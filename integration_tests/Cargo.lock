@@ -1066,6 +1066,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "macp-pb"
+version = "0.4.0"
+dependencies = [
+ "macp-proto",
+ "prost",
+ "prost-types",
+ "tonic-prost-build",
+]
+
+[[package]]
 name = "macp-proto"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1080,6 +1090,7 @@ dependencies = [
  "chrono",
  "futures-core",
  "jsonwebtoken",
+ "macp-pb",
  "macp-proto",
  "prost",
  "prost-types",
