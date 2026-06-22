@@ -258,7 +258,7 @@ mod tests {
     use prost::Message;
 
     fn make_registry() -> ModeRegistry {
-        ModeRegistry::build_default()
+        ModeRegistry::build_default(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator))
     }
 
     fn start_payload_bytes() -> Vec<u8> {

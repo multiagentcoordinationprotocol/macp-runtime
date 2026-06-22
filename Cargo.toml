@@ -49,12 +49,17 @@ base64 = "0.22"
 
 [features]
 default = []
-rocksdb-backend = ["dep:rocksdb"]
-redis-backend = ["dep:redis"]
+rocksdb-backend = ["macp-storage/rocksdb-backend"]
+redis-backend = ["macp-storage/redis-backend"]
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 
 [dependencies]
 macp-pb = { workspace = true }
+macp-core = { workspace = true }
+macp-storage = { workspace = true }
+macp-policy = { workspace = true }
+macp-modes = { workspace = true }
+macp-auth = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tonic-health = { workspace = true }
@@ -69,13 +74,9 @@ tokio-stream = { workspace = true }
 futures-core = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
-jsonwebtoken = { workspace = true }
-reqwest = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-rocksdb = { workspace = true, optional = true }
-redis = { workspace = true, optional = true }
 opentelemetry = { version = "0.22", optional = true }
 opentelemetry_sdk = { version = "0.22", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.15", features = ["tonic"], optional = true }

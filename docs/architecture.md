@@ -20,7 +20,7 @@ Agents (external)
   |
   v
 +-----------------------------------------------------------+
-|  Auth Layer (src/security.rs, src/auth/*.rs)              |
+|  Auth Layer (macp-auth)                                   |
 |    Resolver chain: JWT bearer → static bearer → dev-mode   |
 |    fallback; capability flags (allowed_modes,              |
 |    max_open_sessions, is_observer, …)                      |
@@ -36,21 +36,22 @@ Agents (external)
   |
   v
 +-----------------------------------------------------------+
-|  Mode Layer (src/mode/*.rs)                               |
+|  Mode Layer (macp-modes)                                  |
 |    Decision, Proposal, Task, Handoff, Quorum,             |
-|    Multi-Round, Passthrough                                |
+|    Multi-Round, Passthrough; governance via an injected    |
+|    macp_core::PolicyEvaluator                              |
 +-----------------------------------------------------------+
   |
   v
 +-----------------------------------------------------------+
-|  Policy Layer (src/policy/*.rs)                           |
-|    Policy registry, per-mode commitment evaluators,       |
-|    rule validation                                         |
+|  Policy Layer (macp-policy)                               |
+|    Policy registry, DefaultPolicyEvaluator, per-mode       |
+|    commitment evaluators, rule validation                  |
 +-----------------------------------------------------------+
   |
   v
 +-----------------------------------------------------------+
-|  Storage Layer (src/storage/*.rs)                         |
+|  Storage Layer (macp-storage)                             |
 |    File, RocksDB, Redis, and in-memory backends,          |
 |    append-only logs, checkpointing, compaction             |
 +-----------------------------------------------------------+
@@ -61,6 +62,11 @@ Agents (external)
 |    Session rebuild from log entries, checkpoint fast path  |
 +-----------------------------------------------------------+
 ```
+
+> Vocabulary types (`error`, `session`, decision domain types, policy value
+> types, the `PolicyEvaluator` trait) and the generated protobuf message types
+> live in the transport-free `macp-core` and `macp-pb` crates, which the layers
+> above build on. See `CLAUDE.md` → "Workspace crates" for the full crate map.
 
 The **transport layer** terminates gRPC connections, delegates authentication to the auth layer, validates envelope structure, overrides the sender field with the authenticated identity, and enforces per-sender rate limits. It never touches session state directly.
 

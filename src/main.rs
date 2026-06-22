@@ -178,7 +178,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load persisted state into in-memory caches
     let registry = Arc::new(SessionRegistry::new());
     let log_store = Arc::new(LogStore::new());
-    let mode_registry = Arc::new(ModeRegistry::build_default());
+    let mode_registry = Arc::new(ModeRegistry::build_default(Arc::new(
+        macp_policy::DefaultPolicyEvaluator,
+    )));
     let policy_registry = Arc::new(PolicyRegistry::new());
 
     if !memory_only {

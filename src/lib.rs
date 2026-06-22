@@ -9,18 +9,27 @@ pub mod pb {
 pub use macp_pb::{decision_pb, handoff_pb, proposal_pb, quorum_pb, task_pb};
 
 pub mod error;
-pub mod log_store;
 pub mod metrics;
-pub mod mode;
-pub mod mode_registry;
-pub mod policy;
-pub mod registry;
 pub mod replay;
 pub mod runtime;
 pub mod session;
-pub mod storage;
 pub mod stream_bus;
 
-pub mod auth;
+// The mode layer and registry now live in `macp-modes`; the default governance
+// policy engine in `macp-policy`. Re-exported so existing `crate::mode`,
+// `crate::mode_registry`, and `crate::policy::*` paths (and the equivalent
+// downstream `macp_runtime::*` paths) resolve unchanged.
+pub use macp_modes::{mode, mode_registry};
+pub use macp_policy as policy;
+
+// The persistence layer (append-only log, session registry, storage backends)
+// now lives in `macp-storage`. Re-exported so `macp_runtime::{log_store,
+// registry, storage}` paths resolve unchanged.
+pub use macp_storage::{log_store, registry, storage};
+
 pub mod extensions;
-pub mod security;
+
+// Authentication and the request security layer now live in `macp-auth`.
+// Re-exported so `crate::{auth, security}` and downstream
+// `macp_runtime::{auth, security}` paths resolve unchanged.
+pub use macp_auth::{auth, security};
