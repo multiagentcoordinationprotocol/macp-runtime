@@ -6,7 +6,9 @@ use macp_runtime::session::SessionState;
 use prost::Message;
 
 fn make_registry() -> ModeRegistry {
-    ModeRegistry::build_default()
+    ModeRegistry::build_default(std::sync::Arc::new(
+        macp_runtime::policy::DefaultPolicyEvaluator,
+    ))
 }
 
 fn start_payload(participants: Vec<&str>) -> Vec<u8> {

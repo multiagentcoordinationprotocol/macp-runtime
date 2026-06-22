@@ -1,0 +1,15 @@
+[package]
+name = "macp-pb"
+version = "0.4.0"
+edition = "2021"
+description = "Generated MACP protobuf message types (prost-only, transport-free)."
+publish = false
+
+[dependencies]
+prost = { workspace = true }
+prost-types = { workspace = true }
+# Required for the `links`-provided DEP_MACP_PROTO_PROTO_DIR build env var.
+macp-proto = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }

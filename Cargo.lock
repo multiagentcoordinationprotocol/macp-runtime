@@ -1081,6 +1081,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "macp-auth"
+version = "0.4.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "jsonwebtoken",
+ "macp-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tonic 0.14.5",
+ "tracing",
+]
+
+[[package]]
+name = "macp-core"
+version = "0.4.0"
+dependencies = [
+ "macp-pb",
+ "prost 0.14.3",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
+name = "macp-modes"
+version = "0.4.0"
+dependencies = [
+ "chrono",
+ "macp-core",
+ "macp-pb",
+ "macp-policy",
+ "prost 0.14.3",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "macp-pb"
+version = "0.4.0"
+dependencies = [
+ "macp-proto",
+ "prost 0.14.3",
+ "prost-types",
+ "tonic-prost-build",
+]
+
+[[package]]
+name = "macp-policy"
+version = "0.4.0"
+dependencies = [
+ "macp-core",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "macp-proto"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1095,16 +1160,18 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "futures-core",
- "jsonwebtoken",
+ "macp-auth",
+ "macp-core",
+ "macp-modes",
+ "macp-pb",
+ "macp-policy",
  "macp-proto",
+ "macp-storage",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "prost 0.14.3",
  "prost-types",
- "redis",
- "reqwest",
- "rocksdb",
  "serde",
  "serde_json",
  "tempfile",
@@ -1118,6 +1185,24 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "macp-storage"
+version = "0.4.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "macp-core",
+ "macp-pb",
+ "redis",
+ "rocksdb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -1760,9 +1845,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.12"
+version = "0.103.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8279bb85272c9f10811ae6a6c547ff594d6a7f3c6c6b02ee9726d1d0dcfcdd06"
+checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
  "ring",
  "rustls-pki-types",

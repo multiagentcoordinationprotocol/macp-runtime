@@ -145,7 +145,9 @@ async fn file_backend_full_lifecycle() {
     let replayed = macp_runtime::replay::replay_session(
         &sid,
         &log,
-        &macp_runtime::mode_registry::ModeRegistry::build_default(),
+        &macp_runtime::mode_registry::ModeRegistry::build_default(std::sync::Arc::new(
+            macp_runtime::policy::DefaultPolicyEvaluator,
+        )),
         None,
     )
     .unwrap();
@@ -205,7 +207,9 @@ async fn file_backend_crash_recovery_via_replay() {
     let log_entries = storage.load_log(&sid).await.unwrap();
     assert_eq!(log_entries.len(), 2);
 
-    let mode_registry = ModeRegistry::build_default();
+    let mode_registry = ModeRegistry::build_default(std::sync::Arc::new(
+        macp_runtime::policy::DefaultPolicyEvaluator,
+    ));
     let session = replay_session(&sid, &log_entries, &mode_registry, None).unwrap();
     assert_eq!(session.state, SessionState::Open);
     assert_eq!(session.seen_message_ids.len(), 2);

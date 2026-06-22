@@ -55,7 +55,9 @@ impl Runtime {
             storage,
             registry,
             log_store,
-            Arc::new(ModeRegistry::build_default()),
+            Arc::new(ModeRegistry::build_default(std::sync::Arc::new(
+                macp_policy::DefaultPolicyEvaluator,
+            ))),
         )
     }
 

@@ -5,14 +5,12 @@ RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/ap
 
 WORKDIR /app
 
-# Cache dependencies: copy manifests first, build a dummy, then copy real source
+# Copy the full workspace (root package + member crates) and build. The root
+# macp-runtime package and all crates/* members must be present before any
+# cargo invocation so the workspace resolves and the macp-runtime binary target
+# (referenced by default-run) exists.
 COPY Cargo.toml Cargo.lock build.rs ./
-RUN mkdir -p src && echo "fn main() {}" > src/main.rs && \
-    mkdir -p src/bin && \
-    cargo build --release 2>/dev/null || true && \
-    rm -rf src
-
-# Copy full source and build for real
+COPY crates/ crates/
 COPY src/ src/
 COPY tests/ tests/
 RUN cargo build --release
