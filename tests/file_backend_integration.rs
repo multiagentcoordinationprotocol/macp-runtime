@@ -58,6 +58,7 @@ fn commitment(action: &str) -> Vec<u8> {
         policy_version: "policy.default".into(),
         configuration_version: "cfg-1".into(),
         outcome_positive: true,
+        supersedes: None,
     }
     .encode_to_vec()
 }

@@ -88,9 +88,9 @@ make test-integration-hosted    # All tiers against MACP_TEST_ENDPOINT
 
 The policy engine has dedicated coverage across multiple test layers:
 
-**Unit tests** in `src/policy/` include approximately 80 tests covering all six voting algorithms, quorum threshold calculations, veto logic, evaluation confidence requirements, registry CRUD operations, schema validation, default policy behavior, and rule deserialization.
+**Unit tests** in `crates/macp-policy/` include approximately 80 tests covering all six voting algorithms, quorum threshold calculations, veto logic, evaluation confidence requirements, registry CRUD operations, schema validation, default policy behavior, and rule deserialization.
 
-**Mode unit tests** in `src/mode/*.rs` exercise policy denial paths in all five standard modes, verifying that governance policies correctly block commitment when rules are not satisfied.
+**Mode unit tests** in `crates/macp-modes/src/mode/*.rs` exercise policy denial paths in all five standard modes, verifying that governance policies correctly block commitment when rules are not satisfied.
 
 **Conformance fixtures** exercise mode lifecycles with policy version binding to ensure policies are resolved and applied correctly during replay.
 

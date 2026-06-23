@@ -31,6 +31,17 @@ pub fn validate_commitment_payload_for_session(
         return Err(MacpError::InvalidPayload);
     }
 
+    // RFC-MACP-0001 §7.3.1: if this commitment supersedes a prior one, the
+    // reference must be structurally well-formed. Supersession is inherently
+    // cross-session, so the kernel checks only well-formedness here (and
+    // authority, separately) — it does NOT verify the referenced commitment
+    // exists, was sealed, or is unforked. Those are consumer governance.
+    if let Some(ref sup) = commitment.supersedes {
+        if sup.session_id.trim().is_empty() || sup.commitment_hash.trim().is_empty() {
+            return Err(MacpError::InvalidPayload);
+        }
+    }
+
     // Validate outcome_positive consistency with action (RFC-0001 §7.3)
     validate_outcome_positive(&commitment)?;
 
@@ -146,6 +157,65 @@ mod tests {
             policy_version: String::new(),
             configuration_version: "cfg-1".into(),
             outcome_positive,
+            supersedes: None,
+        }
+    }
+
+    // --- supersedes structural validation (RFC-MACP-0001 §7.3.1) ---
+
+    fn session_for_commitment() -> Session {
+        use std::collections::{HashMap, HashSet};
+        Session {
+            session_id: "s1".into(),
+            state: macp_core::session::SessionState::Open,
+            ttl_expiry: i64::MAX,
+            ttl_ms: 60_000,
+            started_at_unix_ms: 0,
+            resolution: None,
+            mode: "macp.mode.decision.v1".into(),
+            mode_state: vec![],
+            participants: vec![],
+            seen_message_ids: HashSet::new(),
+            intent: String::new(),
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            policy_version: String::new(),
+            context_id: String::new(),
+            extensions: HashMap::new(),
+            roots: vec![],
+            initiator_sender: "agent://a".into(),
+            participant_message_counts: HashMap::new(),
+            participant_last_seen: HashMap::new(),
+            policy_definition: None,
+            suspended_at_ms: None,
+            accumulated_suspended_ms: 0,
+        }
+    }
+
+    #[test]
+    fn well_formed_supersedes_is_accepted() {
+        let session = session_for_commitment();
+        let mut c = make_commitment("decision.selected", true);
+        c.supersedes = Some(macp_pb::pb::CommitmentRef {
+            session_id: "prior-session".into(),
+            commitment_hash: "abc123".into(),
+        });
+        assert!(validate_commitment_payload_for_session(&session, &c.encode_to_vec()).is_ok());
+    }
+
+    #[test]
+    fn malformed_supersedes_is_rejected() {
+        let session = session_for_commitment();
+        for bad in [("", "abc123"), ("prior-session", ""), ("  ", "abc123")] {
+            let mut c = make_commitment("decision.selected", true);
+            c.supersedes = Some(macp_pb::pb::CommitmentRef {
+                session_id: bad.0.into(),
+                commitment_hash: bad.1.into(),
+            });
+            assert!(
+                validate_commitment_payload_for_session(&session, &c.encode_to_vec()).is_err(),
+                "expected rejection for supersedes {bad:?}"
+            );
         }
     }
 

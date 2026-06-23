@@ -7,11 +7,31 @@ use std::collections::{HashMap, HashSet};
 
 pub const MAX_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 
+/// Hard cap on the cumulative time a session may spend `Suspended` before it is
+/// force-expired (RFC-MACP-0001 §7.5). Bounds indefinite human-in-the-loop holds.
+pub const MAX_SUSPEND_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SessionState {
     Open,
+    /// Non-terminal pause of an `Open` session (RFC-MACP-0001 §7.5). TTL is
+    /// banked while suspended; only `Open`<->`Suspended` and `Suspended`->
+    /// `Expired`/`Cancelled` transitions are permitted.
+    Suspended,
     Resolved,
     Expired,
+    /// Terminal: ended by an accepted `CancelSession` (distinct from `Expired`).
+    Cancelled,
+}
+
+impl SessionState {
+    /// Terminal states accept no further transitions.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            SessionState::Resolved | SessionState::Expired | SessionState::Cancelled
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -37,6 +57,12 @@ pub struct Session {
     pub participant_message_counts: HashMap<String, u32>,
     pub participant_last_seen: HashMap<String, i64>,
     pub policy_definition: Option<PolicyDefinition>,
+    /// Wall-clock (session-timeline) ms at which the session was suspended, or
+    /// `None` when not suspended. Used to bank TTL across a suspension (§7.5).
+    pub suspended_at_ms: Option<i64>,
+    /// Cumulative ms the session has spent suspended across all suspend/resume
+    /// cycles. Drives the `MAX_SUSPEND_MS` cap.
+    pub accumulated_suspended_ms: i64,
 }
 
 impl Session {
@@ -47,6 +73,63 @@ impl Session {
             .or_insert(0) += 1;
         self.participant_last_seen
             .insert(sender.to_string(), timestamp_ms);
+    }
+
+    /// Suspend an `Open` session (RFC-MACP-0001 §7.5). Records the suspend time
+    /// so TTL can be banked on resume. Pure: no clock, no I/O — the caller
+    /// injects `now_ms`.
+    pub fn suspend(&mut self, now_ms: i64) -> Result<(), MacpError> {
+        if self.state != SessionState::Open {
+            return Err(MacpError::SessionNotOpen);
+        }
+        self.state = SessionState::Suspended;
+        self.suspended_at_ms = Some(now_ms);
+        Ok(())
+    }
+
+    /// Resume a `Suspended` session, banking the suspended duration into the
+    /// TTL deadline (`ttl_expiry += now - suspended_at`). If the cumulative
+    /// suspended time would exceed `MAX_SUSPEND_MS`, the session is force-expired
+    /// instead and `MacpError::TtlExpired` is returned.
+    pub fn resume(&mut self, now_ms: i64) -> Result<(), MacpError> {
+        if self.state != SessionState::Suspended {
+            return Err(MacpError::SessionNotOpen);
+        }
+        let suspended_at = self.suspended_at_ms.unwrap_or(now_ms);
+        let banked = (now_ms - suspended_at).max(0);
+        self.accumulated_suspended_ms = self.accumulated_suspended_ms.saturating_add(banked);
+        self.suspended_at_ms = None;
+        if self.accumulated_suspended_ms > MAX_SUSPEND_MS {
+            self.state = SessionState::Expired;
+            return Err(MacpError::TtlExpired);
+        }
+        self.ttl_expiry = self.ttl_expiry.saturating_add(banked);
+        self.state = SessionState::Open;
+        Ok(())
+    }
+
+    /// Cancel an `Open` or `Suspended` session into the terminal `Cancelled`
+    /// state (RFC-MACP-0001 §7.3). Returns an error if already terminal.
+    pub fn cancel(&mut self) -> Result<(), MacpError> {
+        if self.state.is_terminal() {
+            return Err(MacpError::SessionNotOpen);
+        }
+        self.state = SessionState::Cancelled;
+        self.suspended_at_ms = None;
+        Ok(())
+    }
+
+    /// Whether a currently-`Suspended` session has exceeded `MAX_SUSPEND_MS` as
+    /// of `now_ms` (cumulative banked plus the in-progress suspension).
+    pub fn suspend_cap_exceeded(&self, now_ms: i64) -> bool {
+        match self.suspended_at_ms {
+            Some(at) => {
+                self.accumulated_suspended_ms
+                    .saturating_add((now_ms - at).max(0))
+                    > MAX_SUSPEND_MS
+            }
+            None => self.accumulated_suspended_ms > MAX_SUSPEND_MS,
+        }
     }
 
     pub fn apply_mode_response(&mut self, response: ModeResponse) {
@@ -255,6 +338,89 @@ mod tests {
                 .to_string(),
             "InvalidPayload"
         );
+    }
+
+    fn open_session(ttl_expiry: i64) -> Session {
+        Session {
+            session_id: "s1".into(),
+            state: SessionState::Open,
+            ttl_expiry,
+            ttl_ms: 60_000,
+            started_at_unix_ms: 0,
+            resolution: None,
+            mode: "macp.mode.decision.v1".into(),
+            mode_state: vec![],
+            participants: vec![],
+            seen_message_ids: HashSet::new(),
+            intent: String::new(),
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            policy_version: String::new(),
+            context_id: String::new(),
+            extensions: HashMap::new(),
+            roots: vec![],
+            initiator_sender: "agent://a".into(),
+            participant_message_counts: HashMap::new(),
+            participant_last_seen: HashMap::new(),
+            policy_definition: None,
+            suspended_at_ms: None,
+            accumulated_suspended_ms: 0,
+        }
+    }
+
+    #[test]
+    fn suspend_then_resume_banks_ttl() {
+        let mut s = open_session(10_000);
+        s.suspend(2_000).unwrap();
+        assert_eq!(s.state, SessionState::Suspended);
+        assert_eq!(s.suspended_at_ms, Some(2_000));
+        // Resume 3_000ms later: banked 3_000 is added to the deadline.
+        s.resume(5_000).unwrap();
+        assert_eq!(s.state, SessionState::Open);
+        assert_eq!(s.ttl_expiry, 13_000);
+        assert_eq!(s.accumulated_suspended_ms, 3_000);
+        assert_eq!(s.suspended_at_ms, None);
+    }
+
+    #[test]
+    fn suspend_requires_open_and_resume_requires_suspended() {
+        let mut s = open_session(10_000);
+        // resume on an Open session is rejected
+        assert!(matches!(
+            s.resume(1).unwrap_err(),
+            MacpError::SessionNotOpen
+        ));
+        s.suspend(1).unwrap();
+        // double-suspend rejected
+        assert!(matches!(
+            s.suspend(2).unwrap_err(),
+            MacpError::SessionNotOpen
+        ));
+    }
+
+    #[test]
+    fn resume_exceeding_max_suspend_expires() {
+        let mut s = open_session(10_000);
+        s.suspend(0).unwrap();
+        // Resume after more than MAX_SUSPEND_MS: force-expired.
+        let err = s.resume(MAX_SUSPEND_MS + 1).unwrap_err();
+        assert!(matches!(err, MacpError::TtlExpired));
+        assert_eq!(s.state, SessionState::Expired);
+    }
+
+    #[test]
+    fn cancel_from_open_or_suspended_then_terminal_is_rejected() {
+        let mut s = open_session(10_000);
+        s.suspend(1).unwrap();
+        s.cancel().unwrap();
+        assert_eq!(s.state, SessionState::Cancelled);
+        assert_eq!(s.suspended_at_ms, None);
+        // Already terminal: further cancel is rejected.
+        assert!(matches!(s.cancel().unwrap_err(), MacpError::SessionNotOpen));
+
+        let mut open = open_session(10_000);
+        open.cancel().unwrap();
+        assert_eq!(open.state, SessionState::Cancelled);
     }
 
     #[test]

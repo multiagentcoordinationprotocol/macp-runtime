@@ -28,6 +28,9 @@ pub enum SessionLifecycleEvent {
     Created { session_id: String },
     Resolved { session_id: String },
     Expired { session_id: String },
+    Suspended { session_id: String },
+    Resumed { session_id: String },
+    Cancelled { session_id: String },
 }
 
 pub struct Runtime {
@@ -278,7 +281,11 @@ impl Runtime {
         session: &mut Session,
     ) -> Result<bool, MacpError> {
         let now = Utc::now().timestamp_millis();
-        if session.state == SessionState::Open && now > session.ttl_expiry {
+        // An Open session past its deadline, or a Suspended session that has
+        // exceeded the MAX_SUSPEND_MS cap (RFC-MACP-0001 §7.5), expires.
+        let expires = (session.state == SessionState::Open && now > session.ttl_expiry)
+            || (session.state == SessionState::Suspended && session.suspend_cap_exceeded(now));
+        if expires {
             let entry = Self::make_internal_entry("TtlExpired", b"", session_id, &session.mode);
             self.storage
                 .append_log_entry(session_id, &entry)
@@ -286,6 +293,7 @@ impl Runtime {
                 .map_err(|_| MacpError::StorageFailed)?;
             self.log_store.append(session_id, entry).await;
             session.state = SessionState::Expired;
+            session.suspended_at_ms = None;
             self.metrics.record_session_expired(&session.mode);
             tracing::info!(session_id, "session expired via TTL");
             let _ = self
@@ -431,6 +439,8 @@ impl Runtime {
             participant_message_counts: std::collections::HashMap::new(),
             participant_last_seen: std::collections::HashMap::new(),
             policy_definition,
+            suspended_at_ms: None,
+            accumulated_suspended_ms: 0,
         };
 
         let response = mode.on_session_start(&session, env)?;
@@ -500,27 +510,32 @@ impl Runtime {
             .get_mut(&env.session_id)
             .ok_or(MacpError::UnknownSession)?;
 
-        if session.seen_message_ids.contains(&env.message_id) {
-            return Ok(ProcessResult {
-                session_state: session.state.clone(),
-                duplicate: true,
-            });
-        }
-
-        // Validate that the envelope mode matches the session's bound mode.
-        // This prevents a token scoped to mode X from sending messages into
-        // a session bound to mode Y (server.rs authorizes against env.mode).
-        if env.mode != session.mode {
-            return Err(MacpError::InvalidEnvelope);
-        }
-
-        if self.maybe_expire_session(&env.session_id, session).await? {
-            self.save_session_to_storage(session).await;
-            return Err(MacpError::TtlExpired);
-        }
-
-        if session.state != SessionState::Open {
-            return Err(MacpError::SessionNotOpen);
+        // Per-message kernel invariants (dedup, mode-binding, TTL, the monotonic
+        // OPEN gate) live in `macp_modes::step` so any consumer of the
+        // coordination core runs the identical checks. The runtime is the first
+        // caller: it drives the phases here so it can interpose its append-only
+        // write between validation and commit (a failed write must not consume a
+        // dedup slot) — which a single all-in-one step could not preserve.
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        match macp_modes::step::check_preconditions(session, env, now_ms)? {
+            macp_modes::step::Precheck::Duplicate => {
+                return Ok(ProcessResult {
+                    session_state: session.state.clone(),
+                    duplicate: true,
+                });
+            }
+            macp_modes::step::Precheck::Expired => {
+                // Durable expiry via the existing path: it appends the
+                // `TtlExpired` log entry, updates metrics/lifecycle, and marks
+                // the session Expired. `check_preconditions` and
+                // `maybe_expire_session` share the same strict `>`, OPEN-guarded
+                // rule, so this always expires.
+                let expired = self.maybe_expire_session(&env.session_id, session).await?;
+                debug_assert!(expired, "check_preconditions reported Expired");
+                self.save_session_to_storage(session).await;
+                return Err(MacpError::TtlExpired);
+            }
+            macp_modes::step::Precheck::Proceed => {}
         }
 
         let mode = self
@@ -537,12 +552,11 @@ impl Runtime {
             .await
             .map_err(|_| MacpError::StorageFailed)?;
 
-        // 2. Update in-memory state
+        // 2. Update in-memory state via the shared commit phase (consume dedup
+        //    slot, record participant activity, apply mode response) — the exact
+        //    sequence a library consumer runs through `macp_modes::step`.
         self.log_store.append(&env.session_id, incoming_entry).await;
-        session.seen_message_ids.insert(env.message_id.clone());
-        session.record_participant_activity(&env.sender, chrono::Utc::now().timestamp_millis());
-        session.apply_mode_response(response);
-        let result_state = session.state.clone();
+        let result_state = macp_modes::step::commit(session, env, response, now_ms);
 
         self.metrics.record_message_accepted(&session.mode);
         if env.message_type == "Commitment" {
@@ -646,7 +660,9 @@ impl Runtime {
 
         self.maybe_expire_session(session_id, session).await?;
 
-        if session.state == SessionState::Resolved || session.state == SessionState::Expired {
+        // Already terminal (Resolved/Expired/Cancelled): nothing to do. An Open
+        // or Suspended session can still be cancelled (RFC-MACP-0001 §7.2/§7.3).
+        if session.state.is_terminal() {
             let result_state = session.state.clone();
             self.save_session_to_storage(session).await;
             return Ok(ProcessResult {
@@ -672,7 +688,9 @@ impl Runtime {
             .await
             .map_err(|_| MacpError::StorageFailed)?;
         self.log_store.append(session_id, cancel_entry).await;
-        session.state = SessionState::Expired;
+        // RFC-MACP-0001 §7.3: cancellation terminates as CANCELLED (distinct
+        // from EXPIRED) — `cancel()` also clears any suspension marker.
+        let _ = session.cancel();
         self.save_session_to_storage(session).await;
         if !self.maybe_compact_log(session_id, session).await {
             self.force_insert_checkpoint(session_id, session).await;
@@ -681,14 +699,131 @@ impl Runtime {
         tracing::info!(session_id, reason, "session cancelled");
         let _ = self
             .session_lifecycle_bus
-            .send(SessionLifecycleEvent::Expired {
+            .send(SessionLifecycleEvent::Cancelled {
                 session_id: session_id.to_string(),
             });
 
         Ok(ProcessResult {
-            session_state: SessionState::Expired,
+            session_state: SessionState::Cancelled,
             duplicate: false,
         })
+    }
+
+    /// Suspend an `Open` session (RFC-MACP-0001 §7.5). Appends a `SessionSuspend`
+    /// annotation, transitions Open -> Suspended, and emits a lifecycle event.
+    /// The session's TTL is banked and restored on resume.
+    pub async fn suspend_session(
+        &self,
+        session_id: &str,
+        reason: &str,
+        suspended_by: &str,
+    ) -> Result<ProcessResult, MacpError> {
+        let mut guard = self.registry.sessions.write().await;
+        let session = guard.get_mut(session_id).ok_or(MacpError::UnknownSession)?;
+
+        self.maybe_expire_session(session_id, session).await?;
+        if session.state != SessionState::Open {
+            return Err(MacpError::SessionNotOpen);
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let payload = crate::pb::SessionSuspendPayload {
+            reason: reason.to_string(),
+            suspended_by: suspended_by.to_string(),
+        };
+        let entry = Self::make_internal_entry(
+            "SessionSuspend",
+            &prost::Message::encode_to_vec(&payload),
+            session_id,
+            &session.mode,
+        );
+        self.storage
+            .append_log_entry(session_id, &entry)
+            .await
+            .map_err(|_| MacpError::StorageFailed)?;
+        self.log_store.append(session_id, entry).await;
+        session.suspend(now_ms)?;
+        self.save_session_to_storage(session).await;
+        self.metrics.record_session_suspended(&session.mode);
+        tracing::info!(session_id, reason, "session suspended");
+        let _ = self
+            .session_lifecycle_bus
+            .send(SessionLifecycleEvent::Suspended {
+                session_id: session_id.to_string(),
+            });
+
+        Ok(ProcessResult {
+            session_state: SessionState::Suspended,
+            duplicate: false,
+        })
+    }
+
+    /// Resume a `Suspended` session (RFC-MACP-0001 §7.5), banking the suspended
+    /// duration into the TTL deadline. If the `MAX_SUSPEND_MS` cap is exceeded,
+    /// the session is force-expired instead.
+    pub async fn resume_session(
+        &self,
+        session_id: &str,
+        reason: &str,
+        resumed_by: &str,
+    ) -> Result<ProcessResult, MacpError> {
+        let mut guard = self.registry.sessions.write().await;
+        let session = guard.get_mut(session_id).ok_or(MacpError::UnknownSession)?;
+
+        if session.state != SessionState::Suspended {
+            return Err(MacpError::SessionNotOpen);
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let banked_before = session
+            .suspended_at_ms
+            .map(|at| (now_ms - at).max(0))
+            .unwrap_or(0);
+        let payload = crate::pb::SessionResumePayload {
+            reason: reason.to_string(),
+            resumed_by: resumed_by.to_string(),
+            banked_ms: banked_before,
+        };
+        let entry = Self::make_internal_entry(
+            "SessionResume",
+            &prost::Message::encode_to_vec(&payload),
+            session_id,
+            &session.mode,
+        );
+        self.storage
+            .append_log_entry(session_id, &entry)
+            .await
+            .map_err(|_| MacpError::StorageFailed)?;
+        self.log_store.append(session_id, entry).await;
+
+        // `resume` banks the TTL; if the suspend cap is exceeded it force-expires.
+        match session.resume(now_ms) {
+            Ok(()) => {
+                self.save_session_to_storage(session).await;
+                self.metrics.record_session_resumed(&session.mode);
+                tracing::info!(session_id, reason, "session resumed");
+                let _ = self
+                    .session_lifecycle_bus
+                    .send(SessionLifecycleEvent::Resumed {
+                        session_id: session_id.to_string(),
+                    });
+                Ok(ProcessResult {
+                    session_state: SessionState::Open,
+                    duplicate: false,
+                })
+            }
+            Err(_) => {
+                // MAX_SUSPEND_MS exceeded: the session is now Expired.
+                self.save_session_to_storage(session).await;
+                self.metrics.record_session_expired(&session.mode);
+                let _ = self
+                    .session_lifecycle_bus
+                    .send(SessionLifecycleEvent::Expired {
+                        session_id: session_id.to_string(),
+                    });
+                Err(MacpError::TtlExpired)
+            }
+        }
     }
 
     /// Best-effort log compaction for terminal sessions.
@@ -1323,6 +1458,7 @@ mod tests {
             policy_version: "policy.default".into(),
             configuration_version: "cfg-1".into(),
             outcome_positive: true,
+            supersedes: None,
         }
         .encode_to_vec();
         let result = rt
@@ -1769,6 +1905,7 @@ mod tests {
             policy_version: "policy.default".into(),
             configuration_version: "cfg-1".into(),
             outcome_positive: true,
+            supersedes: None,
         }
         .encode_to_vec();
         let result = rt

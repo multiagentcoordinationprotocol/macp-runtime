@@ -437,6 +437,7 @@ async fn commitment_with_wrong_mode_version_rejected() {
         policy_version: POLICY_VERSION.into(),
         configuration_version: CONFIG_VERSION.into(),
         outcome_positive: true,
+        supersedes: None,
     }
     .encode_to_vec();
 
@@ -507,6 +508,7 @@ async fn commitment_with_wrong_config_version_rejected() {
         policy_version: POLICY_VERSION.into(),
         configuration_version: "wrong-config-version".into(), // WRONG
         outcome_positive: true,
+        supersedes: None,
     }
     .encode_to_vec();
 
