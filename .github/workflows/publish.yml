@@ -14,11 +14,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Workspace publishing (`cargo publish --workspace`) is stable as of Rust
-  # 1.90; it resolves internal path deps locally so a dry-run validates the
-  # whole graph before anything is on the index. The rest of CI pins the MSRV
-  # (1.89.0); this job only needs a toolchain new enough to publish.
-  RUST_TOOLCHAIN: "stable"
+  # Workspace publishing (`cargo publish --workspace`) resolves internal path
+  # deps locally, so a dry-run validates the whole graph before anything is on
+  # the index. Pin an explicit toolchain that has the flag stabilized rather
+  # than the `stable` label, which can resolve to a cargo too old for it. The
+  # rest of CI pins the MSRV (1.89.0); only this job needs the newer toolchain.
+  RUST_TOOLCHAIN: "1.95.0"
 
 jobs:
   publish:
