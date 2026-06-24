@@ -14,7 +14,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: "1.89.0"
+  # Workspace publishing (`cargo publish --workspace`) is stable as of Rust
+  # 1.90; it resolves internal path deps locally so a dry-run validates the
+  # whole graph before anything is on the index. The rest of CI pins the MSRV
+  # (1.89.0); this job only needs a toolchain new enough to publish.
+  RUST_TOOLCHAIN: "stable"
 
 jobs:
   publish:
@@ -49,18 +53,20 @@ jobs:
             exit 1
           fi
 
-      # Publish bottom-up so each crate's dependencies are already on the index.
-      # `cargo publish` waits for the just-published version to appear before
-      # returning, so the next crate's verify build can resolve it.
-      # A crate whose version is already live is skipped, making a re-run after
-      # a mid-release failure safe.
-      - name: Publish crates in dependency order
+      # `cargo publish --workspace` computes the dependency order itself, builds
+      # each crate's verify step against its sibling path deps (so a dry-run
+      # validates the whole graph without anything on the index yet), and waits
+      # for each upload to appear on the index before publishing its dependents.
+      #
+      # Re-run safety: a crate whose current version is already live is passed
+      # via --exclude, so re-running after a mid-release failure skips the
+      # already-published members instead of erroring on "already exists".
+      - name: Publish workspace to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
           set -euo pipefail
-          crates=(macp-pb macp-core macp-storage macp-policy macp-modes macp-auth macp-runtime)
 
           is_published() {
             local name="$1" ver="$2" code
@@ -70,24 +76,27 @@ jobs:
             [ "$code" = "200" ]
           }
 
-          for c in "${crates[@]}"; do
-            ver=$(cargo metadata --format-version 1 --no-deps \
-              | jq -r ".packages[] | select(.name==\"$c\") | .version")
-            if is_published "$c" "$ver"; then
-              echo "==> skip $c@$ver (already on crates.io)"
-              continue
+          total=0
+          exclude_args=()
+          while read -r name ver; do
+            total=$((total + 1))
+            if is_published "$name" "$ver"; then
+              echo "==> skip $name@$ver (already on crates.io)"
+              exclude_args+=(--exclude "$name")
             fi
-            if [ "${DRY_RUN:-false}" = "true" ]; then
-              echo "==> dry-run package $c@$ver"
-              # Leaf crate can fully verify; dependents can't until upstream is
-              # live, so package without the cross-crate verify build.
-              if [ "$c" = "macp-pb" ]; then
-                cargo publish --dry-run --locked -p "$c"
-              else
-                cargo package --no-verify --locked -p "$c"
-              fi
-            else
-              echo "==> publish $c@$ver"
-              cargo publish --locked -p "$c"
-            fi
-          done
+          done < <(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | "\(.name) \(.version)"')
+
+          if [ "${#exclude_args[@]}" -eq $((total * 2)) ]; then
+            echo "All workspace crates already published; nothing to do."
+            exit 0
+          fi
+
+          # ${arr[@]+...} guards against an empty array tripping `set -u`.
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            echo "==> dry-run publish workspace"
+            cargo publish --workspace --dry-run --locked ${exclude_args[@]+"${exclude_args[@]}"}
+          else
+            echo "==> publish workspace"
+            cargo publish --workspace --locked ${exclude_args[@]+"${exclude_args[@]}"}
+          fi
