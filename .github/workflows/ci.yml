@@ -281,6 +281,5 @@ jobs:
           echo "  - cargo clippy"
           echo "  - cargo test"
           echo "  - cargo build --release"
-          echo "  - protobuf lint"
-          echo "  - proto sync check"
+          echo "  - crate dependency isolation"
           echo "  - cargo audit"

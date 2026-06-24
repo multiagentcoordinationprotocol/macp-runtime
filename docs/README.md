@@ -12,6 +12,8 @@ The runtime ships as a single binary that exposes 22 gRPC RPCs over TLS. It supp
 
 Authentication is layered as a resolver chain: JWT bearer (when an issuer and JWKS are configured), then static bearer tokens, with a dev-mode fallback only when neither is set. Identities expose capability flags -- `allowed_modes`, `can_start_sessions`, `max_open_sessions`, `can_manage_mode_registry`, and `is_observer` -- that are enforced on every request. Per-sender sliding-window rate limits cover both session creation and message throughput. Session lifecycle transitions can be observed in real time through `ListSessions` and `WatchSessions`, and accepted envelope history can be replayed into a stream via passive subscribe.
 
+Internally the runtime is a Cargo workspace with a one-way dependency graph: the coordination vocabulary (`macp-core`), generated messages (`macp-pb`), mode logic (`macp-modes`), policy (`macp-policy`), storage (`macp-storage`), and auth (`macp-auth`) are separate crates, and the root `macp-runtime` crate is the kernel + gRPC server + binary. `macp-core` and `macp-pb` are transport-free, so library consumers can build on the MACP vocabulary and mode logic — driving them with a custom `PolicyEvaluator` — without pulling in transport, storage, or auth. See [Architecture](architecture.md) and `CLAUDE.md` → "Workspace crates" for the crate map.
+
 ## Documentation
 
 ### Getting started

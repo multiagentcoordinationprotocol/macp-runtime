@@ -251,74 +251,77 @@ cargo run --bin fuzz_client
 ```
 Client Request
        |
-  [Transport/gRPC] -- server.rs
+  [Transport/gRPC] -- macp-runtime: src/server.rs
        |
-  [Auth Chain]    -- security.rs, auth/*.rs  (JWT → static → dev fallback)
+  [Auth Chain]    -- macp-auth  (JWT → static → dev fallback)
        |
-  [Coordination Kernel] -- runtime.rs
+  [Coordination Kernel] -- macp-runtime: src/runtime.rs
        |
-  [Mode Registry] -- mode_registry.rs
+  [Mode Registry] -- macp-modes: mode_registry.rs
        |            \
   [Mode Logic]     [Discovery + Extension Lifecycle]
-   mode/*.rs       ListModes, ListExtModes, GetManifest,
+   macp-modes      ListModes, ListExtModes, GetManifest,
                    RegisterExtMode, UnregisterExtMode, PromoteMode
        |
-  [Policy Engine] -- policy/*.rs  (commitment-time evaluation)
+  [Policy Engine] -- macp-policy  (commitment-time evaluation via the
+       |             macp-core PolicyEvaluator trait)
+  [Storage Layer] -- macp-storage  (log_store + backends)
        |
-  [Storage Layer] -- storage/*.rs, log_store.rs
-       |
-  [Replay] -- replay.rs
+  [Replay] -- macp-runtime: src/replay.rs
 ```
 
-See `docs/architecture.md` for detailed layer descriptions.
+The runtime is a Cargo workspace. The root `macp-runtime` crate is the kernel +
+gRPC server + binary; it re-exports the lower crates so the historical
+`macp_runtime::*` paths are preserved. `macp-core` (vocabulary + the
+`PolicyEvaluator` trait) and `macp-pb` (generated protobuf messages) are
+transport-free, and modes evaluate governance through an injected evaluator
+rather than a concrete policy engine.
+
+See `docs/architecture.md` and `CLAUDE.md` → "Workspace crates" for detailed
+layer and crate descriptions.
 
 ## Project structure
 
+The runtime is a Cargo workspace. The root `macp-runtime` crate is the kernel +
+gRPC server + binary; the lower crates form a one-way dependency graph with
+`macp-core` at the base (see `CLAUDE.md` → "Workspace crates").
+
 ```text
 runtime/
-├── src/
+├── src/                    # macp-runtime crate: kernel + gRPC server + binary
 │   ├── main.rs             # server startup, TLS, persistence, auth wiring
 │   ├── server.rs           # gRPC adapter (22 RPCs) and envelope validation
 │   ├── runtime.rs          # coordination kernel, mode dispatch, lifecycle bus
-│   ├── mode_registry.rs    # single source of truth for mode registration
-│   ├── security.rs         # auth config loader, sender derivation, rate limiting
-│   ├── session.rs          # canonical SessionStart validation and session model
-│   ├── registry.rs         # session store with optional persistence
-│   ├── log_store.rs        # in-memory accepted-history log cache + replay helpers
 │   ├── replay.rs           # session rebuild from append-only log
 │   ├── stream_bus.rs       # per-session broadcast channels
 │   ├── metrics.rs          # per-mode metrics counters
-│   ├── auth/               # pluggable auth resolver chain
-│   │   ├── chain.rs        # resolver chain driver
-│   │   ├── resolver.rs     # AuthResolver trait, ResolvedIdentity
-│   │   └── resolvers/
-│   │       ├── jwt_bearer.rs    # JWT validation with JWKS (inline or URL cache)
-│   │       └── static_bearer.rs # opaque bearer token → identity map
+│   ├── error.rs            # thin re-export shim for macp_core::error
+│   ├── session.rs          # thin re-export shim for macp_core::session
 │   ├── extensions/         # session-extension provider plumbing
 │   │   ├── provider.rs     # SessionExtensionProvider trait
 │   │   └── registry.rs     # ExtensionProviderRegistry
-│   ├── mode/               # mode implementations (standards-track + extensions)
-│   │   ├── passthrough.rs  # generic handler for dynamically registered extensions
-│   │   └── ...
-│   ├── policy/             # governance policy framework (RFC-MACP-0012)
-│   │   ├── registry.rs     # policy CRUD + broadcast
-│   │   ├── evaluator.rs    # per-mode commitment evaluation
-│   │   └── rules.rs        # mode-specific rule schemas
-│   ├── storage/            # pluggable storage backends
-│   │   ├── file.rs         # per-session append-only log + snapshots
-│   │   ├── memory.rs       # in-memory backend
-│   │   ├── rocksdb.rs      # RocksDB backend (feature-gated)
-│   │   ├── redis_backend.rs # Redis backend (feature-gated)
-│   │   └── recovery.rs     # crash recovery (.tmp cleanup)
 │   └── bin/                # local development example clients
-├── tests/
-│   ├── integration_mode_lifecycle.rs  # full-stack integration tests
+├── crates/
+│   ├── macp-pb/            # generated protobuf message types (prost-only, no tonic)
+│   ├── macp-core/          # vocabulary: error, session, decision/policy value
+│   │   │                   #   types, CommitmentRules, PolicyEvaluator trait
+│   │   └── src/{error.rs, session.rs, decision.rs, mode.rs, policy/}
+│   ├── macp-storage/       # append-only log, session registry, storage backends
+│   │   └── src/{log_store.rs, registry.rs, storage/{file,memory,rocksdb,redis_backend,recovery}.rs}
+│   ├── macp-policy/        # per-mode rule schemas, registry, DefaultPolicyEvaluator
+│   │   └── src/{registry.rs, evaluator.rs, defaults.rs}
+│   ├── macp-modes/         # mode implementations + registry (governance via
+│   │   │                   #   an injected macp_core::PolicyEvaluator)
+│   │   └── src/{mode_registry.rs, mode/{decision,proposal,task,handoff,quorum,multi_round,passthrough,util}.rs}
+│   └── macp-auth/          # security layer + bearer/JWT resolver chain
+│       └── src/{security.rs, auth/{chain,resolver,resolvers/{jwt_bearer,static_bearer}}.rs}
+├── tests/                  # macp-runtime integration tests
 │   ├── replay_round_trip.rs           # replay tests for all modes
 │   ├── conformance_loader.rs          # JSON fixture runner
 │   └── conformance/                   # per-mode conformance fixtures
-├── integration_tests/                 # gRPC boundary tests (Tier 1/2/3)
+├── integration_tests/                 # gRPC boundary tests (Tier 1/2/3, separate crate)
 ├── docs/
-└── build.rs
+└── build.rs                           # macp.v1 service codegen via .extern_path
 ```
 
 ## Troubleshooting
@@ -363,6 +366,33 @@ The integration suite has three tiers:
 - **Tier 3 (E2E)** — 3 tests with real OpenAI GPT-4o-mini agents coordinating through the runtime (requires `OPENAI_API_KEY`)
 
 See `docs/testing.md` for full details on running locally, in CI, or against a hosted runtime.
+
+## Releasing
+
+The workspace publishes to crates.io as seven crates that share one version
+(`0.4.0`), pinned in `[workspace.package]`. Internal dependencies are declared
+as `{ version = "...", path = "..." }`, so the same manifests build locally
+from `path` and resolve from the registry once published.
+
+Releases are automated by `.github/workflows/publish.yml`, triggered by pushing
+a version tag:
+
+```bash
+git tag v0.4.0
+git push origin v0.4.0
+```
+
+The workflow verifies the tag matches the workspace version, then publishes
+bottom-up so each crate's dependencies are already on the index:
+
+```
+macp-pb → macp-core → macp-storage → macp-policy → macp-modes → macp-auth → macp-runtime
+```
+
+A crate whose version is already live is skipped, so a re-run after a partial
+failure is safe. Publishing requires a `CARGO_REGISTRY_TOKEN` repository secret.
+To validate without uploading, run the workflow manually (`workflow_dispatch`)
+with the default `dry_run` enabled.
 
 ## Development notes
 

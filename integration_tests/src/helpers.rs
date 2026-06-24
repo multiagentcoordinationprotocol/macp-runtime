@@ -89,6 +89,7 @@ pub fn commitment_payload(
         policy_version: POLICY_VERSION.into(),
         configuration_version: CONFIG_VERSION.into(),
         outcome_positive,
+        supersedes: None,
     }
     .encode_to_vec()
 }

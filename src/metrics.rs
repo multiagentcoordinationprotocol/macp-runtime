@@ -9,6 +9,8 @@ pub struct ModeMetrics {
     pub sessions_resolved: AtomicU64,
     pub sessions_expired: AtomicU64,
     pub sessions_cancelled: AtomicU64,
+    pub sessions_suspended: AtomicU64,
+    pub sessions_resumed: AtomicU64,
     pub commitments_accepted: AtomicU64,
     pub commitments_rejected: AtomicU64,
 }
@@ -22,6 +24,8 @@ impl ModeMetrics {
             sessions_resolved: AtomicU64::new(0),
             sessions_expired: AtomicU64::new(0),
             sessions_cancelled: AtomicU64::new(0),
+            sessions_suspended: AtomicU64::new(0),
+            sessions_resumed: AtomicU64::new(0),
             commitments_accepted: AtomicU64::new(0),
             commitments_rejected: AtomicU64::new(0),
         }
@@ -83,6 +87,18 @@ impl RuntimeMetrics {
     pub fn record_session_cancelled(&self, mode: &str) {
         self.get_or_create(mode)
             .sessions_cancelled
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_session_suspended(&self, mode: &str) {
+        self.get_or_create(mode)
+            .sessions_suspended
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_session_resumed(&self, mode: &str) {
+        self.get_or_create(mode)
+            .sessions_resumed
             .fetch_add(1, Ordering::Relaxed);
     }
 

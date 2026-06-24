@@ -295,6 +295,8 @@ mod tests {
             participant_message_counts: std::collections::HashMap::new(),
             participant_last_seen: std::collections::HashMap::new(),
             policy_definition: None,
+            suspended_at_ms: None,
+            accumulated_suspended_ms: 0,
         }
     }
 
@@ -359,6 +361,7 @@ mod tests {
             policy_version: session.policy_version.clone(),
             configuration_version: session.configuration_version.clone(),
             outcome_positive: true,
+            supersedes: None,
         }
         .encode_to_vec()
     }
@@ -900,6 +903,7 @@ mod tests {
             policy_version: session.policy_version.clone(),
             configuration_version: session.configuration_version.clone(),
             outcome_positive: true,
+            supersedes: None,
         }
         .encode_to_vec();
 
@@ -955,6 +959,7 @@ mod tests {
             policy_version: session.policy_version.clone(),
             configuration_version: session.configuration_version.clone(),
             outcome_positive: false,
+            supersedes: None,
         }
         .encode_to_vec();
         let resp = mode
@@ -1010,6 +1015,113 @@ mod tests {
                 &env("agent://orchestrator", "Commitment", commitment(&session)),
             )
             .unwrap_err();
+        assert_eq!(err.to_string(), "PolicyDenied");
+    }
+
+    // A consumer-supplied evaluator that denies every decision commitment,
+    // regardless of votes or rules. Used to prove that modes consult the
+    // injected `PolicyEvaluator` rather than any built-in default — the seam
+    // the workspace split exists to provide.
+    struct DenyAllEvaluator;
+
+    impl macp_core::policy::PolicyEvaluator for DenyAllEvaluator {
+        fn evaluate_decision_commitment(
+            &self,
+            _policy: &macp_core::policy::PolicyDefinition,
+            _state: &DecisionState,
+            _participants: &[String],
+        ) -> macp_core::policy::PolicyDecision {
+            macp_core::policy::PolicyDecision::Deny {
+                reasons: vec!["custom evaluator denies all".into()],
+            }
+        }
+
+        fn evaluate_proposal_commitment(
+            &self,
+            _policy: &macp_core::policy::PolicyDefinition,
+            _counter_proposal_count: usize,
+        ) -> macp_core::policy::PolicyDecision {
+            macp_core::policy::PolicyDecision::Allow { reasons: vec![] }
+        }
+
+        fn evaluate_task_commitment(
+            &self,
+            _policy: &macp_core::policy::PolicyDefinition,
+            _has_output: bool,
+        ) -> macp_core::policy::PolicyDecision {
+            macp_core::policy::PolicyDecision::Allow { reasons: vec![] }
+        }
+
+        fn evaluate_handoff_commitment(
+            &self,
+            _policy: &macp_core::policy::PolicyDefinition,
+        ) -> macp_core::policy::PolicyDecision {
+            macp_core::policy::PolicyDecision::Allow { reasons: vec![] }
+        }
+
+        fn evaluate_quorum_commitment(
+            &self,
+            _policy: &macp_core::policy::PolicyDefinition,
+            _approve_count: usize,
+            _reject_count: usize,
+            _abstain_count: usize,
+            _total_participants: usize,
+        ) -> macp_core::policy::PolicyDecision {
+            macp_core::policy::PolicyDecision::Allow { reasons: vec![] }
+        }
+    }
+
+    // Drive a decision session up to (but not including) the commitment, using a
+    // permissive policy the default evaluator would accept. Returns the session
+    // and the commitment envelope so a test can swap evaluators and assert that
+    // only the injected one changes the outcome.
+    fn session_ready_for_commitment(mode: &DecisionMode) -> (Session, Envelope) {
+        let mut session = test_session();
+        // A policy with no additional voting constraints: the default evaluator
+        // allows the commitment once a proposal exists, so any denial below can
+        // only come from the injected evaluator.
+        session.policy_definition = Some(macp_core::policy::PolicyDefinition {
+            policy_id: "permissive".into(),
+            mode: "macp.mode.decision.v1".into(),
+            description: "no extra constraints".into(),
+            rules: serde_json::json!({}),
+            schema_version: 1,
+        });
+        let resp = mode
+            .on_session_start(
+                &session,
+                &env("agent://orchestrator", "SessionStart", vec![]),
+            )
+            .unwrap();
+        apply(&mut session, resp);
+        let resp = mode
+            .on_message(
+                &session,
+                &env("agent://orchestrator", "Proposal", proposal("p1")),
+            )
+            .unwrap();
+        apply(&mut session, resp);
+        let commit = env("agent://orchestrator", "Commitment", commitment(&session));
+        (session, commit)
+    }
+
+    #[test]
+    fn injected_evaluator_governs_commitment_outcome() {
+        // Same permissive policy, same session timeline — only the injected
+        // evaluator differs. This is the pluggable-policy seam introduced by the
+        // workspace split: modes call through `macp_core::PolicyEvaluator`.
+
+        // Default evaluator: permissive policy allows the commitment.
+        let default_mode =
+            DecisionMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let (session, commit) = session_ready_for_commitment(&default_mode);
+        let resp = default_mode.on_message(&session, &commit).unwrap();
+        assert!(matches!(resp, ModeResponse::PersistAndResolve { .. }));
+
+        // Custom evaluator: identical inputs, but the consumer's policy denies.
+        let custom_mode = DecisionMode::new(std::sync::Arc::new(DenyAllEvaluator));
+        let (session, commit) = session_ready_for_commitment(&custom_mode);
+        let err = custom_mode.on_message(&session, &commit).unwrap_err();
         assert_eq!(err.to_string(), "PolicyDenied");
     }
 

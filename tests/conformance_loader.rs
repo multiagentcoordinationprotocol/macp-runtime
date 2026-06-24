@@ -75,6 +75,7 @@ fn encode_payload(fixture: &ConformanceFixture, msg: &ConformanceMessage) -> Vec
                     .unwrap_or_default()
                     .into(),
                 outcome_positive: p["outcome_positive"].as_bool().unwrap_or(true),
+                supersedes: None,
             }
             .encode_to_vec()
         }

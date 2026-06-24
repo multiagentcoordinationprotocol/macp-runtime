@@ -10,9 +10,10 @@ use macp_runtime::pb::{
     ManifestCapability, ModeRegistryCapability, ParticipantActivity, PolicyDescriptor,
     PolicyRegistryCapability, ProgressCapability, PromoteModeRequest, PromoteModeResponse,
     RegisterExtModeRequest, RegisterExtModeResponse, RegisterPolicyRequest, RegisterPolicyResponse,
-    RootsCapability, RuntimeInfo, SendRequest, SendResponse, SessionLifecycleEvent,
-    SessionMetadata, SessionState as PbSessionState, SessionsCapability, StreamSessionRequest,
-    StreamSessionResponse, UnregisterExtModeRequest, UnregisterExtModeResponse,
+    ResumeSessionRequest, ResumeSessionResponse, RootsCapability, RuntimeInfo, SendRequest,
+    SendResponse, SessionLifecycleEvent, SessionMetadata, SessionState as PbSessionState,
+    SessionsCapability, StreamSessionRequest, StreamSessionResponse, SuspendSessionRequest,
+    SuspendSessionResponse, UnregisterExtModeRequest, UnregisterExtModeResponse,
     UnregisterPolicyRequest, UnregisterPolicyResponse, WatchModeRegistryRequest,
     WatchModeRegistryResponse, WatchPoliciesRequest, WatchPoliciesResponse, WatchRootsRequest,
     WatchRootsResponse, WatchSessionsRequest, WatchSessionsResponse, WatchSignalsRequest,
@@ -81,8 +82,10 @@ impl MacpServer {
     fn session_state_to_pb(state: &SessionState) -> i32 {
         match state {
             SessionState::Open => PbSessionState::Open.into(),
+            SessionState::Suspended => PbSessionState::Suspended.into(),
             SessionState::Resolved => PbSessionState::Resolved.into(),
             SessionState::Expired => PbSessionState::Expired.into(),
+            SessionState::Cancelled => PbSessionState::Cancelled.into(),
         }
     }
 
@@ -809,6 +812,128 @@ impl MacpRuntimeService for MacpServer {
         }
     }
 
+    async fn suspend_session(
+        &self,
+        request: Request<SuspendSessionRequest>,
+    ) -> Result<Response<SuspendSessionResponse>, Status> {
+        let session_id = request.get_ref().session_id.clone();
+        let identity = self
+            .security
+            .authenticate_metadata(request.metadata())
+            .map_err(Self::status_from_error)?;
+        let session = self
+            .runtime
+            .get_session_checked(&session_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("Session '{}' not found", session_id)))?;
+        // RFC-MACP-0001 §7.5: same authority model as CancelSession — initiator
+        // or policy-delegated roles only; mode authorization does not apply.
+        if identity.sender != session.initiator_sender
+            && macp_runtime::mode::util::check_commitment_authority(&session, &identity.sender)
+                .is_err()
+        {
+            return Err(Status::permission_denied(
+                "FORBIDDEN: only the session initiator or policy-delegated roles can suspend",
+            ));
+        }
+        let sender = identity.sender.clone();
+        let req = request.into_inner();
+        match self
+            .runtime
+            .suspend_session(&req.session_id, &req.reason, &sender)
+            .await
+        {
+            Ok(result) => Ok(Response::new(SuspendSessionResponse {
+                ack: Some(Ack {
+                    ok: true,
+                    duplicate: false,
+                    message_id: String::new(),
+                    session_id: req.session_id,
+                    accepted_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+                    session_state: Self::session_state_to_pb(&result.session_state),
+                    error: None,
+                }),
+            })),
+            Err(err) => Ok(Response::new(SuspendSessionResponse {
+                ack: Some(Ack {
+                    ok: false,
+                    duplicate: false,
+                    message_id: String::new(),
+                    session_id: req.session_id.clone(),
+                    accepted_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+                    session_state: PbSessionState::Unspecified.into(),
+                    error: Some(PbMacpError {
+                        code: err.error_code().into(),
+                        message: err.to_string(),
+                        session_id: req.session_id,
+                        message_id: String::new(),
+                        details: vec![],
+                    }),
+                }),
+            })),
+        }
+    }
+
+    async fn resume_session(
+        &self,
+        request: Request<ResumeSessionRequest>,
+    ) -> Result<Response<ResumeSessionResponse>, Status> {
+        let session_id = request.get_ref().session_id.clone();
+        let identity = self
+            .security
+            .authenticate_metadata(request.metadata())
+            .map_err(Self::status_from_error)?;
+        let session = self
+            .runtime
+            .get_session_checked(&session_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("Session '{}' not found", session_id)))?;
+        if identity.sender != session.initiator_sender
+            && macp_runtime::mode::util::check_commitment_authority(&session, &identity.sender)
+                .is_err()
+        {
+            return Err(Status::permission_denied(
+                "FORBIDDEN: only the session initiator or policy-delegated roles can resume",
+            ));
+        }
+        let sender = identity.sender.clone();
+        let req = request.into_inner();
+        match self
+            .runtime
+            .resume_session(&req.session_id, &req.reason, &sender)
+            .await
+        {
+            Ok(result) => Ok(Response::new(ResumeSessionResponse {
+                ack: Some(Ack {
+                    ok: true,
+                    duplicate: false,
+                    message_id: String::new(),
+                    session_id: req.session_id,
+                    accepted_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+                    session_state: Self::session_state_to_pb(&result.session_state),
+                    error: None,
+                }),
+            })),
+            Err(err) => Ok(Response::new(ResumeSessionResponse {
+                ack: Some(Ack {
+                    ok: false,
+                    duplicate: false,
+                    message_id: String::new(),
+                    session_id: req.session_id.clone(),
+                    accepted_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+                    session_state: PbSessionState::Unspecified.into(),
+                    error: Some(PbMacpError {
+                        code: err.error_code().into(),
+                        message: err.to_string(),
+                        session_id: req.session_id,
+                        message_id: String::new(),
+                        details: vec![],
+                    }),
+                }),
+            })),
+        }
+    }
+
     async fn get_manifest(
         &self,
         request: Request<GetManifestRequest>,
@@ -989,6 +1114,12 @@ impl MacpRuntimeService for MacpServer {
                         (session_lifecycle_event::EventType::Resolved, session_id.clone()),
                     macp_runtime::runtime::SessionLifecycleEvent::Expired { session_id } =>
                         (session_lifecycle_event::EventType::Expired, session_id.clone()),
+                    macp_runtime::runtime::SessionLifecycleEvent::Suspended { session_id } =>
+                        (session_lifecycle_event::EventType::Suspended, session_id.clone()),
+                    macp_runtime::runtime::SessionLifecycleEvent::Resumed { session_id } =>
+                        (session_lifecycle_event::EventType::Resumed, session_id.clone()),
+                    macp_runtime::runtime::SessionLifecycleEvent::Cancelled { session_id } =>
+                        (session_lifecycle_event::EventType::Cancelled, session_id.clone()),
                 };
                 let session_meta = runtime.registry.get_session(&sid).await
                     .map(|s| Self::session_to_metadata(&s));
@@ -1605,7 +1736,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_session_transitions_to_expired() {
+    async fn cancel_session_transitions_to_cancelled() {
         let (server, _) = make_server();
         let sid = new_sid();
         let ack = do_send(
@@ -1638,7 +1769,8 @@ mod tests {
         let resp = server.cancel_session(req).await.unwrap();
         let ack = resp.into_inner().ack.unwrap();
         assert!(ack.ok);
-        assert_eq!(ack.session_state, PbSessionState::Expired as i32);
+        // RFC-MACP-0001 §7.3: cancellation now yields the distinct CANCELLED state.
+        assert_eq!(ack.session_state, PbSessionState::Cancelled as i32);
     }
 
     #[tokio::test]

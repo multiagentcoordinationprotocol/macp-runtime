@@ -130,8 +130,32 @@ fn replay_entry(
             }
         }
         EntryKind::Internal => match entry.message_type.as_str() {
-            "TtlExpired" | "SessionCancel" => {
+            "TtlExpired" => {
                 session.state = SessionState::Expired;
+            }
+            // RFC-MACP-0001 §7.3: cancellation replays to the terminal CANCELLED
+            // state (distinct from EXPIRED).
+            "SessionCancel" => {
+                let _ = session.cancel();
+            }
+            // RFC-MACP-0001 §7.5 / RFC-MACP-0003 §2: suspend/resume are on the
+            // replayed timeline; banking uses the recorded entry timestamp so a
+            // suspended-then-resumed session replays to the identical deadline.
+            "SessionSuspend" => {
+                let at = if entry.received_at_ms != 0 {
+                    entry.received_at_ms
+                } else {
+                    entry.timestamp_unix_ms
+                };
+                let _ = session.suspend(at);
+            }
+            "SessionResume" => {
+                let at = if entry.received_at_ms != 0 {
+                    entry.received_at_ms
+                } else {
+                    entry.timestamp_unix_ms
+                };
+                let _ = session.resume(at);
             }
             _ => {}
         },
@@ -233,6 +257,8 @@ fn replay_from_start(
         } else {
             None
         },
+        suspended_at_ms: None,
+        accumulated_suspended_ms: 0,
     };
 
     // 4. Call mode.on_session_start(), apply response
@@ -337,6 +363,7 @@ mod tests {
             policy_version: "policy-1".into(),
             configuration_version: "cfg-1".into(),
             outcome_positive: true,
+            supersedes: None,
         }
         .encode_to_vec();
 
@@ -414,7 +441,8 @@ mod tests {
         ];
 
         let session = replay_session("s1", &entries, &registry, None).unwrap();
-        assert_eq!(session.state, SessionState::Expired);
+        // RFC-MACP-0001 §7.3: cancellation now terminates as CANCELLED.
+        assert_eq!(session.state, SessionState::Cancelled);
     }
 
     #[test]

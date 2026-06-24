@@ -125,7 +125,7 @@ Threshold types: `n_of_m`, `percentage`, `count`. Abstention interpretations: `n
 
 ## How evaluation works
 
-Each standard mode has a dedicated evaluator in `src/policy/evaluator.rs`. Evaluation runs when a `Commitment` envelope arrives, after the mode's own validation has passed. It is a pure function of three inputs: the resolved policy rules, the accumulated accepted message history, and the session's declared participants. No wall-clock time, external calls, or out-of-session state are involved.
+Each standard mode has a dedicated evaluator in `crates/macp-policy/src/evaluator.rs`. Evaluation runs when a `Commitment` envelope arrives, after the mode's own validation has passed. It is a pure function of three inputs: the resolved policy rules, the accumulated accepted message history, and the session's declared participants. No wall-clock time, external calls, or out-of-session state are involved.
 
 | Evaluator | What it checks |
 |-----------|---------------|
@@ -137,7 +137,7 @@ Each standard mode has a dedicated evaluator in `src/policy/evaluator.rs`. Evalu
 
 ## Commitment authority
 
-The `commitment.authority` rule determines who can send the terminal commitment. This is enforced in `src/mode/util.rs` and applies across all modes:
+The `commitment.authority` rule determines who can send the terminal commitment. This is enforced in `crates/macp-modes/src/mode/util.rs` and applies across all modes:
 
 | Value | Who can commit |
 |-------|---------------|

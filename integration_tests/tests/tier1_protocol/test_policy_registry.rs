@@ -414,6 +414,7 @@ async fn policy_enforcement_blocks_commitment_in_decision_mode() {
         policy_version: policy_id,
         configuration_version: CONFIG_VERSION.into(),
         outcome_positive: true,
+        supersedes: None,
     }
     .encode_to_vec();
 

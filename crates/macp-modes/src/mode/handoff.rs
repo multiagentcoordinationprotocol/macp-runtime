@@ -298,6 +298,8 @@ mod tests {
             participant_message_counts: std::collections::HashMap::new(),
             participant_last_seen: std::collections::HashMap::new(),
             policy_definition: None,
+            suspended_at_ms: None,
+            accumulated_suspended_ms: 0,
         }
     }
 
@@ -324,6 +326,7 @@ mod tests {
             policy_version: "policy".into(),
             configuration_version: "config".into(),
             outcome_positive: true,
+            supersedes: None,
         }
         .encode_to_vec()
     }
@@ -925,6 +928,7 @@ mod tests {
             policy_version: "policy".into(),
             configuration_version: "config".into(),
             outcome_positive: true,
+            supersedes: None,
         }
         .encode_to_vec();
         let err = mode

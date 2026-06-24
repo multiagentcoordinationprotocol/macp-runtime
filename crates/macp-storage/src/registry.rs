@@ -37,6 +37,10 @@ pub struct PersistedSession {
     pub initiator_sender: String,
     #[serde(default)]
     pub policy_definition: Option<macp_core::policy::PolicyDefinition>,
+    #[serde(default)]
+    pub suspended_at_ms: Option<i64>,
+    #[serde(default)]
+    pub accumulated_suspended_ms: i64,
 }
 
 fn default_schema_version() -> u32 {
@@ -73,6 +77,8 @@ impl From<&Session> for PersistedSession {
                 .collect(),
             initiator_sender: session.initiator_sender.clone(),
             policy_definition: session.policy_definition.clone(),
+            suspended_at_ms: session.suspended_at_ms,
+            accumulated_suspended_ms: session.accumulated_suspended_ms,
         }
     }
 }
@@ -116,6 +122,8 @@ impl From<PersistedSession> for Session {
             participant_message_counts: std::collections::HashMap::new(),
             participant_last_seen: std::collections::HashMap::new(),
             policy_definition: session.policy_definition,
+            suspended_at_ms: session.suspended_at_ms,
+            accumulated_suspended_ms: session.accumulated_suspended_ms,
         }
     }
 }
@@ -257,6 +265,8 @@ mod tests {
             participant_message_counts: std::collections::HashMap::new(),
             participant_last_seen: std::collections::HashMap::new(),
             policy_definition: None,
+            suspended_at_ms: None,
+            accumulated_suspended_ms: 0,
         }
     }
 

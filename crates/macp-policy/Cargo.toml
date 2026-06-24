@@ -1,9 +1,13 @@
 [package]
 name = "macp-policy"
-version = "0.4.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 description = "MACP default governance policy: per-mode rule schemas, the policy registry, and the DefaultPolicyEvaluator implementation of macp_core::PolicyEvaluator."
-publish = false
+readme = "README.md"
 
 [dependencies]
 macp-core = { workspace = true }

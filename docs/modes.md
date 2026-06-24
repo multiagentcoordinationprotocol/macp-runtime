@@ -4,7 +4,7 @@ This page documents the runtime's implementation of each coordination mode -- th
 
 ## Decision Mode
 
-**Source**: `src/mode/decision.rs` | **Identifier**: `macp.mode.decision.v1`
+**Source**: `crates/macp-modes/src/mode/decision.rs` | **Identifier**: `macp.mode.decision.v1`
 
 The decision mode tracks proposals, evaluations, objections, and votes through an automatic phase progression. Its internal state consists of:
 
@@ -21,7 +21,7 @@ The decision mode tracks proposals, evaluations, objections, and votes through a
 
 ## Proposal Mode
 
-**Source**: `src/mode/proposal.rs` | **Identifier**: `macp.mode.proposal.v1`
+**Source**: `crates/macp-modes/src/mode/proposal.rs` | **Identifier**: `macp.mode.proposal.v1`
 
 The proposal mode handles offer-and-counteroffer negotiation. Its internal state tracks live proposals, per-participant acceptance records, and any terminal rejections.
 
@@ -33,7 +33,7 @@ The proposal mode handles offer-and-counteroffer negotiation. Its internal state
 
 ## Task Mode
 
-**Source**: `src/mode/task.rs` | **Identifier**: `macp.mode.task.v1`
+**Source**: `crates/macp-modes/src/mode/task.rs` | **Identifier**: `macp.mode.task.v1`
 
 The task mode manages bounded work delegation. Its internal state tracks the task request, the currently active assignee, any rejection records, progress updates, and the terminal report (complete or fail).
 
@@ -45,7 +45,7 @@ The task mode manages bounded work delegation. Its internal state tracks the tas
 
 ## Handoff Mode
 
-**Source**: `src/mode/handoff.rs` | **Identifier**: `macp.mode.handoff.v1`
+**Source**: `crates/macp-modes/src/mode/handoff.rs` | **Identifier**: `macp.mode.handoff.v1`
 
 The handoff mode manages responsibility transfer through serial offers. Its internal state tracks offers and their associated context messages.
 
@@ -55,7 +55,7 @@ The handoff mode manages responsibility transfer through serial offers. Its inte
 
 ## Quorum Mode
 
-**Source**: `src/mode/quorum.rs` | **Identifier**: `macp.mode.quorum.v1`
+**Source**: `crates/macp-modes/src/mode/quorum.rs` | **Identifier**: `macp.mode.quorum.v1`
 
 The quorum mode tracks approval requests and ballots against a threshold. Its internal state records the approval request and a map of ballots (approve, reject, or abstain) keyed by sender.
 
@@ -67,7 +67,7 @@ The quorum mode tracks approval requests and ballots against a threshold. Its in
 
 ## Built-in Extension: Multi-Round Mode
 
-**Source**: `src/mode/multi_round.rs` | **Identifier**: `ext.multi_round.v1`
+**Source**: `crates/macp-modes/src/mode/multi_round.rs` | **Identifier**: `ext.multi_round.v1`
 
 The multi-round mode is a built-in extension for iterative convergence. It is discoverable via `ListExtModes` (not `ListModes`, which returns only standards-track modes).
 
@@ -77,6 +77,6 @@ Unlike the standards-track modes, multi-round uses JSON-encoded payloads rather 
 
 ## Dynamic Extension Modes
 
-Extensions can be registered at runtime via `RegisterExtMode`. Each registered extension is backed by the passthrough handler (`src/mode/passthrough.rs`), which accepts any message type listed in the extension's descriptor and requires an explicit commitment from the initiator to resolve the session.
+Extensions can be registered at runtime via `RegisterExtMode`. Each registered extension is backed by the passthrough handler (`crates/macp-modes/src/mode/passthrough.rs`), which accepts any message type listed in the extension's descriptor and requires an explicit commitment from the initiator to resolve the session.
 
 Extension mode names must not use the reserved `macp.mode.*` namespace. Built-in modes cannot be unregistered. Extensions can be promoted to standards-track status via `PromoteMode`, and all registry changes are broadcast to `WatchModeRegistry` subscribers.
