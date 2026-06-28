@@ -1036,6 +1036,64 @@ mod tests {
         assert!(matches!(result, PolicyDecision::Deny { .. }));
     }
 
+    // ── Regression: lending.conservative-shaped policy ──────────────
+    // Reproduces the production bug where a supermajority decision with 100%
+    // approval was denied (and the run cancelled) because the example agents
+    // emitted Votes/Signals but no Evaluation messages. The policy requires
+    // evaluations before voting (minimum_confidence 0.6); with no qualifying
+    // evaluation the commitment is denied even though the vote tally passes.
+    // Emitting a qualifying Evaluation (what the fixed agents now do) allows it.
+    #[test]
+    fn supermajority_requires_evaluation_then_allows_when_provided() {
+        let policy = make_policy(serde_json::json!({
+            "voting": {
+                "algorithm": "supermajority",
+                "threshold": 0.67,
+                "quorum": { "type": "count", "value": 3 }
+            },
+            "evaluation": { "minimum_confidence": 0.6, "required_before_voting": true },
+            "commitment": { "authority": "initiator_only", "require_vote_quorum": true }
+        }));
+        // 3 unique voters, all APPROVE → quorum (3) met, supermajority (100% ≥ 67%) met.
+        let mut state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "APPROVE"),
+            ("p1", "agent://growth", "APPROVE"),
+            ("p1", "agent://compliance", "APPROVE"),
+        ]);
+
+        // Without any Evaluation: denied on the required-before-voting check,
+        // despite the vote tally passing. This is the bug.
+        let denied = evaluate_decision_commitment(&policy, &state, &participants());
+        assert!(
+            matches!(denied, PolicyDecision::Deny { .. }),
+            "got: {:?}",
+            denied
+        );
+        if let PolicyDecision::Deny { reasons } = &denied {
+            assert!(
+                reasons.iter().any(|r| r.contains("minimum confidence")),
+                "expected confidence denial, got: {:?}",
+                reasons
+            );
+        }
+
+        // With a qualifying (non-REVIEW, confidence ≥ 0.6) Evaluation — what the
+        // fixed specialist agents now emit before voting — the commitment passes.
+        state.evaluations.push(Evaluation {
+            proposal_id: "p1".into(),
+            recommendation: "APPROVE".into(),
+            confidence: 0.8,
+            reason: "clear approval".into(),
+            sender: "agent://fraud".into(),
+        });
+        let allowed = evaluate_decision_commitment(&policy, &state, &participants());
+        assert!(
+            matches!(allowed, PolicyDecision::Allow { .. }),
+            "got: {:?}",
+            allowed
+        );
+    }
+
     // ── Default policy always allows ────────────────────────────────
 
     #[test]

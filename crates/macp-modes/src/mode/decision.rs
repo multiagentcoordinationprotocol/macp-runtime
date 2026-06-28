@@ -69,7 +69,21 @@ impl DecisionMode {
 
     fn ensure_can_deliberate(state: &DecisionState) -> Result<(), MacpError> {
         Self::ensure_not_committed(state)?;
-        if state.phase != DecisionPhase::Evaluation {
+        // RFC-MACP-0007 §5 does not require Evaluations/Objections to strictly
+        // precede Votes — it only requires that they reference an existing
+        // proposal and that the session is not yet committed. Autonomous
+        // participants deliberate and vote concurrently, so an Evaluation or
+        // Objection can legitimately arrive after another participant's Vote has
+        // advanced the phase to Voting. Accept deliberation in both the
+        // Evaluation and Voting phases (symmetric with `ensure_can_vote`, which
+        // already accepts Votes during the Evaluation phase). Governance is
+        // unaffected: the `evaluation.required_before_voting` /
+        // `objection_handling` policy gates are still enforced against the full
+        // accumulated state at commitment time.
+        if matches!(
+            state.phase,
+            DecisionPhase::Proposal | DecisionPhase::Committed
+        ) {
             return Err(MacpError::InvalidPayload);
         }
         Ok(())
@@ -679,7 +693,11 @@ mod tests {
     }
 
     #[test]
-    fn evaluation_after_voting_rejected() {
+    fn evaluation_after_voting_accepted() {
+        // RFC-MACP-0007 §5 imposes no ordering between Evaluation and Vote, so
+        // an Evaluation arriving after voting has begun (phase == Voting) is
+        // accepted and recorded. The `required_before_voting` policy gate is
+        // enforced separately at commitment time against the accumulated state.
         let mode = DecisionMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
         let mut session = test_session();
         let resp = mode
@@ -703,19 +721,29 @@ mod tests {
             )
             .unwrap();
         apply(&mut session, resp);
-        assert_eq!(
-            mode.on_message(
+        let resp = mode
+            .on_message(
                 &session,
-                &env("agent://growth", "Evaluation", evaluation("p1"))
+                &env("agent://growth", "Evaluation", evaluation("p1")),
             )
-            .unwrap_err()
-            .to_string(),
-            "InvalidPayload"
+            .expect("evaluation during voting phase should be accepted");
+        apply(&mut session, resp);
+        let state = decode(&session);
+        assert!(
+            state
+                .evaluations
+                .iter()
+                .any(|e| e.sender == "agent://growth"),
+            "late evaluation should be recorded"
         );
     }
 
     #[test]
-    fn objection_after_voting_rejected() {
+    fn objection_after_voting_accepted() {
+        // RFC-MACP-0007 §5 imposes no ordering between Objection and Vote, so an
+        // Objection raised after voting has begun (phase == Voting) is accepted
+        // and recorded. `objection_handling` veto rules are applied at
+        // commitment time against the accumulated state.
         let mode = DecisionMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
         let mut session = test_session();
         let resp = mode
@@ -739,14 +767,20 @@ mod tests {
             )
             .unwrap();
         apply(&mut session, resp);
-        assert_eq!(
-            mode.on_message(
+        let resp = mode
+            .on_message(
                 &session,
-                &env("agent://growth", "Objection", objection("p1"))
+                &env("agent://growth", "Objection", objection("p1")),
             )
-            .unwrap_err()
-            .to_string(),
-            "InvalidPayload"
+            .expect("objection during voting phase should be accepted");
+        apply(&mut session, resp);
+        let state = decode(&session);
+        assert!(
+            state
+                .objections
+                .iter()
+                .any(|o| o.sender == "agent://growth"),
+            "late objection should be recorded"
         );
     }
 
