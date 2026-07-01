@@ -1,7 +1,7 @@
 use macp_core::decision::{DecisionState, Vote};
 use macp_core::policy::rules::{
-    DecisionPolicyRules, HandoffPolicyRules, ProposalPolicyRules, QuorumPolicyRules,
-    TaskPolicyRules,
+    CriticalObjectionAction, DecisionPolicyRules, HandoffPolicyRules, ProposalPolicyRules,
+    QuorumPolicyRules, TaskPolicyRules,
 };
 use macp_core::policy::{PolicyDecision, PolicyDefinition};
 use std::collections::BTreeMap;
@@ -21,19 +21,61 @@ fn check_schema_version(policy: &PolicyDefinition) -> Option<PolicyDecision> {
     }
 }
 
-/// Evaluate whether the governance policy allows a commitment in Decision Mode.
+/// Evaluate whether the governance policy allows a *positive* commitment in
+/// Decision Mode (the legacy, outcome-unaware entry point).
 ///
-/// Checks:
-/// 1. Evaluation confidence: do evaluations meet minimum_confidence?
-/// 2. Objection veto: are there enough blocking objections to trigger veto?
-/// 3. Quorum: have enough participants voted?
-/// 4. Voting threshold: does the vote distribution satisfy the algorithm?
-///
-/// Returns `PolicyDecision::Allow` or `PolicyDecision::Deny` with reasons.
+/// Equivalent to [`evaluate_decision_commitment_outcome`] with
+/// `outcome_positive = true`; retained so existing callers and the ~30 unit
+/// tests below keep compiling against a stable 3-argument signature.
 pub fn evaluate_decision_commitment(
     policy: &PolicyDefinition,
     state: &DecisionState,
     participants: &[String],
+) -> PolicyDecision {
+    evaluate_decision_commitment_outcome(policy, state, participants, true)
+}
+
+/// Evaluate whether the governance policy allows a commitment in Decision Mode,
+/// accounting for the commitment's `outcome_positive` flag.
+///
+/// Decision Mode permits both positive and negative committed outcomes
+/// (RFC-MACP-0007 §6). The gating is **outcome-aware**: a positive commit must
+/// clear the approval bar; a negative (decline) commit must be backed by a
+/// *conclusive non-approval* — at least one explicit reject — not merely the
+/// absence of approval (which, for `unanimous`, may just be incomplete
+/// participation).
+///
+/// Checks:
+/// 1. Evaluation confidence: do evaluations meet `minimum_confidence`? (both outcomes)
+/// 2. Objection veto: critical objections, resolved per `critical_objection_action`.
+/// 3. Quorum: have enough participants voted? (both outcomes)
+/// 4. Voting threshold mapped to the requested outcome (see below).
+///
+/// Voting-result → validity mapping for a real algorithm (`algorithm != "none"`):
+///
+/// | `VotingResult` | approve commit | decline commit |
+/// |---|---|---|
+/// | `Passed`  | allowed | denied, unless `commitment.allow_decline_over_approval` |
+/// | `Failed`  | denied  | allowed iff the decline guard passes (`reject_count > 0`) |
+/// | `NoVotes` | denied iff quorum required | denied (no explicit reject) |
+///
+/// **Decline guard (universal reject-floor):** a decline backed by the vote
+/// outcome requires at least one *explicit* reject (`reject_count > 0`). A
+/// non-vote must never authorize a finalized adverse decline. The quorum gate
+/// (check 3) supplies the additional, opt-in `require_vote_quorum` condition.
+///
+/// **`none` exception:** with `algorithm == "none"` the decision is
+/// initiator-driven and `outcome_positive` is taken at face value (a `none`
+/// decision may legitimately carry no votes); the reject-floor does not apply.
+/// Action/outcome consistency is still enforced upstream by
+/// `validate_commitment_payload_for_session`.
+///
+/// Returns `PolicyDecision::Allow` or `PolicyDecision::Deny` with reasons.
+pub fn evaluate_decision_commitment_outcome(
+    policy: &PolicyDefinition,
+    state: &DecisionState,
+    participants: &[String],
+    outcome_positive: bool,
 ) -> PolicyDecision {
     if let Some(deny) = check_schema_version(policy) {
         return deny;
@@ -44,9 +86,10 @@ pub fn evaluate_decision_commitment(
     let mut deny_reasons: Vec<String> = Vec::new();
     let mut allow_reasons: Vec<String> = Vec::new();
 
-    // 1. Check evaluation requirements (minimum confidence threshold)
+    // 1. Check evaluation requirements (minimum confidence threshold).
     // RFC-MACP-0007: REVIEW evaluations are informational only and MUST NOT
-    // satisfy confidence thresholds or "required before voting" checks.
+    // satisfy confidence thresholds or "required before voting" checks. A
+    // decline still needs a qualifying basis, so this gate is outcome-agnostic.
     let qualifying_evaluations: Vec<_> = state
         .evaluations
         .iter()
@@ -70,8 +113,10 @@ pub fn evaluate_decision_commitment(
         deny_reasons.push("evaluations required before voting but none provided (REVIEW evaluations are informational only)".into());
     }
 
-    // 2. Check critical objections (veto by count of "critical" severity objections)
-    // RFC-MACP-0007 §5: only Objections with severity "critical" trigger veto logic
+    // 2. Check critical objections (veto by count of "critical" severity objections).
+    // RFC-MACP-0007 §5: only Objections with severity "critical" trigger veto
+    // logic. How the veto resolves a commitment is operator-controlled via
+    // `critical_objection_action` (default `deny` = historical hard-stop).
     if rules.objection_handling.critical_severity_vetoes {
         let blocking: Vec<&str> = state
             .objections
@@ -80,20 +125,46 @@ pub fn evaluate_decision_commitment(
             .map(|o| o.sender.as_str())
             .collect();
         if blocking.len() >= rules.objection_handling.veto_threshold as usize {
-            deny_reasons.push(format!(
-                "blocked by {} blocking objection(s) (veto threshold: {}), from: {}",
+            let detail = format!(
+                "{} blocking objection(s) (veto threshold: {}), from: {}",
                 blocking.len(),
                 rules.objection_handling.veto_threshold,
                 blocking.join(", ")
-            ));
+            );
+            match rules.objection_handling.critical_objection_action {
+                CriticalObjectionAction::Deny => {
+                    deny_reasons.push(format!("blocked by {detail}"));
+                }
+                CriticalObjectionAction::Hold => {
+                    // Deny at the evaluator layer (which leaves the session
+                    // open); the reason marks it as an escalation hold rather
+                    // than a permanent denial.
+                    deny_reasons.push(format!(
+                        "held for escalation by {detail} (critical_objection_action=hold)"
+                    ));
+                }
+                CriticalObjectionAction::FinalizeDecline => {
+                    if outcome_positive {
+                        deny_reasons.push(format!(
+                            "veto blocks a positive commitment: {detail} (critical_objection_action=finalize_decline)"
+                        ));
+                    } else {
+                        allow_reasons.push(format!(
+                            "critical-objection veto finalized as a decline: {detail}"
+                        ));
+                    }
+                }
+            }
         }
     }
 
-    // 3. Collect all votes across all proposals
+    // 3. Collect all votes across all proposals.
     let total_voters = count_unique_voters(&state.votes);
     let participant_count = participants.len();
+    let (_, reject_count, _, _) = aggregate_votes(&state.votes);
 
-    // 4. Check vote quorum
+    // 4. Check vote quorum (outcome-agnostic — a decline needs the same quorum
+    //    as an approve when `require_vote_quorum` is set).
     let quorum_met = check_quorum(
         &rules.voting.quorum.quorum_type,
         rules.voting.quorum.value,
@@ -110,7 +181,7 @@ pub fn evaluate_decision_commitment(
         ));
     }
 
-    // 5. Check voting threshold per the algorithm
+    // 5. Map the voting algorithm result to the requested outcome.
     if rules.voting.algorithm != "none" {
         match check_voting_algorithm(
             &rules.voting.algorithm,
@@ -119,15 +190,49 @@ pub fn evaluate_decision_commitment(
             &state.votes,
             participants,
         ) {
-            VotingResult::Passed(reason) => allow_reasons.push(reason),
-            VotingResult::Failed(reason) => deny_reasons.push(reason),
+            VotingResult::Passed(reason) => {
+                if outcome_positive {
+                    allow_reasons.push(reason);
+                } else if rules.commitment.allow_decline_over_approval {
+                    allow_reasons.push(format!(
+                        "decline authorized over a passing approval vote (allow_decline_over_approval=true): {reason}"
+                    ));
+                } else {
+                    deny_reasons.push(format!(
+                        "vote passed the approval threshold but a decline was requested; set commitment.allow_decline_over_approval to permit an executive override ({reason})"
+                    ));
+                }
+            }
+            VotingResult::Failed(reason) => {
+                if outcome_positive {
+                    deny_reasons.push(reason);
+                } else if reject_count > 0 {
+                    // Decline guard satisfied: the approval bar was not met and
+                    // there is at least one explicit reject backing the decline.
+                    allow_reasons.push(format!("decline backed by conclusive rejection: {reason}"));
+                } else {
+                    // Approval failed only through incomplete participation
+                    // (no explicit reject) — must not finalize an adverse decline.
+                    deny_reasons.push(format!(
+                        "approval threshold not met but no explicit reject to justify a decline (incomplete participation is not a rejection): {reason}"
+                    ));
+                }
+            }
             VotingResult::NoVotes => {
-                if rules.commitment.require_vote_quorum {
-                    deny_reasons.push("no votes cast".into());
+                if outcome_positive {
+                    if rules.commitment.require_vote_quorum {
+                        deny_reasons.push("no votes cast".into());
+                    }
+                } else {
+                    deny_reasons.push(
+                        "no votes cast; a decline requires at least one explicit reject vote"
+                            .into(),
+                    );
                 }
             }
         }
     } else {
+        // `none`: initiator-driven; outcome taken at face value (no reject-floor).
         allow_reasons.push("voting algorithm is 'none'; no vote threshold required".into());
     }
 
@@ -1525,5 +1630,250 @@ mod tests {
             "unknown voting algorithm must deny, got: {:?}",
             result
         );
+    }
+
+    // ── Outcome-aware gating: negative (decline) commitments ────────
+    //
+    // RFC-MACP-0007 §6: Decision Mode permits both positive and negative
+    // committed outcomes. `evaluate_decision_commitment_outcome` maps the vote
+    // result onto the requested `outcome_positive`.
+
+    /// Convenience: evaluate a *decline* (`outcome_positive = false`).
+    fn decline(
+        policy: &PolicyDefinition,
+        state: &DecisionState,
+        participants: &[String],
+    ) -> PolicyDecision {
+        evaluate_decision_commitment_outcome(policy, state, participants, false)
+    }
+
+    #[test]
+    fn decline_allowed_when_majority_rejects() {
+        // The motivating case: a clear reject-majority should finalize a decline.
+        let policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 }
+        }));
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "REJECT"),
+            ("p1", "agent://growth", "REJECT"),
+            ("p1", "agent://compliance", "APPROVE"),
+        ]);
+        // Same vote that denies an approve (Failed) must allow a decline.
+        assert!(matches!(
+            evaluate_decision_commitment(&policy, &state, &participants()),
+            PolicyDecision::Deny { .. }
+        ));
+        assert!(matches!(
+            decline(&policy, &state, &participants()),
+            PolicyDecision::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn decline_denied_when_failed_but_no_explicit_reject() {
+        // `unanimous` returns Failed for a *missing voter*, not a rejection.
+        // A non-vote must never authorize a finalized adverse decline.
+        let policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "unanimous" }
+        }));
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "APPROVE"),
+            ("p1", "agent://growth", "APPROVE"),
+            // compliance didn't vote → Failed, but reject_count == 0
+        ]);
+        let result = decline(&policy, &state, &participants());
+        assert!(
+            matches!(result, PolicyDecision::Deny { .. }),
+            "incomplete participation must not authorize a decline, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn decline_allowed_when_unanimous_has_explicit_reject() {
+        let policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "unanimous" }
+        }));
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "APPROVE"),
+            ("p1", "agent://growth", "APPROVE"),
+            ("p1", "agent://compliance", "REJECT"),
+        ]);
+        assert!(matches!(
+            decline(&policy, &state, &participants()),
+            PolicyDecision::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn decline_denied_over_passing_vote_by_default() {
+        // Vote passed (approve majority) but a decline was requested without
+        // the executive-override knob.
+        let policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 }
+        }));
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "APPROVE"),
+            ("p1", "agent://growth", "APPROVE"),
+            ("p1", "agent://compliance", "REJECT"),
+        ]);
+        assert!(matches!(
+            decline(&policy, &state, &participants()),
+            PolicyDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn decline_allowed_over_passing_vote_with_knob() {
+        let policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 },
+            "commitment": { "allow_decline_over_approval": true }
+        }));
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "APPROVE"),
+            ("p1", "agent://growth", "APPROVE"),
+            ("p1", "agent://compliance", "REJECT"),
+        ]);
+        assert!(matches!(
+            decline(&policy, &state, &participants()),
+            PolicyDecision::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn decline_denied_with_no_votes() {
+        // NoVotes → no explicit reject → a decline is not justified.
+        let policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 }
+        }));
+        let state = make_state_with_votes(vec![]);
+        assert!(matches!(
+            decline(&policy, &state, &participants()),
+            PolicyDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn decline_allowed_with_none_algorithm() {
+        // `none`: initiator-driven, outcome taken at face value (no reject-floor).
+        let policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "none" }
+        }));
+        let state = make_state_with_votes(vec![]);
+        assert!(matches!(
+            decline(&policy, &state, &participants()),
+            PolicyDecision::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn decline_denied_when_evaluation_gate_fails() {
+        // The evaluation gate applies to declines too.
+        let policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 },
+            "evaluation": { "required_before_voting": true, "minimum_confidence": 0.8 }
+        }));
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "REJECT"),
+            ("p1", "agent://growth", "REJECT"),
+        ]);
+        // Explicit rejects exist, but no qualifying evaluation was provided.
+        assert!(matches!(
+            decline(&policy, &state, &participants()),
+            PolicyDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn decline_denied_when_quorum_required_and_unmet() {
+        // The decline guard's quorum sub-condition is supplied by the existing
+        // `require_vote_quorum` gate.
+        let policy = make_policy(serde_json::json!({
+            "voting": {
+                "algorithm": "majority",
+                "threshold": 0.5,
+                "quorum": { "type": "count", "value": 3 }
+            },
+            "commitment": { "require_vote_quorum": true }
+        }));
+        // Two explicit rejects (Failed, reject_count > 0) but quorum needs 3.
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "REJECT"),
+            ("p1", "agent://growth", "REJECT"),
+        ]);
+        assert!(matches!(
+            decline(&policy, &state, &participants()),
+            PolicyDecision::Deny { .. }
+        ));
+    }
+
+    // ── critical_objection_action knob ──────────────────────────────
+
+    fn veto_state() -> DecisionState {
+        let mut state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "REJECT"),
+            ("p1", "agent://growth", "REJECT"),
+        ]);
+        state.objections.push(Objection {
+            proposal_id: "p1".into(),
+            reason: "unacceptable risk".into(),
+            severity: "critical".into(),
+            sender: "agent://compliance".into(),
+        });
+        state
+    }
+
+    #[test]
+    fn critical_objection_deny_blocks_decline_by_default() {
+        let policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 },
+            "objection_handling": { "critical_severity_vetoes": true, "veto_threshold": 1 }
+        }));
+        // Default action is `deny`: veto hard-stops even a decline.
+        assert!(matches!(
+            decline(&policy, &veto_state(), &participants()),
+            PolicyDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn critical_objection_finalize_decline_allows_negative_blocks_positive() {
+        let policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 },
+            "objection_handling": {
+                "critical_severity_vetoes": true,
+                "veto_threshold": 1,
+                "critical_objection_action": "finalize_decline"
+            }
+        }));
+        // A decline finalizes under the veto...
+        assert!(matches!(
+            decline(&policy, &veto_state(), &participants()),
+            PolicyDecision::Allow { .. }
+        ));
+        // ...but a positive commitment is still blocked.
+        assert!(matches!(
+            evaluate_decision_commitment_outcome(&policy, &veto_state(), &participants(), true),
+            PolicyDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn critical_objection_hold_denies_to_keep_session_open() {
+        let policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 },
+            "objection_handling": {
+                "critical_severity_vetoes": true,
+                "veto_threshold": 1,
+                "critical_objection_action": "hold"
+            }
+        }));
+        let result = decline(&policy, &veto_state(), &participants());
+        assert!(matches!(result, PolicyDecision::Deny { .. }));
+        if let PolicyDecision::Deny { reasons } = result {
+            assert!(
+                reasons.iter().any(|r| r.contains("escalation")),
+                "hold should surface an escalation reason, got: {reasons:?}"
+            );
+        }
     }
 }

@@ -75,6 +75,14 @@ pub struct ObjectionHandlingRules {
     pub critical_severity_vetoes: bool,
     #[serde(default = "default_veto_threshold")]
     pub veto_threshold: u32,
+    /// What a triggered critical-objection veto does to a commitment.
+    /// Defaults to [`CriticalObjectionAction::Deny`] — the historical hard-stop
+    /// that blocks every commitment. Operators in adverse-action domains
+    /// (claims/lending) generally want `deny` or `hold`; `finalize_decline` is
+    /// opt-in because auto-finalizing a denial off a single critical objection
+    /// is itself a regulated adverse action.
+    #[serde(default)]
+    pub critical_objection_action: CriticalObjectionAction,
 }
 
 impl Default for ObjectionHandlingRules {
@@ -82,12 +90,31 @@ impl Default for ObjectionHandlingRules {
         Self {
             critical_severity_vetoes: false,
             veto_threshold: default_veto_threshold(),
+            critical_objection_action: CriticalObjectionAction::default(),
         }
     }
 }
 
 fn default_veto_threshold() -> u32 {
     1
+}
+
+/// How a triggered critical-objection veto resolves a commitment attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CriticalObjectionAction {
+    /// Hard-stop: the veto blocks every commitment, positive or negative
+    /// (historical behavior, conservative default).
+    #[default]
+    Deny,
+    /// The veto permits a *negative* commitment (`outcome_positive = false`) to
+    /// finalize, while still blocking a positive one.
+    FinalizeDecline,
+    /// The veto blocks the commitment but signals the session should be held
+    /// open for human escalation rather than treated as a permanent denial.
+    /// At the evaluator layer this denies the commitment (leaving the session
+    /// open); the distinct reason string marks it as an escalation hold.
+    Hold,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -264,6 +291,11 @@ mod tests {
         assert_eq!(rules.voting.quorum.quorum_type, "count");
         assert!(!rules.objection_handling.critical_severity_vetoes);
         assert_eq!(rules.objection_handling.veto_threshold, 1);
+        assert_eq!(
+            rules.objection_handling.critical_objection_action,
+            CriticalObjectionAction::Deny
+        );
+        assert!(!rules.commitment.allow_decline_over_approval);
         assert!(!rules.evaluation.required_before_voting);
         assert!((rules.evaluation.minimum_confidence).abs() < f64::EPSILON);
         assert_eq!(rules.commitment.authority, "initiator_only");

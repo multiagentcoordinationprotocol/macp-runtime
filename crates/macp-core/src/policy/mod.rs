@@ -59,6 +59,13 @@ pub struct CommitmentRules {
     pub designated_roles: Vec<String>,
     #[serde(default)]
     pub require_vote_quorum: bool,
+    /// When `true`, an authorized initiator may finalize a *decline*
+    /// (`outcome_positive = false`) even when the vote passed the approval
+    /// threshold — the "executive veto" pattern. Defaults to `false`, which
+    /// preserves the conservative behavior: a passing vote only authorizes a
+    /// positive commitment. See RFC-MACP-0007 §6 (negative committed outcomes).
+    #[serde(default)]
+    pub allow_decline_over_approval: bool,
 }
 
 impl Default for CommitmentRules {
@@ -67,6 +74,7 @@ impl Default for CommitmentRules {
             authority: default_authority(),
             designated_roles: Vec::new(),
             require_vote_quorum: false,
+            allow_decline_over_approval: false,
         }
     }
 }
@@ -98,6 +106,30 @@ pub trait PolicyEvaluator: Send + Sync {
         state: &DecisionState,
         participants: &[String],
     ) -> PolicyDecision;
+
+    /// Outcome-aware variant of [`Self::evaluate_decision_commitment`].
+    ///
+    /// Decision Mode permits both positive and negative committed outcomes
+    /// (RFC-MACP-0007 §6). A positive commitment must clear the approval bar; a
+    /// negative (decline) commitment must be backed by a conclusive
+    /// non-approval. The `outcome_positive` flag is taken from the
+    /// `CommitmentPayload`.
+    ///
+    /// This method is **defaulted** so existing external `PolicyEvaluator`
+    /// implementations compile unchanged: the default body ignores
+    /// `outcome_positive` and delegates to the outcome-unaware method, exactly
+    /// reproducing their prior behavior. `macp-policy`'s
+    /// `DefaultPolicyEvaluator` overrides it to apply outcome-aware gating.
+    fn evaluate_decision_commitment_outcome(
+        &self,
+        policy: &PolicyDefinition,
+        state: &DecisionState,
+        participants: &[String],
+        outcome_positive: bool,
+    ) -> PolicyDecision {
+        let _ = outcome_positive;
+        self.evaluate_decision_commitment(policy, state, participants)
+    }
 
     fn evaluate_proposal_commitment(
         &self,

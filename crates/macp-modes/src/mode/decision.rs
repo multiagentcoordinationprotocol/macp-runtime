@@ -229,16 +229,19 @@ impl Mode for DecisionMode {
                 Ok(ModeResponse::PersistState(Self::encode_state(&state)))
             }
             "Commitment" => {
-                validate_commitment_payload_for_session(session, &env.payload)?;
+                let commitment = validate_commitment_payload_for_session(session, &env.payload)?;
                 if !Self::commitment_ready(&state) {
                     return Err(MacpError::InvalidPayload);
                 }
                 // Evaluate governance policy if one is bound to the session.
+                // Decision Mode permits both positive and negative committed
+                // outcomes (RFC-MACP-0007 §6), so gating is outcome-aware.
                 if let Some(ref policy) = session.policy_definition {
-                    let decision = self.evaluator.evaluate_decision_commitment(
+                    let decision = self.evaluator.evaluate_decision_commitment_outcome(
                         policy,
                         &state,
                         &session.participants,
+                        commitment.outcome_positive,
                     );
                     if let macp_core::policy::PolicyDecision::Deny { reasons } = decision {
                         tracing::warn!(
@@ -969,6 +972,102 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(resp, ModeResponse::PersistAndResolve { .. }));
+        apply(&mut session, resp);
+        assert_eq!(decode(&session).phase, DecisionPhase::Committed);
+    }
+
+    #[test]
+    fn policy_bound_reject_majority_finalizes_decline() {
+        // RFC-MACP-0007 §6: a reject-majority under a bound policy must finalize
+        // a negative outcome rather than being denied (the motivating bug).
+        let mode = DecisionMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = test_session();
+        session.policy_definition = Some(macp_core::policy::PolicyDefinition {
+            policy_id: "majority".into(),
+            mode: "macp.mode.decision.v1".into(),
+            description: "majority".into(),
+            rules: serde_json::json!({
+                "voting": { "algorithm": "majority", "threshold": 0.5 }
+            }),
+            schema_version: 1,
+        });
+        let resp = mode
+            .on_session_start(
+                &session,
+                &env("agent://orchestrator", "SessionStart", vec![]),
+            )
+            .unwrap();
+        apply(&mut session, resp);
+        let resp = mode
+            .on_message(
+                &session,
+                &env("agent://orchestrator", "Proposal", proposal("p1")),
+            )
+            .unwrap();
+        apply(&mut session, resp);
+        // Reject-majority: both voting participants reject.
+        let resp = mode
+            .on_message(
+                &session,
+                &env("agent://fraud", "Vote", vote("p1", "reject")),
+            )
+            .unwrap();
+        apply(&mut session, resp);
+        let resp = mode
+            .on_message(
+                &session,
+                &env("agent://growth", "Vote", vote("p1", "reject")),
+            )
+            .unwrap();
+        apply(&mut session, resp);
+
+        // A positive commitment over a reject-majority is still denied...
+        let positive = CommitmentPayload {
+            commitment_id: "c1".into(),
+            action: "decision.selected".into(),
+            authority_scope: "payments".into(),
+            reason: "approved".into(),
+            mode_version: session.mode_version.clone(),
+            policy_version: session.policy_version.clone(),
+            configuration_version: session.configuration_version.clone(),
+            outcome_positive: true,
+            supersedes: None,
+        }
+        .encode_to_vec();
+        let err = mode
+            .on_message(
+                &session,
+                &env("agent://orchestrator", "Commitment", positive),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), "PolicyDenied");
+
+        // ...but a decline finalizes and resolves the session.
+        let decline = CommitmentPayload {
+            commitment_id: "c2".into(),
+            action: "decision.rejected".into(),
+            authority_scope: "payments".into(),
+            reason: "rejected by majority".into(),
+            mode_version: session.mode_version.clone(),
+            policy_version: session.policy_version.clone(),
+            configuration_version: session.configuration_version.clone(),
+            outcome_positive: false,
+            supersedes: None,
+        }
+        .encode_to_vec();
+        let resp = mode
+            .on_message(
+                &session,
+                &env("agent://orchestrator", "Commitment", decline),
+            )
+            .unwrap();
+        let resolution = match &resp {
+            ModeResponse::PersistAndResolve { resolution, .. } => resolution.clone(),
+            other => panic!("expected PersistAndResolve, got {other:?}"),
+        };
+        let resolved = CommitmentPayload::decode(resolution.as_slice()).unwrap();
+        assert!(!resolved.outcome_positive);
+        assert_eq!(resolved.action, "decision.rejected");
         apply(&mut session, resp);
         assert_eq!(decode(&session).phase, DecisionPhase::Committed);
     }

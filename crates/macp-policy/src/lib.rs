@@ -34,6 +34,21 @@ impl PolicyEvaluator for DefaultPolicyEvaluator {
         evaluator::evaluate_decision_commitment(policy, state, participants)
     }
 
+    fn evaluate_decision_commitment_outcome(
+        &self,
+        policy: &PolicyDefinition,
+        state: &DecisionState,
+        participants: &[String],
+        outcome_positive: bool,
+    ) -> PolicyDecision {
+        evaluator::evaluate_decision_commitment_outcome(
+            policy,
+            state,
+            participants,
+            outcome_positive,
+        )
+    }
+
     fn evaluate_proposal_commitment(
         &self,
         policy: &PolicyDefinition,
