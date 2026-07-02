@@ -20,6 +20,11 @@ struct ConformanceFixture {
     mode_version: String,
     configuration_version: String,
     policy_version: String,
+    /// Optional inline governance policy bound to the session. When present it
+    /// is registered before `SessionStart` so a non-default `policy_version`
+    /// resolves (RFC-MACP-0012). Deserializes straight into `PolicyDefinition`.
+    #[serde(default)]
+    policy: Option<Value>,
     ttl_ms: i64,
     messages: Vec<ConformanceMessage>,
     expected_final_state: String,
@@ -323,8 +328,17 @@ async fn assert_replay_equivalence(rt: &Runtime, sid: &str, live_session: &Sessi
         .get_log(sid)
         .await
         .unwrap_or_else(|| panic!("missing log entries for {sid}"));
-    let replayed = replay_session(sid, &log, rt.mode_registry().as_ref(), None)
-        .unwrap_or_else(|e| panic!("replay failed for {sid}: {e}"));
+    // Pass the runtime's policy registry so replay re-resolves any bound policy
+    // and re-evaluates commitments through it, exercising policy-bound replay
+    // (not just log-trusting replay). For a policy-bound decline the votes are in
+    // the log ahead of the Commitment, so re-evaluation is deterministic.
+    let replayed = replay_session(
+        sid,
+        &log,
+        rt.mode_registry().as_ref(),
+        Some(rt.policy_registry().as_ref()),
+    )
+    .unwrap_or_else(|e| panic!("replay failed for {sid}: {e}"));
     assert_eq!(replayed.state, live_session.state, "replay state mismatch");
     assert_eq!(
         replayed.resolution, live_session.resolution,
@@ -348,6 +362,15 @@ async fn run_conformance_fixture(path: &Path) {
 
     let rt = make_runtime();
     let sid = new_sid();
+
+    // Register a fixture's inline policy (if any) before SessionStart, so a
+    // non-empty policy_version resolves instead of failing UNKNOWN_POLICY_VERSION.
+    if let Some(policy) = &fixture.policy {
+        let def: macp_runtime::policy::PolicyDefinition = serde_json::from_value(policy.clone())
+            .unwrap_or_else(|e| panic!("bad inline policy in {}: {e}", path.display()));
+        rt.register_policy(def)
+            .unwrap_or_else(|e| panic!("register_policy failed in {}: {e}", path.display()));
+    }
 
     let start_payload = SessionStartPayload {
         intent: "conformance".into(),
@@ -490,6 +513,10 @@ conformance_test!(
 conformance_test!(
     conformance_decision_reject_paths,
     "decision_reject_paths.json"
+);
+conformance_test!(
+    conformance_decision_negative_outcome,
+    "decision_negative_outcome.json"
 );
 conformance_test!(
     conformance_proposal_reject_paths,

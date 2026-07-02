@@ -6,14 +6,17 @@ use macp_core::policy::rules::{
 use macp_core::policy::{PolicyDecision, PolicyDefinition};
 use std::collections::BTreeMap;
 
-const SUPPORTED_SCHEMA_VERSION: u32 = 1;
+// Additive per RFC-MACP-0012 §3: schema_version 1 policies stay valid; version 2
+// only signals the descriptor MAY carry the Decision decline-gating fields
+// (`commitment.allow_decline_over_approval`, `objection_handling.critical_objection_action`).
+const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[1, 2];
 
 fn check_schema_version(policy: &PolicyDefinition) -> Option<PolicyDecision> {
-    if policy.schema_version != SUPPORTED_SCHEMA_VERSION {
+    if !SUPPORTED_SCHEMA_VERSIONS.contains(&policy.schema_version) {
         Some(PolicyDecision::Deny {
             reasons: vec![format!(
-                "unsupported policy schema version: {} (supported: {})",
-                policy.schema_version, SUPPORTED_SCHEMA_VERSION
+                "unsupported policy schema version: {} (supported: {:?})",
+                policy.schema_version, SUPPORTED_SCHEMA_VERSIONS
             )],
         })
     } else {
@@ -1630,6 +1633,43 @@ mod tests {
             "unknown voting algorithm must deny, got: {:?}",
             result
         );
+    }
+
+    // ── Schema version gate ─────────────────────────────────────────
+
+    #[test]
+    fn schema_version_2_is_accepted() {
+        // RFC-MACP-0012 §3: v2 is additive; a v2 descriptor must not be denied
+        // for version reasons. Use a passing majority vote so any denial could
+        // only come from the version gate.
+        let mut policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 }
+        }));
+        policy.schema_version = 2;
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "APPROVE"),
+            ("p1", "agent://growth", "APPROVE"),
+        ]);
+        assert!(matches!(
+            evaluate_decision_commitment(&policy, &state, &participants()),
+            PolicyDecision::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn unsupported_schema_versions_are_denied() {
+        for v in [0u32, 3, 99] {
+            let mut policy = make_policy(serde_json::json!({
+                "voting": { "algorithm": "none" }
+            }));
+            policy.schema_version = v;
+            let state = make_state_with_votes(vec![]);
+            let result = evaluate_decision_commitment(&policy, &state, &participants());
+            assert!(
+                matches!(result, PolicyDecision::Deny { .. }),
+                "schema_version {v} must be denied, got: {result:?}"
+            );
+        }
     }
 
     // ── Outcome-aware gating: negative (decline) commitments ────────

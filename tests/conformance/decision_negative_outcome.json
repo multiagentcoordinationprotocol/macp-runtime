@@ -1,0 +1,119 @@
+{
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.majority-decline",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 2,
+    "description": "Majority vote, initiator-only commitment; permits a vote-gated negative (decline) outcome.",
+    "rules": {
+      "voting": { "algorithm": "majority" },
+      "commitment": { "authority": "initiator_only" }
+    }
+  },
+  "policy_version": "policy.decision.majority-decline",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "decision.Proposal",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "Commitment",
+      "payload": {
+        "commitment_id": "c0",
+        "outcome_positive": false,
+        "action": "decision.rejected",
+        "authority_scope": "test",
+        "reason": "premature decline with no explicit reject cast yet",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.majority-decline",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "decision.Vote",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "REJECT",
+        "reason": "not ready"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://b",
+      "message_type": "Vote",
+      "payload_type": "decision.Vote",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "REJECT",
+        "reason": "regression risk"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "Commitment",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": false,
+        "action": "decision.rejected",
+        "authority_scope": "test",
+        "reason": "reject-majority under bound policy",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.majority-decline",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.rejected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": false
+  },
+  "expected_mode_state": {
+    "phase": "Committed",
+    "proposals": {
+      "p1": {
+        "proposal_id": "p1",
+        "sender": "agent://orchestrator"
+      }
+    },
+    "votes": {
+      "p1": {
+        "agent://a": {
+          "vote": "REJECT"
+        },
+        "agent://b": {
+          "vote": "REJECT"
+        }
+      }
+    }
+  }
+}
