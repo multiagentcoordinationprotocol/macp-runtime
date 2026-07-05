@@ -262,9 +262,10 @@ fn encode_quorum_payload(msg: &ConformanceMessage) -> Vec<u8> {
 fn encode_multi_round_payload(msg: &ConformanceMessage) -> Vec<u8> {
     let p = &msg.payload;
     match msg.message_type.as_str() {
-        "Contribute" => json!({"value": p["value"].as_str().unwrap_or_default()})
-            .to_string()
-            .into_bytes(),
+        "Contribute" => macp_runtime::multi_round_pb::ContributePayload {
+            value: p["value"].as_str().unwrap_or_default().into(),
+        }
+        .encode_to_vec(),
         _ => panic!("Unhandled multi_round message: {}", msg.message_type),
     }
 }

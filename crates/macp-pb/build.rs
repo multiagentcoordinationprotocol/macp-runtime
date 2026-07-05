@@ -17,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "macp/modes/task/v1/task.proto",
                 "macp/modes/handoff/v1/handoff.proto",
                 "macp/modes/quorum/v1/quorum.proto",
+                "macp/modes/multi_round/v1/multi_round.proto",
             ],
             &[&proto_dir],
         )?;

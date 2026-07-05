@@ -5,6 +5,15 @@ use common::{
     canonical_commitment_payload, canonical_start_payload, envelope, get_session_as, print_ack,
     send_as,
 };
+use macp_runtime::multi_round_pb::ContributePayload;
+use prost::Message;
+
+fn contribute(value: &str) -> Vec<u8> {
+    ContributePayload {
+        value: value.into(),
+    }
+    .encode_to_vec()
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "m1",
             &session_id,
             "alice",
-            br#"{"value":"option_a"}"#.to_vec(),
+            contribute("option_a"),
         ),
     )
     .await?;
@@ -55,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "m2",
             &session_id,
             "bob",
-            br#"{"value":"option_b"}"#.to_vec(),
+            contribute("option_b"),
         ),
     )
     .await?;
@@ -75,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "m3",
             &session_id,
             "bob",
-            br#"{"value":"option_a"}"#.to_vec(),
+            contribute("option_a"),
         ),
     )
     .await?;
