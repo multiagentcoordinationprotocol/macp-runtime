@@ -32,7 +32,7 @@ Legend: `TODO` · `IN PROGRESS` · `BLOCKED (reason)` · `DONE (verification)` �
 | A4. Session-ID validation fix (36-char base64url with `-`) | DONE (2 new tests; UUID-parseable strings keep strict rules — uppercase UUIDs still rejected) | `macp-core/src/session.rs` |
 | A5. Ext-mode holes | DONE (all three sub-items, 7 new tests) | (1) promote-to-`macp.mode.*` rejected, promotion validated; (2) descriptors must declare ≥1 terminal type, and only `Commitment` (passthrough-backed); (3) empty ext `mode_version` now binds descriptor version, recorded as `LogEntry.bound_mode_version` (serde-default `None`), replay uses recorded binding never live registry, legacy logs keep legacy vacuous semantics. Updated tier-1 fixture descriptor. |
 | A6. Handoff implicit-accept interim fix | DONE (519 tests green; 4 new tests) | `MessageContext` + defaulted `Mode::on_message_at` kernel entry (zero churn on ~330 test call sites); handoff times implicit-accept against the acceptance clock on rev≥1 sessions; `Session.semantics_rev` + `CURRENT_SEMANTICS_REV=1` recorded on SessionStart log entry and in snapshots; legacy histories (rev 0 via serde default) replay under the envelope clock. |
-| A7. Multi-round proto payloads | CODE COMPLETE (2026-07-05) — merge blocked on `macp-proto` 0.1.4 release only | Spec side: PR #45 (canonical proto, package sync, all three hardcoded codegen lists), closes issue #39. Runtime side on `feat/a7-multi-round-proto`: macp-pb codegen + `multi_round_pb` module, mode accepts proto with permanent JSON-first parse order (deliberate deviation from the plan's "proto-first" — see work log), conformance loader + example client emit proto, 3 new regression tests. Verified end-to-end with a temporary path dep; branch commits against `macp-proto = "0.1.4"`. |
+| A7. Multi-round proto payloads | DONE (2026-07-05) — `macp-proto` 0.1.4 released; branch verified against the published crate, ready to merge | Spec side: PR #45 (canonical proto, package sync, all three hardcoded codegen lists), closes issue #39. Runtime side on `feat/a7-multi-round-proto`: macp-pb codegen + `multi_round_pb` module, mode accepts proto with permanent JSON-first parse order (deliberate deviation from the plan's "proto-first" — see work log), conformance loader + example client emit proto, 3 new regression tests. Verified end-to-end with a temporary path dep; branch commits against `macp-proto = "0.1.4"`. |
 | A8. Roots capability decision | DONE (tier-1 test added) | Decision: disclaim honestly. `Initialize` now advertises `roots{list_roots:true, list_changed:false}` — ListRoots truthfully answers (empty set), but no change notifications are promised since no roots provider exists (RFC-0006 §3.3). Revisit at E2. |
 
 ## Phase B — Security & correctness (phase-b-security-correctness.md)
@@ -401,6 +401,19 @@ Legend: `TODO` · `IN PROGRESS` · `BLOCKED (reason)` · `DONE (verification)` �
   both strict checks — intrinsic to the delegated model (owner IS the
   initiator and a transfer party, RFC-0010 §2/§3) — now documented at the
   check. CHANGELOG entries added.
+- **2026-07-05** — **A7 UNBLOCKED — macp-proto 0.1.4 released**: PR #45
+  merged (`04f8332`), publish workflow run 28747377932 dispatched with
+  version 0.1.4, all 8 package jobs green (crates.io shows 0.1.4 as
+  newest, PyPI 0.1.4 live, Go module tagged `packages/proto-go/v0.1.4`).
+  Runtime `feat/a7-multi-round-proto` rebuilt against the PUBLISHED crate
+  (not the path dep): build + 22 multi_round tests + 14 conformance tests
+  green; Cargo.lock pinned to registry 0.1.4 and pushed (`0aa37a9`).
+  Naming note: the release was tagged `v0.1.4`, but the workflow's tag
+  trigger and the previous release use the `proto-v*` convention
+  (`proto-v0.1.3`) — harmless here because workflow_dispatch supplied the
+  version explicitly, but future releases should tag `proto-vX.Y.Z` (or
+  dispatch consistently) so tag-triggered publishes work and spec-version
+  `v*` tags stay unambiguous.
 - **2026-07-05** — **JWKS follow-up (adversarial-review advisory)**: refresh
   is now single-flight (refresh mutex + cache re-check; 8 concurrent
   refreshes provably coalesce into 1 fetch —
