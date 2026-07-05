@@ -183,7 +183,19 @@ impl HandoffMode {
                         accepted_by: None,
                         declined_by: None,
                         outcome_reason: None,
-                        offered_at_ms: env.timestamp_unix_ms,
+                        // Rev >= 1: record the runtime acceptance clock (the
+                        // same value the log entry records, so replay is
+                        // identical). The client envelope timestamp is
+                        // unvalidated — recording it here let an offering
+                        // participant BACK-date the offer and immediately
+                        // commit, forging elapsed time past the implicit-
+                        // accept timeout (the same attack as post-dating the
+                        // commitment, relocated to the offer side).
+                        offered_at_ms: if session.semantics_rev >= 1 {
+                            clock_ms
+                        } else {
+                            env.timestamp_unix_ms
+                        },
                     },
                 );
                 Ok(ModeResponse::PersistState(Self::encode_state(&state)))
@@ -1242,6 +1254,44 @@ mod tests {
         let mut commit_env = env("owner", "Commitment", commitment_payload());
         commit_env.timestamp_unix_ms = offer_time + 200;
         let ctx = macp_core::mode::MessageContext::new(offer_time + 10);
+        let commit = mode.on_message_at(&session, &commit_env, &ctx).unwrap();
+        assert!(matches!(commit, ModeResponse::PersistAndResolve { .. }));
+    }
+
+    /// The offer-side twin of the forged-commitment test: on rev >= 1 the
+    /// offer time is the runtime acceptance clock, so BACK-dating the
+    /// HandoffOffer envelope no longer forges elapsed time past the
+    /// implicit-accept timeout.
+    #[test]
+    fn implicit_accept_ignores_backdated_offer_timestamp_on_rev1() {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = base_session();
+        assert!(session.semantics_rev >= 1);
+        session.participants = vec!["owner".into(), "target".into()];
+        session.policy_definition = Some(auto_accept_policy());
+        let result = mode
+            .on_session_start(&session, &env("owner", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+
+        // Offer envelope BACK-dated far into the past, but accepted "now".
+        let now = 1_000_000i64;
+        let mut offer_env = env("owner", "HandoffOffer", make_offer("h1", "target"));
+        offer_env.timestamp_unix_ms = now - 1_000_000; // forged past
+        let ctx = macp_core::mode::MessageContext::new(now);
+        let result = mode.on_message_at(&session, &offer_env, &ctx).unwrap();
+        apply(&mut session, result);
+
+        // Commitment accepted 50ms later: elapsed (per the acceptance clock)
+        // is 50ms < 100ms timeout — no implicit accept, commitment rejected.
+        let mut commit_env = env("owner", "Commitment", commitment_payload());
+        commit_env.timestamp_unix_ms = now + 50;
+        let ctx = macp_core::mode::MessageContext::new(now + 50);
+        let err = mode.on_message_at(&session, &commit_env, &ctx).unwrap_err();
+        assert_eq!(err.to_string(), "InvalidPayload");
+
+        // With genuinely elapsed acceptance time, it fires.
+        let ctx = macp_core::mode::MessageContext::new(now + 200);
         let commit = mode.on_message_at(&session, &commit_env, &ctx).unwrap();
         assert!(matches!(commit, ModeResponse::PersistAndResolve { .. }));
     }

@@ -290,6 +290,25 @@ impl MacpServer {
         Ok(identity)
     }
 
+    /// Subscribe-window dedupe (see `replay_dedup` in the stream loop): drop
+    /// a buffered envelope that was already delivered in the replay batch;
+    /// the first miss disarms the filter (the receiver is FIFO and every
+    /// in-window duplicate precedes the first post-snapshot envelope). Every
+    /// path that yields broadcast envelopes MUST route through this — the
+    /// drain loops bypassing it delivered subscribe-window duplicates.
+    fn should_skip_replayed(
+        replay_dedup: &mut Option<std::collections::HashSet<String>>,
+        envelope: &Envelope,
+    ) -> bool {
+        if let Some(seen) = replay_dedup.as_mut() {
+            if seen.remove(&envelope.message_id) {
+                return true;
+            }
+            *replay_dedup = None;
+        }
+        false
+    }
+
     fn try_next_stream_event(
         receiver: &mut Option<tokio::sync::broadcast::Receiver<Envelope>>,
     ) -> Result<Option<Envelope>, Status> {
@@ -403,6 +422,12 @@ impl MacpServer {
         self.security
             .authorize_mode(identity, &envelope.mode, is_session_start)
             .map_err(Self::status_from_error)?;
+        // External ingress policy engine (E3): the stream path must be gated
+        // identically to unary Send — without this, a sender denied by an
+        // installed engine could simply switch transports.
+        self.enforce_ingress_policy(identity, &envelope)
+            .await
+            .map_err(Self::status_from_error)?;
         self.security
             .enforce_rate_limit(&identity.sender, is_session_start)
             .await
@@ -460,6 +485,12 @@ impl MacpServer {
             return Err(Status::permission_denied(
                 "FORBIDDEN: caller is not a declared participant or observer for this session",
             ));
+        }
+        // External ingress policy engine (E3): stream-based history replay is
+        // a read and must be gated like GetSession (fail closed).
+        if let Some(engine) = &self.policy_engine {
+            let decision = engine.evaluate_session_access(identity, &session).await;
+            crate::policy_engine::require_allow(decision, "session access")?;
         }
 
         // Subscribe to live broadcast (if not already subscribed)
@@ -597,6 +628,9 @@ impl MacpServer {
                                 }
                             }
                             while let Some(envelope) = Self::try_next_stream_event(&mut session_events)? {
+                                if Self::should_skip_replayed(&mut replay_dedup, &envelope) {
+                                    continue;
+                                }
                                 yield StreamSessionResponse {
                                     response: Some(
                                         crate::pb::stream_session_response::Response::Envelope(envelope),
@@ -605,15 +639,8 @@ impl MacpServer {
                             }
                         }
                         StreamAction::EmitEnvelope(envelope) => {
-                            // Drop the buffered duplicate of a replayed
-                            // envelope (see replay_dedup above); first miss
-                            // disarms the filter — everything after it is
-                            // post-snapshot and genuinely new.
-                            if let Some(seen) = replay_dedup.as_mut() {
-                                if seen.remove(&envelope.message_id) {
-                                    continue;
-                                }
-                                replay_dedup = None;
+                            if Self::should_skip_replayed(&mut replay_dedup, &envelope) {
+                                continue;
                             }
                             yield StreamSessionResponse {
                                 response: Some(
@@ -626,6 +653,9 @@ impl MacpServer {
                         }
                         StreamAction::ClientDone => {
                             while let Some(envelope) = Self::try_next_stream_event(&mut session_events)? {
+                                if Self::should_skip_replayed(&mut replay_dedup, &envelope) {
+                                    continue;
+                                }
                                 yield StreamSessionResponse {
                                     response: Some(
                                         crate::pb::stream_session_response::Response::Envelope(envelope),
@@ -690,6 +720,9 @@ impl MacpServer {
                                 }
                             }
                             while let Some(envelope) = Self::try_next_stream_event(&mut session_events)? {
+                                if Self::should_skip_replayed(&mut replay_dedup, &envelope) {
+                                    continue;
+                                }
                                 yield StreamSessionResponse {
                                     response: Some(
                                         crate::pb::stream_session_response::Response::Envelope(envelope),
@@ -2661,5 +2694,104 @@ mod tests {
             .await
             .expect_err("embargoed read must be denied");
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    /// E3 transport-parity: the ingress engine gates the STREAM path too — a
+    /// denied sender must not be able to bypass the engine by switching from
+    /// unary Send to StreamSession (envelope frames or subscribe frames).
+    #[tokio::test]
+    async fn policy_engine_gates_stream_path() {
+        let (server, runtime) = make_server();
+        let server = server.with_policy_engine(Arc::new(DenySenderEngine {
+            denied: "agent://embargoed".into(),
+        }));
+
+        // Session started by an allowed sender (participants include the
+        // embargoed agent so built-in membership checks pass — only the
+        // engine denies it).
+        let sid = new_sid();
+        let payload = SessionStartPayload {
+            intent: "e3-stream".into(),
+            participants: vec!["agent://ok".into(), "agent://embargoed".into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            policy_version: String::new(),
+            ttl_ms: 60_000,
+            context_id: String::new(),
+            extensions: Default::default(),
+            roots: vec![],
+        }
+        .encode_to_vec();
+        runtime
+            .process(
+                &Envelope {
+                    macp_version: "1.0".into(),
+                    mode: "macp.mode.decision.v1".into(),
+                    message_type: "SessionStart".into(),
+                    message_id: new_sid(),
+                    session_id: sid.clone(),
+                    sender: "agent://ok".into(),
+                    timestamp_unix_ms: Utc::now().timestamp_millis(),
+                    payload,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let embargoed = crate::security::AuthIdentity {
+            sender: "agent://embargoed".into(),
+            allowed_modes: None,
+            can_start_sessions: true,
+            max_open_sessions: None,
+            can_manage_mode_registry: false,
+            is_observer: false,
+        };
+        let mut bound = None;
+        let mut events = None;
+
+        // 1. Stream envelope frame from the embargoed sender: denied.
+        let proposal = crate::decision_pb::ProposalPayload {
+            proposal_id: "p1".into(),
+            option: "x".into(),
+            rationale: "r".into(),
+            supporting_data: vec![],
+        }
+        .encode_to_vec();
+        let req = StreamSessionRequest {
+            envelope: Some(Envelope {
+                macp_version: "1.0".into(),
+                mode: "macp.mode.decision.v1".into(),
+                message_type: "Proposal".into(),
+                message_id: new_sid(),
+                session_id: sid.clone(),
+                sender: "agent://embargoed".into(),
+                timestamp_unix_ms: Utc::now().timestamp_millis(),
+                payload: proposal,
+            }),
+            subscribe_session_id: String::new(),
+            after_sequence: 0,
+        };
+        let err = server
+            .process_stream_request(&embargoed, req, &mut bound, &mut events)
+            .await
+            .expect_err("stream envelope from embargoed sender must be denied");
+        // PolicyDenied maps to FailedPrecondition on the transport (same
+        // error the unary path expresses as a POLICY_DENIED ack).
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition, "{err:?}");
+        assert!(err.message().contains("PolicyDenied"), "{err:?}");
+
+        // 2. Passive-subscribe frame (history read) from the embargoed
+        //    sender: denied even though membership would allow it.
+        let req = StreamSessionRequest {
+            envelope: None,
+            subscribe_session_id: sid.clone(),
+            after_sequence: 0,
+        };
+        let err = server
+            .process_stream_request(&embargoed, req, &mut bound, &mut events)
+            .await
+            .expect_err("stream subscribe from embargoed sender must be denied");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}");
     }
 }

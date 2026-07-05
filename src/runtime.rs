@@ -548,17 +548,20 @@ impl Runtime {
         session_guard.apply_mode_response(response);
 
         let result_state = session_guard.state.clone();
-        // 3. Session save — fatal on SessionStart to ensure snapshot durability.
-        // For subsequent messages, the log entry (COMMIT POINT) is already persisted
-        // so snapshot failure is recoverable via replay.
+        // 3. Session snapshot — best-effort AFTER the durable append. The log
+        // entry above is the COMMIT POINT: once it is durable, the session
+        // exists and replay reconstructs it, so a snapshot failure must NOT
+        // fail (or roll back) the start. The previous fatal+rollback here was
+        // incoherent past the commit point — it could not un-append the
+        // durable SessionStart, so the "failed" session resurrected on
+        // restart, and a same-id client retry appended a SECOND SessionStart
+        // that made the log unreplayable.
         if let Err(err) = self.storage.save_session(&session_guard).await {
-            tracing::error!(
+            tracing::warn!(
                 session_id = %session_guard.session_id,
                 error = %err,
-                "failed to persist session snapshot at SessionStart"
+                "failed to persist session snapshot at SessionStart (recoverable via replay)"
             );
-            rollback(self, &mut session_guard).await;
-            return Err(MacpError::StorageFailed);
         }
         self.metrics.record_session_start(mode_name);
         tracing::info!(
@@ -567,8 +570,13 @@ impl Runtime {
             sender = %env.sender,
             "session started"
         );
-        drop(session_guard);
+        // Publish while still holding the session mutex — publish order must
+        // equal acceptance order (process_message publishes under the mutex
+        // too). Publishing after the drop let a subscriber observe a later
+        // message's broadcast BEFORE this SessionStart's, breaking the FIFO
+        // premise the subscribe-window dedupe relies on.
         self.publish_accepted_envelope(env);
+        drop(session_guard);
         let _ = self
             .session_lifecycle_bus
             .send(SessionLifecycleEvent::Created {
@@ -2428,5 +2436,72 @@ mod tests {
         session.policy_definition.as_mut().unwrap().rules =
             serde_json::json!({ "audit": { "level": "debug" } });
         assert!(!Runtime::audit_verbose(&session));
+    }
+
+    /// Post-commit-point coherence: once the SessionStart log entry is
+    /// durable, a snapshot failure must NOT fail (or roll back) the start —
+    /// the previous fatal path left the durable entry behind, so the
+    /// "failed" session resurrected on restart and a same-id retry appended
+    /// a second SessionStart that made the log unreplayable.
+    #[tokio::test]
+    async fn session_start_snapshot_failure_is_nonfatal_after_commit_point() {
+        use std::io;
+
+        struct FailSnapshotBackend;
+        #[async_trait::async_trait]
+        impl StorageBackend for FailSnapshotBackend {
+            async fn create_session_storage(&self, _s: &str) -> io::Result<()> {
+                Ok(())
+            }
+            async fn save_session(&self, _s: &Session) -> io::Result<()> {
+                Err(io::Error::other("snapshot disk full"))
+            }
+            async fn load_session(&self, _s: &str) -> io::Result<Option<Session>> {
+                Ok(None)
+            }
+            async fn load_all_sessions(&self) -> io::Result<Vec<Session>> {
+                Ok(vec![])
+            }
+            async fn delete_session(&self, _s: &str) -> io::Result<()> {
+                Ok(())
+            }
+            async fn list_session_ids(&self) -> io::Result<Vec<String>> {
+                Ok(vec![])
+            }
+            async fn append_log_entry(
+                &self,
+                _s: &str,
+                _e: &crate::log_store::LogEntry,
+            ) -> io::Result<()> {
+                Ok(())
+            }
+            async fn load_log(&self, _s: &str) -> io::Result<Vec<crate::log_store::LogEntry>> {
+                Ok(vec![])
+            }
+        }
+
+        let rt = Runtime::new(
+            Arc::new(FailSnapshotBackend),
+            Arc::new(SessionRegistry::new()),
+            Arc::new(LogStore::new()),
+        );
+        let sid = new_sid();
+        let result = rt
+            .process(
+                &env(
+                    "macp.mode.decision.v1",
+                    "SessionStart",
+                    "m1",
+                    &sid,
+                    "agent://orchestrator",
+                    session_start(vec!["agent://orchestrator".into()]),
+                ),
+                None,
+            )
+            .await
+            .expect("start must succeed: the log append (commit point) succeeded");
+        assert!(!result.duplicate);
+        // The session exists and is usable.
+        assert!(rt.get_session_checked(&sid).await.is_some());
     }
 }

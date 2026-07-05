@@ -339,3 +339,16 @@ Legend: `TODO` · `IN PROGRESS` · `BLOCKED (reason)` · `DONE (verification)` �
   multi-round proto (needs macp-proto release), E4 publishing + CI oracle,
   E6 buf.build. E5 residuals (participant-validation normalization,
   per-mode codec delegation) are documented polish, not defects.
+- **2026-07-04** — **Adversarial implementation review of the full change
+  set** (docs/change-review-phases-a-e.md): architecture claims CONFIRMED
+  (D2 locking discipline, B2 ordinals, A5 replay binding, B4 async auth,
+  startup ordering). **Four real defects found in the gaps and FIXED with
+  regression tests**: (1) E3 engine bypass via StreamSession (envelope +
+  subscribe paths now gated); (2) A6 forgery relocated to offer back-dating
+  (offered_at_ms now acceptance clock on rev>=1); (3) B2 dedupe bypassed by
+  drain loops + SessionStart publish outside the mutex broke the FIFO
+  premise (shared should_skip_replayed on all yield paths; publish under
+  the mutex); (4) D2 rollback after the commit point resurrected failed
+  sessions / made retry logs unreplayable (post-commit snapshot failure is
+  now non-fatal, matching the log-authoritative doctrine). 532 tests,
+  clippy 0. Tier-1 gate rerunning.
