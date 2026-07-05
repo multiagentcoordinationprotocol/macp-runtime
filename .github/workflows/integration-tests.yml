@@ -10,6 +10,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # rust-toolchain.toml pins 1.89.0 and outranks the installed default for
+  # plain `cargo`; force this workflow onto the stable toolchain it installs
+  # (same pattern as ci.yml / publish.yml).
+  RUSTUP_TOOLCHAIN: "stable"
 
 jobs:
   integration:

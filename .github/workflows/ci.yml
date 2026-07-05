@@ -12,11 +12,23 @@ env:
   # so latest-stable regressions surfaced first at publish time).
   RUST_TOOLCHAIN: "stable"
   MSRV_TOOLCHAIN: "1.89.0"
+  # The repo pins the MSRV via rust-toolchain.toml (channel = "1.89.0"), and
+  # that file wins over the installed default for plain `cargo` — without
+  # this, every "stable" job silently resolves to a minimal auto-installed
+  # 1.89.0 (no rustfmt/clippy components) and fails. RUSTUP_TOOLCHAIN has
+  # higher precedence than the file (same pattern as publish.yml); the MSRV
+  # job overrides it back to the pin at job level.
+  RUSTUP_TOOLCHAIN: "stable"
 
 jobs:
   check:
     name: Check (MSRV)
     runs-on: ubuntu-latest
+    env:
+      # Job-level override: the MSRV gate must run on the pin, not stable.
+      # (Hardcoded because workflow env isn't referencable in job-level env;
+      # keep in sync with MSRV_TOOLCHAIN above.)
+      RUSTUP_TOOLCHAIN: "1.89.0"
 
     steps:
       - name: Checkout repository
