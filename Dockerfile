@@ -12,6 +12,9 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY crates/ crates/
 COPY src/ src/
+# benches/ is declared as a [[bench]] target in Cargo.toml; cargo refuses to
+# parse the manifest if the file is missing, even for a release build.
+COPY benches/ benches/
 RUN cargo build --release
 
 # Stage 2: Minimal runtime image
