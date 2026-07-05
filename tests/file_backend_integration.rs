@@ -217,3 +217,64 @@ async fn file_backend_crash_recovery_via_replay() {
     assert!(session.seen_message_ids.contains("m1"));
     assert!(session.seen_message_ids.contains("m2"));
 }
+
+/// D6: terminal sessions' durable data is deleted by disk GC once past
+/// retention; open sessions are left alone.
+#[tokio::test]
+async fn disk_gc_deletes_terminal_sessions_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage: std::sync::Arc<dyn macp_runtime::storage::StorageBackend> = std::sync::Arc::new(
+        macp_runtime::storage::FileBackend::new(dir.path().to_path_buf()).unwrap(),
+    );
+    let runtime = macp_runtime::runtime::Runtime::new(
+        std::sync::Arc::clone(&storage),
+        std::sync::Arc::new(macp_runtime::registry::SessionRegistry::new()),
+        std::sync::Arc::new(macp_runtime::log_store::LogStore::new()),
+    );
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let start = |sid: &str, ttl: i64| macp_runtime::pb::Envelope {
+        macp_version: "1.0".into(),
+        mode: "ext.multi_round.v1".into(),
+        message_type: "SessionStart".into(),
+        message_id: format!("start-{sid}"),
+        session_id: sid.into(),
+        sender: "agent://a".into(),
+        timestamp_unix_ms: now,
+        payload: prost::Message::encode_to_vec(&macp_runtime::pb::SessionStartPayload {
+            intent: "gc test".into(),
+            participants: vec!["agent://a".into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            policy_version: String::new(),
+            ttl_ms: ttl,
+            context_id: String::new(),
+            extensions: Default::default(),
+            roots: vec![],
+        }),
+    };
+
+    // Session 1: expires almost immediately (terminal soon).
+    let sid_dead = "44444444-1111-4111-8111-111111111111";
+    runtime.process(&start(sid_dead, 1), None).await.unwrap();
+    // Session 2: stays open.
+    let sid_live = "44444444-1111-4111-8111-111111111112";
+    runtime
+        .process(&start(sid_live, 3_600_000), None)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    runtime.cleanup_expired_sessions().await; // transitions sid_dead to Expired
+
+    // Retention 0: anything terminal is past the cutoff.
+    let removed = runtime.gc_disk_sessions(0).await;
+    assert_eq!(removed, 1, "exactly the expired session is GC'd");
+
+    let remaining = storage.list_session_ids().await.unwrap();
+    assert!(remaining.contains(&sid_live.to_string()));
+    assert!(!remaining.contains(&sid_dead.to_string()));
+
+    // The GC'd session is gone from memory too.
+    assert!(runtime.get_session_checked(sid_dead).await.is_none());
+}

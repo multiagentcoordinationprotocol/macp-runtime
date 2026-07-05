@@ -26,5 +26,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
 
 [dev-dependencies]
+tempfile = "3"
 jsonwebtoken = "9"
 base64 = "0.22"

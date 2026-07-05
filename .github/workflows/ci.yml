@@ -7,12 +7,28 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: "1.89.0"
+  # Main jobs run on stable; MSRV_TOOLCHAIN gates the minimum supported
+  # version via the `check` job (previously EVERYTHING ran only on the pin,
+  # so latest-stable regressions surfaced first at publish time).
+  RUST_TOOLCHAIN: "stable"
+  MSRV_TOOLCHAIN: "1.89.0"
+  # The repo pins the MSRV via rust-toolchain.toml (channel = "1.89.0"), and
+  # that file wins over the installed default for plain `cargo` — without
+  # this, every "stable" job silently resolves to a minimal auto-installed
+  # 1.89.0 (no rustfmt/clippy components) and fails. RUSTUP_TOOLCHAIN has
+  # higher precedence than the file (same pattern as publish.yml); the MSRV
+  # job overrides it back to the pin at job level.
+  RUSTUP_TOOLCHAIN: "stable"
 
 jobs:
   check:
-    name: Check
+    name: Check (MSRV)
     runs-on: ubuntu-latest
+    env:
+      # Job-level override: the MSRV gate must run on the pin, not stable.
+      # (Hardcoded because workflow env isn't referencable in job-level env;
+      # keep in sync with MSRV_TOOLCHAIN above.)
+      RUSTUP_TOOLCHAIN: "1.89.0"
 
     steps:
       - name: Checkout repository
@@ -21,7 +37,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          toolchain: ${{ env.MSRV_TOOLCHAIN }}
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -214,8 +230,11 @@ jobs:
           done
 
   audit:
-    name: Security Audit
+    name: Security Audit (advisory)
     runs-on: ubuntu-latest
+    # Advisory: a new upstream RUSTSEC entry must not fail unrelated PRs.
+    # Findings surface as annotations; not part of the required gate.
+    continue-on-error: true
 
     steps:
       - name: Checkout repository
@@ -270,19 +289,110 @@ jobs:
           files: cobertura.xml
           fail_ci_if_error: false
 
+  features:
+    name: Feature-gated backends (rocksdb, redis)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-features-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-features-
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      # These backends were previously never compiled in CI — clippy had
+      # never seen the code and a broken backend could not fail a build.
+      - name: Clippy (feature-gated code)
+        run: cargo clippy -p macp-storage --features rocksdb-backend,redis-backend --all-targets -- -D warnings
+
+      - name: Test rocksdb backend
+        run: cargo test -p macp-storage --features rocksdb-backend
+
+      - name: Test redis backend (live service)
+        run: cargo test -p macp-storage --features redis-backend
+        env:
+          MACP_TEST_REDIS_URL: redis://127.0.0.1:6379
+
+  integration-tier1:
+    name: Tier-1 integration (real gRPC boundary)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            integration_tests/target
+          key: ${{ runner.os }}-cargo-tier1-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-tier1-
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Build runtime binary
+        run: cargo build
+
+      - name: Run tier-1 protocol suite
+        working-directory: integration_tests
+        run: cargo test --test tier1 --test tier1_jwt -- --test-threads=1
+        env:
+          MACP_TEST_BINARY: ../target/debug/macp-runtime
+
   ci-pass:
     name: All Checks Passed
     runs-on: ubuntu-latest
-    needs: [check, fmt, clippy, test, build, deps-isolation, audit]
+    needs: [check, fmt, clippy, test, build, deps-isolation, features, integration-tier1]
 
     steps:
       - name: Summary
         run: |
           echo "All checks passed successfully"
-          echo "  - cargo check"
+          echo "  - cargo check (MSRV)"
           echo "  - cargo fmt"
           echo "  - cargo clippy"
           echo "  - cargo test"
           echo "  - cargo build --release"
           echo "  - crate dependency isolation"
-          echo "  - cargo audit"
+          echo "  - feature-gated backends (rocksdb, redis)"
+          echo "  - tier-1 integration suite"

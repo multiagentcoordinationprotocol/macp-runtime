@@ -53,6 +53,12 @@ pub struct RateLimitConfig {
 struct RateBucket {
     start_events: Mutex<HashMap<String, VecDeque<Instant>>>,
     message_events: Mutex<HashMap<String, VecDeque<Instant>>>,
+    /// Requests since the last full stale-sweep of each map. Full sweeps are
+    /// amortized (every `SWEEP_EVERY` requests) so no single request pays a
+    /// scan proportional to total sender cardinality, while the maps still
+    /// get fully cleaned on a bounded cadence.
+    start_sweep_counter: std::sync::atomic::AtomicU64,
+    message_sweep_counter: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone)]
@@ -86,8 +92,15 @@ impl SecurityLayer {
         }
     }
 
-    /// Dev-mode authenticate: accepts any bearer token as the sender identity.
-    /// This is used ONLY in tests (dev_mode), not in production (from_env).
+    /// Dev-mode authenticate: accepts any bearer token as a FULLY-PRIVILEGED
+    /// identity (can start sessions, can manage the mode registry).
+    ///
+    /// Reached whenever no auth is configured — both by `dev_mode()` in tests
+    /// AND by `from_env()` when the operator sets no tokens/issuer. Startup
+    /// therefore refuses to run without configured auth unless
+    /// `MACP_ALLOW_INSECURE=1` (see `has_configured_auth` and `src/main.rs`);
+    /// an operator who forgets auth env vars must not silently run an
+    /// any-token-is-admin server.
     fn dev_authenticate(&self, metadata: &MetadataMap) -> Result<AuthIdentity, MacpError> {
         if let Some(token) = Self::bearer_token(metadata) {
             return Ok(AuthIdentity {
@@ -148,14 +161,36 @@ impl SecurityLayer {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300u64);
+            // Asymmetric algorithms only by default. HS256 in a default
+            // allowlist is a latent confusion risk: if the JWKS ever contains
+            // an `oct` key, symmetric tokens become verifiable. Operators who
+            // genuinely use shared-secret JWTs must opt in explicitly.
+            let algorithms = std::env::var("MACP_AUTH_JWT_ALGS")
+                .ok()
+                .map(|raw| {
+                    raw.split(',')
+                        .filter_map(|a| match a.trim().to_uppercase().as_str() {
+                            "RS256" => Some(jsonwebtoken::Algorithm::RS256),
+                            "ES256" => Some(jsonwebtoken::Algorithm::ES256),
+                            "HS256" => Some(jsonwebtoken::Algorithm::HS256),
+                            other => {
+                                tracing::warn!(alg = other, "ignoring unsupported JWT algorithm");
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .filter(|algs| !algs.is_empty())
+                .unwrap_or_else(|| {
+                    vec![
+                        jsonwebtoken::Algorithm::RS256,
+                        jsonwebtoken::Algorithm::ES256,
+                    ]
+                });
             let config = crate::auth::resolvers::jwt_bearer::JwtConfig {
                 issuer,
                 audience,
-                algorithms: vec![
-                    jsonwebtoken::Algorithm::RS256,
-                    jsonwebtoken::Algorithm::ES256,
-                    jsonwebtoken::Algorithm::HS256,
-                ],
+                algorithms,
             };
             if let Ok(jwks_json) = std::env::var("MACP_AUTH_JWKS_JSON") {
                 match crate::auth::resolvers::JwtBearerResolver::from_inline_json(
@@ -241,14 +276,15 @@ impl SecurityLayer {
             })
     }
 
-    pub fn authenticate_metadata(&self, metadata: &MetadataMap) -> Result<AuthIdentity, MacpError> {
-        // Production path: use the auth resolver chain.
+    pub async fn authenticate_metadata(
+        &self,
+        metadata: &MetadataMap,
+    ) -> Result<AuthIdentity, MacpError> {
+        // Production path: use the auth resolver chain. Fully async — the
+        // previous block_in_place/block_on bridge parked a worker thread for
+        // the whole JWKS fetch and panicked on a current-thread runtime.
         if let Some(chain) = &self.auth_chain {
-            let chain = Arc::clone(chain);
-            let metadata_clone = metadata.clone();
-            return tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(chain.authenticate(&metadata_clone))
-            });
+            return chain.authenticate(metadata).await;
         }
 
         // Explicit identity map (layer_with_tokens in tests)
@@ -294,26 +330,29 @@ impl SecurityLayer {
 
     async fn check_bucket(
         bucket: &Mutex<HashMap<String, VecDeque<Instant>>>,
+        sweep_counter: &std::sync::atomic::AtomicU64,
         sender: &str,
         config: &RateLimitConfig,
     ) -> Result<(), MacpError> {
         let now = Instant::now();
         let mut guard = bucket.lock().await;
 
-        // Prune stale senders whose events are all outside the window.
-        // Limit pruning to at most 100 entries per call to bound latency.
-        let stale_keys: Vec<String> = guard
-            .iter()
-            .filter(|(_, deque)| {
+        // Amortized stale-sender sweep. A per-request full scan is O(total
+        // senders) — and sender cardinality is attacker-controllable via
+        // distinct authenticated identities — so the full sweep runs only
+        // every SWEEP_EVERY requests. Between sweeps a request touches only
+        // its own deque. The map therefore stays bounded (a full clean every
+        // SWEEP_EVERY requests) without any request paying the whole scan
+        // more than 1/SWEEP_EVERY of the time.
+        const SWEEP_EVERY: u64 = 128;
+        let tick = sweep_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if tick.is_multiple_of(SWEEP_EVERY) {
+            guard.retain(|_, deque| {
                 deque
                     .back()
-                    .map(|last| now.duration_since(*last) > config.window)
-                    .unwrap_or(true)
-            })
-            .map(|(k, _)| k.clone())
-            .collect();
-        for key in stale_keys {
-            guard.remove(&key);
+                    .map(|last| now.duration_since(*last) <= config.window)
+                    .unwrap_or(false)
+            });
         }
 
         let deque = guard.entry(sender.to_string()).or_default();
@@ -331,6 +370,13 @@ impl SecurityLayer {
         Ok(())
     }
 
+    /// Whether any real authentication is configured (static tokens and/or a
+    /// JWT resolver). When false, `authenticate_metadata` falls through to
+    /// the any-token-is-admin dev path — callers gate startup on this.
+    pub fn has_configured_auth(&self) -> bool {
+        self.auth_chain.is_some()
+    }
+
     pub async fn enforce_rate_limit(
         &self,
         sender: &str,
@@ -339,12 +385,19 @@ impl SecurityLayer {
         if is_session_start {
             Self::check_bucket(
                 &self.rate_bucket.start_events,
+                &self.rate_bucket.start_sweep_counter,
                 sender,
                 &self.session_start_rate,
             )
             .await
         } else {
-            Self::check_bucket(&self.rate_bucket.message_events, sender, &self.message_rate).await
+            Self::check_bucket(
+                &self.rate_bucket.message_events,
+                &self.rate_bucket.message_sweep_counter,
+                sender,
+                &self.message_rate,
+            )
+            .await
         }
     }
 }
@@ -398,20 +451,20 @@ mod tests {
     // 1. dev_mode() creates a SecurityLayer that doesn't require auth
     // ---------------------------------------------------------------
 
-    #[test]
-    fn dev_mode_requires_dev_header() {
+    #[tokio::test]
+    async fn dev_mode_requires_dev_header() {
         let layer = SecurityLayer::dev_mode();
         let meta = MetadataMap::new();
-        let err = layer.authenticate_metadata(&meta).unwrap_err();
+        let err = layer.authenticate_metadata(&meta).await.unwrap_err();
         assert!(matches!(err, MacpError::Unauthenticated));
     }
 
-    #[test]
-    fn dev_mode_rejects_dev_sender_header() {
+    #[tokio::test]
+    async fn dev_mode_rejects_dev_sender_header() {
         let layer = SecurityLayer::dev_mode();
         let mut meta = MetadataMap::new();
         meta.insert("x-macp-agent-id", "agent://dev-bot".parse().unwrap());
-        let err = layer.authenticate_metadata(&meta).unwrap_err();
+        let err = layer.authenticate_metadata(&meta).await.unwrap_err();
         assert!(matches!(err, MacpError::Unauthenticated));
     }
 
@@ -437,8 +490,8 @@ mod tests {
     // 3. Bearer token auth: loading tokens and authenticating
     // ---------------------------------------------------------------
 
-    #[test]
-    fn bearer_token_authentication_via_authorization_header() {
+    #[tokio::test]
+    async fn bearer_token_authentication_via_authorization_header() {
         let json = r#"[{"token":"tok-abc","sender":"agent://alice","allowed_modes":[],"can_start_sessions":true}]"#;
         let layer = layer_with_tokens(json);
 
@@ -447,14 +500,15 @@ mod tests {
 
         let id = layer
             .authenticate_metadata(&meta)
+            .await
             .expect("should authenticate");
         assert_eq!(id.sender, "agent://alice");
         assert!(id.allowed_modes.is_none()); // empty vec -> None
         assert!(id.can_start_sessions);
     }
 
-    #[test]
-    fn bearer_token_authentication_via_x_macp_token_header() {
+    #[tokio::test]
+    async fn bearer_token_authentication_via_x_macp_token_header() {
         let json = r#"[{"token":"tok-xyz","sender":"agent://bob"}]"#;
         let layer = layer_with_tokens(json);
 
@@ -463,34 +517,35 @@ mod tests {
 
         let id = layer
             .authenticate_metadata(&meta)
+            .await
             .expect("should authenticate");
         assert_eq!(id.sender, "agent://bob");
     }
 
-    #[test]
-    fn invalid_bearer_token_returns_unauthenticated() {
+    #[tokio::test]
+    async fn invalid_bearer_token_returns_unauthenticated() {
         let json = r#"[{"token":"tok-real","sender":"agent://alice"}]"#;
         let layer = layer_with_tokens(json);
 
         let mut meta = MetadataMap::new();
         meta.insert("authorization", "Bearer tok-fake".parse().unwrap());
 
-        let err = layer.authenticate_metadata(&meta).unwrap_err();
+        let err = layer.authenticate_metadata(&meta).await.unwrap_err();
         assert!(matches!(err, MacpError::Unauthenticated));
     }
 
-    #[test]
-    fn no_token_when_auth_required_returns_unauthenticated() {
+    #[tokio::test]
+    async fn no_token_when_auth_required_returns_unauthenticated() {
         let json = r#"[{"token":"tok-only","sender":"agent://sole"}]"#;
         let layer = layer_with_tokens(json);
 
         let meta = MetadataMap::new(); // no auth header at all
-        let err = layer.authenticate_metadata(&meta).unwrap_err();
+        let err = layer.authenticate_metadata(&meta).await.unwrap_err();
         assert!(matches!(err, MacpError::Unauthenticated));
     }
 
-    #[test]
-    fn parse_identities_wrapped_format() {
+    #[tokio::test]
+    async fn parse_identities_wrapped_format() {
         let json = r#"{"tokens":[{"token":"t1","sender":"agent://wrapped"}]}"#;
         let layer = layer_with_tokens(json);
 
@@ -498,12 +553,13 @@ mod tests {
         meta.insert("authorization", "Bearer t1".parse().unwrap());
         let id = layer
             .authenticate_metadata(&meta)
+            .await
             .expect("should authenticate");
         assert_eq!(id.sender, "agent://wrapped");
     }
 
-    #[test]
-    fn parse_identities_with_allowed_modes() {
+    #[tokio::test]
+    async fn parse_identities_with_allowed_modes() {
         let json = r#"[{"token":"t-modes","sender":"agent://limited","allowed_modes":["macp.mode.decision.v1","macp.mode.task.v1"],"can_start_sessions":false,"max_open_sessions":5}]"#;
         let layer = layer_with_tokens(json);
 
@@ -511,6 +567,7 @@ mod tests {
         meta.insert("authorization", "Bearer t-modes".parse().unwrap());
         let id = layer
             .authenticate_metadata(&meta)
+            .await
             .expect("should authenticate");
 
         assert_eq!(id.sender, "agent://limited");
@@ -525,8 +582,8 @@ mod tests {
         assert!(!modes.contains("macp.mode.proposal.v1"));
     }
 
-    #[test]
-    fn authorization_header_takes_priority_over_x_macp_token() {
+    #[tokio::test]
+    async fn authorization_header_takes_priority_over_x_macp_token() {
         let json = r#"[
             {"token":"bearer-tok","sender":"agent://bearer-user"},
             {"token":"header-tok","sender":"agent://header-user"}
@@ -539,6 +596,7 @@ mod tests {
 
         let id = layer
             .authenticate_metadata(&meta)
+            .await
             .expect("should authenticate");
         // Authorization header should take priority
         assert_eq!(id.sender, "agent://bearer-user");
@@ -548,8 +606,8 @@ mod tests {
     // 4. Dev header extraction: x-macp-agent-id
     // ---------------------------------------------------------------
 
-    #[test]
-    fn dev_sender_header_rejected_without_chain() {
+    #[tokio::test]
+    async fn dev_sender_header_rejected_without_chain() {
         let layer = SecurityLayer {
             identities: Arc::new(HashMap::new()),
             rate_bucket: Arc::new(RateBucket::default()),
@@ -568,12 +626,12 @@ mod tests {
         let mut meta = MetadataMap::new();
         meta.insert("x-macp-agent-id", "agent://dev-agent".parse().unwrap());
 
-        let err = layer.authenticate_metadata(&meta).unwrap_err();
+        let err = layer.authenticate_metadata(&meta).await.unwrap_err();
         assert!(matches!(err, MacpError::Unauthenticated));
     }
 
-    #[test]
-    fn dev_sender_header_ignored_when_not_allowed() {
+    #[tokio::test]
+    async fn dev_sender_header_ignored_when_not_allowed() {
         // allow_dev_sender_header=false, no tokens
         let layer = SecurityLayer {
             identities: Arc::new(HashMap::new()),
@@ -593,12 +651,12 @@ mod tests {
         let mut meta = MetadataMap::new();
         meta.insert("x-macp-agent-id", "agent://sneaky".parse().unwrap());
 
-        let err = layer.authenticate_metadata(&meta).unwrap_err();
+        let err = layer.authenticate_metadata(&meta).await.unwrap_err();
         assert!(matches!(err, MacpError::Unauthenticated));
     }
 
-    #[test]
-    fn bearer_token_takes_priority_over_dev_header() {
+    #[tokio::test]
+    async fn bearer_token_takes_priority_over_dev_header() {
         let json = r#"[{"token":"real-tok","sender":"agent://real"}]"#;
         let identities = SecurityLayer::parse_identities(json).unwrap();
 
@@ -623,6 +681,7 @@ mod tests {
 
         let id = layer
             .authenticate_metadata(&meta)
+            .await
             .expect("should authenticate via bearer");
         assert_eq!(id.sender, "agent://real");
     }
@@ -754,14 +813,14 @@ mod tests {
         assert!(matches!(err, MacpError::Forbidden));
     }
 
-    #[test]
-    fn bearer_token_can_manage_mode_registry() {
+    #[tokio::test]
+    async fn bearer_token_can_manage_mode_registry() {
         let json =
             r#"[{"token":"admin-tok","sender":"agent://admin","can_manage_mode_registry":true}]"#;
         let layer = layer_with_tokens(json);
         let mut meta = MetadataMap::new();
         meta.insert("authorization", "Bearer admin-tok".parse().unwrap());
-        let id = layer.authenticate_metadata(&meta).unwrap();
+        let id = layer.authenticate_metadata(&meta).await.unwrap();
         assert!(layer.authorize_mode_registry(&id).is_ok());
     }
 
@@ -882,31 +941,31 @@ mod tests {
     // 7. Anonymous fallback behavior
     // ---------------------------------------------------------------
 
-    #[test]
-    fn no_anonymous_fallback_even_when_auth_not_required() {
+    #[tokio::test]
+    async fn no_anonymous_fallback_even_when_auth_not_required() {
         let layer = insecure_layer();
         let meta = MetadataMap::new();
-        let err = layer.authenticate_metadata(&meta).unwrap_err();
+        let err = layer.authenticate_metadata(&meta).await.unwrap_err();
         assert!(matches!(err, MacpError::Unauthenticated));
     }
 
-    #[test]
-    fn no_anonymous_fallback_when_auth_required() {
+    #[tokio::test]
+    async fn no_anonymous_fallback_when_auth_required() {
         let json = r#"[{"token":"t","sender":"agent://real"}]"#;
         let layer = layer_with_tokens(json);
 
         let meta = MetadataMap::new();
-        let err = layer.authenticate_metadata(&meta).unwrap_err();
+        let err = layer.authenticate_metadata(&meta).await.unwrap_err();
         assert!(matches!(err, MacpError::Unauthenticated));
     }
 
-    #[test]
-    fn dev_mode_no_fallback_with_empty_metadata() {
+    #[tokio::test]
+    async fn dev_mode_no_fallback_with_empty_metadata() {
         // dev_mode: allow_dev_sender_header=true
         // With no headers at all, returns Unauthenticated (no anonymous fallback)
         let layer = SecurityLayer::dev_mode();
         let meta = MetadataMap::new();
-        let err = layer.authenticate_metadata(&meta).unwrap_err();
+        let err = layer.authenticate_metadata(&meta).await.unwrap_err();
         assert!(matches!(err, MacpError::Unauthenticated));
     }
 
@@ -942,8 +1001,8 @@ mod tests {
         assert!(bob.allowed_modes.is_none()); // empty vec -> None
     }
 
-    #[test]
-    fn token_file_end_to_end_via_layer() {
+    #[tokio::test]
+    async fn token_file_end_to_end_via_layer() {
         // Build a layer as if loaded from a token file, then authenticate with it.
         let json = r#"[{"token":"e2e-tok","sender":"agent://e2e-agent"}]"#;
         let mut tmp = NamedTempFile::new().expect("create temp file");
@@ -956,6 +1015,7 @@ mod tests {
         meta.insert("authorization", "Bearer e2e-tok".parse().unwrap());
         let id = layer
             .authenticate_metadata(&meta)
+            .await
             .expect("should authenticate");
         assert_eq!(id.sender, "agent://e2e-agent");
     }
@@ -977,5 +1037,53 @@ mod tests {
         let identities =
             SecurityLayer::parse_identities(r#"{"tokens":[]}"#).expect("valid wrapped empty");
         assert!(identities.is_empty());
+    }
+
+    /// The amortized sweep must actually bound the sender map: stale senders
+    /// are fully removed when the periodic full sweep fires, so the map does
+    /// not grow with total distinct-sender cardinality forever.
+    #[tokio::test]
+    async fn rate_bucket_sweep_removes_stale_senders() {
+        let bucket = RateBucket::default();
+        let config = RateLimitConfig {
+            limit: 10,
+            window: Duration::from_millis(1),
+        };
+
+        // Tick 0 sweeps the (empty) map; ticks 1..=49 add 49 distinct senders.
+        for i in 0..50 {
+            SecurityLayer::check_bucket(
+                &bucket.start_events,
+                &bucket.start_sweep_counter,
+                &format!("agent://stale-{i}"),
+                &config,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(bucket.start_events.lock().await.len() >= 49);
+
+        // Let every recorded event age out of the window.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        // Drive the counter across the next sweep boundary (tick 128) with a
+        // single fresh sender. After the sweep only the fresh sender remains.
+        for _ in 0..80 {
+            SecurityLayer::check_bucket(
+                &bucket.start_events,
+                &bucket.start_sweep_counter,
+                "agent://fresh",
+                &config,
+            )
+            .await
+            .ok(); // fresh sender may hit its own limit; irrelevant here
+        }
+        let map = bucket.start_events.lock().await;
+        assert!(
+            map.len() <= 2,
+            "stale senders must be swept; map still has {} entries",
+            map.len()
+        );
+        assert!(map.contains_key("agent://fresh"));
     }
 }

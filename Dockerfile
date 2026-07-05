@@ -12,7 +12,6 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY crates/ crates/
 COPY src/ src/
-COPY tests/ tests/
 RUN cargo build --release
 
 # Stage 2: Minimal runtime image
@@ -29,7 +28,9 @@ WORKDIR /home/macp
 COPY --from=builder /app/target/release/macp-runtime /usr/local/bin/macp-runtime
 
 ENV MACP_BIND_ADDR=0.0.0.0:50051
-ENV MACP_ALLOW_INSECURE=1
+# NOTE: no MACP_ALLOW_INSECURE here. The runtime refuses to start without
+# configured auth + TLS unless the operator explicitly opts into dev mode:
+#   docker run -e MACP_ALLOW_INSECURE=1 ...   (local development only)
 ENV MACP_DATA_DIR=/home/macp/.macp-data
 
 EXPOSE 50051

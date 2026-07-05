@@ -1,5 +1,8 @@
 use thiserror::Error;
 
+/// Protocol error vocabulary. `#[non_exhaustive]`: downstream matches must
+/// carry a wildcard arm so new error variants are not a breaking change.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum MacpError {
     #[error("InvalidMacpVersion")]

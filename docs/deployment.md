@@ -51,7 +51,35 @@ The runtime supports four storage configurations, selected via `MACP_STORAGE_BAC
 
 **RocksDB backend** uses an embedded key-value store for higher throughput. Enable it by building with the `rocksdb-backend` Cargo feature and setting `MACP_STORAGE_BACKEND=rocksdb`. The database path defaults to `MACP_ROCKSDB_PATH`.
 
-**Redis backend** stores session data in a remote Redis instance, useful for shared-nothing deployments. Enable it with the `redis-backend` feature and set `MACP_STORAGE_BACKEND=redis` with `MACP_REDIS_URL` pointing to your Redis instance.
+**Redis backend** stores session data in a remote Redis instance. Enable it with the `redis-backend` feature and set `MACP_STORAGE_BACKEND=redis` with `MACP_REDIS_URL` pointing to your Redis instance.
+
+### Durability matrix
+
+The runtime acknowledges a message only after the log append "commit point".
+What that acknowledgement guarantees differs by backend:
+
+| Backend | Acked ⇒ survives process crash | Acked ⇒ survives host power loss | Notes |
+|---|---|---|---|
+| `file` | yes | yes | log appends `fsync` before ack; snapshots are tmp-fsync-rename atomic |
+| `rocksdb` | yes | yes | log appends sync the WAL before ack; session snapshots are async (recovered via replay) |
+| `redis` | yes (Redis process survives) | **no** | RPUSH acks in Redis memory; no WAIT/AOF barrier. Cache-tier / single-writer only — the runtime logs a warning at startup |
+
+All backends skip individually corrupt log entries on load (with a warning)
+rather than failing the whole session; `MACP_STRICT_RECOVERY=1` makes
+recovery-level errors fatal.
+
+**Single-writer**: state authority lives in the runtime process's memory.
+Two runtimes must never share one data directory or Redis instance.
+
+### Observation-surface authorization
+
+`GetSession` is participant/observer-scoped, while `ListSessions` and
+`WatchSessions` return metadata for **all** sessions to any authenticated
+identity (RFC-0006 permits this shape). Deployments with confidentiality
+requirements between agent groups should front these RPCs with a proxy or
+restrict which identities may call them. `WatchSignals` requires
+authentication; `ListModes`/`GetManifest`/`WatchModeRegistry`/`WatchRoots`
+are open discovery surfaces by design.
 
 **Memory-only mode** disables persistence entirely. Set `MACP_MEMORY_ONLY=1` for testing or ephemeral workloads. All session data is lost when the process exits.
 
@@ -92,22 +120,20 @@ The runtime provides operational visibility through several mechanisms:
 
 ## Container deployment
 
-Here is a minimal multi-stage Dockerfile for building and running the runtime:
+Use the repository's `Dockerfile` (multi-stage, non-root `macp` user). The
+image does **not** enable dev mode: the runtime refuses to start without
+configured authentication and TLS unless you explicitly opt in for local
+development:
 
-```dockerfile
-FROM rust:1.85 AS builder
-WORKDIR /app
-COPY . .
-RUN apt-get update && apt-get install -y protobuf-compiler
-RUN cargo build --release
+```bash
+# Production: configure auth + TLS
+docker run -p 50051:50051 \
+  -e MACP_AUTH_TOKENS_FILE=/etc/macp/tokens.json \
+  -e MACP_TLS_CERT_PATH=/etc/macp/tls.crt -e MACP_TLS_KEY_PATH=/etc/macp/tls.key \
+  -v ./secrets:/etc/macp macp-runtime
 
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/macp-runtime /usr/local/bin/
-EXPOSE 50051
-VOLUME /data
-ENV MACP_DATA_DIR=/data
-CMD ["macp-runtime"]
+# Local development ONLY: any bearer token becomes a fully-privileged identity
+docker run -p 50051:50051 -e MACP_ALLOW_INSECURE=1 macp-runtime
 ```
 
 When deploying in containers:

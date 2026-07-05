@@ -45,12 +45,15 @@ const OVERFLOW_MODE: &str = "_overflow";
 
 pub struct RuntimeMetrics {
     per_mode: RwLock<HashMap<String, Arc<ModeMetrics>>>,
+    /// Replay/snapshot divergences observed during startup recovery (D7).
+    replay_mismatches: AtomicU64,
 }
 
 impl RuntimeMetrics {
     pub fn new() -> Self {
         Self {
             per_mode: RwLock::new(HashMap::new()),
+            replay_mismatches: AtomicU64::new(0),
         }
     }
 
@@ -138,6 +141,14 @@ impl RuntimeMetrics {
         )
     }
 
+    pub fn record_replay_mismatch(&self, count: u64) {
+        self.replay_mismatches.fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn replay_mismatches(&self) -> u64 {
+        self.replay_mismatches.load(Ordering::Relaxed)
+    }
+
     pub fn snapshot(&self) -> Vec<(String, MetricsSnapshot)> {
         let guard = self.per_mode.read().unwrap_or_else(|e| e.into_inner());
         guard
@@ -154,6 +165,8 @@ impl RuntimeMetrics {
                         sessions_cancelled: m.sessions_cancelled.load(Ordering::Relaxed),
                         commitments_accepted: m.commitments_accepted.load(Ordering::Relaxed),
                         commitments_rejected: m.commitments_rejected.load(Ordering::Relaxed),
+                        sessions_suspended: m.sessions_suspended.load(Ordering::Relaxed),
+                        sessions_resumed: m.sessions_resumed.load(Ordering::Relaxed),
                     },
                 )
             })
@@ -177,4 +190,28 @@ pub struct MetricsSnapshot {
     pub sessions_cancelled: u64,
     pub commitments_accepted: u64,
     pub commitments_rejected: u64,
+    pub sessions_suspended: u64,
+    pub sessions_resumed: u64,
+}
+
+impl MetricsSnapshot {
+    /// Render this snapshot as Prometheus text-format lines for one mode.
+    pub fn prometheus_lines(&self, mode: &str, out: &mut String) {
+        use std::fmt::Write;
+        let pairs: [(&str, u64); 10] = [
+            ("macp_messages_accepted_total", self.messages_accepted),
+            ("macp_messages_rejected_total", self.messages_rejected),
+            ("macp_sessions_started_total", self.sessions_started),
+            ("macp_sessions_resolved_total", self.sessions_resolved),
+            ("macp_sessions_expired_total", self.sessions_expired),
+            ("macp_sessions_cancelled_total", self.sessions_cancelled),
+            ("macp_sessions_suspended_total", self.sessions_suspended),
+            ("macp_sessions_resumed_total", self.sessions_resumed),
+            ("macp_commitments_accepted_total", self.commitments_accepted),
+            ("macp_commitments_rejected_total", self.commitments_rejected),
+        ];
+        for (name, value) in pairs {
+            let _ = writeln!(out, "{name}{{mode=\"{mode}\"}} {value}");
+        }
+    }
 }

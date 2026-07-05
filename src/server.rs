@@ -1,6 +1,6 @@
-use macp_runtime::error::MacpError;
-use macp_runtime::pb::macp_runtime_service_server::MacpRuntimeService;
-use macp_runtime::pb::{
+use crate::error::MacpError;
+use crate::pb::macp_runtime_service_server::MacpRuntimeService;
+use crate::pb::{
     session_lifecycle_event, Ack, CancelSessionRequest, CancelSessionResponse,
     CancellationCapability, Capabilities, Envelope, GetManifestRequest, GetManifestResponse,
     GetPolicyRequest, GetPolicyResponse, GetSessionRequest, GetSessionResponse, InitializeRequest,
@@ -19,9 +19,9 @@ use macp_runtime::pb::{
     WatchRootsResponse, WatchSessionsRequest, WatchSessionsResponse, WatchSignalsRequest,
     WatchSignalsResponse,
 };
-use macp_runtime::runtime::Runtime;
-use macp_runtime::security::{AuthIdentity, SecurityLayer};
-use macp_runtime::session::SessionState;
+use crate::runtime::Runtime;
+use crate::security::{AuthIdentity, SecurityLayer};
+use crate::session::SessionState;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -34,11 +34,81 @@ type SessionResponseStream = std::pin::Pin<
 pub struct MacpServer {
     runtime: Arc<Runtime>,
     security: SecurityLayer,
+    /// RFC-MACP-0012 §9 file-loaded profile: when policies are preloaded from
+    /// `MACP_POLICIES_DIR`, the policy registry is read-only over the wire —
+    /// `register_policy` is advertised `false` and the mutating RPCs return
+    /// `FAILED_PRECONDITION`. Governance then has exactly one source of truth.
+    policies_read_only: bool,
+    /// Optional external ingress policy engine (E3). Consulted after
+    /// authentication, before kernel acceptance; deny-on-error. See
+    /// `crate::policy_engine`.
+    policy_engine: Option<Arc<dyn crate::policy_engine::PolicyEngine>>,
 }
 
 impl MacpServer {
     pub fn new(runtime: Arc<Runtime>, security: SecurityLayer) -> Self {
-        Self { runtime, security }
+        Self {
+            runtime,
+            security,
+            policies_read_only: false,
+            policy_engine: None,
+        }
+    }
+
+    pub fn with_read_only_policies(mut self) -> Self {
+        self.policies_read_only = true;
+        self
+    }
+
+    /// Install an external ingress policy engine (OPA/Cedar/custom). All
+    /// session starts, session-scoped sends, and session reads are then
+    /// additionally gated on it (fail closed).
+    pub fn with_policy_engine(
+        mut self,
+        engine: Arc<dyn crate::policy_engine::PolicyEngine>,
+    ) -> Self {
+        self.policy_engine = Some(engine);
+        self
+    }
+
+    /// E3 ingress gate for the send path. No-op without an engine. Denials
+    /// surface as `POLICY_DENIED` acks (fail closed, including unrecognized
+    /// decisions — `PolicyDecision` is `#[non_exhaustive]`).
+    async fn enforce_ingress_policy(
+        &self,
+        identity: &crate::security::AuthIdentity,
+        env: &Envelope,
+    ) -> Result<(), MacpError> {
+        let Some(engine) = &self.policy_engine else {
+            return Ok(());
+        };
+        let decision = if env.message_type == "SessionStart" {
+            engine
+                .evaluate_session_start(identity, &env.mode, env)
+                .await
+        } else if !env.session_id.is_empty() {
+            // Session-scoped message: give the engine the session context. A
+            // missing session falls through to the kernel's own
+            // UnknownSession handling.
+            match self.runtime.get_session_checked(&env.session_id).await {
+                Some(session) => engine.evaluate_message(identity, &session, env).await,
+                None => return Ok(()),
+            }
+        } else {
+            return Ok(());
+        };
+        match decision {
+            macp_core::policy::PolicyDecision::Allow { .. } => Ok(()),
+            macp_core::policy::PolicyDecision::Deny { reasons } => {
+                Err(MacpError::PolicyDenied { reasons })
+            }
+            other => {
+                tracing::warn!(decision = ?other, "unrecognized ingress policy decision");
+                Err(MacpError::PolicyDenied {
+                    reasons: vec!["unrecognized policy decision".into()],
+                })
+            }
+        }
     }
 
     fn validate_envelope_shape(&self, env: &Envelope) -> Result<(), MacpError> {
@@ -89,7 +159,7 @@ impl MacpServer {
         }
     }
 
-    fn session_to_metadata(session: &macp_runtime::session::Session) -> SessionMetadata {
+    fn session_to_metadata(session: &crate::session::Session) -> SessionMetadata {
         let participant_activity = session
             .participant_message_counts
             .iter()
@@ -166,7 +236,10 @@ impl MacpServer {
         request: &Request<SendRequest>,
         env: Envelope,
     ) -> Result<(Envelope, Option<usize>), MacpError> {
-        let identity = self.security.authenticate_metadata(request.metadata())?;
+        let identity = self
+            .security
+            .authenticate_metadata(request.metadata())
+            .await?;
         let env = Self::apply_authenticated_sender(&identity, env)?;
         let is_session_start = env.message_type == "SessionStart";
         self.security
@@ -174,6 +247,9 @@ impl MacpServer {
         self.security
             .enforce_rate_limit(&identity.sender, is_session_start)
             .await?;
+        // External ingress policy engine (E3): after authentication and the
+        // built-in security checks, before kernel acceptance.
+        self.enforce_ingress_policy(&identity, &env).await?;
         let max_open = if is_session_start {
             identity.max_open_sessions
         } else {
@@ -190,6 +266,7 @@ impl MacpServer {
         let identity = self
             .security
             .authenticate_metadata(request.metadata())
+            .await
             .map_err(Self::status_from_error)?;
         let session = self
             .runtime
@@ -204,7 +281,32 @@ impl MacpServer {
                 "FORBIDDEN: session access denied",
             ));
         }
+        // External ingress policy engine (E3): may additionally restrict
+        // reads beyond the built-in membership check (fail closed).
+        if let Some(engine) = &self.policy_engine {
+            let decision = engine.evaluate_session_access(&identity, &session).await;
+            crate::policy_engine::require_allow(decision, "session access")?;
+        }
         Ok(identity)
+    }
+
+    /// Subscribe-window dedupe (see `replay_dedup` in the stream loop): drop
+    /// a buffered envelope that was already delivered in the replay batch;
+    /// the first miss disarms the filter (the receiver is FIFO and every
+    /// in-window duplicate precedes the first post-snapshot envelope). Every
+    /// path that yields broadcast envelopes MUST route through this — the
+    /// drain loops bypassing it delivered subscribe-window duplicates.
+    fn should_skip_replayed(
+        replay_dedup: &mut Option<std::collections::HashSet<String>>,
+        envelope: &Envelope,
+    ) -> bool {
+        if let Some(seen) = replay_dedup.as_mut() {
+            if seen.remove(&envelope.message_id) {
+                return true;
+            }
+            *replay_dedup = None;
+        }
+        false
     }
 
     fn try_next_stream_event(
@@ -320,6 +422,12 @@ impl MacpServer {
         self.security
             .authorize_mode(identity, &envelope.mode, is_session_start)
             .map_err(Self::status_from_error)?;
+        // External ingress policy engine (E3): the stream path must be gated
+        // identically to unary Send — without this, a sender denied by an
+        // installed engine could simply switch transports.
+        self.enforce_ingress_policy(identity, &envelope)
+            .await
+            .map_err(Self::status_from_error)?;
         self.security
             .enforce_rate_limit(&identity.sender, is_session_start)
             .await
@@ -378,6 +486,12 @@ impl MacpServer {
                 "FORBIDDEN: caller is not a declared participant or observer for this session",
             ));
         }
+        // External ingress policy engine (E3): stream-based history replay is
+        // a read and must be gated like GetSession (fail closed).
+        if let Some(engine) = &self.policy_engine {
+            let decision = engine.evaluate_session_access(identity, &session).await;
+            crate::policy_engine::require_allow(decision, "session access")?;
+        }
 
         // Subscribe to live broadcast (if not already subscribed)
         if session_events.is_none() {
@@ -396,7 +510,13 @@ impl MacpServer {
         let replay = self
             .runtime
             .get_session_envelopes_after(session_id, after_sequence)
-            .await;
+            .await
+            .map_err(|base| {
+                Status::failed_precondition(format!(
+                    "session history before ordinal {base} was compacted; \
+                     resume with after_sequence >= {base} or re-read state via GetSession"
+                ))
+            })?;
 
         Ok(replay)
     }
@@ -429,6 +549,14 @@ impl MacpServer {
             let mut inbound = Box::pin(inbound);
             let mut bound_session_id: Option<String> = None;
             let mut session_events: Option<broadcast::Receiver<Envelope>> = None;
+            // Subscribe-window dedup (RFC-0006 §3.2): the receiver is
+            // subscribed BEFORE the history snapshot is read, so an envelope
+            // accepted in that window arrives twice — once in the replay
+            // batch, once buffered on the receiver. Buffered events are FIFO
+            // and all in-window events precede post-snapshot ones, so we drop
+            // buffered envelopes whose message_id was replayed and disarm on
+            // the first miss.
+            let mut replay_dedup: Option<std::collections::HashSet<String>> = None;
 
             loop {
                 if session_events.is_some() {
@@ -465,10 +593,15 @@ impl MacpServer {
                             {
                                 Ok(replay) => {
                                     // RFC-MACP-0006-A1: yield replayed envelopes from subscribe
+                                    if !replay.is_empty() {
+                                        replay_dedup = Some(
+                                            replay.iter().map(|e| e.message_id.clone()).collect(),
+                                        );
+                                    }
                                     for env in replay {
                                         yield StreamSessionResponse {
                                             response: Some(
-                                                macp_runtime::pb::stream_session_response::Response::Envelope(env),
+                                                crate::pb::stream_session_response::Response::Envelope(env),
                                             ),
                                         };
                                     }
@@ -481,7 +614,7 @@ impl MacpServer {
                                     // are sent as inline MACPError; stream remains open.
                                     yield StreamSessionResponse {
                                         response: Some(
-                                            macp_runtime::pb::stream_session_response::Response::Error(
+                                            crate::pb::stream_session_response::Response::Error(
                                                 PbMacpError {
                                                     code: status.message().to_string(),
                                                     message: status.message().to_string(),
@@ -495,17 +628,23 @@ impl MacpServer {
                                 }
                             }
                             while let Some(envelope) = Self::try_next_stream_event(&mut session_events)? {
+                                if Self::should_skip_replayed(&mut replay_dedup, &envelope) {
+                                    continue;
+                                }
                                 yield StreamSessionResponse {
                                     response: Some(
-                                        macp_runtime::pb::stream_session_response::Response::Envelope(envelope),
+                                        crate::pb::stream_session_response::Response::Envelope(envelope),
                                     ),
                                 };
                             }
                         }
                         StreamAction::EmitEnvelope(envelope) => {
+                            if Self::should_skip_replayed(&mut replay_dedup, &envelope) {
+                                continue;
+                            }
                             yield StreamSessionResponse {
                                 response: Some(
-                                    macp_runtime::pb::stream_session_response::Response::Envelope(envelope),
+                                    crate::pb::stream_session_response::Response::Envelope(envelope),
                                 ),
                             };
                         }
@@ -514,9 +653,12 @@ impl MacpServer {
                         }
                         StreamAction::ClientDone => {
                             while let Some(envelope) = Self::try_next_stream_event(&mut session_events)? {
+                                if Self::should_skip_replayed(&mut replay_dedup, &envelope) {
+                                    continue;
+                                }
                                 yield StreamSessionResponse {
                                     response: Some(
-                                        macp_runtime::pb::stream_session_response::Response::Envelope(envelope),
+                                        crate::pb::stream_session_response::Response::Envelope(envelope),
                                     ),
                                 };
                             }
@@ -545,10 +687,15 @@ impl MacpServer {
                             {
                                 Ok(replay) => {
                                     // RFC-MACP-0006-A1: yield replayed envelopes from subscribe
+                                    if !replay.is_empty() {
+                                        replay_dedup = Some(
+                                            replay.iter().map(|e| e.message_id.clone()).collect(),
+                                        );
+                                    }
                                     for env in replay {
                                         yield StreamSessionResponse {
                                             response: Some(
-                                                macp_runtime::pb::stream_session_response::Response::Envelope(env),
+                                                crate::pb::stream_session_response::Response::Envelope(env),
                                             ),
                                         };
                                     }
@@ -559,7 +706,7 @@ impl MacpServer {
                                 Err(status) => {
                                     yield StreamSessionResponse {
                                         response: Some(
-                                            macp_runtime::pb::stream_session_response::Response::Error(
+                                            crate::pb::stream_session_response::Response::Error(
                                                 PbMacpError {
                                                     code: status.message().to_string(),
                                                     message: status.message().to_string(),
@@ -573,9 +720,12 @@ impl MacpServer {
                                 }
                             }
                             while let Some(envelope) = Self::try_next_stream_event(&mut session_events)? {
+                                if Self::should_skip_replayed(&mut replay_dedup, &envelope) {
+                                    continue;
+                                }
                                 yield StreamSessionResponse {
                                     response: Some(
-                                        macp_runtime::pb::stream_session_response::Response::Envelope(envelope),
+                                        crate::pb::stream_session_response::Response::Envelope(envelope),
                                     ),
                                 };
                             }
@@ -676,15 +826,20 @@ impl MacpRuntimeService for MacpServer {
                     list_changed: true,
                 }),
                 roots: Some(RootsCapability {
+                    // ListRoots is answerable (the root set is empty — a valid
+                    // state), but this runtime has no roots provider, so the
+                    // set never changes: do not advertise change notifications
+                    // (RFC-MACP-0006 §3.3 gates WatchRoots on list_changed).
+                    // Revisit when a roots provider lands (plans E2).
                     list_roots: true,
-                    list_changed: true,
+                    list_changed: false,
                 }),
                 policy_registry: Some(PolicyRegistryCapability {
-                    register_policy: true,
+                    register_policy: !self.policies_read_only,
                     list_policies: true,
                     list_changed: true,
                 }),
-                experimental: Some(macp_runtime::pb::ExperimentalCapabilities {
+                experimental: Some(crate::pb::ExperimentalCapabilities {
                     features: HashMap::from([
                         ("ext_mode_lifecycle".into(), "true".into()),
                     ]),
@@ -724,6 +879,15 @@ impl MacpRuntimeService for MacpServer {
             },
             Err(err) => {
                 let env = request.get_ref().envelope.clone().unwrap_or_default();
+                // Rejection counters were collected but never recorded before
+                // (permanently zero). Session-scoped rejections are counted
+                // per mode; commitments additionally under their own counter.
+                if !env.session_id.is_empty() {
+                    self.runtime.metrics().record_message_rejected(&env.mode);
+                    if env.message_type == "Commitment" {
+                        self.runtime.metrics().record_commitment_rejected(&env.mode);
+                    }
+                }
                 Self::make_error_ack(&err, &env)
             }
         };
@@ -758,6 +922,7 @@ impl MacpRuntimeService for MacpServer {
         let identity = self
             .security
             .authenticate_metadata(request.metadata())
+            .await
             .map_err(Self::status_from_error)?;
         let session = self
             .runtime
@@ -767,8 +932,7 @@ impl MacpRuntimeService for MacpServer {
         // RFC-MACP-0001: "Only the initiator and policy-delegated roles may cancel."
         // CancelSession is a Core control-plane message — mode authorization does not apply.
         if identity.sender != session.initiator_sender
-            && macp_runtime::mode::util::check_commitment_authority(&session, &identity.sender)
-                .is_err()
+            && crate::mode::util::check_commitment_authority(&session, &identity.sender).is_err()
         {
             return Err(Status::permission_denied(
                 "FORBIDDEN: only the session initiator or policy-delegated roles can cancel",
@@ -820,6 +984,7 @@ impl MacpRuntimeService for MacpServer {
         let identity = self
             .security
             .authenticate_metadata(request.metadata())
+            .await
             .map_err(Self::status_from_error)?;
         let session = self
             .runtime
@@ -829,8 +994,7 @@ impl MacpRuntimeService for MacpServer {
         // RFC-MACP-0001 §7.5: same authority model as CancelSession — initiator
         // or policy-delegated roles only; mode authorization does not apply.
         if identity.sender != session.initiator_sender
-            && macp_runtime::mode::util::check_commitment_authority(&session, &identity.sender)
-                .is_err()
+            && crate::mode::util::check_commitment_authority(&session, &identity.sender).is_err()
         {
             return Err(Status::permission_denied(
                 "FORBIDDEN: only the session initiator or policy-delegated roles can suspend",
@@ -882,6 +1046,7 @@ impl MacpRuntimeService for MacpServer {
         let identity = self
             .security
             .authenticate_metadata(request.metadata())
+            .await
             .map_err(Self::status_from_error)?;
         let session = self
             .runtime
@@ -889,8 +1054,7 @@ impl MacpRuntimeService for MacpServer {
             .await
             .ok_or_else(|| Status::not_found(format!("Session '{}' not found", session_id)))?;
         if identity.sender != session.initiator_sender
-            && macp_runtime::mode::util::check_commitment_authority(&session, &identity.sender)
-                .is_err()
+            && crate::mode::util::check_commitment_authority(&session, &identity.sender).is_err()
         {
             return Err(Status::permission_denied(
                 "FORBIDDEN: only the session initiator or policy-delegated roles can resume",
@@ -947,7 +1111,7 @@ impl MacpRuntimeService for MacpServer {
         }
 
         Ok(Response::new(GetManifestResponse {
-            manifest: Some(macp_runtime::pb::AgentManifest {
+            manifest: Some(crate::pb::AgentManifest {
                 agent_id: "macp-runtime".into(),
                 title: "MACP Reference Runtime".into(),
                 description: "Reference implementation of MACP".into(),
@@ -986,6 +1150,7 @@ impl MacpRuntimeService for MacpServer {
         let identity = self
             .security
             .authenticate_metadata(request.metadata())
+            .await
             .map_err(Self::status_from_error)?;
         let inbound = request.into_inner();
         Ok(Response::new(
@@ -1005,7 +1170,7 @@ impl MacpRuntimeService for MacpServer {
         let stream = async_stream::try_stream! {
             // Send initial state
             yield WatchModeRegistryResponse {
-                change: Some(macp_runtime::pb::RegistryChanged {
+                change: Some(crate::pb::RegistryChanged {
                     registry: "modes".into(),
                     observed_at_unix_ms: chrono::Utc::now().timestamp_millis(),
                 }),
@@ -1013,7 +1178,7 @@ impl MacpRuntimeService for MacpServer {
             // Wait for changes from register/unregister/promote
             while rx.recv().await.is_ok() {
                 yield WatchModeRegistryResponse {
-                    change: Some(macp_runtime::pb::RegistryChanged {
+                    change: Some(crate::pb::RegistryChanged {
                         registry: "modes".into(),
                         observed_at_unix_ms: chrono::Utc::now().timestamp_millis(),
                     }),
@@ -1032,7 +1197,7 @@ impl MacpRuntimeService for MacpServer {
         _request: Request<WatchRootsRequest>,
     ) -> Result<Response<Self::WatchRootsStream>, Status> {
         let initial = WatchRootsResponse {
-            change: Some(macp_runtime::pb::RootsChanged {
+            change: Some(crate::pb::RootsChanged {
                 observed_at_unix_ms: chrono::Utc::now().timestamp_millis(),
             }),
         };
@@ -1054,14 +1219,36 @@ impl MacpRuntimeService for MacpServer {
 
     async fn watch_signals(
         &self,
-        _request: Request<WatchSignalsRequest>,
+        request: Request<WatchSignalsRequest>,
     ) -> Result<Response<Self::WatchSignalsStream>, Status> {
+        // Ambient signals carry agent-generated payload data; subscribing is
+        // gated on authentication like the session-observation surfaces.
+        // (RFC-0004 §4.1 constrains unauthenticated *producers*; requiring
+        // authenticated subscribers is this runtime's hardening posture.)
+        let _identity = self
+            .security
+            .authenticate_metadata(request.metadata())
+            .await
+            .map_err(Self::status_from_error)?;
         let mut rx = self.runtime.subscribe_signals();
         let stream = async_stream::try_stream! {
-            while let Ok(envelope) = rx.recv().await {
-                yield WatchSignalsResponse {
-                    envelope: Some(envelope),
-                };
+            loop {
+                match rx.recv().await {
+                    Ok(envelope) => {
+                        yield WatchSignalsResponse {
+                            envelope: Some(envelope),
+                        };
+                    }
+                    // Surface lag instead of silently ending the stream: a
+                    // slow consumer must be able to distinguish "no traffic"
+                    // from "events dropped" (mirrors StreamSession).
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        Err(Status::resource_exhausted(format!(
+                            "WatchSignals receiver fell behind by {skipped} signals"
+                        )))?;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
             }
         };
         Ok(Response::new(Box::pin(stream)))
@@ -1076,6 +1263,7 @@ impl MacpRuntimeService for MacpServer {
         let _identity = self
             .security
             .authenticate_metadata(request.metadata())
+            .await
             .map_err(Self::status_from_error)?;
         let sessions = self.runtime.registry.get_all_sessions().await;
         let metadata: Vec<SessionMetadata> =
@@ -1090,13 +1278,21 @@ impl MacpRuntimeService for MacpServer {
         let _identity = self
             .security
             .authenticate_metadata(request.metadata())
+            .await
             .map_err(Self::status_from_error)?;
         let mut rx = self.runtime.subscribe_session_lifecycle();
         let runtime = Arc::clone(&self.runtime);
         let stream = async_stream::try_stream! {
-            // Initial sync: emit all current sessions as CREATED events
+            // Initial sync: emit all current sessions as CREATED events. The
+            // lifecycle bus was subscribed *before* this snapshot (so no event
+            // is missed); any Created event buffered in that window would
+            // duplicate a snapshot entry — session IDs are create-once, so we
+            // dedupe buffered Created events against the synced set below.
             let sessions = runtime.registry.get_all_sessions().await;
+            let mut synced: std::collections::HashSet<String> =
+                std::collections::HashSet::with_capacity(sessions.len());
             for session in &sessions {
+                synced.insert(session.session_id.clone());
                 yield WatchSessionsResponse {
                     event: Some(SessionLifecycleEvent {
                         event_type: session_lifecycle_event::EventType::Created.into(),
@@ -1106,21 +1302,39 @@ impl MacpRuntimeService for MacpServer {
                 };
             }
             // Stream lifecycle transitions
-            while let Ok(event) = rx.recv().await {
+            loop {
+                let event = match rx.recv().await {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        Err(Status::resource_exhausted(format!(
+                            "WatchSessions receiver fell behind by {skipped} events"
+                        )))?;
+                        break;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
                 let (event_type, sid) = match &event {
-                    macp_runtime::runtime::SessionLifecycleEvent::Created { session_id } =>
+                    crate::runtime::SessionLifecycleEvent::Created { session_id } =>
                         (session_lifecycle_event::EventType::Created, session_id.clone()),
-                    macp_runtime::runtime::SessionLifecycleEvent::Resolved { session_id } =>
+                    crate::runtime::SessionLifecycleEvent::Resolved { session_id } =>
                         (session_lifecycle_event::EventType::Resolved, session_id.clone()),
-                    macp_runtime::runtime::SessionLifecycleEvent::Expired { session_id } =>
+                    crate::runtime::SessionLifecycleEvent::Expired { session_id } =>
                         (session_lifecycle_event::EventType::Expired, session_id.clone()),
-                    macp_runtime::runtime::SessionLifecycleEvent::Suspended { session_id } =>
+                    crate::runtime::SessionLifecycleEvent::Suspended { session_id } =>
                         (session_lifecycle_event::EventType::Suspended, session_id.clone()),
-                    macp_runtime::runtime::SessionLifecycleEvent::Resumed { session_id } =>
+                    crate::runtime::SessionLifecycleEvent::Resumed { session_id } =>
                         (session_lifecycle_event::EventType::Resumed, session_id.clone()),
-                    macp_runtime::runtime::SessionLifecycleEvent::Cancelled { session_id } =>
+                    crate::runtime::SessionLifecycleEvent::Cancelled { session_id } =>
                         (session_lifecycle_event::EventType::Cancelled, session_id.clone()),
                 };
+                // Skip the buffered duplicate of an initial-sync entry;
+                // non-Created events for synced sessions are new information
+                // and pass through.
+                if event_type == session_lifecycle_event::EventType::Created
+                    && !synced.insert(sid.clone())
+                {
+                    continue;
+                }
                 let session_meta = runtime.registry.get_session(&sid).await
                     .map(|s| Self::session_to_metadata(&s));
                 yield WatchSessionsResponse {
@@ -1153,6 +1367,7 @@ impl MacpRuntimeService for MacpServer {
         let identity = self
             .security
             .authenticate_metadata(request.metadata())
+            .await
             .map_err(Self::status_from_error)?;
         self.security
             .authorize_mode_registry(&identity)
@@ -1180,6 +1395,7 @@ impl MacpRuntimeService for MacpServer {
         let identity = self
             .security
             .authenticate_metadata(request.metadata())
+            .await
             .map_err(Self::status_from_error)?;
         self.security
             .authorize_mode_registry(&identity)
@@ -1204,6 +1420,7 @@ impl MacpRuntimeService for MacpServer {
         let identity = self
             .security
             .authenticate_metadata(request.metadata())
+            .await
             .map_err(Self::status_from_error)?;
         self.security
             .authorize_mode_registry(&identity)
@@ -1234,9 +1451,15 @@ impl MacpRuntimeService for MacpServer {
         &self,
         request: Request<RegisterPolicyRequest>,
     ) -> Result<Response<RegisterPolicyResponse>, Status> {
+        if self.policies_read_only {
+            return Err(Status::failed_precondition(
+                "policy registry is read-only: policies are file-loaded via MACP_POLICIES_DIR",
+            ));
+        }
         let identity = self
             .security
             .authenticate_metadata(request.metadata())
+            .await
             .map_err(Self::status_from_error)?;
         self.security
             .authorize_mode_registry(&identity)
@@ -1262,9 +1485,15 @@ impl MacpRuntimeService for MacpServer {
         &self,
         request: Request<UnregisterPolicyRequest>,
     ) -> Result<Response<UnregisterPolicyResponse>, Status> {
+        if self.policies_read_only {
+            return Err(Status::failed_precondition(
+                "policy registry is read-only: policies are file-loaded via MACP_POLICIES_DIR",
+            ));
+        }
         let identity = self
             .security
             .authenticate_metadata(request.metadata())
+            .await
             .map_err(Self::status_from_error)?;
         self.security
             .authorize_mode_registry(&identity)
@@ -1289,6 +1518,7 @@ impl MacpRuntimeService for MacpServer {
         let _identity = self
             .security
             .authenticate_metadata(request.metadata())
+            .await
             .map_err(Self::status_from_error)?;
         let req = request.into_inner();
         let policy = self
@@ -1307,6 +1537,7 @@ impl MacpRuntimeService for MacpServer {
         let _identity = self
             .security
             .authenticate_metadata(request.metadata())
+            .await
             .map_err(Self::status_from_error)?;
         let req = request.into_inner();
         let mode_filter = if req.mode.is_empty() {
@@ -1365,13 +1596,13 @@ impl MacpRuntimeService for MacpServer {
 impl MacpServer {
     fn policy_descriptor_to_definition(
         descriptor: &PolicyDescriptor,
-    ) -> macp_runtime::policy::PolicyDefinition {
+    ) -> crate::policy::PolicyDefinition {
         let rules: serde_json::Value = if descriptor.rules.is_empty() {
             serde_json::json!({})
         } else {
             serde_json::from_str(&descriptor.rules).unwrap_or_else(|_| serde_json::json!({}))
         };
-        macp_runtime::policy::PolicyDefinition {
+        crate::policy::PolicyDefinition {
             policy_id: descriptor.policy_id.clone(),
             mode: descriptor.mode.clone(),
             description: descriptor.description.clone(),
@@ -1381,7 +1612,7 @@ impl MacpServer {
     }
 
     fn policy_definition_to_descriptor(
-        definition: &macp_runtime::policy::PolicyDefinition,
+        definition: &crate::policy::PolicyDefinition,
     ) -> PolicyDescriptor {
         PolicyDescriptor {
             policy_id: definition.policy_id.clone(),
@@ -1397,10 +1628,10 @@ impl MacpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::log_store::LogStore;
+    use crate::pb::SessionStartPayload;
+    use crate::registry::SessionRegistry;
     use chrono::Utc;
-    use macp_runtime::log_store::LogStore;
-    use macp_runtime::pb::SessionStartPayload;
-    use macp_runtime::registry::SessionRegistry;
     use prost::Message;
 
     fn new_sid() -> String {
@@ -1408,8 +1639,8 @@ mod tests {
     }
 
     fn make_server() -> (MacpServer, Arc<Runtime>) {
-        let storage: Arc<dyn macp_runtime::storage::StorageBackend> =
-            Arc::new(macp_runtime::storage::MemoryBackend);
+        let storage: Arc<dyn crate::storage::StorageBackend> =
+            Arc::new(crate::storage::MemoryBackend);
         let registry = Arc::new(SessionRegistry::new());
         let log_store = Arc::new(LogStore::new());
         let runtime = Arc::new(Runtime::new(storage, registry, log_store));
@@ -1525,8 +1756,8 @@ mod tests {
 
     #[tokio::test]
     async fn register_ext_mode_requires_authenticated_registry_permission() {
-        let storage: Arc<dyn macp_runtime::storage::StorageBackend> =
-            Arc::new(macp_runtime::storage::MemoryBackend);
+        let storage: Arc<dyn crate::storage::StorageBackend> =
+            Arc::new(crate::storage::MemoryBackend);
         let registry = Arc::new(SessionRegistry::new());
         let log_store = Arc::new(LogStore::new());
         let runtime = Arc::new(Runtime::new(storage, registry, log_store));
@@ -1534,7 +1765,7 @@ mod tests {
         let server = MacpServer::new(runtime, security);
 
         let req = Request::new(RegisterExtModeRequest {
-            mode_descriptor: Some(macp_runtime::pb::ModeDescriptor {
+            mode_descriptor: Some(crate::pb::ModeDescriptor {
                 mode: "ext.custom.v1".into(),
                 mode_version: "1.0.0".into(),
                 message_types: vec!["SessionStart".into(), "Commitment".into()],
@@ -1582,7 +1813,7 @@ mod tests {
 
         let response = stream.next().await.unwrap().unwrap();
         let envelope = match response.response.unwrap() {
-            macp_runtime::pb::stream_session_response::Response::Envelope(e) => e,
+            crate::pb::stream_session_response::Response::Envelope(e) => e,
             _ => panic!("expected envelope"),
         };
         assert_eq!(envelope.message_type, "SessionStart");
@@ -1633,7 +1864,7 @@ mod tests {
 
         let first = stream.next().await.unwrap().unwrap();
         let first_env = match first.response.unwrap() {
-            macp_runtime::pb::stream_session_response::Response::Envelope(e) => e,
+            crate::pb::stream_session_response::Response::Envelope(e) => e,
             _ => panic!("expected envelope"),
         };
         assert_eq!(first_env.session_id, sid1);
@@ -1685,7 +1916,7 @@ mod tests {
     async fn get_manifest_includes_all_modes() {
         let (server, _) = make_server();
         let resp = server
-            .get_manifest(Request::new(macp_runtime::pb::GetManifestRequest {
+            .get_manifest(Request::new(crate::pb::GetManifestRequest {
                 agent_id: String::new(),
             }))
             .await
@@ -2041,7 +2272,7 @@ mod tests {
         message_id: &str,
         proposal_id: &str,
     ) {
-        let payload = macp_runtime::decision_pb::ProposalPayload {
+        let payload = crate::decision_pb::ProposalPayload {
             proposal_id: proposal_id.into(),
             option: "opt".into(),
             rationale: "r".into(),
@@ -2313,5 +2544,254 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    /// E3: an injected ingress engine gates session start, messages, and
+    /// session reads — deny-one-sender double proves all three hooks fire and
+    /// that denial surfaces as POLICY_DENIED / PermissionDenied (fail closed).
+    struct DenySenderEngine {
+        denied: String,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::policy_engine::PolicyEngine for DenySenderEngine {
+        async fn evaluate_session_start(
+            &self,
+            identity: &crate::security::AuthIdentity,
+            _mode: &str,
+            _env: &Envelope,
+        ) -> macp_core::policy::PolicyDecision {
+            if identity.sender == self.denied {
+                macp_core::policy::PolicyDecision::Deny {
+                    reasons: vec!["sender embargoed".into()],
+                }
+            } else {
+                macp_core::policy::PolicyDecision::Allow { reasons: vec![] }
+            }
+        }
+
+        async fn evaluate_message(
+            &self,
+            identity: &crate::security::AuthIdentity,
+            _session: &macp_core::session::Session,
+            _env: &Envelope,
+        ) -> macp_core::policy::PolicyDecision {
+            if identity.sender == self.denied {
+                macp_core::policy::PolicyDecision::Deny {
+                    reasons: vec!["sender embargoed".into()],
+                }
+            } else {
+                macp_core::policy::PolicyDecision::Allow { reasons: vec![] }
+            }
+        }
+
+        async fn evaluate_session_access(
+            &self,
+            identity: &crate::security::AuthIdentity,
+            _session: &macp_core::session::Session,
+        ) -> macp_core::policy::PolicyDecision {
+            if identity.sender == self.denied {
+                macp_core::policy::PolicyDecision::Deny {
+                    reasons: vec!["sender embargoed".into()],
+                }
+            } else {
+                macp_core::policy::PolicyDecision::Allow { reasons: vec![] }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_engine_gates_all_three_ingress_points() {
+        let (server, _runtime) = make_server();
+        let server = server.with_policy_engine(Arc::new(DenySenderEngine {
+            denied: "agent://embargoed".into(),
+        }));
+
+        let sid = new_sid();
+        let start_payload = SessionStartPayload {
+            intent: "e3".into(),
+            participants: vec!["agent://ok".into(), "agent://embargoed".into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            policy_version: String::new(),
+            ttl_ms: 60_000,
+            context_id: String::new(),
+            extensions: Default::default(),
+            roots: vec![],
+        }
+        .encode_to_vec();
+        let start_env = |sender: &str, sid: &str| Envelope {
+            macp_version: "1.0".into(),
+            mode: "macp.mode.decision.v1".into(),
+            message_type: "SessionStart".into(),
+            message_id: new_sid(),
+            session_id: sid.into(),
+            sender: sender.into(),
+            timestamp_unix_ms: Utc::now().timestamp_millis(),
+            payload: start_payload.clone(),
+        };
+
+        // 1. Embargoed sender cannot start a session.
+        let ack = server
+            .send(send_req(
+                "agent://embargoed",
+                start_env("agent://embargoed", &sid),
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .ack
+            .unwrap();
+        assert!(!ack.ok);
+        assert_eq!(ack.error.unwrap().code, "POLICY_DENIED");
+
+        // Allowed sender starts it.
+        let ack = server
+            .send(send_req("agent://ok", start_env("agent://ok", &sid)))
+            .await
+            .unwrap()
+            .into_inner()
+            .ack
+            .unwrap();
+        assert!(ack.ok, "allowed sender must start: {:?}", ack.error);
+
+        // 2. Embargoed sender cannot send into the session.
+        let proposal = crate::decision_pb::ProposalPayload {
+            proposal_id: "p1".into(),
+            option: "x".into(),
+            rationale: "r".into(),
+            supporting_data: vec![],
+        }
+        .encode_to_vec();
+        let msg_env = Envelope {
+            macp_version: "1.0".into(),
+            mode: "macp.mode.decision.v1".into(),
+            message_type: "Proposal".into(),
+            message_id: new_sid(),
+            session_id: sid.clone(),
+            sender: "agent://embargoed".into(),
+            timestamp_unix_ms: Utc::now().timestamp_millis(),
+            payload: proposal,
+        };
+        let ack = server
+            .send(send_req("agent://embargoed", msg_env))
+            .await
+            .unwrap()
+            .into_inner()
+            .ack
+            .unwrap();
+        assert!(!ack.ok);
+        assert_eq!(ack.error.unwrap().code, "POLICY_DENIED");
+
+        // 3. Embargoed sender cannot read the session.
+        let mut req = Request::new(crate::pb::GetSessionRequest {
+            session_id: sid.clone(),
+        });
+        req.metadata_mut()
+            .insert("authorization", "Bearer agent://embargoed".parse().unwrap());
+        let err = server
+            .get_session(req)
+            .await
+            .expect_err("embargoed read must be denied");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    /// E3 transport-parity: the ingress engine gates the STREAM path too — a
+    /// denied sender must not be able to bypass the engine by switching from
+    /// unary Send to StreamSession (envelope frames or subscribe frames).
+    #[tokio::test]
+    async fn policy_engine_gates_stream_path() {
+        let (server, runtime) = make_server();
+        let server = server.with_policy_engine(Arc::new(DenySenderEngine {
+            denied: "agent://embargoed".into(),
+        }));
+
+        // Session started by an allowed sender (participants include the
+        // embargoed agent so built-in membership checks pass — only the
+        // engine denies it).
+        let sid = new_sid();
+        let payload = SessionStartPayload {
+            intent: "e3-stream".into(),
+            participants: vec!["agent://ok".into(), "agent://embargoed".into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            policy_version: String::new(),
+            ttl_ms: 60_000,
+            context_id: String::new(),
+            extensions: Default::default(),
+            roots: vec![],
+        }
+        .encode_to_vec();
+        runtime
+            .process(
+                &Envelope {
+                    macp_version: "1.0".into(),
+                    mode: "macp.mode.decision.v1".into(),
+                    message_type: "SessionStart".into(),
+                    message_id: new_sid(),
+                    session_id: sid.clone(),
+                    sender: "agent://ok".into(),
+                    timestamp_unix_ms: Utc::now().timestamp_millis(),
+                    payload,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let embargoed = crate::security::AuthIdentity {
+            sender: "agent://embargoed".into(),
+            allowed_modes: None,
+            can_start_sessions: true,
+            max_open_sessions: None,
+            can_manage_mode_registry: false,
+            is_observer: false,
+        };
+        let mut bound = None;
+        let mut events = None;
+
+        // 1. Stream envelope frame from the embargoed sender: denied.
+        let proposal = crate::decision_pb::ProposalPayload {
+            proposal_id: "p1".into(),
+            option: "x".into(),
+            rationale: "r".into(),
+            supporting_data: vec![],
+        }
+        .encode_to_vec();
+        let req = StreamSessionRequest {
+            envelope: Some(Envelope {
+                macp_version: "1.0".into(),
+                mode: "macp.mode.decision.v1".into(),
+                message_type: "Proposal".into(),
+                message_id: new_sid(),
+                session_id: sid.clone(),
+                sender: "agent://embargoed".into(),
+                timestamp_unix_ms: Utc::now().timestamp_millis(),
+                payload: proposal,
+            }),
+            subscribe_session_id: String::new(),
+            after_sequence: 0,
+        };
+        let err = server
+            .process_stream_request(&embargoed, req, &mut bound, &mut events)
+            .await
+            .expect_err("stream envelope from embargoed sender must be denied");
+        // PolicyDenied maps to FailedPrecondition on the transport (same
+        // error the unary path expresses as a POLICY_DENIED ack).
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition, "{err:?}");
+        assert!(err.message().contains("PolicyDenied"), "{err:?}");
+
+        // 2. Passive-subscribe frame (history read) from the embargoed
+        //    sender: denied even though membership would allow it.
+        let req = StreamSessionRequest {
+            envelope: None,
+            subscribe_session_id: sid.clone(),
+            after_sequence: 0,
+        };
+        let err = server
+            .process_stream_request(&embargoed, req, &mut bound, &mut events)
+            .await
+            .expect_err("stream subscribe from embargoed sender must be denied");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}");
     }
 }

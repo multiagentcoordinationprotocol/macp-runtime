@@ -47,8 +47,8 @@ async fn register_and_unregister_ext_mode() {
         description: "A test extension mode".into(),
         determinism_class: String::new(),
         participant_model: String::new(),
-        message_types: vec!["Ping".into(), "Pong".into()],
-        terminal_message_types: vec![],
+        message_types: vec!["Ping".into(), "Pong".into(), "Commitment".into()],
+        terminal_message_types: vec!["Commitment".into()],
         schema_uris: Default::default(),
     };
 

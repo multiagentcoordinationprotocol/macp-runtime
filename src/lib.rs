@@ -28,6 +28,8 @@ pub use macp_policy as policy;
 pub use macp_storage::{log_store, registry, storage};
 
 pub mod extensions;
+pub mod policy_engine;
+pub mod server;
 
 // Authentication and the request security layer now live in `macp-auth`.
 // Re-exported so `crate::{auth, security}` and downstream

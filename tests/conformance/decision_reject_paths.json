@@ -14,7 +14,7 @@
     {
       "sender": "agent://outsider",
       "message_type": "Proposal",
-      "payload_type": "decision.Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
       "payload": {
         "proposal_id": "p1",
         "option": "deploy",
@@ -27,7 +27,7 @@
     {
       "sender": "agent://orchestrator",
       "message_type": "Proposal",
-      "payload_type": "decision.Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
       "payload": {
         "proposal_id": "p1",
         "option": "deploy",
@@ -39,7 +39,7 @@
     {
       "sender": "agent://a",
       "message_type": "Commitment",
-      "payload_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
       "payload": {
         "commitment_id": "c1",
         "action": "decision.selected",
@@ -56,7 +56,7 @@
     {
       "sender": "agent://a",
       "message_type": "Vote",
-      "payload_type": "decision.Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
       "payload": {
         "proposal_id": "p1",
         "vote": "approve",
@@ -67,7 +67,7 @@
     {
       "sender": "agent://b",
       "message_type": "Evaluation",
-      "payload_type": "decision.Evaluation",
+      "payload_type": "macp.modes.decision.v1.EvaluationPayload",
       "payload": {
         "proposal_id": "p1",
         "recommendation": "approve",

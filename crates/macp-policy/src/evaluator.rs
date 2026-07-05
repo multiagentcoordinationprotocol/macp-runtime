@@ -24,6 +24,21 @@ fn check_schema_version(policy: &PolicyDefinition) -> Option<PolicyDecision> {
     }
 }
 
+/// Parse the mode's rule schema from the bound policy. Rules were validated
+/// at registration, so an eval-time parse failure means the definition was
+/// corrupted or bypassed registration — deny loudly rather than silently
+/// evaluating default (empty) rules as if the policy imposed nothing.
+fn parse_rules<T: serde::de::DeserializeOwned>(
+    policy: &PolicyDefinition,
+) -> Result<T, PolicyDecision> {
+    serde_json::from_value(policy.rules.clone()).map_err(|e| PolicyDecision::Deny {
+        reasons: vec![format!(
+            "policy '{}' rules failed to parse at evaluation time: {e}",
+            policy.policy_id
+        )],
+    })
+}
+
 /// Evaluate whether the governance policy allows a *positive* commitment in
 /// Decision Mode (the legacy, outcome-unaware entry point).
 ///
@@ -83,8 +98,10 @@ pub fn evaluate_decision_commitment_outcome(
     if let Some(deny) = check_schema_version(policy) {
         return deny;
     }
-    let rules: DecisionPolicyRules =
-        serde_json::from_value(policy.rules.clone()).unwrap_or_default();
+    let rules: DecisionPolicyRules = match parse_rules(policy) {
+        Ok(r) => r,
+        Err(deny) => return deny,
+    };
 
     let mut deny_reasons: Vec<String> = Vec::new();
     let mut allow_reasons: Vec<String> = Vec::new();
@@ -471,18 +488,33 @@ fn compute_weighted_votes(
 // ── Proposal Mode Evaluator ─────────────────────────────────────────
 
 /// Evaluate whether the governance policy allows a commitment in Proposal Mode.
-///
-/// Checks:
-/// - `counter_proposal.max_rounds`: if > 0, ensures counter-proposal count doesn't exceed limit
+/// Legacy wrapper: assumes a positive outcome.
 pub fn evaluate_proposal_commitment(
     policy: &PolicyDefinition,
     counter_proposal_count: usize,
 ) -> PolicyDecision {
+    evaluate_proposal_commitment_outcome(policy, counter_proposal_count, true)
+}
+
+/// Outcome-aware Proposal Mode evaluation.
+///
+/// Checks:
+/// - `counter_proposal.max_rounds`: if > 0, a **positive** commitment must not
+///   exceed the round limit. A negative (terminal-reject) commitment is the
+///   legitimate exit from an over-long negotiation and is not blocked by the
+///   round limit — denying it would trap the session until TTL expiry.
+pub fn evaluate_proposal_commitment_outcome(
+    policy: &PolicyDefinition,
+    counter_proposal_count: usize,
+    outcome_positive: bool,
+) -> PolicyDecision {
     if let Some(deny) = check_schema_version(policy) {
         return deny;
     }
-    let rules: ProposalPolicyRules =
-        serde_json::from_value(policy.rules.clone()).unwrap_or_default();
+    let rules: ProposalPolicyRules = match parse_rules(policy) {
+        Ok(r) => r,
+        Err(deny) => return deny,
+    };
 
     let mut deny_reasons: Vec<String> = Vec::new();
     let mut allow_reasons: Vec<String> = Vec::new();
@@ -490,10 +522,15 @@ pub fn evaluate_proposal_commitment(
     if rules.counter_proposal.max_rounds > 0
         && counter_proposal_count > rules.counter_proposal.max_rounds
     {
-        deny_reasons.push(format!(
-            "counter-proposal limit exceeded: {} of {} allowed",
-            counter_proposal_count, rules.counter_proposal.max_rounds
-        ));
+        if outcome_positive {
+            deny_reasons.push(format!(
+                "counter-proposal limit exceeded: {} of {} allowed",
+                counter_proposal_count, rules.counter_proposal.max_rounds
+            ));
+        } else {
+            allow_reasons
+                .push("round limit exceeded but outcome is a decline: limit not applicable".into());
+        }
     }
 
     if deny_reasons.is_empty() {
@@ -513,20 +550,41 @@ pub fn evaluate_proposal_commitment(
 // ── Task Mode Evaluator ─────────────────────────────────────────────
 
 /// Evaluate whether the governance policy allows a commitment in Task Mode.
+/// Legacy wrapper: assumes a positive outcome.
+pub fn evaluate_task_commitment(policy: &PolicyDefinition, has_output: bool) -> PolicyDecision {
+    evaluate_task_commitment_outcome(policy, has_output, true)
+}
+
+/// Outcome-aware Task Mode evaluation.
 ///
 /// Checks:
-/// - `completion.require_output`: if true, task completion must include non-empty output
-pub fn evaluate_task_commitment(policy: &PolicyDefinition, has_output: bool) -> PolicyDecision {
+/// - `completion.require_output`: if true, a **positive** (completed)
+///   commitment must include non-empty output. A negative commitment (a
+///   `TaskFail` terminal report) legitimately has no output and is not gated
+///   by the output requirement.
+pub fn evaluate_task_commitment_outcome(
+    policy: &PolicyDefinition,
+    has_output: bool,
+    outcome_positive: bool,
+) -> PolicyDecision {
     if let Some(deny) = check_schema_version(policy) {
         return deny;
     }
-    let rules: TaskPolicyRules = serde_json::from_value(policy.rules.clone()).unwrap_or_default();
+    let rules: TaskPolicyRules = match parse_rules(policy) {
+        Ok(r) => r,
+        Err(deny) => return deny,
+    };
 
     let mut deny_reasons: Vec<String> = Vec::new();
     let mut allow_reasons: Vec<String> = Vec::new();
 
     if rules.completion.require_output && !has_output {
-        deny_reasons.push("policy requires task output before commitment".into());
+        if outcome_positive {
+            deny_reasons.push("policy requires task output before commitment".into());
+        } else {
+            allow_reasons
+                .push("negative outcome (task failure): output requirement not applicable".into());
+        }
     }
 
     if deny_reasons.is_empty() {
@@ -551,11 +609,24 @@ pub fn evaluate_task_commitment(policy: &PolicyDefinition, has_output: bool) -> 
 /// at message-processing time via lazy evaluation, not at commitment evaluation.
 /// This evaluator always allows.
 pub fn evaluate_handoff_commitment(policy: &PolicyDefinition) -> PolicyDecision {
+    evaluate_handoff_commitment_outcome(policy, true)
+}
+
+/// Outcome-aware Handoff Mode evaluation. Both accepted handoffs (positive)
+/// and declined handoffs (negative) are policy-clean; the rules the RFC
+/// defines for handoff (`acceptance.implicit_accept_timeout_ms`) act at
+/// message-processing time, not commitment time.
+pub fn evaluate_handoff_commitment_outcome(
+    policy: &PolicyDefinition,
+    _outcome_positive: bool,
+) -> PolicyDecision {
     if let Some(deny) = check_schema_version(policy) {
         return deny;
     }
-    let _rules: HandoffPolicyRules =
-        serde_json::from_value(policy.rules.clone()).unwrap_or_default();
+    let _rules: HandoffPolicyRules = match parse_rules(policy) {
+        Ok(r) => r,
+        Err(deny) => return deny,
+    };
 
     PolicyDecision::Allow {
         reasons: vec!["handoff policy constraints satisfied".into()],
@@ -565,11 +636,7 @@ pub fn evaluate_handoff_commitment(policy: &PolicyDefinition) -> PolicyDecision 
 // ── Quorum Mode Evaluator ───────────────────────────────────────────
 
 /// Evaluate whether the governance policy allows a commitment in Quorum Mode.
-///
-/// Checks:
-/// - `abstention`: if `counts_toward_quorum` is false and `interpretation` is not "ignored",
-///   abstentions may affect quorum calculation
-/// - `threshold`: if set, checks that voter participation meets the threshold requirement
+/// Legacy wrapper: assumes a positive outcome.
 pub fn evaluate_quorum_commitment(
     policy: &PolicyDefinition,
     approve_count: usize,
@@ -577,49 +644,87 @@ pub fn evaluate_quorum_commitment(
     abstain_count: usize,
     total_participants: usize,
 ) -> PolicyDecision {
+    evaluate_quorum_commitment_outcome(
+        policy,
+        approve_count,
+        reject_count,
+        abstain_count,
+        total_participants,
+        true,
+    )
+}
+
+/// Outcome-aware Quorum Mode evaluation.
+///
+/// RFC-MACP-0012 §4.2: the policy `threshold` **overrides the
+/// `required_approvals` from the ApprovalRequest** — it is an approval-count
+/// bar, exactly as the mode itself reads it. (An earlier revision of this
+/// evaluator reinterpreted the same field as a *participation* quorum over
+/// approve+reject voters — a second, conflicting meaning of one field, which
+/// both denied legitimate declines and double-gated approvals. That reading
+/// was non-conformant and has been removed; a distinct participation-quorum
+/// rule field, if desired, needs an RFC schema addition first.)
+///
+/// Checks:
+/// - `threshold`: for a **positive** commitment, approvals must meet the
+///   effective threshold (count/n_of_m: `value` approvals; percentage:
+///   `value`% of declared participants). A **negative** (decline) commitment
+///   is the legitimate terminal when approval is not reached — the threshold
+///   does not gate it.
+/// - `abstention.interpretation`: `implicit_reject` is reported for
+///   transparency (the effective rejection count) but does not gate.
+pub fn evaluate_quorum_commitment_outcome(
+    policy: &PolicyDefinition,
+    approve_count: usize,
+    reject_count: usize,
+    abstain_count: usize,
+    total_participants: usize,
+    outcome_positive: bool,
+) -> PolicyDecision {
     if let Some(deny) = check_schema_version(policy) {
         return deny;
     }
-    let rules: QuorumPolicyRules = serde_json::from_value(policy.rules.clone()).unwrap_or_default();
+    let rules: QuorumPolicyRules = match parse_rules(policy) {
+        Ok(r) => r,
+        Err(deny) => return deny,
+    };
 
     let mut deny_reasons: Vec<String> = Vec::new();
     let mut allow_reasons: Vec<String> = Vec::new();
 
-    // Determine effective voter count based on abstention rules
-    let effective_voters = if rules.abstention.counts_toward_quorum {
-        approve_count + reject_count + abstain_count
-    } else {
-        approve_count + reject_count
-    };
+    // Approval threshold (RFC-0012 §4.2) — mirrors the mode's own
+    // `effective_threshold` interpretation so the same field never carries two
+    // meanings across layers.
+    if rules.threshold.value > 0.0 {
+        let required: usize = match rules.threshold.threshold_type.as_str() {
+            "percentage" => {
+                // Percentage of declared participants, ceiling. Guard the
+                // zero-participant case (legacy shim callers) — treat as unmet.
+                if total_participants == 0 {
+                    usize::MAX
+                } else {
+                    ((rules.threshold.value / 100.0) * total_participants as f64).ceil() as usize
+                }
+            }
+            // "count" / "n_of_m" (and unknown types conservatively)
+            _ => rules.threshold.value.ceil() as usize,
+        };
+        if outcome_positive && approve_count < required {
+            deny_reasons.push(format!(
+                "approval threshold not met: {} of {} required approvals ({} {})",
+                approve_count, required, rules.threshold.value, rules.threshold.threshold_type
+            ));
+        } else if !outcome_positive {
+            allow_reasons
+                .push("negative outcome: approval threshold does not gate a decline".into());
+        }
+    }
 
-    // Handle abstention interpretation
+    // Handle abstention interpretation (reported for transparency; not gating)
     let effective_reject_count = match rules.abstention.interpretation.as_str() {
         "implicit_reject" => reject_count + abstain_count,
         _ => reject_count, // "neutral" and "ignored" don't add to rejections
     };
-
-    // If interpretation is "ignored", abstentions don't trigger any denial
-    // If interpretation is "neutral" or "implicit_reject" and abstentions exist
-    // but counts_toward_quorum is false, we just exclude them from voter count (already done above)
-
-    // Check quorum threshold
-    let quorum_met = check_quorum(
-        &rules.threshold.threshold_type,
-        rules.threshold.value,
-        effective_voters,
-        total_participants,
-    );
-    if rules.threshold.value > 0.0 && !quorum_met {
-        deny_reasons.push(format!(
-            "quorum not met: {} effective voters of {} participants (threshold: {} {})",
-            effective_voters,
-            total_participants,
-            rules.threshold.value,
-            rules.threshold.threshold_type
-        ));
-    }
-
-    // Report effective rejection count for transparency
     if effective_reject_count > reject_count {
         allow_reasons.push(format!(
             "abstentions interpreted as implicit rejections: {} effective rejections",
@@ -1299,13 +1404,83 @@ mod tests {
     }
 
     #[test]
-    fn quorum_allows_when_threshold_met_including_abstentions() {
+    fn quorum_denies_positive_when_approvals_below_threshold_despite_participation() {
         let policy = make_policy(serde_json::json!({
             "threshold": { "type": "n_of_m", "value": 3 },
             "abstention": { "counts_toward_quorum": true, "interpretation": "neutral" }
         }));
-        // 2 approve + 0 reject + 1 abstain = 3 effective voters >= 3 threshold
+        // RFC-0012 §4.2: threshold is an approval-count bar, not a
+        // participation quorum. 2 approvals < 3 required — the fact that an
+        // abstention brings "participation" to 3 must not approve it. (This
+        // test previously asserted Allow under the removed participation
+        // reading.)
         let result = super::evaluate_quorum_commitment(&policy, 2, 0, 1, 5);
+        assert!(matches!(result, PolicyDecision::Deny { .. }));
+    }
+
+    #[test]
+    fn quorum_allows_positive_when_approvals_meet_threshold() {
+        let policy = make_policy(serde_json::json!({
+            "threshold": { "type": "n_of_m", "value": 3 }
+        }));
+        let result = super::evaluate_quorum_commitment(&policy, 3, 1, 1, 5);
+        assert!(matches!(result, PolicyDecision::Allow { .. }));
+    }
+
+    #[test]
+    fn quorum_decline_not_gated_by_threshold() {
+        let policy = make_policy(serde_json::json!({
+            "threshold": { "type": "n_of_m", "value": 3 }
+        }));
+        // A negative (decline) commitment is the legitimate terminal when the
+        // approval bar is unreachable — the threshold must not deny it.
+        let result = super::evaluate_quorum_commitment_outcome(&policy, 0, 2, 3, 5, false);
+        assert!(matches!(result, PolicyDecision::Allow { .. }));
+    }
+
+    #[test]
+    fn quorum_percentage_threshold_is_approval_share_of_participants() {
+        let policy = make_policy(serde_json::json!({
+            "threshold": { "type": "percentage", "value": 60.0 }
+        }));
+        // 60% of 5 participants = 3 required approvals.
+        let denied = super::evaluate_quorum_commitment(&policy, 2, 0, 0, 5);
+        assert!(matches!(denied, PolicyDecision::Deny { .. }));
+        let allowed = super::evaluate_quorum_commitment(&policy, 3, 0, 0, 5);
+        assert!(matches!(allowed, PolicyDecision::Allow { .. }));
+    }
+
+    #[test]
+    fn task_fail_not_gated_by_require_output() {
+        let policy = make_policy(serde_json::json!({
+            "completion": { "require_output": true }
+        }));
+        // Positive completion without output: denied.
+        let denied = super::evaluate_task_commitment_outcome(&policy, false, true);
+        assert!(matches!(denied, PolicyDecision::Deny { .. }));
+        // Negative outcome (TaskFail) has no output by nature: allowed.
+        let allowed = super::evaluate_task_commitment_outcome(&policy, false, false);
+        assert!(matches!(allowed, PolicyDecision::Allow { .. }));
+    }
+
+    #[test]
+    fn proposal_decline_not_gated_by_max_rounds() {
+        let policy = make_policy(serde_json::json!({
+            "counter_proposal": { "max_rounds": 2 }
+        }));
+        // Positive convergence over the round limit: denied.
+        let denied = super::evaluate_proposal_commitment_outcome(&policy, 5, true);
+        assert!(matches!(denied, PolicyDecision::Deny { .. }));
+        // Terminal-reject decline after the same rounds: allowed (the decline
+        // is the exit from an over-long negotiation).
+        let allowed = super::evaluate_proposal_commitment_outcome(&policy, 5, false);
+        assert!(matches!(allowed, PolicyDecision::Allow { .. }));
+    }
+
+    #[test]
+    fn handoff_decline_allowed() {
+        let policy = make_policy(serde_json::json!({}));
+        let result = super::evaluate_handoff_commitment_outcome(&policy, false);
         assert!(matches!(result, PolicyDecision::Allow { .. }));
     }
 

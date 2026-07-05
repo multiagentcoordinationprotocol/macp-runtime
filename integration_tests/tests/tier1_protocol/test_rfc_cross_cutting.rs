@@ -286,7 +286,7 @@ async fn watch_signals_receives_broadcast_signal() {
     eprintln!("── Signal Broadcast Test: WatchSignals RPC ──────────────────");
     eprintln!("   Agent A (watcher) subscribes to WatchSignals stream");
     let mut signal_stream = watcher
-        .watch_signals(WatchSignalsRequest {})
+        .watch_signals(with_sender("agent://watcher", WatchSignalsRequest {}))
         .await
         .unwrap()
         .into_inner();
@@ -801,4 +801,16 @@ async fn session_accepts_messages_within_ttl_window() {
     .unwrap();
     assert!(ack.ok, "Message within TTL window must be accepted");
     assert_eq!(ack.session_state, 1, "Session should still be OPEN");
+}
+
+#[tokio::test]
+async fn watch_signals_requires_authentication() {
+    // The ambient signal plane carries agent-generated payloads; an
+    // unauthenticated caller must not be able to subscribe.
+    let mut client = common::grpc_client().await;
+    let err = client
+        .watch_signals(WatchSignalsRequest {})
+        .await
+        .expect_err("unauthenticated WatchSignals must be rejected");
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
 }

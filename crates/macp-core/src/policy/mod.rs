@@ -21,12 +21,16 @@ pub struct PolicyDefinition {
     pub schema_version: u32,
 }
 
+/// `#[non_exhaustive]`: consumers MUST treat any non-`Allow` decision as a
+/// denial (fail closed). Never `if let Deny` — that fails open on new variants.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub enum PolicyDecision {
     Allow { reasons: Vec<String> },
     Deny { reasons: Vec<String> },
 }
 
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub enum PolicyError {
     UnknownPolicy(String),
@@ -93,33 +97,77 @@ pub fn extract_commitment_rules(rules: &serde_json::Value) -> CommitmentRules {
         .unwrap_or_default()
 }
 
+/// Everything a policy evaluator may consult when gating a commitment.
+///
+/// Built by the mode at commitment time. `outcome_positive` comes from the
+/// validated `CommitmentPayload` and makes every mode's evaluation
+/// outcome-aware: a negative (decline) commitment is a legitimate terminal
+/// outcome and must not be denied by checks that only make sense for positive
+/// outcomes (RFC-MACP-0007 §6 and the schema_version 2 decline semantics).
+pub struct CommitmentContext<'a> {
+    pub policy: &'a PolicyDefinition,
+    pub participants: &'a [String],
+    pub outcome_positive: bool,
+    pub mode: CommitmentMode<'a>,
+}
+
+/// Per-mode accumulated state relevant to commitment evaluation.
+///
+/// Carries exactly the data each mode already computes: `DecisionState` is a
+/// core domain type (passed whole); the other modes summarize their internal
+/// state into scalars. `#[non_exhaustive]`: evaluators must carry a wildcard
+/// arm and treat unknown modes as a denial (fail closed).
+#[non_exhaustive]
+pub enum CommitmentMode<'a> {
+    Decision {
+        state: &'a DecisionState,
+    },
+    Proposal {
+        counter_proposal_count: usize,
+    },
+    Task {
+        has_output: bool,
+    },
+    Handoff,
+    Quorum {
+        approve_count: usize,
+        reject_count: usize,
+        abstain_count: usize,
+    },
+}
+
 /// Governance policy evaluation at commitment time.
 ///
 /// The runtime resolves a [`PolicyDefinition`] at `SessionStart` and stores it
-/// on the session; at commitment time a mode calls the matching method here.
-/// The default implementation lives in `macp-policy`
-/// (`macp_policy::DefaultPolicyEvaluator`); consumers may provide their own.
+/// on the session; at commitment time a mode builds a [`CommitmentContext`]
+/// and calls [`PolicyEvaluator::evaluate_commitment`]. The default
+/// implementation lives in `macp-policy` (`macp_policy::DefaultPolicyEvaluator`);
+/// consumers may provide their own.
+///
+/// The per-mode methods are deprecated shims kept for one release; they build
+/// a `CommitmentContext` and delegate to `evaluate_commitment`.
 pub trait PolicyEvaluator: Send + Sync {
+    /// Single evaluation entry point. Only an explicit
+    /// [`PolicyDecision::Allow`] permits the commitment — callers must treat
+    /// any other decision as a denial (fail closed).
+    fn evaluate_commitment(&self, ctx: &CommitmentContext<'_>) -> PolicyDecision;
+
+    #[deprecated(note = "build a CommitmentContext and call evaluate_commitment")]
     fn evaluate_decision_commitment(
         &self,
         policy: &PolicyDefinition,
         state: &DecisionState,
         participants: &[String],
-    ) -> PolicyDecision;
+    ) -> PolicyDecision {
+        self.evaluate_commitment(&CommitmentContext {
+            policy,
+            participants,
+            outcome_positive: true,
+            mode: CommitmentMode::Decision { state },
+        })
+    }
 
-    /// Outcome-aware variant of [`Self::evaluate_decision_commitment`].
-    ///
-    /// Decision Mode permits both positive and negative committed outcomes
-    /// (RFC-MACP-0007 §6). A positive commitment must clear the approval bar; a
-    /// negative (decline) commitment must be backed by a conclusive
-    /// non-approval. The `outcome_positive` flag is taken from the
-    /// `CommitmentPayload`.
-    ///
-    /// This method is **defaulted** so existing external `PolicyEvaluator`
-    /// implementations compile unchanged: the default body ignores
-    /// `outcome_positive` and delegates to the outcome-unaware method, exactly
-    /// reproducing their prior behavior. `macp-policy`'s
-    /// `DefaultPolicyEvaluator` overrides it to apply outcome-aware gating.
+    #[deprecated(note = "build a CommitmentContext and call evaluate_commitment")]
     fn evaluate_decision_commitment_outcome(
         &self,
         policy: &PolicyDefinition,
@@ -127,24 +175,55 @@ pub trait PolicyEvaluator: Send + Sync {
         participants: &[String],
         outcome_positive: bool,
     ) -> PolicyDecision {
-        let _ = outcome_positive;
-        self.evaluate_decision_commitment(policy, state, participants)
+        self.evaluate_commitment(&CommitmentContext {
+            policy,
+            participants,
+            outcome_positive,
+            mode: CommitmentMode::Decision { state },
+        })
     }
 
+    #[deprecated(note = "build a CommitmentContext and call evaluate_commitment")]
     fn evaluate_proposal_commitment(
         &self,
         policy: &PolicyDefinition,
         counter_proposal_count: usize,
-    ) -> PolicyDecision;
+    ) -> PolicyDecision {
+        self.evaluate_commitment(&CommitmentContext {
+            policy,
+            participants: &[],
+            outcome_positive: true,
+            mode: CommitmentMode::Proposal {
+                counter_proposal_count,
+            },
+        })
+    }
 
+    #[deprecated(note = "build a CommitmentContext and call evaluate_commitment")]
     fn evaluate_task_commitment(
         &self,
         policy: &PolicyDefinition,
         has_output: bool,
-    ) -> PolicyDecision;
+    ) -> PolicyDecision {
+        self.evaluate_commitment(&CommitmentContext {
+            policy,
+            participants: &[],
+            outcome_positive: true,
+            mode: CommitmentMode::Task { has_output },
+        })
+    }
 
-    fn evaluate_handoff_commitment(&self, policy: &PolicyDefinition) -> PolicyDecision;
+    #[deprecated(note = "build a CommitmentContext and call evaluate_commitment")]
+    fn evaluate_handoff_commitment(&self, policy: &PolicyDefinition) -> PolicyDecision {
+        self.evaluate_commitment(&CommitmentContext {
+            policy,
+            participants: &[],
+            outcome_positive: true,
+            mode: CommitmentMode::Handoff,
+        })
+    }
 
+    #[deprecated(note = "build a CommitmentContext and call evaluate_commitment")]
     fn evaluate_quorum_commitment(
         &self,
         policy: &PolicyDefinition,
@@ -152,7 +231,24 @@ pub trait PolicyEvaluator: Send + Sync {
         reject_count: usize,
         abstain_count: usize,
         total_participants: usize,
-    ) -> PolicyDecision;
+    ) -> PolicyDecision {
+        // The legacy signature carried an explicit participant total; the
+        // context derives it from `participants`, which the shim cannot
+        // reconstruct — evaluators needing the total should count ballots or
+        // use `participants.len()`. Legacy callers are inside this workspace
+        // only and have been migrated.
+        let _ = total_participants;
+        self.evaluate_commitment(&CommitmentContext {
+            policy,
+            participants: &[],
+            outcome_positive: true,
+            mode: CommitmentMode::Quorum {
+                approve_count,
+                reject_count,
+                abstain_count,
+            },
+        })
+    }
 }
 
 #[cfg(test)]

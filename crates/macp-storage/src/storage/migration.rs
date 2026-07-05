@@ -151,38 +151,27 @@ mod tests {
     use super::*;
     use crate::log_store::EntryKind;
     use crate::storage::StorageBackend;
-    use macp_core::session::{Session, SessionState};
+    use macp_core::session::Session;
     use std::collections::HashSet;
 
     fn sample_session(id: &str) -> Session {
-        Session {
-            session_id: id.into(),
-            state: SessionState::Open,
-            ttl_expiry: 61_000,
-            ttl_ms: 60_000,
-            started_at_unix_ms: 1_000,
-            resolution: None,
-            mode: "macp.mode.decision.v1".into(),
-            mode_state: vec![1, 2, 3],
-            participants: vec!["alice".into(), "bob".into()],
-            seen_message_ids: HashSet::from(["m1".into()]),
-            intent: "test intent".into(),
-            mode_version: "1.0.0".into(),
-            configuration_version: "cfg-1".into(),
-            policy_version: "pol-1".into(),
-            context_id: "test-ctx".to_string(),
-            extensions: std::collections::HashMap::new(),
-            roots: vec![macp_pb::pb::Root {
+        Session::builder(id, "macp.mode.decision.v1", "alice")
+            .ttl_expiry(61_000)
+            .ttl_ms(60_000)
+            .started_at_unix_ms(1_000)
+            .mode_state(vec![1, 2, 3])
+            .participants(vec!["alice".into(), "bob".into()])
+            .seen_message_ids(HashSet::from(["m1".into()]))
+            .intent("test intent")
+            .mode_version("1.0.0")
+            .configuration_version("cfg-1")
+            .policy_version("pol-1")
+            .context_id("test-ctx")
+            .roots(vec![macp_pb::pb::Root {
                 uri: "root://1".into(),
                 name: "r1".into(),
-            }],
-            initiator_sender: "alice".into(),
-            participant_message_counts: std::collections::HashMap::new(),
-            participant_last_seen: std::collections::HashMap::new(),
-            policy_definition: None,
-            suspended_at_ms: None,
-            accumulated_suspended_ms: 0,
-        }
+            }])
+            .build()
     }
 
     fn sample_entry(id: &str) -> LogEntry {
@@ -197,6 +186,9 @@ mod tests {
             mode: String::new(),
             macp_version: String::new(),
             timestamp_unix_ms: 1_700_000_000_000,
+            bound_mode_version: None,
+            semantics_rev: 0,
+            compacted_incoming_ordinals: 0,
         }
     }
 

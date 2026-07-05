@@ -6,7 +6,6 @@
 //! it constructs a mode with an injected evaluator and steps messages through
 //! `macp_modes::step`, exactly as an embedding library consumer would.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use macp_core::session::{Session, SessionState};
@@ -22,31 +21,12 @@ const MODE: &str = "macp.mode.decision.v1";
 const INITIATOR: &str = "agent://orchestrator";
 
 fn session() -> Session {
-    Session {
-        session_id: SESSION_ID.into(),
-        state: SessionState::Open,
-        ttl_expiry: i64::MAX,
-        ttl_ms: 60_000,
-        started_at_unix_ms: 0,
-        resolution: None,
-        mode: MODE.into(),
-        mode_state: vec![],
-        participants: vec![INITIATOR.into(), "agent://fraud".into()],
-        seen_message_ids: HashSet::new(),
-        intent: String::new(),
-        mode_version: "1.0.0".into(),
-        configuration_version: "cfg-1".into(),
-        policy_version: String::new(),
-        context_id: String::new(),
-        extensions: HashMap::new(),
-        roots: vec![],
-        initiator_sender: INITIATOR.into(),
-        participant_message_counts: HashMap::new(),
-        participant_last_seen: HashMap::new(),
-        policy_definition: None,
-        suspended_at_ms: None,
-        accumulated_suspended_ms: 0,
-    }
+    Session::builder(SESSION_ID, MODE, INITIATOR)
+        .ttl_ms(60_000)
+        .participants(vec![INITIATOR.into(), "agent://fraud".into()])
+        .mode_version("1.0.0")
+        .configuration_version("cfg-1")
+        .build()
 }
 
 fn env(sender: &str, message_type: &str, message_id: &str, payload: Vec<u8>) -> Envelope {

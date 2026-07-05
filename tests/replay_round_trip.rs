@@ -45,6 +45,9 @@ fn incoming(
         mode: mode.into(),
         macp_version: "1.0".into(),
         timestamp_unix_ms: ts,
+        bound_mode_version: None,
+        semantics_rev: 0,
+        compacted_incoming_ordinals: 0,
     }
 }
 

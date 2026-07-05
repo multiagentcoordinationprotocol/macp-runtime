@@ -1,6 +1,6 @@
 use crate::mode::util::{
-    check_commitment_authority, is_declared_participant, participants_all_accept,
-    validate_commitment_payload_for_session,
+    check_commitment_authority, enforce_commitment_policy, is_declared_participant,
+    participants_all_accept, validate_commitment_payload_for_session,
 };
 use crate::mode::{Mode, ModeResponse};
 use macp_core::error::MacpError;
@@ -351,31 +351,26 @@ impl Mode for ProposalMode {
                 Ok(ModeResponse::PersistState(Self::encode_state(&state)))
             }
             "Commitment" => {
-                validate_commitment_payload_for_session(session, &env.payload)?;
+                let commitment = validate_commitment_payload_for_session(session, &env.payload)?;
                 Self::refresh_phase(session, &mut state);
                 if !Self::commitment_ready(&state) {
                     return Err(MacpError::InvalidPayload);
                 }
-                // Evaluate governance policy if one is bound to the session.
-                if let Some(ref policy) = session.policy_definition {
-                    let counter_count = state
-                        .proposals
-                        .values()
-                        .filter(|p| p.supersedes_proposal_id.is_some())
-                        .count();
-                    let decision = self
-                        .evaluator
-                        .evaluate_proposal_commitment(policy, counter_count);
-                    if let macp_core::policy::PolicyDecision::Deny { reasons } = decision {
-                        tracing::warn!(
-                            session_id = %session.session_id,
-                            policy_id = %policy.policy_id,
-                            reasons = ?reasons,
-                            "policy denied commitment"
-                        );
-                        return Err(MacpError::PolicyDenied { reasons });
-                    }
-                }
+                // Governance policy gate (shared): fail closed, only
+                // an explicit Allow proceeds.
+                let counter_count = state
+                    .proposals
+                    .values()
+                    .filter(|p| p.supersedes_proposal_id.is_some())
+                    .count();
+                enforce_commitment_policy(
+                    session,
+                    macp_core::policy::CommitmentMode::Proposal {
+                        counter_proposal_count: counter_count,
+                    },
+                    commitment.outcome_positive,
+                    &*self.evaluator,
+                )?;
                 state.phase = ProposalPhase::Committed;
                 Ok(ModeResponse::PersistAndResolve {
                     state: Self::encode_state(&state),
@@ -390,36 +385,17 @@ impl Mode for ProposalMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use macp_core::session::{Session, SessionState};
+    use macp_core::session::Session;
     use macp_pb::pb::CommitmentPayload;
-    use std::collections::HashSet;
 
     fn base_session() -> Session {
-        Session {
-            session_id: "s1".into(),
-            state: SessionState::Open,
-            ttl_expiry: i64::MAX,
-            ttl_ms: 60_000,
-            started_at_unix_ms: 0,
-            resolution: None,
-            mode: "macp.mode.proposal.v1".into(),
-            mode_state: vec![],
-            participants: vec!["agent://buyer".into(), "agent://seller".into()],
-            seen_message_ids: HashSet::new(),
-            intent: String::new(),
-            mode_version: "1.0.0".into(),
-            configuration_version: "cfg-1".into(),
-            policy_version: "policy-1".into(),
-            context_id: String::new(),
-            extensions: std::collections::HashMap::new(),
-            roots: vec![],
-            initiator_sender: "agent://buyer".into(),
-            participant_message_counts: std::collections::HashMap::new(),
-            participant_last_seen: std::collections::HashMap::new(),
-            policy_definition: None,
-            suspended_at_ms: None,
-            accumulated_suspended_ms: 0,
-        }
+        Session::builder("s1", "macp.mode.proposal.v1", "agent://buyer")
+            .ttl_ms(60_000)
+            .participants(vec!["agent://buyer".into(), "agent://seller".into()])
+            .mode_version("1.0.0")
+            .configuration_version("cfg-1")
+            .policy_version("policy-1")
+            .build()
     }
 
     fn decode(session: &Session) -> ProposalState {

@@ -14,7 +14,8 @@ pub async fn compact_session_log(
     storage: &dyn StorageBackend,
     session_id: &str,
     session: &Session,
-) -> io::Result<()> {
+    discarded_incoming_ordinals: u64,
+) -> io::Result<LogEntry> {
     let persisted = PersistedSession::from(session);
     let raw_payload = serde_json::to_vec(&persisted)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -31,7 +32,19 @@ pub async fn compact_session_log(
         mode: session.mode.clone(),
         macp_version: String::new(),
         timestamp_unix_ms: now,
+        // Checkpoints carry the full serialized session (including its bound
+        // mode_version), so no separate binding record is needed here.
+        bound_mode_version: None,
+        semantics_rev: 0,
+        // Preserve the passive-subscribe sequence across compaction: the
+        // checkpoint records how many accepted ordinals it replaced, so
+        // post-compaction entries keep contiguous client-visible ordinals
+        // and resumes below the base get an explicit error (RFC-0006 §3.2).
+        compacted_incoming_ordinals: discarded_incoming_ordinals,
     };
 
-    storage.replace_log(session_id, &[checkpoint]).await
+    storage
+        .replace_log(session_id, std::slice::from_ref(&checkpoint))
+        .await?;
+    Ok(checkpoint)
 }

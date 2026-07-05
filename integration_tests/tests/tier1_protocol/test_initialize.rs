@@ -18,6 +18,19 @@ async fn initialize_returns_runtime_info() {
 }
 
 #[tokio::test]
+async fn initialize_advertises_honest_roots_capability() {
+    // The runtime has no roots provider: ListRoots answers (empty set is a
+    // valid state) but the set never changes, so change notifications must
+    // not be advertised (RFC-MACP-0006 §3.3 gates WatchRoots on list_changed).
+    let mut client = common::grpc_client().await;
+    let resp = helpers::initialize(&mut client).await.unwrap();
+    let caps = resp.capabilities.expect("capabilities present");
+    let roots = caps.roots.expect("roots capability present");
+    assert!(roots.list_roots);
+    assert!(!roots.list_changed);
+}
+
+#[tokio::test]
 async fn list_modes_returns_five_standard_modes() {
     let mut client = common::grpc_client().await;
     let resp = helpers::list_modes(&mut client).await.unwrap();

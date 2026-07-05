@@ -66,7 +66,10 @@ fn make_runtime() -> Runtime {
 
 fn encode_payload(fixture: &ConformanceFixture, msg: &ConformanceMessage) -> Vec<u8> {
     match msg.payload_type.as_str() {
-        "Commitment" => {
+        // Canonical fully-qualified protobuf message names (conformance-pack
+        // format): mode payloads are macp.modes.<mode>.v1.<Type>Payload and
+        // the shared terminal is macp.v1.CommitmentPayload.
+        "macp.v1.CommitmentPayload" => {
             let p = &msg.payload;
             CommitmentPayload {
                 commitment_id: p["commitment_id"].as_str().unwrap_or_default().into(),
@@ -84,12 +87,12 @@ fn encode_payload(fixture: &ConformanceFixture, msg: &ConformanceMessage) -> Vec
             }
             .encode_to_vec()
         }
-        t if t.starts_with("decision.") => encode_decision_payload(msg),
-        t if t.starts_with("proposal.") => encode_proposal_payload(msg),
-        t if t.starts_with("task.") => encode_task_payload(msg),
-        t if t.starts_with("handoff.") => encode_handoff_payload(msg),
-        t if t.starts_with("quorum.") => encode_quorum_payload(msg),
-        t if t.starts_with("multi_round.") => encode_multi_round_payload(msg),
+        t if t.starts_with("macp.modes.decision.v1.") => encode_decision_payload(msg),
+        t if t.starts_with("macp.modes.proposal.v1.") => encode_proposal_payload(msg),
+        t if t.starts_with("macp.modes.task.v1.") => encode_task_payload(msg),
+        t if t.starts_with("macp.modes.handoff.v1.") => encode_handoff_payload(msg),
+        t if t.starts_with("macp.modes.quorum.v1.") => encode_quorum_payload(msg),
+        t if t.starts_with("macp.modes.multi_round.v1.") => encode_multi_round_payload(msg),
         _ => panic!(
             "Unknown payload_type: {} in fixture for mode {}",
             msg.payload_type, fixture.mode
@@ -532,3 +535,62 @@ conformance_test!(
     conformance_multi_round_reject_paths,
     "multi_round_reject_paths.json"
 );
+
+/// Structural guard for the conformance-pack format: every fixture must use
+/// canonical fully-qualified protobuf payload names and valid enums, matching
+/// `tests/conformance/schema.json`. Keeps local fixtures from drifting back
+/// to runtime-internal shorthand.
+#[test]
+fn fixtures_conform_to_canonical_format() {
+    fn canonical_payload_type(pt: &str) -> bool {
+        pt.starts_with("macp.v1.") || (pt.starts_with("macp.modes.") && pt.ends_with("Payload"))
+    }
+    fn canonical_mode(m: &str) -> bool {
+        m.starts_with("macp.mode.") || m.starts_with("ext.")
+    }
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/conformance");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json")
+            || path.file_name().and_then(|n| n.to_str()) == Some("schema.json")
+        {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+
+        assert!(
+            canonical_mode(v["mode"].as_str().unwrap_or("")),
+            "{name}: invalid mode id"
+        );
+        assert!(
+            v["ttl_ms"].as_i64().unwrap_or(0) >= 1,
+            "{name}: ttl_ms >= 1"
+        );
+        for (i, msg) in v["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .enumerate()
+        {
+            let pt = msg["payload_type"].as_str().unwrap_or("");
+            assert!(
+                canonical_payload_type(pt),
+                "{name} message {i}: non-canonical payload_type {pt:?}"
+            );
+            let expect = msg["expect"].as_str().unwrap_or("");
+            assert!(
+                expect == "accept" || expect == "reject",
+                "{name} message {i}: expect must be accept|reject"
+            );
+        }
+        checked += 1;
+    }
+    assert!(
+        checked >= 13,
+        "expected all fixtures checked, got {checked}"
+    );
+}
