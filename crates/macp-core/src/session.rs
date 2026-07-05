@@ -11,6 +11,18 @@ pub const MAX_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 /// force-expired (RFC-MACP-0001 §7.5). Bounds indefinite human-in-the-loop holds.
 pub const MAX_SUSPEND_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
+/// Current session-semantics revision. Recorded at SessionStart (on the
+/// session and its log entry) and consulted wherever acceptance-time behavior
+/// changed across releases, so legacy histories replay under the semantics
+/// they were accepted with (RFC-MACP-0003 §1).
+///
+/// Revisions:
+/// - 0 — legacy: Handoff implicit-accept timed against the client-supplied
+///   envelope timestamp.
+/// - 1 — Handoff implicit-accept times against the runtime acceptance clock
+///   (`MessageContext::accepted_at_ms`).
+pub const CURRENT_SEMANTICS_REV: u32 = 1;
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SessionState {
     Open,
@@ -34,6 +46,11 @@ impl SessionState {
     }
 }
 
+/// Session model. Fields are public for reads, but the struct is
+/// `#[non_exhaustive]`: construct via [`Session::builder`]. This lets the model
+/// gain fields without breaking every constructor in downstream crates
+/// (pre-1.0 freeze requirement).
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct Session {
     pub session_id: String,
@@ -63,9 +80,53 @@ pub struct Session {
     /// Cumulative ms the session has spent suspended across all suspend/resume
     /// cycles. Drives the `MAX_SUSPEND_MS` cap.
     pub accumulated_suspended_ms: i64,
+    /// Session-semantics revision this session was accepted under. See
+    /// [`CURRENT_SEMANTICS_REV`]. Legacy persisted sessions load as `0`.
+    pub semantics_rev: u32,
 }
 
 impl Session {
+    /// Start building a `Session`. The three arguments are the fields with no
+    /// meaningful default; everything else starts from documented defaults
+    /// (see [`SessionBuilder`]) and is set with the builder's methods.
+    pub fn builder(
+        session_id: impl Into<String>,
+        mode: impl Into<String>,
+        initiator_sender: impl Into<String>,
+    ) -> SessionBuilder {
+        SessionBuilder {
+            inner: Session {
+                session_id: session_id.into(),
+                state: SessionState::Open,
+                // Never-expires by default: every kernel path overrides this
+                // from the validated SessionStart payload; library/test
+                // consumers get a session that behaves until told otherwise.
+                ttl_expiry: i64::MAX,
+                ttl_ms: 0,
+                started_at_unix_ms: 0,
+                resolution: None,
+                mode: mode.into(),
+                mode_state: vec![],
+                participants: vec![],
+                seen_message_ids: HashSet::new(),
+                intent: String::new(),
+                mode_version: String::new(),
+                configuration_version: String::new(),
+                policy_version: String::new(),
+                context_id: String::new(),
+                extensions: HashMap::new(),
+                roots: vec![],
+                initiator_sender: initiator_sender.into(),
+                participant_message_counts: HashMap::new(),
+                participant_last_seen: HashMap::new(),
+                policy_definition: None,
+                suspended_at_ms: None,
+                accumulated_suspended_ms: 0,
+                semantics_rev: CURRENT_SEMANTICS_REV,
+            },
+        }
+    }
+
     pub fn record_participant_activity(&mut self, sender: &str, timestamp_ms: i64) {
         *self
             .participant_message_counts
@@ -146,6 +207,78 @@ impl Session {
                 self.resolution = Some(resolution);
             }
         }
+    }
+}
+
+/// Builder for [`Session`] — the only construction path outside `macp-core`
+/// (the struct is `#[non_exhaustive]`).
+///
+/// Defaults: `state: Open`, `ttl_expiry: i64::MAX` (never expires until set),
+/// numeric fields `0`, everything else empty/`None`.
+#[derive(Clone, Debug)]
+pub struct SessionBuilder {
+    inner: Session,
+}
+
+macro_rules! builder_setters {
+    ($($(#[$doc:meta])* $name:ident: $ty:ty),* $(,)?) => {
+        $(
+            $(#[$doc])*
+            pub fn $name(mut self, value: $ty) -> Self {
+                self.inner.$name = value;
+                self
+            }
+        )*
+    };
+}
+
+impl SessionBuilder {
+    builder_setters! {
+        state: SessionState,
+        ttl_expiry: i64,
+        ttl_ms: i64,
+        started_at_unix_ms: i64,
+        resolution: Option<Vec<u8>>,
+        mode_state: Vec<u8>,
+        participants: Vec<String>,
+        seen_message_ids: HashSet<String>,
+        extensions: HashMap<String, Vec<u8>>,
+        roots: Vec<macp_pb::pb::Root>,
+        participant_message_counts: HashMap<String, u32>,
+        participant_last_seen: HashMap<String, i64>,
+        policy_definition: Option<crate::policy::PolicyDefinition>,
+        suspended_at_ms: Option<i64>,
+        accumulated_suspended_ms: i64,
+        semantics_rev: u32,
+    }
+
+    pub fn intent(mut self, value: impl Into<String>) -> Self {
+        self.inner.intent = value.into();
+        self
+    }
+
+    pub fn mode_version(mut self, value: impl Into<String>) -> Self {
+        self.inner.mode_version = value.into();
+        self
+    }
+
+    pub fn configuration_version(mut self, value: impl Into<String>) -> Self {
+        self.inner.configuration_version = value.into();
+        self
+    }
+
+    pub fn policy_version(mut self, value: impl Into<String>) -> Self {
+        self.inner.policy_version = value.into();
+        self
+    }
+
+    pub fn context_id(mut self, value: impl Into<String>) -> Self {
+        self.inner.context_id = value.into();
+        self
+    }
+
+    pub fn build(self) -> Session {
+        self.inner
     }
 }
 
@@ -232,10 +365,13 @@ pub fn validate_session_id_for_acceptance(session_id: &str) -> Result<(), MacpEr
         return Err(MacpError::InvalidSessionId);
     }
 
-    // Try UUID parse: must be valid UUID v4 or v7, canonical lowercase hyphenated form
+    // UUID-shaped ids (36 chars, parseable) are held to strict UUID rules with no
+    // fall-through: canonical lowercase hyphenated form, version v4 or v7. This
+    // keeps non-canonical forms (e.g. uppercase) of the same UUID from being
+    // admitted as distinct base64url tokens. Only strings that do not parse as a
+    // UUID at all fall through to the base64url rule.
     if session_id.len() == 36 && session_id.contains('-') {
         if let Ok(parsed) = uuid::Uuid::parse_str(session_id) {
-            // Verify it's the canonical lowercase hyphenated representation
             if parsed.as_hyphenated().to_string() == session_id {
                 match parsed.get_version() {
                     Some(uuid::Version::Random) | Some(uuid::Version::SortRand) => {
@@ -244,8 +380,8 @@ pub fn validate_session_id_for_acceptance(session_id: &str) -> Result<(), MacpEr
                     _ => {}
                 }
             }
+            return Err(MacpError::InvalidSessionId);
         }
-        return Err(MacpError::InvalidSessionId);
     }
 
     // Try base64url: at least 22 chars, only [A-Za-z0-9_-]
@@ -365,6 +501,7 @@ mod tests {
             policy_definition: None,
             suspended_at_ms: None,
             accumulated_suspended_ms: 0,
+            semantics_rev: CURRENT_SEMANTICS_REV,
         }
     }
 
@@ -498,6 +635,30 @@ mod tests {
                 .to_string(),
             "InvalidSessionId"
         );
+    }
+
+    #[test]
+    fn base64url_36_chars_with_hyphen_accepted() {
+        // 36-char base64url token containing '-' that is NOT UUID-shaped: must be
+        // accepted via the base64url rule, not rejected by the UUID branch.
+        // (Regression test for the hard-routing bug: len==36 && contains('-')
+        // previously returned Err without trying the base64url rule.)
+        let id = "Zx-abcdefghijklmnopqrstuvwxyz_ABCDE-";
+        assert_eq!(id.len(), 36);
+        assert!(uuid::Uuid::parse_str(id).is_err());
+        validate_session_id_for_acceptance(id).unwrap();
+    }
+
+    #[test]
+    fn uuid_shaped_but_wrong_version_does_not_fall_through() {
+        // A canonical v1 UUID is also 36 chars of valid base64url charset; it must
+        // still be rejected (UUID rules apply, no fall-through to base64url).
+        let v4 = uuid::Uuid::new_v4();
+        let mut bytes = *v4.as_bytes();
+        bytes[6] = (bytes[6] & 0x0F) | 0x10;
+        bytes[8] = (bytes[8] & 0x3F) | 0x80;
+        let v1_id = uuid::Uuid::from_bytes(bytes).as_hyphenated().to_string();
+        assert!(validate_session_id_for_acceptance(&v1_id).is_err());
     }
 
     #[test]

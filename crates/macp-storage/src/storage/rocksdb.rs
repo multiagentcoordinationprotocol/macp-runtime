@@ -178,7 +178,17 @@ impl StorageBackend for RocksDbBackend {
         let key = Self::log_key(session_id, seq);
         let bytes =
             serde_json::to_vec(entry).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        self.db.put_cf(&cf, &key, &bytes).map_err(io::Error::other)
+        // The log append is the runtime's COMMIT POINT: an acked message must
+        // survive a crash. Default WriteOptions leave the write in the WAL's
+        // OS buffer (sync=false) — fsync the WAL before acknowledging, giving
+        // this backend the same durability contract as the file backend.
+        // (Session snapshots stay async: the log is the source of truth and
+        // snapshots are reconstructed via replay.)
+        let mut write_opts = rocksdb::WriteOptions::default();
+        write_opts.set_sync(true);
+        self.db
+            .put_cf_opt(&cf, &key, &bytes, &write_opts)
+            .map_err(io::Error::other)
     }
 
     async fn load_log(&self, session_id: &str) -> io::Result<Vec<LogEntry>> {
@@ -194,9 +204,21 @@ impl StorageBackend for RocksDbBackend {
             if !key.starts_with(&prefix) {
                 break;
             }
-            let entry: LogEntry = serde_json::from_slice(&value)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            entries.push(entry);
+            // Corrupt-entry parity with the file backend: skip the entry with
+            // a warning instead of failing the whole session load. One bad
+            // record must not take down every other entry in the log
+            // (`MACP_STRICT_RECOVERY` gating happens at the recovery layer).
+            match serde_json::from_slice::<LogEntry>(&value) {
+                Ok(entry) => entries.push(entry),
+                Err(e) => {
+                    tracing::warn!(
+                        session_id,
+                        key = %String::from_utf8_lossy(&key),
+                        error = %e,
+                        "skipping corrupt log entry"
+                    );
+                }
+            }
         }
         Ok(entries)
     }
@@ -236,35 +258,23 @@ impl StorageBackend for RocksDbBackend {
 mod tests {
     use super::*;
     use crate::log_store::EntryKind;
-    use macp_core::session::SessionState;
+
     use std::collections::HashSet;
 
     fn sample_session(id: &str) -> Session {
-        Session {
-            session_id: id.into(),
-            state: SessionState::Open,
-            ttl_expiry: 61_000,
-            ttl_ms: 60_000,
-            started_at_unix_ms: 1_000,
-            resolution: None,
-            mode: "macp.mode.decision.v1".into(),
-            mode_state: vec![1, 2, 3],
-            participants: vec!["alice".into(), "bob".into()],
-            seen_message_ids: HashSet::from(["m1".into()]),
-            intent: "test".into(),
-            mode_version: "1.0.0".into(),
-            configuration_version: "cfg-1".into(),
-            policy_version: "pol-1".into(),
-            context_id: "test-ctx".to_string(),
-            extensions: std::collections::HashMap::new(),
-            roots: vec![],
-            initiator_sender: "alice".into(),
-            participant_message_counts: std::collections::HashMap::new(),
-            participant_last_seen: std::collections::HashMap::new(),
-            policy_definition: None,
-            suspended_at_ms: None,
-            accumulated_suspended_ms: 0,
-        }
+        Session::builder(id, "macp.mode.decision.v1", "alice")
+            .ttl_expiry(61_000)
+            .ttl_ms(60_000)
+            .started_at_unix_ms(1_000)
+            .mode_state(vec![1, 2, 3])
+            .participants(vec!["alice".into(), "bob".into()])
+            .seen_message_ids(HashSet::from(["m1".into()]))
+            .intent("test intent")
+            .mode_version("1.0.0")
+            .configuration_version("cfg-1")
+            .policy_version("pol-1")
+            .context_id("test-ctx")
+            .build()
     }
 
     fn sample_entry(id: &str) -> LogEntry {
@@ -279,6 +289,9 @@ mod tests {
             mode: String::new(),
             macp_version: String::new(),
             timestamp_unix_ms: 1_700_000_000_000,
+            bound_mode_version: None,
+            semantics_rev: 0,
+            compacted_incoming_ordinals: 0,
         }
     }
 
@@ -401,5 +414,33 @@ mod tests {
         let log2 = backend.load_log("s2").await.unwrap();
         assert_eq!(log2.len(), 1);
         assert_eq!(log2[0].message_id, "b");
+    }
+
+    /// Corrupt-entry parity with the file backend: one bad record must not
+    /// fail the whole session load (it is skipped with a warning).
+    #[tokio::test]
+    async fn rocksdb_load_log_skips_corrupt_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = RocksDbBackend::open(dir.path()).unwrap();
+        backend.create_session_storage("s1").await.unwrap();
+        backend
+            .append_log_entry("s1", &sample_entry("m1"))
+            .await
+            .unwrap();
+
+        // Inject a corrupt record at the next sequence position directly.
+        let cf = backend.db.cf_handle(CF_LOGS).unwrap();
+        let key = RocksDbBackend::log_key("s1", 1);
+        backend.db.put_cf(&cf, &key, b"not json").unwrap();
+
+        backend
+            .append_log_entry("s1", &sample_entry("m2"))
+            .await
+            .unwrap();
+
+        let entries = backend.load_log("s1").await.unwrap();
+        assert_eq!(entries.len(), 2, "corrupt entry skipped, valid ones kept");
+        assert_eq!(entries[0].message_id, "m1");
+        assert_eq!(entries[1].message_id, "m2");
     }
 }

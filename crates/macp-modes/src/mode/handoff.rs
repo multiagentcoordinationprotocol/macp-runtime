@@ -1,5 +1,6 @@
 use crate::mode::util::{
-    check_commitment_authority, is_declared_participant, validate_commitment_payload_for_session,
+    check_commitment_authority, enforce_commitment_policy, is_declared_participant,
+    validate_commitment_payload_for_session,
 };
 use crate::mode::{Mode, ModeResponse};
 use macp_core::error::MacpError;
@@ -81,9 +82,6 @@ impl Mode for HandoffMode {
             "HandoffOffer" if env.sender == session.initiator_sender => Ok(()),
             "HandoffOffer" => Err(MacpError::Forbidden),
             // HandoffContext: any declared participant (on_message enforces offerer match)
-            "HandoffContext" if is_declared_participant(&session.participants, &env.sender) => {
-                Ok(())
-            }
             _ if is_declared_participant(&session.participants, &env.sender) => Ok(()),
             _ => Err(MacpError::Forbidden),
         }
@@ -110,6 +108,41 @@ impl Mode for HandoffMode {
     }
 
     fn on_message(&self, session: &Session, env: &Envelope) -> Result<ModeResponse, MacpError> {
+        // Legacy clock (semantics rev 0): the client-supplied envelope
+        // timestamp. The kernel calls `on_message_at`, which selects the
+        // acceptance clock for rev >= 1 sessions; this path remains for
+        // legacy-history replay and direct library callers.
+        self.handle_message(session, env, env.timestamp_unix_ms)
+    }
+
+    fn on_message_at(
+        &self,
+        session: &Session,
+        env: &Envelope,
+        ctx: &macp_core::mode::MessageContext,
+    ) -> Result<ModeResponse, MacpError> {
+        // Rev >= 1: the implicit-accept timeout is measured against the
+        // runtime's acceptance clock, which the initiator cannot forge (the
+        // envelope timestamp let an initiator post-date a Commitment to
+        // finalize an offer the target never accepted). Legacy (rev 0)
+        // sessions keep the envelope clock so their histories replay to the
+        // same outcome they were accepted with.
+        let clock_ms = if session.semantics_rev >= 1 {
+            ctx.accepted_at_ms
+        } else {
+            env.timestamp_unix_ms
+        };
+        self.handle_message(session, env, clock_ms)
+    }
+}
+
+impl HandoffMode {
+    fn handle_message(
+        &self,
+        session: &Session,
+        env: &Envelope,
+        clock_ms: i64,
+    ) -> Result<ModeResponse, MacpError> {
         let mut state = if session.mode_state.is_empty() {
             HandoffState::default()
         } else {
@@ -221,14 +254,17 @@ impl Mode for HandoffMode {
                 Ok(ModeResponse::PersistState(Self::encode_state(&state)))
             }
             "Commitment" => {
-                validate_commitment_payload_for_session(session, &env.payload)?;
+                let commitment = validate_commitment_payload_for_session(session, &env.payload)?;
                 // RFC-MACP-0012: lazy implicit_accept_timeout_ms check
                 if let Some(ref policy) = session.policy_definition {
                     let rules: macp_core::policy::rules::HandoffPolicyRules =
                         serde_json::from_value(policy.rules.clone()).unwrap_or_default();
                     if rules.acceptance.implicit_accept_timeout_ms > 0 {
-                        // Use envelope timestamp for replay determinism
-                        let now_ms = env.timestamp_unix_ms;
+                        // Clock selected by `on_message_at` per the session's
+                        // semantics revision: acceptance time (rev >= 1) or the
+                        // legacy envelope timestamp (rev 0). Both are
+                        // log-recorded, so replay is deterministic either way.
+                        let now_ms = clock_ms;
                         let timeout = rules.acceptance.implicit_accept_timeout_ms as i64;
                         for offer in state.offers.values_mut() {
                             if offer.disposition == HandoffDisposition::Offered
@@ -245,19 +281,14 @@ impl Mode for HandoffMode {
                 if !Self::commitment_ready(&state) {
                     return Err(MacpError::InvalidPayload);
                 }
-                // Evaluate governance policy if one is bound to the session.
-                if let Some(ref policy) = session.policy_definition {
-                    let decision = self.evaluator.evaluate_handoff_commitment(policy);
-                    if let macp_core::policy::PolicyDecision::Deny { reasons } = decision {
-                        tracing::warn!(
-                            session_id = %session.session_id,
-                            policy_id = %policy.policy_id,
-                            reasons = ?reasons,
-                            "policy denied commitment"
-                        );
-                        return Err(MacpError::PolicyDenied { reasons });
-                    }
-                }
+                // Governance policy gate (shared): fail closed, only
+                // an explicit Allow proceeds.
+                enforce_commitment_policy(
+                    session,
+                    macp_core::policy::CommitmentMode::Handoff,
+                    commitment.outcome_positive,
+                    &*self.evaluator,
+                )?;
                 Ok(ModeResponse::PersistAndResolve {
                     state: Self::encode_state(&state),
                     resolution: env.payload.clone(),
@@ -271,36 +302,17 @@ impl Mode for HandoffMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use macp_core::session::{Session, SessionState};
+    use macp_core::session::Session;
     use macp_pb::pb::CommitmentPayload;
-    use std::collections::HashSet;
 
     fn base_session() -> Session {
-        Session {
-            session_id: "s1".into(),
-            state: SessionState::Open,
-            ttl_expiry: i64::MAX,
-            ttl_ms: 60_000,
-            started_at_unix_ms: 0,
-            resolution: None,
-            mode: "macp.mode.handoff.v1".into(),
-            mode_state: vec![],
-            participants: vec!["owner".into(), "target".into()],
-            seen_message_ids: HashSet::new(),
-            intent: String::new(),
-            mode_version: "1.0.0".into(),
-            configuration_version: "config".into(),
-            policy_version: "policy".into(),
-            context_id: String::new(),
-            extensions: std::collections::HashMap::new(),
-            roots: vec![],
-            initiator_sender: "owner".into(),
-            participant_message_counts: std::collections::HashMap::new(),
-            participant_last_seen: std::collections::HashMap::new(),
-            policy_definition: None,
-            suspended_at_ms: None,
-            accumulated_suspended_ms: 0,
-        }
+        Session::builder("s1", "macp.mode.handoff.v1", "owner")
+            .ttl_ms(60_000)
+            .participants(vec!["owner".into(), "target".into()])
+            .mode_version("1.0.0")
+            .configuration_version("config")
+            .policy_version("policy")
+            .build()
     }
 
     fn env(sender: &str, message_type: &str, payload: Vec<u8>) -> Envelope {
@@ -1152,6 +1164,85 @@ mod tests {
         let mut commit_env = env("owner", "Commitment", commitment_payload());
         commit_env.timestamp_unix_ms = offer_time + 200; // well past 100ms timeout
         let commit = mode.on_message(&session, &commit_env).unwrap();
+        assert!(matches!(commit, ModeResponse::PersistAndResolve { .. }));
+    }
+
+    fn auto_accept_policy() -> macp_core::policy::PolicyDefinition {
+        macp_core::policy::PolicyDefinition {
+            policy_id: "auto-accept".into(),
+            mode: "macp.mode.handoff.v1".into(),
+            description: "short timeout".into(),
+            rules: serde_json::json!({
+                "acceptance": { "implicit_accept_timeout_ms": 100 },
+                "commitment": { "authority": "initiator_only" }
+            }),
+            schema_version: 1,
+        }
+    }
+
+    /// Semantics rev >= 1: the implicit-accept timeout is measured against the
+    /// runtime acceptance clock, so an initiator post-dating the Commitment
+    /// envelope can no longer finalize an offer the target never accepted.
+    #[test]
+    fn implicit_accept_ignores_forged_envelope_timestamp_on_rev1() {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = base_session();
+        assert!(session.semantics_rev >= 1, "builder default is current rev");
+        session.participants = vec!["owner".into(), "target".into()];
+        session.policy_definition = Some(auto_accept_policy());
+        let result = mode
+            .on_session_start(&session, &env("owner", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+
+        let offer_time = 1000i64;
+        let mut offer_env = env("owner", "HandoffOffer", make_offer("h1", "target"));
+        offer_env.timestamp_unix_ms = offer_time;
+        let result = mode.on_message(&session, &offer_env).unwrap();
+        apply(&mut session, result);
+
+        // Initiator forges a far-future envelope timestamp, but the runtime's
+        // acceptance clock says only 50ms elapsed: no implicit accept, and the
+        // commitment is not ready (no accepted offer) -> rejected.
+        let mut commit_env = env("owner", "Commitment", commitment_payload());
+        commit_env.timestamp_unix_ms = offer_time + 1_000_000;
+        let ctx = macp_core::mode::MessageContext::new(offer_time + 50);
+        let err = mode.on_message_at(&session, &commit_env, &ctx).unwrap_err();
+        assert_eq!(err.to_string(), "InvalidPayload");
+
+        // With genuine elapsed acceptance time past the timeout, it fires.
+        let ctx = macp_core::mode::MessageContext::new(offer_time + 200);
+        let commit = mode.on_message_at(&session, &commit_env, &ctx).unwrap();
+        assert!(matches!(commit, ModeResponse::PersistAndResolve { .. }));
+    }
+
+    /// Legacy sessions (rev 0) keep the envelope-timestamp clock through the
+    /// kernel entry point, so pre-fix histories replay to the outcome they
+    /// were accepted with.
+    #[test]
+    fn implicit_accept_legacy_rev0_keeps_envelope_clock() {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = base_session();
+        session.semantics_rev = 0;
+        session.participants = vec!["owner".into(), "target".into()];
+        session.policy_definition = Some(auto_accept_policy());
+        let result = mode
+            .on_session_start(&session, &env("owner", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+
+        let offer_time = 1000i64;
+        let mut offer_env = env("owner", "HandoffOffer", make_offer("h1", "target"));
+        offer_env.timestamp_unix_ms = offer_time;
+        let result = mode.on_message(&session, &offer_env).unwrap();
+        apply(&mut session, result);
+
+        // Legacy semantics: the envelope timestamp drives the timeout even
+        // when the acceptance clock disagrees (as it did before the fix).
+        let mut commit_env = env("owner", "Commitment", commitment_payload());
+        commit_env.timestamp_unix_ms = offer_time + 200;
+        let ctx = macp_core::mode::MessageContext::new(offer_time + 10);
+        let commit = mode.on_message_at(&session, &commit_env, &ctx).unwrap();
         assert!(matches!(commit, ModeResponse::PersistAndResolve { .. }));
     }
 }

@@ -190,17 +190,20 @@ impl Runtime {
         self.session_lifecycle_bus.subscribe()
     }
 
-    /// RFC-MACP-0006-A1: Replay accepted envelopes from the session log for
-    /// passive subscribe. Returns `Incoming` log entries as reconstructed
-    /// `Envelope` values, starting from `after_sequence` (0-based log index).
+    /// RFC-MACP-0006 §3.2: Replay accepted envelopes from the session log for
+    /// passive subscribe, strictly after `after_sequence` (1-based accepted
+    /// ordinal, exclusive; 0 = from the start). `Err(base)` when the
+    /// requested range was discarded by log compaction — the caller must
+    /// surface an explicit error, not silently skip missing history.
     pub async fn get_session_envelopes_after(
         &self,
         session_id: &str,
         after_sequence: u64,
-    ) -> Vec<Envelope> {
-        self.log_store
+    ) -> Result<Vec<Envelope>, u64> {
+        Ok(self
+            .log_store
             .get_incoming_after(session_id, after_sequence)
-            .await
+            .await?
             .into_iter()
             .map(|(_idx, entry)| Envelope {
                 macp_version: if entry.macp_version.is_empty() {
@@ -220,7 +223,7 @@ impl Runtime {
                 },
                 payload: entry.raw_payload,
             })
-            .collect()
+            .collect())
     }
 
     fn publish_accepted_envelope(&self, env: &Envelope) {
@@ -229,10 +232,22 @@ impl Runtime {
         }
     }
 
-    fn make_incoming_entry(env: &Envelope) -> LogEntry {
+    /// Whether the session's bound policy requests info-level per-message
+    /// audit lines (`rules.audit.level == "info"`).
+    fn audit_verbose(session: &Session) -> bool {
+        session
+            .policy_definition
+            .as_ref()
+            .and_then(|p| p.rules.get("audit"))
+            .and_then(|a| a.get("level"))
+            .and_then(|l| l.as_str())
+            == Some("info")
+    }
+
+    fn make_incoming_entry(env: &Envelope, received_at_ms: i64) -> LogEntry {
         LogEntry {
             message_id: env.message_id.clone(),
-            received_at_ms: Utc::now().timestamp_millis(),
+            received_at_ms,
             sender: env.sender.clone(),
             message_type: env.message_type.clone(),
             raw_payload: env.payload.clone(),
@@ -241,6 +256,9 @@ impl Runtime {
             mode: env.mode.clone(),
             macp_version: env.macp_version.clone(),
             timestamp_unix_ms: env.timestamp_unix_ms,
+            bound_mode_version: None,
+            semantics_rev: 0,
+            compacted_incoming_ordinals: 0,
         }
     }
 
@@ -262,6 +280,9 @@ impl Runtime {
             mode: mode.into(),
             macp_version: "1.0".into(),
             timestamp_unix_ms: now,
+            bound_mode_version: None,
+            semantics_rev: 0,
+            compacted_incoming_ordinals: 0,
         }
     }
 
@@ -339,10 +360,17 @@ impl Runtime {
             validate_canonical_session_start_payload(&start_payload)?;
         }
 
-        // Validate mode_version matches the registered descriptor's version
-        if let Some(descriptor_version) = self.mode_registry.get_mode_version(mode_name) {
+        // Validate mode_version matches the registered descriptor's version.
+        // When the payload omits mode_version (only possible for non-strict
+        // extension modes), bind the descriptor's version instead of leaving the
+        // session bound to "" — an empty binding makes the Commitment version
+        // check vacuous (any commitment with mode_version "" would match).
+        // The bound value is recorded on the SessionStart log entry so replay
+        // uses the recorded binding, never the live registry.
+        let descriptor_version = self.mode_registry.get_mode_version(mode_name);
+        if let Some(descriptor_version) = &descriptor_version {
             if !start_payload.mode_version.is_empty()
-                && start_payload.mode_version != descriptor_version
+                && &start_payload.mode_version != descriptor_version
             {
                 tracing::warn!(
                     mode = mode_name,
@@ -353,11 +381,23 @@ impl Runtime {
                 return Err(MacpError::InvalidEnvelope);
             }
         }
+        let bound_mode_version: Option<String> = if start_payload.mode_version.is_empty() {
+            descriptor_version
+        } else {
+            None
+        };
+        let effective_mode_version = bound_mode_version
+            .clone()
+            .unwrap_or_else(|| start_payload.mode_version.clone());
 
         let ttl_ms = extract_ttl_ms(&start_payload)?;
 
-        let mut guard = self.registry.sessions.write().await;
-        if let Some(existing) = guard.get(&env.session_id) {
+        // Existing-session path: duplicate SessionStart handling. Take the
+        // shared handle under a brief map read, then check dedup under the
+        // session's own mutex (never await a session mutex while holding the
+        // map lock).
+        if let Some(existing) = self.registry.get_shared(&env.session_id).await {
+            let existing = existing.lock().await;
             if existing.seen_message_ids.contains(&env.message_id) {
                 return Ok(ProcessResult {
                     session_state: existing.state.clone(),
@@ -365,24 +405,6 @@ impl Runtime {
                 });
             }
             return Err(MacpError::SessionAlreadyExists);
-        }
-
-        // Enforce max_open_sessions atomically under the write lock to
-        // prevent TOCTOU races where concurrent SessionStart requests
-        // both pass a read-lock count check before either is inserted.
-        if let Some(max_open) = max_open_sessions {
-            let now = Utc::now().timestamp_millis();
-            let count = guard
-                .values()
-                .filter(|s| {
-                    s.initiator_sender == env.sender
-                        && s.state == SessionState::Open
-                        && now <= s.ttl_expiry
-                })
-                .count();
-            if count >= max_open {
-                return Err(MacpError::RateLimited);
-            }
         }
 
         // Resolve the governance policy for this session.
@@ -417,63 +439,125 @@ impl Runtime {
             accepted_at
         };
         let ttl_expiry = ttl_base.saturating_add(ttl_ms);
-        let session = Session {
-            session_id: env.session_id.clone(),
-            state: SessionState::Open,
-            ttl_expiry,
-            ttl_ms,
-            started_at_unix_ms: accepted_at,
-            resolution: None,
-            mode: mode_name.to_string(),
-            mode_state: vec![],
-            participants: start_payload.participants.clone(),
-            seen_message_ids: std::collections::HashSet::new(),
-            intent: start_payload.intent.clone(),
-            mode_version: start_payload.mode_version.clone(),
-            configuration_version: start_payload.configuration_version.clone(),
-            policy_version: effective_policy_version,
-            context_id: start_payload.context_id.clone(),
-            extensions: start_payload.extensions.clone(),
-            roots: start_payload.roots.clone(),
-            initiator_sender: env.sender.clone(),
-            participant_message_counts: std::collections::HashMap::new(),
-            participant_last_seen: std::collections::HashMap::new(),
-            policy_definition,
-            suspended_at_ms: None,
-            accumulated_suspended_ms: 0,
-        };
+        let session = Session::builder(env.session_id.clone(), mode_name, env.sender.clone())
+            .ttl_expiry(ttl_expiry)
+            .ttl_ms(ttl_ms)
+            .started_at_unix_ms(accepted_at)
+            .participants(start_payload.participants.clone())
+            .intent(start_payload.intent.clone())
+            .mode_version(effective_mode_version)
+            .configuration_version(start_payload.configuration_version.clone())
+            .policy_version(effective_policy_version)
+            .context_id(start_payload.context_id.clone())
+            .extensions(start_payload.extensions.clone())
+            .roots(start_payload.roots.clone())
+            .policy_definition(policy_definition)
+            .build();
 
         let response = mode.on_session_start(&session, env)?;
+        let semantics_rev = session.semantics_rev;
+
+        // Reserve the session id atomically (dedup + max_open TOCTOU safety),
+        // then do the storage I/O with the map lock RELEASED and only this
+        // session's mutex held — a slow fsync on one SessionStart no longer
+        // stalls every other session.
+        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(session));
+        // Lock our own reservation BEFORE publishing it, so any concurrent
+        // access to this session id blocks until start completes or rolls back.
+        let mut session_guard = shared
+            .clone()
+            .try_lock_owned()
+            .expect("freshly created mutex is uncontended");
+        {
+            let mut map = self.registry.sessions.write().await;
+            if map.contains_key(&env.session_id) {
+                // Lost a same-id race after the earlier existence check.
+                return Err(MacpError::SessionAlreadyExists);
+            }
+            if let Some(max_open) = max_open_sessions {
+                let now = Utc::now().timestamp_millis();
+                let mut count = 0usize;
+                for arc in map.values() {
+                    // Never await a session mutex under the map lock: a
+                    // locked entry is in-flight and therefore Open —
+                    // counting it is the conservative direction for a
+                    // rate limit.
+                    let counts = match arc.try_lock() {
+                        Ok(s) => {
+                            s.initiator_sender == env.sender
+                                && s.state == SessionState::Open
+                                && now <= s.ttl_expiry
+                        }
+                        Err(_) => true,
+                    };
+                    if counts {
+                        count += 1;
+                    }
+                }
+                if count >= max_open {
+                    return Err(MacpError::RateLimited);
+                }
+            }
+            map.insert(env.session_id.clone(), std::sync::Arc::clone(&shared));
+        }
+
+        // Roll back the reservation on any storage failure: poison the
+        // placeholder (non-Open) BEFORE removing it so a waiter that already
+        // cloned the Arc fails the OPEN gate instead of processing a message
+        // for a session whose SessionStart never committed.
+        let rollback = |runtime: &Self, session_guard: &mut Session| {
+            session_guard.state = SessionState::Expired;
+            let registry = std::sync::Arc::clone(&runtime.registry);
+            let sid = env.session_id.clone();
+            async move {
+                let mut map = registry.sessions.write().await;
+                map.remove(&sid);
+            }
+        };
 
         // 1. Create storage directory and write log entry (COMMIT POINT)
-        self.storage
+        if self
+            .storage
             .create_session_storage(&env.session_id)
             .await
-            .map_err(|_| MacpError::StorageFailed)?;
-        let incoming_entry = Self::make_incoming_entry(env);
-        self.storage
+            .is_err()
+        {
+            rollback(self, &mut session_guard).await;
+            return Err(MacpError::StorageFailed);
+        }
+        let mut incoming_entry = Self::make_incoming_entry(env, accepted_at);
+        incoming_entry.bound_mode_version = bound_mode_version;
+        incoming_entry.semantics_rev = semantics_rev;
+        if self
+            .storage
             .append_log_entry(&env.session_id, &incoming_entry)
             .await
-            .map_err(|_| MacpError::StorageFailed)?;
+            .is_err()
+        {
+            rollback(self, &mut session_guard).await;
+            return Err(MacpError::StorageFailed);
+        }
 
         // 2. Update in-memory caches
         self.log_store.create_session_log(&env.session_id).await;
         self.log_store.append(&env.session_id, incoming_entry).await;
 
-        let mut session = session;
-        session.seen_message_ids.insert(env.message_id.clone());
-        session.apply_mode_response(response);
+        session_guard
+            .seen_message_ids
+            .insert(env.message_id.clone());
+        session_guard.apply_mode_response(response);
 
-        let result_state = session.state.clone();
+        let result_state = session_guard.state.clone();
         // 3. Session save — fatal on SessionStart to ensure snapshot durability.
         // For subsequent messages, the log entry (COMMIT POINT) is already persisted
         // so snapshot failure is recoverable via replay.
-        if let Err(err) = self.storage.save_session(&session).await {
+        if let Err(err) = self.storage.save_session(&session_guard).await {
             tracing::error!(
-                session_id = %session.session_id,
+                session_id = %session_guard.session_id,
                 error = %err,
                 "failed to persist session snapshot at SessionStart"
             );
+            rollback(self, &mut session_guard).await;
             return Err(MacpError::StorageFailed);
         }
         self.metrics.record_session_start(mode_name);
@@ -483,7 +567,7 @@ impl Runtime {
             sender = %env.sender,
             "session started"
         );
-        guard.insert(env.session_id.clone(), session);
+        drop(session_guard);
         self.publish_accepted_envelope(env);
         let _ = self
             .session_lifecycle_bus
@@ -505,10 +589,19 @@ impl Runtime {
     /// 4. Transition to RESOLVED (session.apply_mode_response)
     /// 5. Reject subsequent messages (enforced by step 1 on next call)
     async fn process_message(&self, env: &Envelope) -> Result<ProcessResult, MacpError> {
-        let mut guard = self.registry.sessions.write().await;
-        let session = guard
-            .get_mut(&env.session_id)
+        // Per-session serialization (RFC-0001 §8.1): clone the shared handle
+        // under a brief map read, then hold ONLY this session's mutex across
+        // validate + append (fsync) + commit. Different sessions' appends
+        // proceed in parallel; the same session's appends stay strictly
+        // ordered (which also keeps RocksDB's per-session next_seq
+        // read-modify-write safe).
+        let shared = self
+            .registry
+            .get_shared(&env.session_id)
+            .await
             .ok_or(MacpError::UnknownSession)?;
+        let mut session_guard = shared.lock().await;
+        let session = &mut *session_guard;
 
         // Per-message kernel invariants (dedup, mode-binding, TTL, the monotonic
         // OPEN gate) live in `macp_modes::step` so any consumer of the
@@ -543,10 +636,17 @@ impl Runtime {
             .get_mode(&session.mode)
             .ok_or(MacpError::UnknownMode)?;
         mode.authorize_sender(session, env)?;
-        let response = mode.on_message(session, env)?;
+        // One acceptance clock for both the mode call and the log entry, so
+        // replay (which re-reads received_at_ms) observes the identical time.
+        let accepted_at_ms = Utc::now().timestamp_millis();
+        let response = mode.on_message_at(
+            session,
+            env,
+            &macp_core::mode::MessageContext::new(accepted_at_ms),
+        )?;
 
         // 1. COMMIT POINT: write log entry to disk
-        let incoming_entry = Self::make_incoming_entry(env);
+        let incoming_entry = Self::make_incoming_entry(env, accepted_at_ms);
         self.storage
             .append_log_entry(&env.session_id, &incoming_entry)
             .await
@@ -563,13 +663,27 @@ impl Runtime {
             self.metrics.record_commitment_accepted(&session.mode);
         }
 
-        tracing::debug!(
-            session_id = %env.session_id,
-            message_type = %env.message_type,
-            sender = %env.sender,
-            state = ?result_state,
-            "message accepted"
-        );
+        // Policy-driven audit verbosity (E3b): a bound policy may request
+        // per-message audit lines at info level via an `audit.level` rules
+        // block ("info"); default stays debug. Mode rule schemas ignore
+        // unknown blocks, so `audit` composes with any mode's rules.
+        if Self::audit_verbose(session) {
+            tracing::info!(
+                session_id = %env.session_id,
+                message_type = %env.message_type,
+                sender = %env.sender,
+                state = ?result_state,
+                "message accepted (audit)"
+            );
+        } else {
+            tracing::debug!(
+                session_id = %env.session_id,
+                message_type = %env.message_type,
+                sender = %env.sender,
+                state = ?result_state,
+                "message accepted"
+            );
+        }
 
         if result_state == SessionState::Resolved {
             self.metrics.record_session_resolved(&session.mode);
@@ -630,20 +744,16 @@ impl Runtime {
     }
 
     pub async fn get_session_checked(&self, session_id: &str) -> Option<Session> {
-        let mut guard = self.registry.sessions.write().await;
-        let changed = if let Some(session) = guard.get_mut(session_id) {
-            self.maybe_expire_session(session_id, session)
-                .await
-                .unwrap_or(false)
-        } else {
-            return None;
-        };
+        let shared = self.registry.get_shared(session_id).await?;
+        let mut session = shared.lock().await;
+        let changed = self
+            .maybe_expire_session(session_id, &mut session)
+            .await
+            .unwrap_or(false);
         if changed {
-            if let Some(session) = guard.get(session_id) {
-                self.save_session_to_storage(session).await;
-            }
+            self.save_session_to_storage(&session).await;
         }
-        guard.get(session_id).cloned()
+        Some(session.clone())
     }
 
     /// Cancel a session. The `cancelled_by` parameter MUST be the authenticated
@@ -655,8 +765,13 @@ impl Runtime {
         reason: &str,
         cancelled_by: &str,
     ) -> Result<ProcessResult, MacpError> {
-        let mut guard = self.registry.sessions.write().await;
-        let session = guard.get_mut(session_id).ok_or(MacpError::UnknownSession)?;
+        let shared = self
+            .registry
+            .get_shared(session_id)
+            .await
+            .ok_or(MacpError::UnknownSession)?;
+        let mut session_guard = shared.lock().await;
+        let session = &mut *session_guard;
 
         self.maybe_expire_session(session_id, session).await?;
 
@@ -718,8 +833,13 @@ impl Runtime {
         reason: &str,
         suspended_by: &str,
     ) -> Result<ProcessResult, MacpError> {
-        let mut guard = self.registry.sessions.write().await;
-        let session = guard.get_mut(session_id).ok_or(MacpError::UnknownSession)?;
+        let shared = self
+            .registry
+            .get_shared(session_id)
+            .await
+            .ok_or(MacpError::UnknownSession)?;
+        let mut session_guard = shared.lock().await;
+        let session = &mut *session_guard;
 
         self.maybe_expire_session(session_id, session).await?;
         if session.state != SessionState::Open {
@@ -767,8 +887,13 @@ impl Runtime {
         reason: &str,
         resumed_by: &str,
     ) -> Result<ProcessResult, MacpError> {
-        let mut guard = self.registry.sessions.write().await;
-        let session = guard.get_mut(session_id).ok_or(MacpError::UnknownSession)?;
+        let shared = self
+            .registry
+            .get_shared(session_id)
+            .await
+            .ok_or(MacpError::UnknownSession)?;
+        let mut session_guard = shared.lock().await;
+        let session = &mut *session_guard;
 
         if session.state != SessionState::Suspended {
             return Err(MacpError::SessionNotOpen);
@@ -829,10 +954,42 @@ impl Runtime {
     /// Best-effort log compaction for terminal sessions.
     /// Returns `true` if compaction succeeded, `false` if skipped or failed.
     async fn maybe_compact_log(&self, session_id: &str, session: &Session) -> bool {
-        match crate::storage::compaction::compact_session_log(&*self.storage, session_id, session)
-            .await
+        // Ordinal accounting for the sequence contract: the checkpoint must
+        // record every accepted ordinal it discards, including any base from
+        // a prior compaction recorded in the current log.
+        let discarded = match self.log_store.get_log(session_id).await {
+            Some(entries) => {
+                let prior_base: u64 = entries
+                    .iter()
+                    .filter(|e| e.entry_kind == EntryKind::Checkpoint)
+                    .map(|e| e.compacted_incoming_ordinals)
+                    .max()
+                    .unwrap_or(0);
+                prior_base
+                    + entries
+                        .iter()
+                        .filter(|e| e.entry_kind == EntryKind::Incoming)
+                        .count() as u64
+            }
+            None => 0,
+        };
+        match crate::storage::compaction::compact_session_log(
+            &*self.storage,
+            session_id,
+            session,
+            discarded,
+        )
+        .await
         {
-            Ok(()) => true,
+            Ok(checkpoint) => {
+                // Keep the in-memory log in step with storage — previously
+                // only disk was rewritten, so memory and disk diverged and
+                // post-restart passive-subscribe history vanished silently.
+                self.log_store
+                    .replace_session_log(session_id, vec![checkpoint])
+                    .await;
+                true
+            }
             Err(e) => {
                 tracing::debug!(
                     session_id,
@@ -867,6 +1024,9 @@ impl Runtime {
             mode: session.mode.clone(),
             macp_version: String::new(),
             timestamp_unix_ms: now,
+            bound_mode_version: None,
+            semantics_rev: 0,
+            compacted_incoming_ordinals: 0,
         };
         if let Err(e) = self.storage.append_log_entry(session_id, &checkpoint).await {
             tracing::warn!(session_id, error = %e, "failed to write forced checkpoint");
@@ -903,76 +1063,157 @@ impl Runtime {
     /// stale sessions without waiting for the next incoming message.
     pub async fn cleanup_expired_sessions(&self) {
         let now = Utc::now().timestamp_millis();
-        let mut guard = self.registry.sessions.write().await;
-        let expired_ids: Vec<String> = guard
-            .iter()
-            .filter(|(_, s)| s.state == SessionState::Open && now > s.ttl_expiry)
-            .map(|(id, _)| id.clone())
-            .collect();
+        // Snapshot the shared handles under a brief map read; never hold the
+        // map lock across per-session locks or storage I/O. Each session is
+        // re-checked under its own mutex (it may have been touched since the
+        // snapshot).
+        let candidates: Vec<(String, crate::registry::SharedSession)> = {
+            let guard = self.registry.sessions.read().await;
+            guard
+                .iter()
+                .map(|(id, arc)| (id.clone(), std::sync::Arc::clone(arc)))
+                .collect()
+        };
 
-        for session_id in &expired_ids {
-            if let Some(session) = guard.get_mut(session_id) {
-                if session.state != SessionState::Open || now <= session.ttl_expiry {
-                    continue;
-                }
-                let entry = Self::make_internal_entry("TtlExpired", b"", session_id, &session.mode);
-                if let Err(e) = self.storage.append_log_entry(session_id, &entry).await {
-                    tracing::warn!(
-                        session_id,
-                        error = %e,
-                        "failed to write TTL expiry during cleanup"
-                    );
-                    continue;
-                }
-                self.log_store.append(session_id, entry).await;
-                session.state = SessionState::Expired;
-                self.metrics.record_session_expired(&session.mode);
-                self.save_session_to_storage(session).await;
-                if !self.maybe_compact_log(session_id, session).await {
-                    self.force_insert_checkpoint(session_id, session).await;
-                }
-                tracing::info!(session_id, "session expired via background cleanup");
-                let _ = self
-                    .session_lifecycle_bus
-                    .send(SessionLifecycleEvent::Expired {
-                        session_id: session_id.clone(),
-                    });
+        let mut expired_count = 0usize;
+        for (session_id, shared) in candidates {
+            let mut session = shared.lock().await;
+            if session.state != SessionState::Open || now <= session.ttl_expiry {
+                continue;
             }
+            let entry = Self::make_internal_entry("TtlExpired", b"", &session_id, &session.mode);
+            if let Err(e) = self.storage.append_log_entry(&session_id, &entry).await {
+                tracing::warn!(
+                    session_id,
+                    error = %e,
+                    "failed to write TTL expiry during cleanup"
+                );
+                continue;
+            }
+            self.log_store.append(&session_id, entry).await;
+            session.state = SessionState::Expired;
+            self.metrics.record_session_expired(&session.mode);
+            self.save_session_to_storage(&session).await;
+            if !self.maybe_compact_log(&session_id, &session).await {
+                self.force_insert_checkpoint(&session_id, &session).await;
+            }
+            expired_count += 1;
+            tracing::info!(session_id = %session_id, "session expired via background cleanup");
+            let _ = self
+                .session_lifecycle_bus
+                .send(SessionLifecycleEvent::Expired {
+                    session_id: session_id.clone(),
+                });
         }
 
-        if !expired_ids.is_empty() {
-            tracing::info!(
-                count = expired_ids.len(),
-                "background cleanup expired sessions"
-            );
+        if expired_count > 0 {
+            tracing::info!(count = expired_count, "background cleanup expired sessions");
         }
     }
 
-    /// Evict resolved/expired sessions older than `retention_secs` from memory.
-    /// Sessions remain queryable from durable storage even after eviction.
+    /// Delete terminal sessions' durable data older than `retention_secs`
+    /// (opt-in via `MACP_SESSION_DISK_RETENTION_SECS`). Before this existed,
+    /// `storage.delete_session` had no callers at all: disk grew without
+    /// bound and every restart reloaded every session ever completed.
+    /// Enumerates STORAGE (not memory — eviction may already have dropped the
+    /// registry entry), deletes the session's snapshot+log, and clears any
+    /// in-memory remnants. Returns the number of sessions deleted.
+    pub async fn gc_disk_sessions(&self, retention_secs: u64) -> usize {
+        let now = Utc::now().timestamp_millis();
+        let cutoff = now - (retention_secs as i64 * 1000);
+        let ids = match self.storage.list_session_ids().await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(error = %e, "disk GC: cannot list sessions");
+                return 0;
+            }
+        };
+        let mut removed = 0usize;
+        for id in ids {
+            // Prefer the in-memory state when present (cheap + current);
+            // fall back to the stored snapshot for evicted sessions.
+            let eligible = if let Some(shared) = self.registry.get_shared(&id).await {
+                let s = shared.lock().await;
+                s.state.is_terminal() && s.started_at_unix_ms < cutoff
+            } else {
+                match self.storage.load_session(&id).await {
+                    Ok(Some(s)) => s.state.is_terminal() && s.started_at_unix_ms < cutoff,
+                    // No snapshot (or unreadable): leave it for operator
+                    // inspection rather than guessing.
+                    _ => false,
+                }
+            };
+            if !eligible {
+                continue;
+            }
+            match self.storage.delete_session(&id).await {
+                Ok(()) => {
+                    {
+                        let mut guard = self.registry.sessions.write().await;
+                        guard.remove(&id);
+                    }
+                    self.log_store.remove_session_log(&id).await;
+                    let _ = self.stream_bus.remove_if_unused(&id);
+                    removed += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(session_id = %id, error = %e, "disk GC: delete failed");
+                }
+            }
+        }
+        if removed > 0 {
+            tracing::info!(count = removed, "disk GC removed terminal sessions");
+        }
+        removed
+    }
+
+    /// Evict resolved/expired sessions older than `retention_secs` from
+    /// memory: the registry entry, the in-memory log cache, AND the stream
+    /// broadcast channel (all three previously grew for the process lifetime;
+    /// the log cache and stream bus were never evicted at all). Sessions
+    /// remain queryable from durable storage after eviction.
     pub async fn evict_stale_sessions(&self, retention_secs: u64) {
         let now = Utc::now().timestamp_millis();
         let cutoff = now - (retention_secs as i64 * 1000);
-        let mut guard = self.registry.sessions.write().await;
-        let evict_ids: Vec<String> = guard
-            .iter()
-            .filter(|(_, s)| {
-                matches!(s.state, SessionState::Resolved | SessionState::Expired)
-                    && s.started_at_unix_ms < cutoff
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
 
+        let candidates: Vec<(String, crate::registry::SharedSession)> = {
+            let guard = self.registry.sessions.read().await;
+            guard
+                .iter()
+                .map(|(id, arc)| (id.clone(), std::sync::Arc::clone(arc)))
+                .collect()
+        };
+        let mut evict_ids = Vec::new();
+        for (id, shared) in candidates {
+            let session = shared.lock().await;
+            if matches!(
+                session.state,
+                SessionState::Resolved | SessionState::Expired | SessionState::Cancelled
+            ) && session.started_at_unix_ms < cutoff
+            {
+                evict_ids.push(id);
+            }
+        }
+
+        if evict_ids.is_empty() {
+            return;
+        }
+        {
+            let mut guard = self.registry.sessions.write().await;
+            for id in &evict_ids {
+                guard.remove(id);
+            }
+        }
         for id in &evict_ids {
-            guard.remove(id);
+            self.log_store.remove_session_log(id).await;
+            // Left in place if a subscriber is still attached; retried on the
+            // next sweep once receivers drop.
+            let _ = self.stream_bus.remove_if_unused(id);
         }
-
-        if !evict_ids.is_empty() {
-            tracing::info!(
-                count = evict_ids.len(),
-                "evicted stale sessions from memory"
-            );
-        }
+        tracing::info!(
+            count = evict_ids.len(),
+            "evicted stale sessions from memory (registry + log cache + stream bus)"
+        );
     }
 }
 
@@ -2027,5 +2268,165 @@ mod tests {
             payload: vec![],
         };
         rt.process_signal(&signal).await.unwrap();
+    }
+
+    /// Freeze invariant: CommitmentPayload version fields must match the
+    /// session-bound versions — for extension modes too. When a non-strict ext
+    /// mode's SessionStart omits mode_version, the runtime binds the registered
+    /// descriptor's version; a Commitment carrying "" must no longer match
+    /// vacuously.
+    #[tokio::test]
+    async fn ext_mode_empty_version_binds_descriptor_version() {
+        let rt = make_runtime();
+        rt.register_extension(ModeDescriptor {
+            mode: "ext.dyn.v1".into(),
+            mode_version: "2.5.0".into(),
+            message_types: vec!["SessionStart".into(), "Note".into(), "Commitment".into()],
+            terminal_message_types: vec!["Commitment".into()],
+            ..Default::default()
+        })
+        .unwrap();
+
+        let sid = new_sid();
+        let payload = SessionStartPayload {
+            participants: vec!["alice".into()],
+            configuration_version: "cfg-1".into(),
+            ttl_ms: 60_000,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        rt.process(
+            &env("ext.dyn.v1", "SessionStart", "m1", &sid, "alice", payload),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // The session is bound to the descriptor's version, not "".
+        let session = rt.get_session_checked(&sid).await.unwrap();
+        assert_eq!(session.mode_version, "2.5.0");
+
+        // Commitment with empty mode_version: rejected (no vacuous match).
+        let bad = CommitmentPayload {
+            commitment_id: "c1".into(),
+            action: "work.completed".into(),
+            authority_scope: "test".into(),
+            reason: "done".into(),
+            mode_version: String::new(),
+            policy_version: "policy.default".into(),
+            configuration_version: "cfg-1".into(),
+            outcome_positive: true,
+            supersedes: None,
+        }
+        .encode_to_vec();
+        let err = rt
+            .process(
+                &env("ext.dyn.v1", "Commitment", "m2", &sid, "alice", bad),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "InvalidPayload");
+
+        // Commitment echoing the bound descriptor version: accepted, resolves.
+        let good = CommitmentPayload {
+            commitment_id: "c1".into(),
+            action: "work.completed".into(),
+            authority_scope: "test".into(),
+            reason: "done".into(),
+            mode_version: "2.5.0".into(),
+            policy_version: "policy.default".into(),
+            configuration_version: "cfg-1".into(),
+            outcome_positive: true,
+            supersedes: None,
+        }
+        .encode_to_vec();
+        let result = rt
+            .process(
+                &env("ext.dyn.v1", "Commitment", "m3", &sid, "alice", good),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.session_state, SessionState::Resolved);
+    }
+
+    /// The binding must be recorded on the SessionStart log entry (replay reads
+    /// it from there), and only when the payload actually omitted the version.
+    #[tokio::test]
+    async fn ext_mode_binding_recorded_on_session_start_log_entry() {
+        let rt = make_runtime();
+        rt.register_extension(ModeDescriptor {
+            mode: "ext.dyn2.v1".into(),
+            mode_version: "3.0.0".into(),
+            message_types: vec!["SessionStart".into(), "Commitment".into()],
+            terminal_message_types: vec!["Commitment".into()],
+            ..Default::default()
+        })
+        .unwrap();
+
+        let sid = new_sid();
+        let payload = SessionStartPayload {
+            participants: vec!["alice".into()],
+            configuration_version: "cfg-1".into(),
+            ttl_ms: 60_000,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        rt.process(
+            &env("ext.dyn2.v1", "SessionStart", "m1", &sid, "alice", payload),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let log = rt.log_store.get_log(&sid).await.unwrap();
+        assert_eq!(log[0].message_type, "SessionStart");
+        assert_eq!(log[0].bound_mode_version.as_deref(), Some("3.0.0"));
+
+        // A payload that carries the version explicitly records no binding.
+        let sid2 = new_sid();
+        let payload2 = SessionStartPayload {
+            participants: vec!["alice".into()],
+            mode_version: "3.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            ttl_ms: 60_000,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        rt.process(
+            &env(
+                "ext.dyn2.v1",
+                "SessionStart",
+                "m1",
+                &sid2,
+                "alice",
+                payload2,
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+        let log2 = rt.log_store.get_log(&sid2).await.unwrap();
+        assert_eq!(log2[0].bound_mode_version, None);
+    }
+
+    #[test]
+    fn audit_verbosity_reads_policy_rules() {
+        let mut session = Session::builder("s1", "macp.mode.decision.v1", "a").build();
+        assert!(!Runtime::audit_verbose(&session));
+
+        session.policy_definition = Some(macp_core::policy::PolicyDefinition {
+            policy_id: "policy.test.audit".into(),
+            mode: "*".into(),
+            description: "audited".into(),
+            rules: serde_json::json!({ "audit": { "level": "info" } }),
+            schema_version: 1,
+        });
+        assert!(Runtime::audit_verbose(&session));
+
+        session.policy_definition.as_mut().unwrap().rules =
+            serde_json::json!({ "audit": { "level": "debug" } });
+        assert!(!Runtime::audit_verbose(&session));
     }
 }

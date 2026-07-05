@@ -123,7 +123,14 @@ fn replay_entry(
             }
 
             mode.authorize_sender(session, &replay_env)?;
-            let response = mode.on_message(session, &replay_env)?;
+            // The acceptance clock replays as the recorded `received_at_ms`
+            // (the same value the live path passed), never wall-clock.
+            let ctx = macp_core::mode::MessageContext::new(if entry.received_at_ms != 0 {
+                entry.received_at_ms
+            } else {
+                entry.timestamp_unix_ms
+            });
+            let response = mode.on_message_at(session, &replay_env, &ctx)?;
             session.apply_mode_response(response);
             if !replay_env.message_id.is_empty() {
                 session.seen_message_ids.insert(replay_env.message_id);
@@ -164,6 +171,54 @@ fn replay_entry(
         }
     }
     Ok(())
+}
+
+/// Warn-only replay/snapshot divergence check (D7, promoted from
+/// plans/defer/replay_validation.md). The log is authoritative and snapshots
+/// are best-effort, so a mismatch is diagnostic, never fatal — but state or
+/// dedup-count divergence between "what the log replays to" and "what the
+/// snapshot recorded" is exactly the class of bug the determinism guarantees
+/// (RFC-MACP-0003) forbid, so it must be visible. Returns the number of
+/// mismatched fields (0 = consistent).
+pub fn validate_replay_consistency(
+    session_id: &str,
+    replayed: &Session,
+    snapshot: &Session,
+) -> u32 {
+    let mut mismatches = 0u32;
+    if replayed.state != snapshot.state {
+        mismatches += 1;
+        tracing::warn!(
+            session_id,
+            replayed_state = ?replayed.state,
+            snapshot_state = ?snapshot.state,
+            "replay/snapshot state mismatch"
+        );
+    }
+    if replayed.seen_message_ids.len() != snapshot.seen_message_ids.len() {
+        mismatches += 1;
+        tracing::warn!(
+            session_id,
+            replayed_dedup = replayed.seen_message_ids.len(),
+            snapshot_dedup = snapshot.seen_message_ids.len(),
+            "replay/snapshot dedup count mismatch"
+        );
+    }
+    if replayed.participants != snapshot.participants {
+        mismatches += 1;
+        tracing::warn!(session_id, "replay/snapshot participants mismatch");
+    }
+    if replayed.mode_version != snapshot.mode_version
+        || replayed.configuration_version != snapshot.configuration_version
+        || replayed.policy_version != snapshot.policy_version
+    {
+        mismatches += 1;
+        tracing::warn!(
+            session_id,
+            "replay/snapshot bound-version mismatch (mode/configuration/policy)"
+        );
+    }
+    mismatches
 }
 
 /// Full replay from the SessionStart entry.
@@ -231,35 +286,37 @@ fn replay_from_start(
         payload: start_entry.raw_payload.clone(),
     };
 
-    let mut session = Session {
-        session_id: session_id.into(),
-        state: SessionState::Open,
-        ttl_expiry,
-        ttl_ms,
-        started_at_unix_ms,
-        resolution: None,
-        mode: mode_name.to_string(),
-        mode_state: vec![],
-        participants: start_payload.participants.clone(),
-        seen_message_ids: std::collections::HashSet::new(),
-        intent: start_payload.intent.clone(),
-        mode_version: start_payload.mode_version.clone(),
-        configuration_version: start_payload.configuration_version.clone(),
-        policy_version: start_payload.policy_version.clone(),
-        context_id: start_payload.context_id.clone(),
-        extensions: start_payload.extensions.clone(),
-        roots: start_payload.roots.clone(),
-        initiator_sender: start_entry.sender.clone(),
-        participant_message_counts: std::collections::HashMap::new(),
-        participant_last_seen: std::collections::HashMap::new(),
-        policy_definition: if !start_payload.policy_version.is_empty() {
+    let mut session = Session::builder(session_id, mode_name, start_entry.sender.clone())
+        // Replay under the semantics revision the session was accepted with
+        // (legacy entries record 0 via serde default).
+        .semantics_rev(start_entry.semantics_rev)
+        .ttl_expiry(ttl_expiry)
+        .ttl_ms(ttl_ms)
+        .started_at_unix_ms(started_at_unix_ms)
+        .participants(start_payload.participants.clone())
+        .intent(start_payload.intent.clone())
+        // Use the binding recorded at acceptance time when present (extension
+        // modes whose SessionStart payload omitted mode_version). Never re-derive
+        // from the live registry — dynamic registrations may have changed or be
+        // absent after restart. Legacy entries (None) keep the payload's value,
+        // preserving their original (possibly empty) binding semantics.
+        .mode_version(
+            start_entry
+                .bound_mode_version
+                .clone()
+                .unwrap_or_else(|| start_payload.mode_version.clone()),
+        )
+        .configuration_version(start_payload.configuration_version.clone())
+        .policy_version(start_payload.policy_version.clone())
+        .context_id(start_payload.context_id.clone())
+        .extensions(start_payload.extensions.clone())
+        .roots(start_payload.roots.clone())
+        .policy_definition(if !start_payload.policy_version.is_empty() {
             policy_registry.and_then(|pr| pr.resolve(&start_payload.policy_version).ok())
         } else {
             None
-        },
-        suspended_at_ms: None,
-        accumulated_suspended_ms: 0,
-    };
+        })
+        .build();
 
     // 4. Call mode.on_session_start(), apply response
     let response = mode.on_session_start(&session, &env)?;
@@ -320,6 +377,9 @@ mod tests {
             mode: "macp.mode.decision.v1".into(),
             macp_version: "1.0".into(),
             timestamp_unix_ms: received_at_ms,
+            bound_mode_version: None,
+            semantics_rev: 0,
+            compacted_incoming_ordinals: 0,
         }
     }
 
@@ -335,6 +395,9 @@ mod tests {
             mode: "macp.mode.decision.v1".into(),
             macp_version: "1.0".into(),
             timestamp_unix_ms: received_at_ms,
+            bound_mode_version: None,
+            semantics_rev: 0,
+            compacted_incoming_ordinals: 0,
         }
     }
 
@@ -539,6 +602,9 @@ mod tests {
             mode: "macp.mode.decision.v1".into(),
             macp_version: "1.0".into(),
             timestamp_unix_ms: 3000,
+            bound_mode_version: None,
+            semantics_rev: 0,
+            compacted_incoming_ordinals: 0,
         };
 
         // A vote after the checkpoint
@@ -579,5 +645,122 @@ mod tests {
         let session = replay_session("s1", &entries, &registry, None).unwrap();
         assert_eq!(session.state, SessionState::Open);
         assert!(session.seen_message_ids.contains("m1"));
+    }
+
+    fn ext_registry_with_dyn_mode(version: &str) -> ModeRegistry {
+        let registry = make_registry();
+        registry
+            .register_extension(macp_pb::pb::ModeDescriptor {
+                mode: "ext.dyn.v1".into(),
+                mode_version: version.into(),
+                message_types: vec!["SessionStart".into(), "Commitment".into()],
+                terminal_message_types: vec!["Commitment".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        registry
+    }
+
+    fn ext_start_entry(bound_mode_version: Option<String>) -> LogEntry {
+        // Non-strict ext SessionStart whose payload omits mode_version.
+        let payload = SessionStartPayload {
+            participants: vec!["alice".into()],
+            configuration_version: "cfg-1".into(),
+            ttl_ms: 60_000,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        LogEntry {
+            message_id: "m1".into(),
+            received_at_ms: 1000,
+            sender: "alice".into(),
+            message_type: "SessionStart".into(),
+            raw_payload: payload,
+            entry_kind: EntryKind::Incoming,
+            session_id: "s1".into(),
+            mode: "ext.dyn.v1".into(),
+            macp_version: "1.0".into(),
+            timestamp_unix_ms: 1000,
+            bound_mode_version,
+            semantics_rev: 0,
+            compacted_incoming_ordinals: 0,
+        }
+    }
+
+    /// Replay uses the binding recorded at acceptance time — never the live
+    /// registry. The registry here deliberately carries a *different* version
+    /// than the recorded binding to prove no re-derivation happens.
+    #[test]
+    fn replay_uses_recorded_mode_version_binding() {
+        let registry = ext_registry_with_dyn_mode("9.9.9");
+        let entries = vec![ext_start_entry(Some("2.5.0".into()))];
+        let session = replay_session("s1", &entries, &registry, None).unwrap();
+        assert_eq!(session.mode_version, "2.5.0");
+    }
+
+    /// Legacy logs (entries recorded before the binding existed) keep their
+    /// original empty-version binding — the vacuous-match semantics they were
+    /// accepted under. Migration rule: new semantics apply to new sessions only.
+    #[test]
+    fn replay_legacy_entry_without_binding_keeps_empty_version() {
+        let registry = ext_registry_with_dyn_mode("9.9.9");
+        let entries = vec![ext_start_entry(None)];
+        let session = replay_session("s1", &entries, &registry, None).unwrap();
+        assert_eq!(session.mode_version, "");
+    }
+
+    /// A legacy log entry serialized without the field must deserialize (serde
+    /// default) and replay under legacy semantics.
+    #[test]
+    fn legacy_log_entry_json_without_binding_field_deserializes() {
+        let json = serde_json::json!({
+            "message_id": "m1",
+            "received_at_ms": 1000,
+            "sender": "alice",
+            "message_type": "SessionStart",
+            "raw_payload": [],
+            "entry_kind": "Incoming",
+            "session_id": "s1",
+            "mode": "ext.dyn.v1",
+            "macp_version": "1.0",
+            "timestamp_unix_ms": 1000
+        });
+        let entry: LogEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(entry.bound_mode_version, None);
+        // Legacy entries also carry no semantics revision: rev 0 (legacy
+        // acceptance-time behavior) via serde default.
+        assert_eq!(entry.semantics_rev, 0);
+    }
+
+    /// Replay binds the session to the semantics revision recorded at
+    /// acceptance: legacy entries (rev 0) must NOT be upgraded to the current
+    /// revision, or their acceptance-time behavior (e.g. the handoff
+    /// implicit-accept clock) would change under replay.
+    #[test]
+    fn replay_preserves_recorded_semantics_rev() {
+        let registry = ext_registry_with_dyn_mode("1.0.0");
+        let entries = vec![ext_start_entry(Some("1.0.0".into()))]; // semantics_rev: 0
+        let session = replay_session("s1", &entries, &registry, None).unwrap();
+        assert_eq!(session.semantics_rev, 0);
+        assert_ne!(
+            session.semantics_rev,
+            macp_core::session::CURRENT_SEMANTICS_REV
+        );
+    }
+
+    #[test]
+    fn replay_consistency_flags_state_and_dedup_divergence() {
+        let a = Session::builder("s1", "macp.mode.decision.v1", "agent://a")
+            .mode_version("1.0.0")
+            .configuration_version("cfg-1")
+            .build();
+        // Identical sessions: consistent.
+        assert_eq!(validate_replay_consistency("s1", &a, &a.clone()), 0);
+
+        // Diverged state + dedup count: two mismatches, warn-only.
+        let mut b = a.clone();
+        b.state = SessionState::Resolved;
+        b.seen_message_ids.insert("m1".into());
+        assert_eq!(validate_replay_consistency("s1", &a, &b), 2);
     }
 }

@@ -1,5 +1,6 @@
 use crate::mode::util::{
-    check_commitment_authority, is_declared_participant, validate_commitment_payload_for_session,
+    check_commitment_authority, enforce_commitment_policy, is_declared_participant,
+    validate_commitment_payload_for_session,
 };
 use crate::mode::{Mode, ModeResponse};
 use macp_core::error::MacpError;
@@ -216,44 +217,37 @@ impl Mode for QuorumMode {
                 Ok(ModeResponse::PersistState(Self::encode_state(&state)))
             }
             "Commitment" => {
-                validate_commitment_payload_for_session(session, &env.payload)?;
+                let commitment = validate_commitment_payload_for_session(session, &env.payload)?;
                 if !Self::commitment_ready(session, &state) {
                     return Err(MacpError::InvalidPayload);
                 }
-                // Evaluate governance policy if one is bound to the session.
-                if let Some(ref policy) = session.policy_definition {
-                    let approve_count = state
-                        .ballots
-                        .values()
-                        .filter(|b| b.choice == BallotChoice::Approve)
-                        .count();
-                    let reject_count = state
-                        .ballots
-                        .values()
-                        .filter(|b| b.choice == BallotChoice::Reject)
-                        .count();
-                    let abstain_count = state
-                        .ballots
-                        .values()
-                        .filter(|b| b.choice == BallotChoice::Abstain)
-                        .count();
-                    let decision = self.evaluator.evaluate_quorum_commitment(
-                        policy,
+                // Governance policy gate (shared): fail closed, only
+                // an explicit Allow proceeds.
+                let approve_count = state
+                    .ballots
+                    .values()
+                    .filter(|b| b.choice == BallotChoice::Approve)
+                    .count();
+                let reject_count = state
+                    .ballots
+                    .values()
+                    .filter(|b| b.choice == BallotChoice::Reject)
+                    .count();
+                let abstain_count = state
+                    .ballots
+                    .values()
+                    .filter(|b| b.choice == BallotChoice::Abstain)
+                    .count();
+                enforce_commitment_policy(
+                    session,
+                    macp_core::policy::CommitmentMode::Quorum {
                         approve_count,
                         reject_count,
                         abstain_count,
-                        session.participants.len(),
-                    );
-                    if let macp_core::policy::PolicyDecision::Deny { reasons } = decision {
-                        tracing::warn!(
-                            session_id = %session.session_id,
-                            policy_id = %policy.policy_id,
-                            reasons = ?reasons,
-                            "policy denied commitment"
-                        );
-                        return Err(MacpError::PolicyDenied { reasons });
-                    }
-                }
+                    },
+                    commitment.outcome_positive,
+                    &*self.evaluator,
+                )?;
                 Ok(ModeResponse::PersistAndResolve {
                     state: Self::encode_state(&state),
                     resolution: env.payload.clone(),
@@ -267,36 +261,17 @@ impl Mode for QuorumMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use macp_core::session::{Session, SessionState};
+    use macp_core::session::Session;
     use macp_pb::pb::CommitmentPayload;
-    use std::collections::HashSet;
 
     fn base_session() -> Session {
-        Session {
-            session_id: "s1".into(),
-            state: SessionState::Open,
-            ttl_expiry: i64::MAX,
-            ttl_ms: 60_000,
-            started_at_unix_ms: 0,
-            resolution: None,
-            mode: "macp.mode.quorum.v1".into(),
-            mode_state: vec![],
-            participants: vec!["alice".into(), "bob".into(), "carol".into()],
-            seen_message_ids: HashSet::new(),
-            intent: String::new(),
-            mode_version: "1.0.0".into(),
-            configuration_version: "config".into(),
-            policy_version: "policy".into(),
-            context_id: String::new(),
-            extensions: std::collections::HashMap::new(),
-            roots: vec![],
-            initiator_sender: "coordinator".into(),
-            participant_message_counts: std::collections::HashMap::new(),
-            participant_last_seen: std::collections::HashMap::new(),
-            policy_definition: None,
-            suspended_at_ms: None,
-            accumulated_suspended_ms: 0,
-        }
+        Session::builder("s1", "macp.mode.quorum.v1", "coordinator")
+            .ttl_ms(60_000)
+            .participants(vec!["alice".into(), "bob".into(), "carol".into()])
+            .mode_version("1.0.0")
+            .configuration_version("config")
+            .policy_version("policy")
+            .build()
     }
 
     fn env(sender: &str, message_type: &str, payload: Vec<u8>) -> Envelope {

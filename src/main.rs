@@ -1,5 +1,3 @@
-mod server;
-
 use macp_runtime::log_store::LogStore;
 use macp_runtime::mode_registry::ModeRegistry;
 use macp_runtime::pb;
@@ -8,10 +6,10 @@ use macp_runtime::registry::SessionRegistry;
 use macp_runtime::replay::replay_session;
 use macp_runtime::runtime::Runtime;
 use macp_runtime::security::SecurityLayer;
+use macp_runtime::server::MacpServer;
 use macp_runtime::storage::{
     cleanup_temp_files, migrate_if_needed, FileBackend, MemoryBackend, StorageBackend,
 };
-use server::MacpServer;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -182,7 +180,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         macp_policy::DefaultPolicyEvaluator,
     )));
     let policy_registry = Arc::new(PolicyRegistry::new());
+    // RFC-MACP-0012 §9: preload governance policies from disk BEFORE session
+    // recovery — replayed sessions resolve their bound policy_version against
+    // the live registry, so a session governed by a file-loaded policy must
+    // find it. A configured-but-broken policies dir is fatal: a runtime told
+    // to preload governance must not silently start without it.
+    let policies_dir = std::env::var("MACP_POLICIES_DIR").ok();
+    if let Some(dir) = &policies_dir {
+        let count = policy_registry
+            .load_from_dir(std::path::Path::new(dir))
+            .map_err(|e| format!("MACP_POLICIES_DIR: {e}"))?;
+        tracing::info!(count, dir = %dir, "loaded governance policies from directory");
+    }
 
+    let mut recovery_replay_mismatches: u64 = 0;
     if !memory_only {
         // Replay sessions from logs
         let session_ids = storage.list_session_ids().await?;
@@ -217,6 +228,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(&policy_registry),
             ) {
                 Ok(session) => {
+                    // D7: warn-only divergence check against the stored
+                    // snapshot BEFORE we overwrite it with the replayed state.
+                    if let Ok(Some(snapshot)) = storage.load_session(&session_id).await {
+                        recovery_replay_mismatches +=
+                            macp_runtime::replay::validate_replay_consistency(
+                                &session_id,
+                                &session,
+                                &snapshot,
+                            ) as u64;
+                    }
                     if let Err(e) = storage.save_session(&session).await {
                         if strict_recovery {
                             return Err(io::Error::other(format!(
@@ -271,16 +292,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mode_registry,
         policy_registry,
     ));
+    if recovery_replay_mismatches > 0 {
+        tracing::warn!(
+            mismatches = recovery_replay_mismatches,
+            "replay/snapshot divergences detected during recovery (log is authoritative)"
+        );
+        runtime
+            .metrics()
+            .record_replay_mismatch(recovery_replay_mismatches);
+    }
     let security = SecurityLayer::from_env()?;
-    let svc = MacpServer::new(Arc::clone(&runtime), security);
 
     let allow_insecure = std::env::var("MACP_ALLOW_INSECURE").ok().as_deref() == Some("1");
+    // Without configured auth, every bearer token authenticates as a
+    // fully-privileged identity (dev fallback). That must be an explicit
+    // local-development choice, never a silent default: refuse to start
+    // unless the operator opted in via the same flag that gates plaintext.
+    if !security.has_configured_auth() {
+        if allow_insecure {
+            tracing::warn!(
+                "no authentication configured (MACP_AUTH_TOKENS_*/MACP_AUTH_ISSUER unset): \
+                 running in dev-mode auth where ANY bearer token is a fully-privileged \
+                 identity; permitted only because MACP_ALLOW_INSECURE=1"
+            );
+        } else {
+            return Err(
+                "no authentication configured: set MACP_AUTH_TOKENS_FILE/MACP_AUTH_TOKENS_JSON \
+                 or MACP_AUTH_ISSUER (+JWKS), or explicitly opt into dev-mode auth with \
+                 MACP_ALLOW_INSECURE=1 (local development only)"
+                    .into(),
+            );
+        }
+    }
+    let mut svc = MacpServer::new(Arc::clone(&runtime), security);
+    if policies_dir.is_some() {
+        // File-loaded profile: registry is read-only over the wire
+        // (register_policy=false, list_policies=true — RFC-0012 §9).
+        svc = svc.with_read_only_policies();
+    }
     let tls_cert = std::env::var("MACP_TLS_CERT_PATH").ok();
     let tls_key = std::env::var("MACP_TLS_KEY_PATH").ok();
 
     tracing::info!(%addr, "macp-runtime v0.4.0 listening");
 
-    let builder = Server::builder();
+    // Server resource limits (RFC-MACP-0004 §7 DoS defenses). Combined with
+    // per-session locking these bound how much work one client can queue.
+    let concurrency_per_conn: usize = std::env::var("MACP_CONCURRENCY_LIMIT_PER_CONNECTION")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64);
+    let max_streams: u32 = std::env::var("MACP_MAX_CONCURRENT_STREAMS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128);
+    let request_timeout_secs: u64 = std::env::var("MACP_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+
+    let builder = Server::builder()
+        .concurrency_limit_per_connection(concurrency_per_conn)
+        .max_concurrent_streams(Some(max_streams))
+        .timeout(std::time::Duration::from_secs(request_timeout_secs))
+        .tcp_keepalive(Some(std::time::Duration::from_secs(60)))
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(30)));
     let mut builder = match (tls_cert, tls_key) {
         (Some(cert_path), Some(key_path)) => {
             let cert = tokio::fs::read(cert_path).await?;
@@ -302,10 +377,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set_serving::<pb::macp_runtime_service_server::MacpRuntimeServiceServer<MacpServer>>()
         .await;
 
+    // Make the transport-level message bound track the configured payload
+    // bound: previously tonic's 4 MB default applied BEFORE the payload-size
+    // check, so MACP_MAX_PAYLOAD_BYTES above 4 MB was silently ineffective
+    // and far-larger frames were decoded before rejection. Envelope overhead
+    // (ids, mode, sender, metadata) gets a fixed allowance on top.
+    let max_payload_bytes: usize = std::env::var("MACP_MAX_PAYLOAD_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1_048_576);
+    const ENVELOPE_OVERHEAD_BYTES: usize = 64 * 1024;
+
+    // Graceful shutdown: on ctrl-c stop accepting and drain in-flight
+    // requests; long-lived watch streams would hold the drain open forever,
+    // so a hard deadline forces exit afterwards.
+    let drain_secs: u64 = std::env::var("MACP_SHUTDOWN_DRAIN_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutdown signal received; draining in-flight requests");
+    };
     let server_future = builder
         .add_service(health_service)
-        .add_service(pb::macp_runtime_service_server::MacpRuntimeServiceServer::new(svc))
-        .serve(addr);
+        .add_service(
+            pb::macp_runtime_service_server::MacpRuntimeServiceServer::new(svc)
+                .max_decoding_message_size(max_payload_bytes + ENVELOPE_OVERHEAD_BYTES),
+        )
+        .serve_with_shutdown(addr, shutdown);
 
     // Background cleanup task: expire TTL-exceeded sessions and evict stale ones.
     let cleanup_interval_secs: u64 = std::env::var("MACP_CLEANUP_INTERVAL_SECS")
@@ -316,6 +416,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3600);
+    // Opt-in durable-data retention: 0 (default) keeps history forever.
+    let disk_retention_secs: u64 = std::env::var("MACP_SESSION_DISK_RETENTION_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let cleanup_runtime = runtime.clone();
     let cleanup_handle = tokio::spawn(async move {
         let mut interval =
@@ -326,15 +431,76 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cleanup_runtime
                 .evict_stale_sessions(session_retention_secs)
                 .await;
+            if disk_retention_secs > 0 {
+                cleanup_runtime.gc_disk_sessions(disk_retention_secs).await;
+            }
         }
     });
 
+    // Prometheus metrics endpoint (opt-in via MACP_METRICS_ADDR, e.g.
+    // "127.0.0.1:9464"). Deliberately dependency-free: a minimal HTTP/1.1
+    // text-format responder — every counter the runtime collects was
+    // previously write-only with no export surface at all.
+    if let Ok(metrics_addr) = std::env::var("MACP_METRICS_ADDR") {
+        let metrics_runtime = runtime.clone();
+        tokio::spawn(async move {
+            let listener = match tokio::net::TcpListener::bind(&metrics_addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::error!(%metrics_addr, error = %e, "metrics endpoint failed to bind");
+                    return;
+                }
+            };
+            tracing::info!(%metrics_addr, "metrics endpoint listening (GET /metrics)");
+            loop {
+                let Ok((mut sock, _peer)) = listener.accept().await else {
+                    continue;
+                };
+                let rt = metrics_runtime.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 1024];
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        sock.read(&mut buf),
+                    )
+                    .await;
+                    let mut body = String::new();
+                    for (mode, snap) in rt.metrics().snapshot() {
+                        snap.prometheus_lines(&mode, &mut body);
+                    }
+                    body.push_str(&format!(
+                        "macp_replay_mismatches_total {}\n",
+                        rt.metrics().replay_mismatches()
+                    ));
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+    }
+
+    // serve_with_shutdown resolves once the signal fired AND connections
+    // drained; the timer arm is the hard deadline for connections that never
+    // close (watch streams).
+    let deadline = async {
+        let _ = tokio::signal::ctrl_c().await;
+        tokio::time::sleep(std::time::Duration::from_secs(drain_secs)).await;
+    };
     tokio::select! {
         result = server_future => {
             result?;
+            tracing::info!("all connections drained");
         }
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("shutting down gracefully...");
+        _ = deadline => {
+            tracing::warn!(
+                drain_secs,
+                "drain deadline reached with connections still open; forcing shutdown"
+            );
         }
     }
     cleanup_handle.abort();

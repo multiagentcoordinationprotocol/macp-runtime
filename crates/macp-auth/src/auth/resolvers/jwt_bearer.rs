@@ -34,7 +34,7 @@ pub struct JwtConfig {
 }
 
 struct CachedKeys {
-    keys: Vec<DecodingKey>,
+    keys: Vec<(Option<String>, DecodingKey)>,
     fetched_at: std::time::Instant,
 }
 
@@ -46,9 +46,15 @@ pub struct JwtBearerResolver {
 }
 
 enum JwksSource {
-    Inline(Vec<DecodingKey>),
+    Inline(Vec<(Option<String>, DecodingKey)>),
     Url(String),
 }
+
+/// How long past the normal cache TTL stale JWKS keys may still be served
+/// when the endpoint is unreachable (availability vs. rotation-latency
+/// trade-off; rotated-out keys stop verifying at most TTL+grace after
+/// removal from the JWKS).
+const STALE_GRACE: std::time::Duration = std::time::Duration::from_secs(3600);
 
 impl JwtBearerResolver {
     pub fn from_inline_json(config: JwtConfig, jwks_json: &str) -> Result<Self, String> {
@@ -94,7 +100,7 @@ impl JwtBearerResolver {
             .map(str::to_string)
     }
 
-    async fn get_keys(&self) -> Result<Vec<DecodingKey>, AuthError> {
+    async fn get_keys(&self) -> Result<Vec<(Option<String>, DecodingKey)>, AuthError> {
         {
             let guard = self.cached_keys.read().await;
             if let Some(cached) = guard.as_ref() {
@@ -107,19 +113,49 @@ impl JwtBearerResolver {
         match &self.jwks_source {
             JwksSource::Inline(keys) => Ok(keys.clone()),
             JwksSource::Url(url) => {
-                let keys = self.fetch_jwks(url).await?;
-                let mut guard = self.cached_keys.write().await;
-                *guard = Some(CachedKeys {
-                    keys: keys.clone(),
-                    fetched_at: std::time::Instant::now(),
-                });
-                Ok(keys)
+                match self.fetch_jwks(url).await {
+                    Ok(keys) => {
+                        let mut guard = self.cached_keys.write().await;
+                        *guard = Some(CachedKeys {
+                            keys: keys.clone(),
+                            fetched_at: std::time::Instant::now(),
+                        });
+                        Ok(keys)
+                    }
+                    Err(fetch_err) => {
+                        // Stale-cache fallback: a JWKS endpoint outage must
+                        // not take down ALL JWT auth the moment the TTL
+                        // expires. Serve the last-known keys (bounded by the
+                        // stale window) while refresh keeps failing; key
+                        // rotation still converges on the next good fetch.
+                        let guard = self.cached_keys.read().await;
+                        if let Some(cached) = guard.as_ref() {
+                            if cached.fetched_at.elapsed() < self.cache_ttl + STALE_GRACE {
+                                tracing::warn!(
+                                    error = %fetch_err,
+                                    "JWKS refresh failed; serving stale cached keys within grace window"
+                                );
+                                return Ok(cached.keys.clone());
+                            }
+                        }
+                        Err(fetch_err)
+                    }
+                }
             }
         }
     }
 
-    async fn fetch_jwks(&self, url: &str) -> Result<Vec<DecodingKey>, AuthError> {
-        let resp = reqwest::get(url)
+    async fn fetch_jwks(&self, url: &str) -> Result<Vec<(Option<String>, DecodingKey)>, AuthError> {
+        // Explicit timeouts: a hanging JWKS endpoint must not block the auth
+        // path indefinitely (the default reqwest client has no timeout).
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(3))
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(|e| AuthError::FetchFailed(format!("JWKS client build failed: {e}")))?;
+        let resp = client
+            .get(url)
+            .send()
             .await
             .map_err(|e| AuthError::FetchFailed(format!("JWKS fetch failed: {e}")))?;
         let jwks: serde_json::Value = resp
@@ -129,7 +165,7 @@ impl JwtBearerResolver {
         Self::parse_jwks(&jwks).map_err(AuthError::FetchFailed)
     }
 
-    fn parse_jwks(jwks: &serde_json::Value) -> Result<Vec<DecodingKey>, String> {
+    fn parse_jwks(jwks: &serde_json::Value) -> Result<Vec<(Option<String>, DecodingKey)>, String> {
         let keys_arr = jwks
             .get("keys")
             .and_then(|k| k.as_array())
@@ -138,13 +174,14 @@ impl JwtBearerResolver {
         let mut decoding_keys = Vec::new();
         for key in keys_arr {
             let kty = key.get("kty").and_then(|v| v.as_str()).unwrap_or("");
+            let kid = key.get("kid").and_then(|v| v.as_str()).map(str::to_string);
             match kty {
                 "RSA" => {
                     let n = key.get("n").and_then(|v| v.as_str()).unwrap_or("");
                     let e = key.get("e").and_then(|v| v.as_str()).unwrap_or("");
                     if !n.is_empty() && !e.is_empty() {
                         if let Ok(dk) = DecodingKey::from_rsa_components(n, e) {
-                            decoding_keys.push(dk);
+                            decoding_keys.push((kid, dk));
                         }
                     }
                 }
@@ -155,16 +192,17 @@ impl JwtBearerResolver {
                     if !x.is_empty() && !y.is_empty() {
                         if let Ok(dk) = DecodingKey::from_ec_components(x, y) {
                             let _ = crv;
-                            decoding_keys.push(dk);
+                            decoding_keys.push((kid, dk));
                         }
                     }
                 }
                 "oct" => {
                     if let Some(k_val) = key.get("k").and_then(|v| v.as_str()) {
-                        decoding_keys.push(
+                        decoding_keys.push((
+                            kid,
                             DecodingKey::from_base64_secret(k_val)
                                 .unwrap_or_else(|_| DecodingKey::from_secret(k_val.as_bytes())),
-                        );
+                        ));
                     }
                 }
                 _ => {}
@@ -215,8 +253,22 @@ impl AuthResolver for JwtBearerResolver {
         validation.set_audience(&[&self.config.audience]);
         validation.algorithms = vec![header.alg];
 
+        // Key selection: when the token names a `kid` and the JWKS has a
+        // matching key, verify against that key only (O(1), and a signature
+        // failure is then a real failure, not "wrong key tried first").
+        // Tokens without a kid, or with an unknown kid, fall back to trying
+        // every key of the right family (previous behavior).
+        let selected: Vec<&DecodingKey> = match header.kid.as_deref() {
+            Some(kid) if keys.iter().any(|(k, _)| k.as_deref() == Some(kid)) => keys
+                .iter()
+                .filter(|(k, _)| k.as_deref() == Some(kid))
+                .map(|(_, dk)| dk)
+                .collect(),
+            _ => keys.iter().map(|(_, dk)| dk).collect(),
+        };
+
         let mut last_err = None;
-        for key in &keys {
+        for key in selected {
             match decode::<MACPClaims>(&token, key, &validation) {
                 Ok(token_data) => {
                     let claims = token_data.claims;

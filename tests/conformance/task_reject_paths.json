@@ -10,21 +10,21 @@
     {
       "sender": "agent://worker",
       "message_type": "TaskRequest",
-      "payload_type": "task.TaskRequest",
+      "payload_type": "macp.modes.task.v1.TaskRequestPayload",
       "payload": { "task_id": "t1", "title": "Build", "instructions": "Do it", "requested_assignee": "agent://worker", "deadline_unix_ms": 0 },
       "expect": "reject"
     },
     {
       "sender": "agent://planner",
       "message_type": "TaskRequest",
-      "payload_type": "task.TaskRequest",
+      "payload_type": "macp.modes.task.v1.TaskRequestPayload",
       "payload": { "task_id": "t1", "title": "Build", "instructions": "Do it", "requested_assignee": "agent://worker", "deadline_unix_ms": 0 },
       "expect": "accept"
     },
     {
       "sender": "agent://planner",
       "message_type": "TaskRequest",
-      "payload_type": "task.TaskRequest",
+      "payload_type": "macp.modes.task.v1.TaskRequestPayload",
       "payload": { "task_id": "t2", "title": "Another", "instructions": "Do more", "requested_assignee": "agent://worker", "deadline_unix_ms": 0 },
       "expect": "reject"
     }

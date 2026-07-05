@@ -113,6 +113,37 @@ impl PolicyRegistry {
     }
 
     /// Subscribe to policy registry change notifications.
+    /// Load policy definitions from a directory of JSON files (RFC-MACP-0012
+    /// §9 / `MACP_POLICIES_DIR`). Each `*.json` file holds one
+    /// `PolicyDefinition`-shaped document:
+    /// `{ "policy_id", "mode", "description", "rules", "schema_version" }`.
+    ///
+    /// Every file goes through the same `register` path as the RPC (schema
+    /// validation, reserved-id and duplicate checks). Returns the number of
+    /// policies loaded; any invalid file is an error — a runtime configured
+    /// to preload governance policies must not silently start without them.
+    pub fn load_from_dir(&self, dir: &std::path::Path) -> Result<usize, String> {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .map_err(|e| format!("cannot read policies dir {}: {e}", dir.display()))?
+            .filter_map(|r| r.ok().map(|d| d.path()))
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+            .collect();
+        // Deterministic load order regardless of filesystem enumeration.
+        entries.sort();
+
+        let mut loaded = 0;
+        for path in entries {
+            let raw = std::fs::read_to_string(&path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let definition: PolicyDefinition = serde_json::from_str(&raw)
+                .map_err(|e| format!("invalid policy file {}: {e}", path.display()))?;
+            self.register(definition)
+                .map_err(|e| format!("policy file {} rejected: {e}", path.display()))?;
+            loaded += 1;
+        }
+        Ok(loaded)
+    }
+
     pub fn subscribe_changes(&self) -> broadcast::Receiver<()> {
         self.change_tx.subscribe()
     }

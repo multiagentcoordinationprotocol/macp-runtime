@@ -44,6 +44,32 @@ impl SessionStreamBus {
             let _ = sender.send(envelope);
         }
     }
+
+    /// Remove a session's broadcast channel if it has no live receivers.
+    /// Channels are created lazily on subscribe and were previously never
+    /// removed — every session ever streamed pinned a map entry (and a
+    /// lagging receiver pins up to `capacity` buffered envelopes) for the
+    /// process lifetime. Called from session eviction; a channel with active
+    /// receivers is left in place (`false`) and retried on the next sweep.
+    pub fn remove_if_unused(&self, session_id: &str) -> bool {
+        let mut guard = self.channels.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.get(session_id) {
+            Some(sender) if sender.receiver_count() == 0 => {
+                guard.remove(session_id);
+                true
+            }
+            Some(_) => false,
+            None => true,
+        }
+    }
+
+    /// Number of live channels (observability / tests).
+    pub fn channel_count(&self) -> usize {
+        self.channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+    }
 }
 
 #[cfg(test)]
@@ -70,5 +96,24 @@ mod tests {
         bus.publish("s1", env("m1"));
         let envelope = rx.try_recv().expect("stream event");
         assert_eq!(envelope.message_id, "m1");
+    }
+
+    #[test]
+    fn remove_if_unused_respects_live_receivers() {
+        let bus = SessionStreamBus::default();
+        let rx = bus.subscribe("s1");
+        assert_eq!(bus.channel_count(), 1);
+
+        // Live receiver: channel must survive eviction attempts.
+        assert!(!bus.remove_if_unused("s1"));
+        assert_eq!(bus.channel_count(), 1);
+
+        // Receiver dropped: channel is removable.
+        drop(rx);
+        assert!(bus.remove_if_unused("s1"));
+        assert_eq!(bus.channel_count(), 0);
+
+        // Unknown session is trivially "removed".
+        assert!(bus.remove_if_unused("nope"));
     }
 }

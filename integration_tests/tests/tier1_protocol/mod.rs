@@ -13,6 +13,7 @@ mod test_quorum_mode;
 mod test_reject_paths;
 mod test_rfc_cross_cutting;
 mod test_session_lifecycle;
+mod test_startup_gate;
 mod test_stream_session;
 mod test_task_mode;
 mod test_validation_gaps;

@@ -10,28 +10,28 @@
     {
       "sender": "agent://planner",
       "message_type": "TaskRequest",
-      "payload_type": "task.TaskRequest",
+      "payload_type": "macp.modes.task.v1.TaskRequestPayload",
       "payload": { "task_id": "t1", "title": "Build", "instructions": "Do it", "requested_assignee": "agent://worker", "input": [], "deadline_unix_ms": 0 },
       "expect": "accept"
     },
     {
       "sender": "agent://worker",
       "message_type": "TaskAccept",
-      "payload_type": "task.TaskAccept",
+      "payload_type": "macp.modes.task.v1.TaskAcceptPayload",
       "payload": { "task_id": "t1", "assignee": "agent://worker", "reason": "ready" },
       "expect": "accept"
     },
     {
       "sender": "agent://worker",
       "message_type": "TaskComplete",
-      "payload_type": "task.TaskComplete",
+      "payload_type": "macp.modes.task.v1.TaskCompletePayload",
       "payload": { "task_id": "t1", "assignee": "agent://worker", "output": [], "summary": "done" },
       "expect": "accept"
     },
     {
       "sender": "agent://planner",
       "message_type": "Commitment",
-      "payload_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
       "payload": {
         "commitment_id": "c1",
         "action": "task.completed",

@@ -1,5 +1,6 @@
 use crate::mode::util::{
-    check_commitment_authority, is_declared_participant, validate_commitment_payload_for_session,
+    check_commitment_authority, enforce_commitment_policy, is_declared_participant,
+    validate_commitment_payload_for_session,
 };
 use crate::mode::{Mode, ModeResponse};
 use macp_core::error::MacpError;
@@ -324,27 +325,22 @@ impl Mode for TaskMode {
                 Ok(ModeResponse::PersistState(Self::encode_state(&state)))
             }
             "Commitment" => {
-                validate_commitment_payload_for_session(session, &env.payload)?;
+                let commitment = validate_commitment_payload_for_session(session, &env.payload)?;
                 if state.terminal_report.is_none() {
                     return Err(MacpError::InvalidPayload);
                 }
-                // Evaluate governance policy if one is bound to the session.
-                if let Some(ref policy) = session.policy_definition {
-                    let has_output = matches!(
-                        &state.terminal_report,
-                        Some(TaskTerminalReport::Complete(record)) if !record.output.is_empty()
-                    );
-                    let decision = self.evaluator.evaluate_task_commitment(policy, has_output);
-                    if let macp_core::policy::PolicyDecision::Deny { reasons } = decision {
-                        tracing::warn!(
-                            session_id = %session.session_id,
-                            policy_id = %policy.policy_id,
-                            reasons = ?reasons,
-                            "policy denied commitment"
-                        );
-                        return Err(MacpError::PolicyDenied { reasons });
-                    }
-                }
+                // Governance policy gate (shared): fail closed, only
+                // an explicit Allow proceeds.
+                let has_output = matches!(
+                    &state.terminal_report,
+                    Some(TaskTerminalReport::Complete(record)) if !record.output.is_empty()
+                );
+                enforce_commitment_policy(
+                    session,
+                    macp_core::policy::CommitmentMode::Task { has_output },
+                    commitment.outcome_positive,
+                    &*self.evaluator,
+                )?;
                 Ok(ModeResponse::PersistAndResolve {
                     state: Self::encode_state(&state),
                     resolution: env.payload.clone(),
@@ -358,36 +354,17 @@ impl Mode for TaskMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use macp_core::session::{Session, SessionState};
+    use macp_core::session::Session;
     use macp_pb::pb::CommitmentPayload;
-    use std::collections::HashSet;
 
     fn base_session() -> Session {
-        Session {
-            session_id: "s1".into(),
-            state: SessionState::Open,
-            ttl_expiry: i64::MAX,
-            ttl_ms: 60_000,
-            started_at_unix_ms: 0,
-            resolution: None,
-            mode: "macp.mode.task.v1".into(),
-            mode_state: vec![],
-            participants: vec!["planner".into(), "worker".into()],
-            seen_message_ids: HashSet::new(),
-            intent: String::new(),
-            mode_version: "1.0.0".into(),
-            configuration_version: "config".into(),
-            policy_version: "policy".into(),
-            context_id: String::new(),
-            extensions: std::collections::HashMap::new(),
-            roots: vec![],
-            initiator_sender: "planner".into(),
-            participant_message_counts: std::collections::HashMap::new(),
-            participant_last_seen: std::collections::HashMap::new(),
-            policy_definition: None,
-            suspended_at_ms: None,
-            accumulated_suspended_ms: 0,
-        }
+        Session::builder("s1", "macp.mode.task.v1", "planner")
+            .ttl_ms(60_000)
+            .participants(vec!["planner".into(), "worker".into()])
+            .mode_version("1.0.0")
+            .configuration_version("config")
+            .policy_version("policy")
+            .build()
     }
 
     fn env(sender: &str, message_type: &str, payload: Vec<u8>) -> Envelope {

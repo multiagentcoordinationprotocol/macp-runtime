@@ -1,5 +1,6 @@
 use crate::mode::util::{
-    check_commitment_authority, is_declared_participant, validate_commitment_payload_for_session,
+    check_commitment_authority, enforce_commitment_policy, is_declared_participant,
+    validate_commitment_payload_for_session,
 };
 use crate::mode::{Mode, ModeResponse};
 use macp_core::error::MacpError;
@@ -233,26 +234,14 @@ impl Mode for DecisionMode {
                 if !Self::commitment_ready(&state) {
                     return Err(MacpError::InvalidPayload);
                 }
-                // Evaluate governance policy if one is bound to the session.
-                // Decision Mode permits both positive and negative committed
-                // outcomes (RFC-MACP-0007 §6), so gating is outcome-aware.
-                if let Some(ref policy) = session.policy_definition {
-                    let decision = self.evaluator.evaluate_decision_commitment_outcome(
-                        policy,
-                        &state,
-                        &session.participants,
-                        commitment.outcome_positive,
-                    );
-                    if let macp_core::policy::PolicyDecision::Deny { reasons } = decision {
-                        tracing::warn!(
-                            session_id = %session.session_id,
-                            policy_id = %policy.policy_id,
-                            reasons = ?reasons,
-                            "policy denied commitment"
-                        );
-                        return Err(MacpError::PolicyDenied { reasons });
-                    }
-                }
+                // Governance policy gate (shared): fail closed, only
+                // an explicit Allow proceeds.
+                enforce_commitment_policy(
+                    session,
+                    macp_core::policy::CommitmentMode::Decision { state: &state },
+                    commitment.outcome_positive,
+                    &*self.evaluator,
+                )?;
                 state.phase = DecisionPhase::Committed;
                 Ok(ModeResponse::PersistAndResolve {
                     state: Self::encode_state(&state),
@@ -267,40 +256,21 @@ impl Mode for DecisionMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use macp_core::session::SessionState;
+
     use macp_pb::pb::CommitmentPayload;
-    use std::collections::HashSet;
 
     fn test_session() -> Session {
-        Session {
-            session_id: "s1".into(),
-            state: SessionState::Open,
-            ttl_expiry: i64::MAX,
-            ttl_ms: 60_000,
-            started_at_unix_ms: 0,
-            resolution: None,
-            mode: "macp.mode.decision.v1".into(),
-            mode_state: vec![],
-            participants: vec![
+        Session::builder("s1", "macp.mode.decision.v1", "agent://orchestrator")
+            .ttl_ms(60_000)
+            .participants(vec![
                 "agent://orchestrator".into(),
                 "agent://fraud".into(),
                 "agent://growth".into(),
-            ],
-            seen_message_ids: HashSet::new(),
-            intent: String::new(),
-            mode_version: "1.0.0".into(),
-            configuration_version: "cfg-1".into(),
-            policy_version: "policy-1".into(),
-            context_id: String::new(),
-            extensions: std::collections::HashMap::new(),
-            roots: vec![],
-            initiator_sender: "agent://orchestrator".into(),
-            participant_message_counts: std::collections::HashMap::new(),
-            participant_last_seen: std::collections::HashMap::new(),
-            policy_definition: None,
-            suspended_at_ms: None,
-            accumulated_suspended_ms: 0,
-        }
+            ])
+            .mode_version("1.0.0")
+            .configuration_version("cfg-1")
+            .policy_version("policy-1")
+            .build()
     }
 
     fn env(sender: &str, message_type: &str, payload: Vec<u8>) -> Envelope {
@@ -1124,49 +1094,18 @@ mod tests {
     struct DenyAllEvaluator;
 
     impl macp_core::policy::PolicyEvaluator for DenyAllEvaluator {
-        fn evaluate_decision_commitment(
+        fn evaluate_commitment(
             &self,
-            _policy: &macp_core::policy::PolicyDefinition,
-            _state: &DecisionState,
-            _participants: &[String],
+            ctx: &macp_core::policy::CommitmentContext<'_>,
         ) -> macp_core::policy::PolicyDecision {
-            macp_core::policy::PolicyDecision::Deny {
-                reasons: vec!["custom evaluator denies all".into()],
+            match ctx.mode {
+                macp_core::policy::CommitmentMode::Decision { .. } => {
+                    macp_core::policy::PolicyDecision::Deny {
+                        reasons: vec!["custom evaluator denies all".into()],
+                    }
+                }
+                _ => macp_core::policy::PolicyDecision::Allow { reasons: vec![] },
             }
-        }
-
-        fn evaluate_proposal_commitment(
-            &self,
-            _policy: &macp_core::policy::PolicyDefinition,
-            _counter_proposal_count: usize,
-        ) -> macp_core::policy::PolicyDecision {
-            macp_core::policy::PolicyDecision::Allow { reasons: vec![] }
-        }
-
-        fn evaluate_task_commitment(
-            &self,
-            _policy: &macp_core::policy::PolicyDefinition,
-            _has_output: bool,
-        ) -> macp_core::policy::PolicyDecision {
-            macp_core::policy::PolicyDecision::Allow { reasons: vec![] }
-        }
-
-        fn evaluate_handoff_commitment(
-            &self,
-            _policy: &macp_core::policy::PolicyDefinition,
-        ) -> macp_core::policy::PolicyDecision {
-            macp_core::policy::PolicyDecision::Allow { reasons: vec![] }
-        }
-
-        fn evaluate_quorum_commitment(
-            &self,
-            _policy: &macp_core::policy::PolicyDefinition,
-            _approve_count: usize,
-            _reject_count: usize,
-            _abstain_count: usize,
-            _total_participants: usize,
-        ) -> macp_core::policy::PolicyDecision {
-            macp_core::policy::PolicyDecision::Allow { reasons: vec![] }
         }
     }
 

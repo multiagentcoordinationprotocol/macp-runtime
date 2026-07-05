@@ -176,37 +176,16 @@ impl MultiRoundMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use macp_core::session::SessionState;
+
     use macp_pb::pb::CommitmentPayload;
     use prost::Message;
-    use std::collections::HashSet;
 
     fn base_session() -> Session {
-        Session {
-            session_id: "s1".into(),
-            state: SessionState::Open,
-            ttl_expiry: i64::MAX,
-            ttl_ms: 60_000,
-            started_at_unix_ms: 0,
-            resolution: None,
-            mode: "ext.multi_round.v1".into(),
-            mode_state: vec![],
-            participants: vec![],
-            seen_message_ids: HashSet::new(),
-            intent: String::new(),
-            mode_version: "1.0.0".into(),
-            configuration_version: "cfg-1".into(),
-            policy_version: String::new(),
-            context_id: String::new(),
-            extensions: std::collections::HashMap::new(),
-            roots: vec![],
-            initiator_sender: "coordinator".into(),
-            participant_message_counts: std::collections::HashMap::new(),
-            participant_last_seen: std::collections::HashMap::new(),
-            policy_definition: None,
-            suspended_at_ms: None,
-            accumulated_suspended_ms: 0,
-        }
+        Session::builder("s1", "ext.multi_round.v1", "coordinator")
+            .ttl_ms(60_000)
+            .mode_version("1.0.0")
+            .configuration_version("cfg-1")
+            .build()
     }
 
     fn session_start_env() -> Envelope {

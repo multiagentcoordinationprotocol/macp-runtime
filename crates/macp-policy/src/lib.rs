@@ -15,9 +15,10 @@ pub mod registry;
 // macp-core. Re-exported so `macp_policy::rules` and downstream
 // `crate::policy::rules` paths keep resolving.
 pub use macp_core::policy::rules;
-pub use macp_core::policy::{PolicyDecision, PolicyDefinition, PolicyError, PolicyEvaluator};
-
-use macp_core::decision::DecisionState;
+pub use macp_core::policy::{
+    CommitmentContext, CommitmentMode, PolicyDecision, PolicyDefinition, PolicyError,
+    PolicyEvaluator,
+};
 
 /// The default [`PolicyEvaluator`], evaluating commitments against the RFC-MACP
 /// rule schemas. Stateless — construct with `DefaultPolicyEvaluator` directly.
@@ -25,64 +26,46 @@ use macp_core::decision::DecisionState;
 pub struct DefaultPolicyEvaluator;
 
 impl PolicyEvaluator for DefaultPolicyEvaluator {
-    fn evaluate_decision_commitment(
-        &self,
-        policy: &PolicyDefinition,
-        state: &DecisionState,
-        participants: &[String],
-    ) -> PolicyDecision {
-        evaluator::evaluate_decision_commitment(policy, state, participants)
-    }
-
-    fn evaluate_decision_commitment_outcome(
-        &self,
-        policy: &PolicyDefinition,
-        state: &DecisionState,
-        participants: &[String],
-        outcome_positive: bool,
-    ) -> PolicyDecision {
-        evaluator::evaluate_decision_commitment_outcome(
-            policy,
-            state,
-            participants,
-            outcome_positive,
-        )
-    }
-
-    fn evaluate_proposal_commitment(
-        &self,
-        policy: &PolicyDefinition,
-        counter_proposal_count: usize,
-    ) -> PolicyDecision {
-        evaluator::evaluate_proposal_commitment(policy, counter_proposal_count)
-    }
-
-    fn evaluate_task_commitment(
-        &self,
-        policy: &PolicyDefinition,
-        has_output: bool,
-    ) -> PolicyDecision {
-        evaluator::evaluate_task_commitment(policy, has_output)
-    }
-
-    fn evaluate_handoff_commitment(&self, policy: &PolicyDefinition) -> PolicyDecision {
-        evaluator::evaluate_handoff_commitment(policy)
-    }
-
-    fn evaluate_quorum_commitment(
-        &self,
-        policy: &PolicyDefinition,
-        approve_count: usize,
-        reject_count: usize,
-        abstain_count: usize,
-        total_participants: usize,
-    ) -> PolicyDecision {
-        evaluator::evaluate_quorum_commitment(
-            policy,
-            approve_count,
-            reject_count,
-            abstain_count,
-            total_participants,
-        )
+    fn evaluate_commitment(&self, ctx: &CommitmentContext<'_>) -> PolicyDecision {
+        match ctx.mode {
+            CommitmentMode::Decision { state } => evaluator::evaluate_decision_commitment_outcome(
+                ctx.policy,
+                state,
+                ctx.participants,
+                ctx.outcome_positive,
+            ),
+            CommitmentMode::Proposal {
+                counter_proposal_count,
+            } => evaluator::evaluate_proposal_commitment_outcome(
+                ctx.policy,
+                counter_proposal_count,
+                ctx.outcome_positive,
+            ),
+            CommitmentMode::Task { has_output } => evaluator::evaluate_task_commitment_outcome(
+                ctx.policy,
+                has_output,
+                ctx.outcome_positive,
+            ),
+            CommitmentMode::Handoff => {
+                evaluator::evaluate_handoff_commitment_outcome(ctx.policy, ctx.outcome_positive)
+            }
+            CommitmentMode::Quorum {
+                approve_count,
+                reject_count,
+                abstain_count,
+            } => evaluator::evaluate_quorum_commitment_outcome(
+                ctx.policy,
+                approve_count,
+                reject_count,
+                abstain_count,
+                ctx.participants.len(),
+                ctx.outcome_positive,
+            ),
+            // CommitmentMode is #[non_exhaustive]: fail closed on modes this
+            // evaluator does not know how to govern.
+            _ => PolicyDecision::Deny {
+                reasons: vec!["unrecognized commitment mode".into()],
+            },
+        }
     }
 }

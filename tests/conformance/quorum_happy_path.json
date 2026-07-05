@@ -10,28 +10,28 @@
     {
       "sender": "agent://coordinator",
       "message_type": "ApprovalRequest",
-      "payload_type": "quorum.ApprovalRequest",
+      "payload_type": "macp.modes.quorum.v1.ApprovalRequestPayload",
       "payload": { "request_id": "r1", "action": "deploy", "summary": "Deploy v2", "details": [], "required_approvals": 2 },
       "expect": "accept"
     },
     {
       "sender": "agent://alice",
       "message_type": "Approve",
-      "payload_type": "quorum.Approve",
+      "payload_type": "macp.modes.quorum.v1.ApprovePayload",
       "payload": { "request_id": "r1", "reason": "lgtm" },
       "expect": "accept"
     },
     {
       "sender": "agent://bob",
       "message_type": "Approve",
-      "payload_type": "quorum.Approve",
+      "payload_type": "macp.modes.quorum.v1.ApprovePayload",
       "payload": { "request_id": "r1", "reason": "ship it" },
       "expect": "accept"
     },
     {
       "sender": "agent://coordinator",
       "message_type": "Commitment",
-      "payload_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
       "payload": {
         "commitment_id": "c1",
         "action": "quorum.approved",

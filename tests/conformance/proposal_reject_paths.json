@@ -13,7 +13,7 @@
     {
       "sender": "agent://buyer",
       "message_type": "Commitment",
-      "payload_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
       "payload": {
         "commitment_id": "c1",
         "action": "proposal.accepted",
@@ -30,7 +30,7 @@
     {
       "sender": "agent://seller",
       "message_type": "CounterProposal",
-      "payload_type": "proposal.CounterProposal",
+      "payload_type": "macp.modes.proposal.v1.CounterProposalPayload",
       "payload": {
         "proposal_id": "p2",
         "supersedes_proposal_id": "",

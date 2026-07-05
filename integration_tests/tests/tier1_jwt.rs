@@ -53,6 +53,10 @@ async fn endpoint() -> &'static str {
             ("MACP_AUTH_ISSUER", ISSUER),
             ("MACP_AUTH_AUDIENCE", AUDIENCE),
             ("MACP_AUTH_JWKS_JSON", jwks.as_str()),
+            // This harness signs with a symmetric key; HS256 is no longer in
+            // the default allowlist (RS256/ES256 only) and must be opted into
+            // explicitly — which also exercises the env knob end-to-end.
+            ("MACP_AUTH_JWT_ALGS", "HS256"),
         ],
     )
     .await
@@ -356,4 +360,51 @@ async fn opaque_bearer_is_unauthenticated_when_only_jwt_is_configured() {
         .await
         .expect("RPC returned ack");
     assert_unauthenticated_ack(resp.into_inner().ack.unwrap());
+}
+
+/// Security property (master plan §1.6): HS256 must NOT verify under the
+/// default algorithm allowlist. A runtime configured with the same symmetric
+/// JWKS but WITHOUT the explicit `MACP_AUTH_JWT_ALGS=HS256` opt-in rejects
+/// otherwise-valid HS256 tokens.
+#[tokio::test]
+async fn hs256_rejected_without_explicit_algorithm_opt_in() {
+    let binary = std::env::var("MACP_TEST_BINARY").unwrap_or_else(|_| {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        format!("{manifest_dir}/../target/debug/macp-runtime")
+    });
+    let jwks = jwks_json();
+    let manager = ServerManager::start_with_env(
+        &binary,
+        &[
+            ("MACP_AUTH_ISSUER", ISSUER),
+            ("MACP_AUTH_AUDIENCE", AUDIENCE),
+            ("MACP_AUTH_JWKS_JSON", jwks.as_str()),
+            // No MACP_AUTH_JWT_ALGS: default allowlist (RS256/ES256).
+        ],
+    )
+    .await
+    .expect("failed to start default-allowlist MACP runtime");
+
+    let mut client = MacpRuntimeServiceClient::connect(manager.endpoint.clone())
+        .await
+        .expect("failed to connect");
+
+    let token = sign(&Claims {
+        sub: "agent://hs256-default",
+        iss: ISSUER,
+        aud: AUDIENCE,
+        exp: chrono::Utc::now().timestamp() + 300,
+        macp_scopes: None,
+    });
+    // ListSessions requires authentication (GetManifest is open discovery).
+    let mut request = tonic::Request::new(macp_runtime::pb::ListSessionsRequest {});
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {token}").parse().expect("valid header"),
+    );
+    let err = client
+        .list_sessions(request)
+        .await
+        .expect_err("HS256 token must be rejected under the default allowlist");
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
 }

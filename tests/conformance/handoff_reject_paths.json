@@ -13,7 +13,7 @@
     {
       "sender": "agent://target",
       "message_type": "HandoffAccept",
-      "payload_type": "handoff.HandoffAccept",
+      "payload_type": "macp.modes.handoff.v1.HandoffAcceptPayload",
       "payload": {
         "handoff_id": "h1",
         "accepted_by": "agent://target",
@@ -25,7 +25,7 @@
     {
       "sender": "agent://owner",
       "message_type": "HandoffOffer",
-      "payload_type": "handoff.HandoffOffer",
+      "payload_type": "macp.modes.handoff.v1.HandoffOfferPayload",
       "payload": {
         "handoff_id": "h1",
         "target_participant": "agent://target",
@@ -37,7 +37,7 @@
     {
       "sender": "agent://target",
       "message_type": "HandoffAccept",
-      "payload_type": "handoff.HandoffAccept",
+      "payload_type": "macp.modes.handoff.v1.HandoffAcceptPayload",
       "payload": {
         "handoff_id": "h1",
         "accepted_by": "agent://target",
@@ -48,7 +48,7 @@
     {
       "sender": "agent://owner",
       "message_type": "HandoffContext",
-      "payload_type": "handoff.HandoffContext",
+      "payload_type": "macp.modes.handoff.v1.HandoffContextPayload",
       "payload": {
         "handoff_id": "h1",
         "content_type": "text/plain",

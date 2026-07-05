@@ -478,7 +478,25 @@ impl ModeRegistry {
         if descriptor.mode_version.trim().is_empty() {
             return Err("extension descriptor must bind mode_version".into());
         }
+        // A mode with no terminal message type can never resolve — sessions under it
+        // could only expire or be cancelled. Reject at registration rather than
+        // letting every session dead-end.
+        if descriptor.terminal_message_types.is_empty() {
+            return Err(
+                "extension descriptor must declare at least one terminal message type".into(),
+            );
+        }
         for terminal in &descriptor.terminal_message_types {
+            // Dynamically registered modes are passthrough-backed, and passthrough
+            // resolves only on `Commitment`. Any other declared terminal would be
+            // advertised to clients but non-functional.
+            if terminal != "Commitment" {
+                return Err(format!(
+                    "dynamically registered modes resolve only on 'Commitment'; \
+                     terminal message type '{}' would never terminate a session",
+                    terminal
+                ));
+            }
             if !descriptor
                 .message_types
                 .iter()
@@ -575,6 +593,20 @@ impl ModeRegistry {
         }
 
         let final_name = new_name.unwrap_or(mode).to_string();
+        // The macp.mode.* namespace is reserved for RFC-standardized modes
+        // (RFC-MACP-0002 §12). Promotion grants standards-track status on this
+        // runtime, not RFC namespace membership — without this guard, a
+        // passthrough-backed extension could masquerade as a standard mode via
+        // register(ext.x) + promote(-> macp.mode.x).
+        if final_name != mode && final_name.starts_with("macp.mode.") {
+            return Err(format!(
+                "cannot promote '{}' into the reserved macp.mode.* namespace",
+                mode
+            ));
+        }
+        if final_name.trim().is_empty() {
+            return Err("promotion target name must not be empty".into());
+        }
         if final_name != mode && guard.contains_key(&final_name) {
             return Err(format!(
                 "cannot promote: target name '{}' already exists",
@@ -636,6 +668,19 @@ impl<'a> ModeRef<'a> {
     ) -> Result<crate::mode::ModeResponse, macp_core::error::MacpError> {
         let mode = self.factory()?.create();
         mode.on_message(session, env)
+    }
+
+    /// Kernel entry point: `on_message` with the runtime's acceptance-clock
+    /// context. The runtime and replay call this so modes that need a
+    /// trustworthy time source receive the log-recorded clock.
+    pub fn on_message_at(
+        &self,
+        session: &macp_core::session::Session,
+        env: &macp_pb::pb::Envelope,
+        ctx: &macp_core::mode::MessageContext,
+    ) -> Result<crate::mode::ModeResponse, macp_core::error::MacpError> {
+        let mode = self.factory()?.create();
+        mode.on_message_at(session, env, ctx)
     }
 
     pub fn authorize_sender(
@@ -775,13 +820,49 @@ mod tests {
     #[test]
     fn register_rejects_duplicate() {
         let registry = ModeRegistry::build_default(Arc::new(macp_policy::DefaultPolicyEvaluator));
+        // Descriptor is otherwise valid so the failure exercised is the duplicate
+        // check, not descriptor validation.
         let descriptor = ModeDescriptor {
             mode: "ext.multi_round.v1".into(),
             mode_version: "1.0.0".into(),
             message_types: vec!["SessionStart".into(), "Commitment".into()],
+            terminal_message_types: vec!["Commitment".into()],
             ..Default::default()
         };
         assert!(registry.register_extension(descriptor).is_err());
+    }
+
+    #[test]
+    fn register_rejects_empty_terminal_types() {
+        let registry = ModeRegistry::build_default(Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let descriptor = ModeDescriptor {
+            mode: "ext.noterm.v1".into(),
+            mode_version: "1.0.0".into(),
+            message_types: vec!["SessionStart".into(), "Commitment".into()],
+            terminal_message_types: vec![],
+            ..Default::default()
+        };
+        let err = registry.register_extension(descriptor).unwrap_err();
+        assert!(
+            err.contains("terminal message type"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn register_rejects_non_commitment_terminal() {
+        let registry = ModeRegistry::build_default(Arc::new(macp_policy::DefaultPolicyEvaluator));
+        // Passthrough-backed modes resolve only on Commitment; a different declared
+        // terminal would be advertised but non-functional.
+        let descriptor = ModeDescriptor {
+            mode: "ext.badterm.v1".into(),
+            mode_version: "1.0.0".into(),
+            message_types: vec!["SessionStart".into(), "Finalize".into()],
+            terminal_message_types: vec!["Finalize".into()],
+            ..Default::default()
+        };
+        let err = registry.register_extension(descriptor).unwrap_err();
+        assert!(err.contains("Commitment"), "unexpected error: {err}");
     }
 
     #[test]
@@ -791,6 +872,7 @@ mod tests {
             mode: "ext.temp.v1".into(),
             mode_version: "1.0.0".into(),
             message_types: vec!["SessionStart".into(), "Commitment".into()],
+            terminal_message_types: vec!["Commitment".into()],
             ..Default::default()
         };
         registry.register_extension(descriptor).unwrap();
@@ -810,7 +892,31 @@ mod tests {
     }
 
     #[test]
-    fn promote_extension_to_standard() {
+    fn promote_rejects_reserved_namespace_target() {
+        let registry = ModeRegistry::build_default(Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let descriptor = ModeDescriptor {
+            mode: "ext.new.v1".into(),
+            mode_version: "1.0.0".into(),
+            message_types: vec!["SessionStart".into(), "Commitment".into()],
+            terminal_message_types: vec!["Commitment".into()],
+            ..Default::default()
+        };
+        registry.register_extension(descriptor).unwrap();
+
+        // Promotion must not be a side door into the reserved RFC namespace.
+        let err = registry
+            .promote_mode("ext.new.v1", Some("macp.mode.new.v1"))
+            .unwrap_err();
+        assert!(err.contains("reserved"), "unexpected error: {err}");
+
+        // The failed promotion must not have mutated the entry.
+        assert!(registry.get_mode("ext.new.v1").is_some());
+        assert!(!registry.is_standard_mode("ext.new.v1"));
+        assert!(registry.get_mode("macp.mode.new.v1").is_none());
+    }
+
+    #[test]
+    fn promote_extension_to_standard_with_ext_rename() {
         let registry = ModeRegistry::build_default(Arc::new(macp_policy::DefaultPolicyEvaluator));
         let descriptor = ModeDescriptor {
             mode: "ext.new.v1".into(),
@@ -823,14 +929,15 @@ mod tests {
         assert!(!registry.is_standard_mode("ext.new.v1"));
         assert!(!registry.requires_strict_session_start("ext.new.v1"));
 
+        // Rename within the extension namespace is allowed.
         let final_name = registry
-            .promote_mode("ext.new.v1", Some("macp.mode.new.v1"))
+            .promote_mode("ext.new.v1", Some("ext.new.v2"))
             .unwrap();
-        assert_eq!(final_name, "macp.mode.new.v1");
-        assert!(registry.is_standard_mode("macp.mode.new.v1"));
-        assert!(registry.requires_strict_session_start("macp.mode.new.v1"));
+        assert_eq!(final_name, "ext.new.v2");
+        assert!(registry.is_standard_mode("ext.new.v2"));
+        assert!(registry.requires_strict_session_start("ext.new.v2"));
         assert!(registry.get_mode("ext.new.v1").is_none());
-        assert!(registry.get_mode("macp.mode.new.v1").is_some());
+        assert!(registry.get_mode("ext.new.v2").is_some());
     }
 
     #[test]
@@ -862,19 +969,17 @@ mod tests {
             ..Default::default()
         };
         registry.register_extension(descriptor).unwrap();
-        registry
-            .promote_mode("ext.promoted.v1", Some("macp.mode.promoted.v1"))
-            .unwrap();
+        registry.promote_mode("ext.promoted.v1", None).unwrap();
 
         let standard_names = registry.standard_mode_names();
-        assert!(standard_names.contains(&"macp.mode.promoted.v1".to_string()));
+        assert!(standard_names.contains(&"ext.promoted.v1".to_string()));
 
         let standard_modes: Vec<String> = registry
             .standard_mode_descriptors()
             .into_iter()
             .map(|d| d.mode)
             .collect();
-        assert!(standard_modes.contains(&"macp.mode.promoted.v1".to_string()));
+        assert!(standard_modes.contains(&"ext.promoted.v1".to_string()));
     }
 
     #[test]

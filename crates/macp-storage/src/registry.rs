@@ -2,6 +2,7 @@ use macp_core::session::Session;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -41,6 +42,10 @@ pub struct PersistedSession {
     pub suspended_at_ms: Option<i64>,
     #[serde(default)]
     pub accumulated_suspended_ms: i64,
+    /// Session-semantics revision (see `macp_core::session::CURRENT_SEMANTICS_REV`).
+    /// Legacy snapshots deserialize as 0 and keep legacy behavior.
+    #[serde(default)]
+    pub semantics_rev: u32,
 }
 
 fn default_schema_version() -> u32 {
@@ -79,6 +84,7 @@ impl From<&Session> for PersistedSession {
             policy_definition: session.policy_definition.clone(),
             suspended_at_ms: session.suspended_at_ms,
             accumulated_suspended_ms: session.accumulated_suspended_ms,
+            semantics_rev: session.semantics_rev,
         }
     }
 }
@@ -93,43 +99,50 @@ impl From<PersistedSession> for Session {
                 .ttl_expiry
                 .saturating_sub(session.started_at_unix_ms)
         };
-        Self {
-            session_id: session.session_id,
-            state: session.state,
-            ttl_expiry: session.ttl_expiry,
-            ttl_ms,
-            started_at_unix_ms: session.started_at_unix_ms,
-            resolution: session.resolution,
-            mode: session.mode,
-            mode_state: session.mode_state,
-            participants: session.participants,
-            seen_message_ids: session.seen_message_ids.into_iter().collect(),
-            intent: session.intent,
-            mode_version: session.mode_version,
-            configuration_version: session.configuration_version,
-            policy_version: session.policy_version,
-            context_id: session.context_id,
-            extensions: session.extensions,
-            roots: session
-                .roots
-                .into_iter()
-                .map(|root| macp_pb::pb::Root {
-                    uri: root.uri,
-                    name: root.name,
-                })
-                .collect(),
-            initiator_sender: session.initiator_sender,
-            participant_message_counts: std::collections::HashMap::new(),
-            participant_last_seen: std::collections::HashMap::new(),
-            policy_definition: session.policy_definition,
-            suspended_at_ms: session.suspended_at_ms,
-            accumulated_suspended_ms: session.accumulated_suspended_ms,
-        }
+        Session::builder(session.session_id, session.mode, session.initiator_sender)
+            .state(session.state)
+            .ttl_expiry(session.ttl_expiry)
+            .ttl_ms(ttl_ms)
+            .started_at_unix_ms(session.started_at_unix_ms)
+            .resolution(session.resolution)
+            .mode_state(session.mode_state)
+            .participants(session.participants)
+            .seen_message_ids(session.seen_message_ids.into_iter().collect())
+            .intent(session.intent)
+            .mode_version(session.mode_version)
+            .configuration_version(session.configuration_version)
+            .policy_version(session.policy_version)
+            .context_id(session.context_id)
+            .extensions(session.extensions)
+            .roots(
+                session
+                    .roots
+                    .into_iter()
+                    .map(|root| macp_pb::pb::Root {
+                        uri: root.uri,
+                        name: root.name,
+                    })
+                    .collect(),
+            )
+            .policy_definition(session.policy_definition)
+            .suspended_at_ms(session.suspended_at_ms)
+            .accumulated_suspended_ms(session.accumulated_suspended_ms)
+            .semantics_rev(session.semantics_rev)
+            .build()
     }
 }
 
+/// A registered session behind its own async mutex. The registry map lock is
+/// held only for lookup/insert/remove; the per-session mutex serializes all
+/// processing (validate + storage append + commit) for that session ONLY —
+/// RFC-MACP-0001 §8.1 requires acceptance serialization within a session,
+/// never across sessions. Lock ordering: map lock BEFORE session mutex, and
+/// never hold the map lock while awaiting a session mutex — snapshot the
+/// `Arc`s, drop the map guard, then lock.
+pub type SharedSession = Arc<tokio::sync::Mutex<Session>>;
+
 pub struct SessionRegistry {
-    pub sessions: RwLock<HashMap<String, Session>>,
+    pub sessions: RwLock<HashMap<String, SharedSession>>,
     persistence_path: Option<PathBuf>,
 }
 
@@ -158,7 +171,7 @@ impl SessionRegistry {
         })
     }
 
-    fn load_sessions(path: &Path) -> std::io::Result<HashMap<String, Session>> {
+    fn load_sessions(path: &Path) -> std::io::Result<HashMap<String, SharedSession>> {
         if !path.exists() {
             return Ok(HashMap::new());
         }
@@ -172,63 +185,96 @@ impl SessionRegistry {
         };
         Ok(persisted
             .into_iter()
-            .map(|(id, session)| (id, session.into()))
+            .map(|(id, session)| (id, Arc::new(tokio::sync::Mutex::new(session.into()))))
             .collect())
     }
 
-    fn persist_map(path: &Path, sessions: &HashMap<String, Session>) -> std::io::Result<()> {
-        let persisted: HashMap<String, PersistedSession> = sessions
-            .iter()
-            .map(|(id, session)| (id.clone(), PersistedSession::from(session)))
-            .collect();
-        let bytes = serde_json::to_vec_pretty(&persisted)?;
+    fn persist_map(
+        path: &Path,
+        sessions: &HashMap<String, PersistedSession>,
+    ) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(sessions)?;
         let tmp_path = path.with_extension("json.tmp");
         fs::write(&tmp_path, bytes)?;
         fs::rename(&tmp_path, path)
     }
 
-    pub(crate) async fn persist_locked(
-        &self,
-        sessions: &HashMap<String, Session>,
-    ) -> std::io::Result<()> {
-        if let Some(path) = &self.persistence_path {
-            Self::persist_map(path, sessions)?;
-        }
-        Ok(())
-    }
-
+    /// Snapshot every session (locking each briefly) and persist. Never holds
+    /// the map lock across the per-session locks or the fs write.
     pub async fn persist_snapshot(&self) -> std::io::Result<()> {
-        let guard = self.sessions.read().await;
-        self.persist_locked(&guard).await
+        let Some(path) = self.persistence_path.clone() else {
+            return Ok(());
+        };
+        let arcs: Vec<(String, SharedSession)> = {
+            let guard = self.sessions.read().await;
+            guard
+                .iter()
+                .map(|(id, arc)| (id.clone(), Arc::clone(arc)))
+                .collect()
+        };
+        let mut persisted = HashMap::with_capacity(arcs.len());
+        for (id, arc) in arcs {
+            let session = arc.lock().await;
+            persisted.insert(id, PersistedSession::from(&*session));
+        }
+        Self::persist_map(&path, &persisted)
     }
 
-    pub async fn get_session(&self, session_id: &str) -> Option<Session> {
+    /// Clone the shared handle for a session (brief map read; no session lock).
+    pub async fn get_shared(&self, session_id: &str) -> Option<SharedSession> {
         let guard = self.sessions.read().await;
         guard.get(session_id).cloned()
     }
 
+    pub async fn get_session(&self, session_id: &str) -> Option<Session> {
+        let arc = self.get_shared(session_id).await?;
+        let session = arc.lock().await;
+        Some(session.clone())
+    }
+
     pub async fn get_all_sessions(&self) -> Vec<Session> {
-        let guard = self.sessions.read().await;
-        guard.values().cloned().collect()
+        let arcs: Vec<SharedSession> = {
+            let guard = self.sessions.read().await;
+            guard.values().cloned().collect()
+        };
+        let mut out = Vec::with_capacity(arcs.len());
+        for arc in arcs {
+            out.push(arc.lock().await.clone());
+        }
+        out
     }
 
     pub async fn insert_recovered_session(&self, session_id: String, session: Session) {
-        let mut guard = self.sessions.write().await;
-        guard.insert(session_id, session);
-        let _ = self.persist_locked(&guard).await;
+        {
+            let mut guard = self.sessions.write().await;
+            guard.insert(session_id, Arc::new(tokio::sync::Mutex::new(session)));
+        }
+        let _ = self.persist_snapshot().await;
     }
 
     pub async fn count_open_sessions_for_initiator(&self, sender: &str) -> usize {
         let now = chrono::Utc::now().timestamp_millis();
-        let guard = self.sessions.read().await;
-        guard
-            .values()
-            .filter(|session| {
-                session.initiator_sender == sender
-                    && session.state == macp_core::session::SessionState::Open
-                    && now <= session.ttl_expiry
-            })
-            .count()
+        let arcs: Vec<SharedSession> = {
+            let guard = self.sessions.read().await;
+            guard.values().cloned().collect()
+        };
+        let mut count = 0;
+        for arc in arcs {
+            // A session currently being processed is Open by definition —
+            // count it (conservative for a rate limit) rather than await.
+            let counts = match arc.try_lock() {
+                Ok(session) => {
+                    session.initiator_sender == sender
+                        && session.state == macp_core::session::SessionState::Open
+                        && now <= session.ttl_expiry
+                }
+                Err(_) => true,
+            };
+            if counts {
+                count += 1;
+            }
+        }
+        count
     }
 }
 
@@ -240,34 +286,23 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_session(id: &str) -> Session {
-        Session {
-            session_id: id.into(),
-            state: SessionState::Open,
-            ttl_expiry: 10,
-            ttl_ms: 9,
-            started_at_unix_ms: 1,
-            resolution: None,
-            mode: "macp.mode.decision.v1".into(),
-            mode_state: vec![1, 2, 3],
-            participants: vec!["alice".into()],
-            seen_message_ids: HashSet::from(["m1".into()]),
-            intent: "intent".into(),
-            mode_version: "1.0.0".into(),
-            configuration_version: "cfg".into(),
-            policy_version: "pol".into(),
-            context_id: "test-ctx".to_string(),
-            extensions: std::collections::HashMap::new(),
-            roots: vec![macp_pb::pb::Root {
+        Session::builder(id, "macp.mode.decision.v1", "alice")
+            .ttl_expiry(10)
+            .ttl_ms(9)
+            .started_at_unix_ms(1)
+            .mode_state(vec![1, 2, 3])
+            .participants(vec!["alice".into()])
+            .seen_message_ids(HashSet::from(["m1".into()]))
+            .intent("intent")
+            .mode_version("1.0.0")
+            .configuration_version("cfg")
+            .policy_version("pol")
+            .context_id("test-ctx")
+            .roots(vec![macp_pb::pb::Root {
                 uri: "root://1".into(),
                 name: "r1".into(),
-            }],
-            initiator_sender: "alice".into(),
-            participant_message_counts: std::collections::HashMap::new(),
-            participant_last_seen: std::collections::HashMap::new(),
-            policy_definition: None,
-            suspended_at_ms: None,
-            accumulated_suspended_ms: 0,
-        }
+            }])
+            .build()
     }
 
     #[tokio::test]

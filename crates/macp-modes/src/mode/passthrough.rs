@@ -63,36 +63,18 @@ impl Mode for PassthroughMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use macp_core::session::SessionState;
+
     use macp_pb::pb::CommitmentPayload;
     use prost::Message;
 
     fn make_session() -> Session {
-        Session {
-            session_id: "s1".into(),
-            state: SessionState::Open,
-            ttl_expiry: i64::MAX,
-            ttl_ms: 60_000,
-            started_at_unix_ms: 1000,
-            resolution: None,
-            mode: "ext.test.v1".into(),
-            mode_state: vec![],
-            participants: vec!["alice".into(), "bob".into()],
-            seen_message_ids: std::collections::HashSet::new(),
-            intent: String::new(),
-            mode_version: "1.0.0".into(),
-            configuration_version: "cfg-1".into(),
-            policy_version: String::new(),
-            context_id: String::new(),
-            extensions: std::collections::HashMap::new(),
-            roots: vec![],
-            initiator_sender: "alice".into(),
-            participant_message_counts: std::collections::HashMap::new(),
-            participant_last_seen: std::collections::HashMap::new(),
-            policy_definition: None,
-            suspended_at_ms: None,
-            accumulated_suspended_ms: 0,
-        }
+        Session::builder("s1", "ext.test.v1", "alice")
+            .ttl_ms(60_000)
+            .started_at_unix_ms(1000)
+            .participants(vec!["alice".into(), "bob".into()])
+            .mode_version("1.0.0")
+            .configuration_version("cfg-1")
+            .build()
     }
 
     fn make_env(sender: &str, message_type: &str, payload: Vec<u8>) -> Envelope {

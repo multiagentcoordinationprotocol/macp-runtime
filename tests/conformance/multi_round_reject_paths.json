@@ -10,7 +10,7 @@
     {
       "sender": "agent://coordinator",
       "message_type": "Commitment",
-      "payload_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
       "payload": {
         "commitment_id": "c1",
         "action": "multi_round.converged",
@@ -26,21 +26,21 @@
     {
       "sender": "agent://alice",
       "message_type": "Contribute",
-      "payload_type": "multi_round.Contribute",
+      "payload_type": "macp.modes.multi_round.v1.ContributePayload",
       "payload": { "value": "option_a" },
       "expect": "accept"
     },
     {
       "sender": "agent://bob",
       "message_type": "Contribute",
-      "payload_type": "multi_round.Contribute",
+      "payload_type": "macp.modes.multi_round.v1.ContributePayload",
       "payload": { "value": "option_a" },
       "expect": "accept"
     },
     {
       "sender": "agent://alice",
       "message_type": "Commitment",
-      "payload_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
       "payload": {
         "commitment_id": "c1",
         "action": "multi_round.converged",

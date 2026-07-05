@@ -133,7 +133,6 @@ pub fn step(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{HashMap, HashSet};
 
     const MODE: &str = "macp.mode.test.v1";
 
@@ -159,31 +158,13 @@ mod tests {
     }
 
     fn session() -> Session {
-        Session {
-            session_id: "11111111-1111-4111-8111-111111111111".into(),
-            state: SessionState::Open,
-            ttl_expiry: 10_000,
-            ttl_ms: 10_000,
-            started_at_unix_ms: 0,
-            resolution: None,
-            mode: MODE.into(),
-            mode_state: vec![],
-            participants: vec!["agent://a".into(), "agent://b".into()],
-            seen_message_ids: HashSet::new(),
-            intent: String::new(),
-            mode_version: "1.0.0".into(),
-            configuration_version: "cfg-1".into(),
-            policy_version: String::new(),
-            context_id: String::new(),
-            extensions: HashMap::new(),
-            roots: vec![],
-            initiator_sender: "agent://a".into(),
-            participant_message_counts: HashMap::new(),
-            participant_last_seen: HashMap::new(),
-            policy_definition: None,
-            suspended_at_ms: None,
-            accumulated_suspended_ms: 0,
-        }
+        Session::builder("11111111-1111-4111-8111-111111111111", MODE, "agent://a")
+            .ttl_expiry(10_000)
+            .ttl_ms(10_000)
+            .participants(vec!["agent://a".into(), "agent://b".into()])
+            .mode_version("1.0.0")
+            .configuration_version("cfg-1")
+            .build()
     }
 
     fn env(sender: &str, message_type: &str, message_id: &str) -> Envelope {

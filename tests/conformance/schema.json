@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multiagentcoordinationprotocol.io/schemas/conformance-fixture.schema.json",
+  "title": "MACP mode conformance fixture",
+  "description": "A scripted session transcript with per-message accept/reject expectations, runnable against any MACP runtime.",
+  "type": "object",
+  "required": [
+    "mode",
+    "initiator",
+    "participants",
+    "mode_version",
+    "configuration_version",
+    "ttl_ms",
+    "messages",
+    "expected_final_state"
+  ],
+  "properties": {
+    "description": {
+      "type": "string"
+    },
+    "mode": {
+      "type": "string",
+      "pattern": "^(macp\\.mode\\.[a-z_]+\\.v\\d+|ext\\.[a-z_.]+\\.v\\d+)$"
+    },
+    "initiator": {
+      "type": "string",
+      "minLength": 1
+    },
+    "participants": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1
+    },
+    "mode_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "configuration_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "policy_version": {
+      "type": "string"
+    },
+    "ttl_ms": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "messages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "sender",
+          "message_type",
+          "payload_type",
+          "payload",
+          "expect"
+        ],
+        "properties": {
+          "sender": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message_type": {
+            "type": "string",
+            "minLength": 1
+          },
+          "payload_type": {
+            "type": "string",
+            "description": "Fully-qualified protobuf message name",
+            "pattern": "^(macp\\.v1\\.[A-Za-z]+|macp\\.modes\\.[a-z_]+\\.v\\d+\\.[A-Za-z]+Payload)$"
+          },
+          "payload": {
+            "type": "object"
+          },
+          "expect": {
+            "enum": [
+              "accept",
+              "reject"
+            ]
+          },
+          "expected_error_code": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "expected_final_state": {
+      "enum": [
+        "Open",
+        "Suspended",
+        "Resolved",
+        "Expired",
+        "Cancelled"
+      ]
+    },
+    "expected_resolution": {
+      "type": "object"
+    },
+    "expected_mode_state": {
+      "type": "object"
+    },
+    "expect_resolution_present": {
+      "type": "boolean"
+    },
+    "verify_replay_equivalence": {
+      "type": "boolean"
+    },
+    "policy": {
+      "type": "object",
+      "description": "Optional inline PolicyDefinition registered before SessionStart"
+    }
+  },
+  "additionalProperties": false
+}

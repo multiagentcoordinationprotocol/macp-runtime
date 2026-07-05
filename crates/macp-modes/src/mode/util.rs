@@ -27,7 +27,17 @@ pub fn validate_commitment_payload_for_session(
         return Err(MacpError::InvalidPayload);
     }
 
-    if !session.policy_version.is_empty() && commitment.policy_version != session.policy_version {
+    // RFC-MACP-0012 §6.1: an empty policy_version at SessionStart resolves to
+    // "policy.default", and the runtime rewrites session.policy_version to the
+    // resolved id. A client that started with "" must not be forced to echo a
+    // value it never set, so an empty commitment.policy_version defers to the
+    // session's bound policy. A non-empty value must match the binding exactly.
+    // (The echo question is ambiguous upstream — filed as an RFC issue; empty-
+    // matches is forward-compatible with either resolution.)
+    if !commitment.policy_version.is_empty()
+        && !session.policy_version.is_empty()
+        && commitment.policy_version != session.policy_version
+    {
         return Err(MacpError::InvalidPayload);
     }
 
@@ -70,6 +80,58 @@ fn validate_outcome_positive(commitment: &CommitmentPayload) -> Result<(), MacpE
         return Err(MacpError::InvalidPayload);
     }
     Ok(())
+}
+
+/// Shared commitment policy gate (extracted from five per-mode copies).
+/// Fail closed: only an explicit `Allow` proceeds — `PolicyDecision` is
+/// `#[non_exhaustive]`, and any unknown decision denies.
+pub fn enforce_commitment_policy(
+    session: &Session,
+    mode: macp_core::policy::CommitmentMode<'_>,
+    outcome_positive: bool,
+    evaluator: &dyn macp_core::policy::PolicyEvaluator,
+) -> Result<(), MacpError> {
+    let Some(ref policy) = session.policy_definition else {
+        return Ok(());
+    };
+    let decision = evaluator.evaluate_commitment(&macp_core::policy::CommitmentContext {
+        policy,
+        participants: &session.participants,
+        outcome_positive,
+        mode,
+    });
+    match decision {
+        macp_core::policy::PolicyDecision::Allow { .. } => Ok(()),
+        macp_core::policy::PolicyDecision::Deny { reasons } => {
+            tracing::warn!(
+                session_id = %session.session_id,
+                policy_id = %policy.policy_id,
+                reasons = ?reasons,
+                "policy denied commitment"
+            );
+            Err(MacpError::PolicyDenied { reasons })
+        }
+        other => {
+            tracing::warn!(
+                session_id = %session.session_id,
+                policy_id = %policy.policy_id,
+                decision = ?other,
+                "unrecognized policy decision treated as denial"
+            );
+            Err(MacpError::PolicyDenied {
+                reasons: vec!["unrecognized policy decision".into()],
+            })
+        }
+    }
+}
+
+/// Shared mode-state JSON codec (extracted from six per-mode copies).
+pub fn encode_mode_state<T: serde::Serialize>(state: &T) -> Vec<u8> {
+    serde_json::to_vec(state).unwrap_or_default()
+}
+
+pub fn decode_mode_state<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, MacpError> {
+    serde_json::from_slice(bytes).map_err(|_| MacpError::InvalidModeState)
 }
 
 pub fn is_declared_participant(participants: &[String], sender: &str) -> bool {
@@ -120,15 +182,11 @@ pub fn check_commitment_authority(session: &Session, sender: &str) -> Result<(),
     }
 }
 
-/// Extract the `commitment` section from any mode's policy rules JSON.
-/// All RFC mode schemas include a `commitment` sub-object with `authority` and `designated_roles`.
 fn extract_commitment_rules(
     rules: &serde_json::Value,
 ) -> macp_core::policy::rules::CommitmentRules {
-    rules
-        .get("commitment")
-        .and_then(|c| serde_json::from_value(c.clone()).ok())
-        .unwrap_or_default()
+    // Single implementation lives in macp-core (this was a byte-for-byte copy).
+    macp_core::policy::extract_commitment_rules(rules)
 }
 
 pub fn participants_all_accept(
@@ -164,32 +222,11 @@ mod tests {
     // --- supersedes structural validation (RFC-MACP-0001 §7.3.1) ---
 
     fn session_for_commitment() -> Session {
-        use std::collections::{HashMap, HashSet};
-        Session {
-            session_id: "s1".into(),
-            state: macp_core::session::SessionState::Open,
-            ttl_expiry: i64::MAX,
-            ttl_ms: 60_000,
-            started_at_unix_ms: 0,
-            resolution: None,
-            mode: "macp.mode.decision.v1".into(),
-            mode_state: vec![],
-            participants: vec![],
-            seen_message_ids: HashSet::new(),
-            intent: String::new(),
-            mode_version: "1.0.0".into(),
-            configuration_version: "cfg-1".into(),
-            policy_version: String::new(),
-            context_id: String::new(),
-            extensions: HashMap::new(),
-            roots: vec![],
-            initiator_sender: "agent://a".into(),
-            participant_message_counts: HashMap::new(),
-            participant_last_seen: HashMap::new(),
-            policy_definition: None,
-            suspended_at_ms: None,
-            accumulated_suspended_ms: 0,
-        }
+        Session::builder("s1", "macp.mode.decision.v1", "agent://a")
+            .ttl_ms(60_000)
+            .mode_version("1.0.0")
+            .configuration_version("cfg-1")
+            .build()
     }
 
     #[test]
@@ -217,6 +254,37 @@ mod tests {
                 "expected rejection for supersedes {bad:?}"
             );
         }
+    }
+
+    // --- policy_version echo (master plan §2.3) ---
+
+    /// A session that started with empty policy_version is rewritten to
+    /// "policy.default" by the runtime; the client must not be required to echo
+    /// a value it never sent.
+    #[test]
+    fn empty_commitment_policy_version_matches_bound_policy() {
+        let mut session = session_for_commitment();
+        session.policy_version = "policy.default".into();
+        let c = make_commitment("decision.selected", true); // policy_version: ""
+        assert!(validate_commitment_payload_for_session(&session, &c.encode_to_vec()).is_ok());
+    }
+
+    #[test]
+    fn wrong_commitment_policy_version_rejected() {
+        let mut session = session_for_commitment();
+        session.policy_version = "policy.default".into();
+        let mut c = make_commitment("decision.selected", true);
+        c.policy_version = "policy.other.v1".into();
+        assert!(validate_commitment_payload_for_session(&session, &c.encode_to_vec()).is_err());
+    }
+
+    #[test]
+    fn exact_commitment_policy_version_accepted() {
+        let mut session = session_for_commitment();
+        session.policy_version = "policy.default".into();
+        let mut c = make_commitment("decision.selected", true);
+        c.policy_version = "policy.default".into();
+        assert!(validate_commitment_payload_for_session(&session, &c.encode_to_vec()).is_ok());
     }
 
     // --- outcome_positive validation: RFC-defined positive actions ---

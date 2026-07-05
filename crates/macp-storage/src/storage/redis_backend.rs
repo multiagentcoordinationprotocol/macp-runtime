@@ -18,6 +18,17 @@ impl RedisBackend {
             .get_multiplexed_async_connection()
             .await
             .map_err(io::Error::other)?;
+        // Durability disclosure: RPUSH acks once the Redis server has the
+        // command in memory — there is no WAIT and no fsync barrier, so with
+        // default persistence (RDB snapshots) an acknowledged log append can
+        // be lost if Redis crashes. This backend is suitable for cache-tier /
+        // single-writer deployments; it does NOT provide the file backend's
+        // acked-implies-durable contract. (Two runtimes sharing one Redis
+        // would also corrupt each other — state authority is in-process.)
+        tracing::warn!(
+            "Redis storage backend does not guarantee durable acknowledgement; \
+             acked messages may be lost on Redis crash (see docs/deployment.md)"
+        );
         Ok(Self {
             conn,
             prefix: prefix.into(),
@@ -117,10 +128,15 @@ impl StorageBackend for RedisBackend {
             .await
             .map_err(io::Error::other)?;
         let mut entries = Vec::with_capacity(items.len());
-        for item in items {
-            let entry: LogEntry = serde_json::from_slice(&item)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            entries.push(entry);
+        for (idx, item) in items.iter().enumerate() {
+            // Corrupt-entry parity with the file backend: skip + warn rather
+            // than failing the entire session load on one bad record.
+            match serde_json::from_slice::<LogEntry>(item) {
+                Ok(entry) => entries.push(entry),
+                Err(e) => {
+                    tracing::warn!(session_id, idx, error = %e, "skipping corrupt log entry");
+                }
+            }
         }
         Ok(entries)
     }
@@ -129,18 +145,19 @@ impl StorageBackend for RedisBackend {
         let mut conn = self.conn.clone();
         let key = self.log_key(session_id);
 
-        // Delete existing list
-        conn.del::<_, ()>(&key).await.map_err(io::Error::other)?;
-
-        // Push new entries
+        // Atomic swap: DEL + RPUSH* inside one MULTI/EXEC transaction. The
+        // previous sequential implementation could fail between the DEL and
+        // the pushes, leaving a truncated (or empty) log — silent history
+        // loss for the session.
+        let mut pipe = redis::pipe();
+        pipe.atomic();
+        pipe.del(&key);
         for entry in entries {
             let bytes = serde_json::to_vec(entry)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            conn.rpush::<_, _, ()>(&key, bytes)
-                .await
-                .map_err(io::Error::other)?;
+            pipe.rpush(&key, bytes);
         }
-        Ok(())
+        pipe.exec_async(&mut conn).await.map_err(io::Error::other)
     }
 }
 
@@ -148,35 +165,23 @@ impl StorageBackend for RedisBackend {
 mod tests {
     use super::*;
     use crate::log_store::EntryKind;
-    use macp_core::session::SessionState;
+
     use std::collections::HashSet;
 
     fn sample_session(id: &str) -> Session {
-        Session {
-            session_id: id.into(),
-            state: SessionState::Open,
-            ttl_expiry: 61_000,
-            ttl_ms: 60_000,
-            started_at_unix_ms: 1_000,
-            resolution: None,
-            mode: "macp.mode.decision.v1".into(),
-            mode_state: vec![1, 2, 3],
-            participants: vec!["alice".into(), "bob".into()],
-            seen_message_ids: HashSet::from(["m1".into()]),
-            intent: "test".into(),
-            mode_version: "1.0.0".into(),
-            configuration_version: "cfg-1".into(),
-            policy_version: "pol-1".into(),
-            context_id: "test-ctx".to_string(),
-            extensions: std::collections::HashMap::new(),
-            roots: vec![],
-            initiator_sender: "alice".into(),
-            participant_message_counts: std::collections::HashMap::new(),
-            participant_last_seen: std::collections::HashMap::new(),
-            policy_definition: None,
-            suspended_at_ms: None,
-            accumulated_suspended_ms: 0,
-        }
+        Session::builder(id, "macp.mode.decision.v1", "alice")
+            .ttl_expiry(61_000)
+            .ttl_ms(60_000)
+            .started_at_unix_ms(1_000)
+            .mode_state(vec![1, 2, 3])
+            .participants(vec!["alice".into(), "bob".into()])
+            .seen_message_ids(HashSet::from(["m1".into()]))
+            .intent("test intent")
+            .mode_version("1.0.0")
+            .configuration_version("cfg-1")
+            .policy_version("pol-1")
+            .context_id("test-ctx")
+            .build()
     }
 
     fn sample_entry(id: &str) -> LogEntry {
@@ -191,6 +196,9 @@ mod tests {
             mode: String::new(),
             macp_version: String::new(),
             timestamp_unix_ms: 1_700_000_000_000,
+            bound_mode_version: None,
+            semantics_rev: 0,
+            compacted_incoming_ordinals: 0,
         }
     }
 

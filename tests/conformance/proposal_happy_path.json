@@ -13,7 +13,7 @@
     {
       "sender": "agent://seller",
       "message_type": "Proposal",
-      "payload_type": "proposal.Proposal",
+      "payload_type": "macp.modes.proposal.v1.ProposalPayload",
       "payload": {
         "proposal_id": "p1",
         "title": "offer",
@@ -26,7 +26,7 @@
     {
       "sender": "agent://buyer",
       "message_type": "Accept",
-      "payload_type": "proposal.Accept",
+      "payload_type": "macp.modes.proposal.v1.AcceptPayload",
       "payload": {
         "proposal_id": "p1",
         "reason": ""
@@ -36,7 +36,7 @@
     {
       "sender": "agent://seller",
       "message_type": "Accept",
-      "payload_type": "proposal.Accept",
+      "payload_type": "macp.modes.proposal.v1.AcceptPayload",
       "payload": {
         "proposal_id": "p1",
         "reason": ""
@@ -46,7 +46,7 @@
     {
       "sender": "agent://buyer",
       "message_type": "Commitment",
-      "payload_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
       "payload": {
         "commitment_id": "c1",
         "action": "proposal.accepted",
