@@ -346,7 +346,7 @@ impl SecurityLayer {
         // more than 1/SWEEP_EVERY of the time.
         const SWEEP_EVERY: u64 = 128;
         let tick = sweep_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if tick % SWEEP_EVERY == 0 {
+        if tick.is_multiple_of(SWEEP_EVERY) {
             guard.retain(|_, deque| {
                 deque
                     .back()

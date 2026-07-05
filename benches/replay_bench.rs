@@ -64,11 +64,15 @@ fn log_of(n: usize) -> Vec<LogEntry> {
     let mut entries = vec![incoming("m0", "SessionStart", "agent://a", start_payload())];
     for i in 0..n {
         // Alternate values so the session never converges/resolves mid-log.
-        let v = if i % 2 == 0 { "x" } else { "y" };
+        let v = if i.is_multiple_of(2) { "x" } else { "y" };
         entries.push(incoming(
             &format!("m{}", i + 1),
             "Contribute",
-            if i % 2 == 0 { "agent://a" } else { "agent://b" },
+            if i.is_multiple_of(2) {
+                "agent://a"
+            } else {
+                "agent://b"
+            },
             contribute_payload(v),
         ));
     }
@@ -150,8 +154,12 @@ fn bench_kernel_throughput(c: &mut Criterion) {
         let mut i = 0u64;
         b.iter(|| {
             i += 1;
-            let sender = if i % 2 == 0 { "agent://a" } else { "agent://b" };
-            let v = if i % 2 == 0 { "x" } else { "y" };
+            let sender = if i.is_multiple_of(2) {
+                "agent://a"
+            } else {
+                "agent://b"
+            };
+            let v = if i.is_multiple_of(2) { "x" } else { "y" };
             rt.block_on(async {
                 runtime
                     .process(
@@ -199,8 +207,12 @@ fn bench_kernel_throughput(c: &mut Criterion) {
         b.iter(|| {
             i += 1;
             let sid = &sids[(i % 8) as usize];
-            let sender = if i % 2 == 0 { "agent://a" } else { "agent://b" };
-            let v = if i % 2 == 0 { "x" } else { "y" };
+            let sender = if i.is_multiple_of(2) {
+                "agent://a"
+            } else {
+                "agent://b"
+            };
+            let v = if i.is_multiple_of(2) { "x" } else { "y" };
             rt.block_on(async {
                 runtime
                     .process(
@@ -293,12 +305,16 @@ fn bench_kernel_throughput_file_backend(c: &mut Criterion) {
                         "Contribute",
                         &format!("f{i}-{k}"),
                         sid,
-                        if (i + k as u64) % 2 == 0 {
+                        if (i + k as u64).is_multiple_of(2) {
                             "agent://a"
                         } else {
                             "agent://b"
                         },
-                        contribute_payload(if (i + k as u64) % 2 == 0 { "x" } else { "y" }),
+                        contribute_payload(if (i + k as u64).is_multiple_of(2) {
+                            "x"
+                        } else {
+                            "y"
+                        }),
                     );
                     handles.push(tokio::spawn(async move {
                         runtime.process(&e, None).await.unwrap()
