@@ -124,13 +124,17 @@ impl Mode for TaskMode {
         session: &Session,
         _env: &Envelope,
     ) -> Result<ModeResponse, MacpError> {
-        if session.participants.len() < 2 {
-            return Err(MacpError::InvalidPayload);
-        }
+        // RFC-MACP-0009 §2 (orchestrated model): the requester coordinates
+        // work among eligible assignees, so the pool must contain at least
+        // one participant other than the initiator. The initiator's own
+        // authority to emit TaskRequest is role-based (§4) and does NOT
+        // require participant-list membership — an external orchestrator may
+        // drive a task without listing itself (mirrors the role-vs-membership
+        // principle RFC-0007 §2 and RFC-0011 §2 make explicit).
         if !session
             .participants
             .iter()
-            .any(|p| p == &session.initiator_sender)
+            .any(|p| p != &session.initiator_sender)
         {
             return Err(MacpError::InvalidPayload);
         }
@@ -485,10 +489,11 @@ mod tests {
     }
 
     #[test]
-    fn session_start_requires_at_least_two_participants() {
+    fn session_start_rejects_initiator_only_pool() {
         let mode = TaskMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
         let mut session = base_session();
-        session.participants = vec!["planner".into()]; // only 1
+        // The initiator alone leaves no eligible assignee (RFC-0009 §2).
+        session.participants = vec!["planner".into()];
         let err = mode
             .on_session_start(&session, &env("planner", "SessionStart", vec![]))
             .unwrap_err();
@@ -506,15 +511,18 @@ mod tests {
         assert_eq!(err.to_string(), "InvalidPayload");
     }
 
+    /// RFC-MACP-0009 §2/§4: TaskRequest authority is role-based (initiator),
+    /// not membership-based — an external orchestrator driving a pool of
+    /// assignees is a legitimate orchestrated session.
     #[test]
-    fn session_start_rejects_when_initiator_not_participant() {
+    fn session_start_accepts_external_orchestrator() {
         let mode = TaskMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
         let mut session = base_session();
         session.participants = vec!["worker".into(), "other".into()]; // planner not included
-        let err = mode
+        let result = mode
             .on_session_start(&session, &env("planner", "SessionStart", vec![]))
-            .unwrap_err();
-        assert_eq!(err.to_string(), "InvalidPayload");
+            .unwrap();
+        assert!(matches!(result, ModeResponse::PersistState(_)));
     }
 
     // --- TaskRequest ---

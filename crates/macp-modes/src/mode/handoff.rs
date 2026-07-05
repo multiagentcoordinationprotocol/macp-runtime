@@ -92,6 +92,13 @@ impl Mode for HandoffMode {
         session: &Session,
         _env: &Envelope,
     ) -> Result<ModeResponse, MacpError> {
+        // RFC-MACP-0010 §2 (delegated model): the accepted SessionStart
+        // sender IS the current responsibility owner, and §3 binds
+        // `participants` as "current owner and eligible targets". Both checks
+        // below are stricter than the literal §3 text but follow from the
+        // model: the owner must be in the list, alongside ≥1 eligible target.
+        // (Unlike Task/Decision/Quorum, initiator membership is intrinsic
+        // here — the initiator is a transfer party, not just a coordinator.)
         if session.participants.len() < 2 {
             return Err(MacpError::InvalidPayload);
         }

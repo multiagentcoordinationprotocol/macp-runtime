@@ -56,6 +56,12 @@ workspace version in the root `Cargo.toml`.
   mis-routed to UUID validation and rejected).
 - Rate-limiter stale-sender cleanup is amortized (full sweep every 128
   requests) instead of scanning all senders on every request.
+- Task mode accepts an external orchestrator: `SessionStart` no longer
+  requires the initiator in `participants` (RFC-MACP-0009 authorizes
+  `TaskRequest` by initiator role, not membership). The pool must still
+  contain at least one eligible assignee other than the initiator. Handoff
+  keeps requiring initiator membership — intrinsic to the delegated model
+  (RFC-MACP-0010 §2), now documented at the check.
 
 ### Changed
 - `PolicyEvaluator` is now a single-method trait:

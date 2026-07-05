@@ -43,6 +43,13 @@ pub struct JwtBearerResolver {
     jwks_source: JwksSource,
     cached_keys: Arc<RwLock<Option<CachedKeys>>>,
     cache_ttl: std::time::Duration,
+    /// Serializes JWKS refreshes (single-flight): when the TTL expires under
+    /// concurrent load, exactly one caller fetches while the rest wait and
+    /// then read the refreshed cache — no thundering herd on the endpoint.
+    refresh_lock: tokio::sync::Mutex<()>,
+    /// Built once on first use and reused across refreshes (connection
+    /// pooling; previously a new client was built per fetch).
+    http_client: std::sync::OnceLock<reqwest::Client>,
 }
 
 enum JwksSource {
@@ -74,6 +81,8 @@ impl JwtBearerResolver {
                 fetched_at: std::time::Instant::now(),
             }))),
             cache_ttl: std::time::Duration::from_secs(u64::MAX),
+            refresh_lock: tokio::sync::Mutex::new(()),
+            http_client: std::sync::OnceLock::new(),
         })
     }
 
@@ -89,6 +98,8 @@ impl JwtBearerResolver {
             jwks_source: JwksSource::Url(url),
             cached_keys: Arc::new(RwLock::new(None)),
             cache_ttl: std::time::Duration::from_secs(cache_ttl_secs),
+            refresh_lock: tokio::sync::Mutex::new(()),
+            http_client: std::sync::OnceLock::new(),
         }
     }
 
@@ -113,6 +124,18 @@ impl JwtBearerResolver {
         match &self.jwks_source {
             JwksSource::Inline(keys) => Ok(keys.clone()),
             JwksSource::Url(url) => {
+                // Single-flight: serialize refreshes, then re-check the cache
+                // — a caller that waited here usually finds the keys another
+                // caller just fetched and never hits the endpoint itself.
+                let _refresh = self.refresh_lock.lock().await;
+                {
+                    let guard = self.cached_keys.read().await;
+                    if let Some(cached) = guard.as_ref() {
+                        if cached.fetched_at.elapsed() < self.cache_ttl {
+                            return Ok(cached.keys.clone());
+                        }
+                    }
+                }
                 match self.fetch_jwks(url).await {
                     Ok(keys) => {
                         let mut guard = self.cached_keys.write().await;
@@ -148,11 +171,19 @@ impl JwtBearerResolver {
     async fn fetch_jwks(&self, url: &str) -> Result<Vec<(Option<String>, DecodingKey)>, AuthError> {
         // Explicit timeouts: a hanging JWKS endpoint must not block the auth
         // path indefinitely (the default reqwest client has no timeout).
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(3))
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .map_err(|e| AuthError::FetchFailed(format!("JWKS client build failed: {e}")))?;
+        let client = match self.http_client.get() {
+            Some(c) => c,
+            None => {
+                let built = reqwest::Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(3))
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                    .map_err(|e| {
+                        AuthError::FetchFailed(format!("JWKS client build failed: {e}"))
+                    })?;
+                self.http_client.get_or_init(|| built)
+            }
+        };
         let resp = client
             .get(url)
             .send()
@@ -503,6 +534,63 @@ mod tests {
         let resolver = JwtBearerResolver::from_inline_json(config(), &jwks_inline()).unwrap();
         let outcome = resolver.resolve(&MetadataMap::new()).await.unwrap();
         assert!(outcome.is_none());
+    }
+
+    /// Single-flight: N concurrent callers hitting an empty/expired cache
+    /// must coalesce into exactly one JWKS fetch (no thundering herd on the
+    /// endpoint when the TTL expires under load).
+    #[tokio::test]
+    async fn concurrent_jwks_refresh_is_single_flight() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let counter = connections.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                let body = jwks_inline();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let _ = sock.read(&mut buf).await;
+                    // Hold the response briefly so all 8 callers pile up
+                    // behind the in-flight refresh.
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let resolver = Arc::new(JwtBearerResolver::from_url(
+            config(),
+            format!("http://{addr}/jwks"),
+            300,
+        ));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let r = resolver.clone();
+            handles.push(tokio::spawn(async move { r.get_keys().await }));
+        }
+        for h in handles {
+            let keys = h.await.unwrap().expect("all callers get keys");
+            assert!(!keys.is_empty());
+        }
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            1,
+            "8 concurrent refreshes must coalesce into one JWKS fetch"
+        );
     }
 
     #[tokio::test]

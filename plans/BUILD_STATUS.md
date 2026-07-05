@@ -32,7 +32,7 @@ Legend: `TODO` · `IN PROGRESS` · `BLOCKED (reason)` · `DONE (verification)` �
 | A4. Session-ID validation fix (36-char base64url with `-`) | DONE (2 new tests; UUID-parseable strings keep strict rules — uppercase UUIDs still rejected) | `macp-core/src/session.rs` |
 | A5. Ext-mode holes | DONE (all three sub-items, 7 new tests) | (1) promote-to-`macp.mode.*` rejected, promotion validated; (2) descriptors must declare ≥1 terminal type, and only `Commitment` (passthrough-backed); (3) empty ext `mode_version` now binds descriptor version, recorded as `LogEntry.bound_mode_version` (serde-default `None`), replay uses recorded binding never live registry, legacy logs keep legacy vacuous semantics. Updated tier-1 fixture descriptor. |
 | A6. Handoff implicit-accept interim fix | DONE (519 tests green; 4 new tests) | `MessageContext` + defaulted `Mode::on_message_at` kernel entry (zero churn on ~330 test call sites); handoff times implicit-accept against the acceptance clock on rev≥1 sessions; `Session.semantics_rev` + `CURRENT_SEMANTICS_REV=1` recorded on SessionStart log entry and in snapshots; legacy histories (rev 0 via serde default) replay under the envelope clock. |
-| A7. Multi-round proto payloads | BLOCKED (needs upstream `macp-proto` release — rfc-changes.md item 6) | |
+| A7. Multi-round proto payloads | CODE COMPLETE (2026-07-05) — merge blocked on `macp-proto` 0.1.4 release only | Spec side: PR #45 (canonical proto, package sync, all three hardcoded codegen lists), closes issue #39. Runtime side on `feat/a7-multi-round-proto`: macp-pb codegen + `multi_round_pb` module, mode accepts proto with permanent JSON-first parse order (deliberate deviation from the plan's "proto-first" — see work log), conformance loader + example client emit proto, 3 new regression tests. Verified end-to-end with a temporary path dep; branch commits against `macp-proto = "0.1.4"`. |
 | A8. Roots capability decision | DONE (tier-1 test added) | Decision: disclaim honestly. `Initialize` now advertises `roots{list_roots:true, list_changed:false}` — ListRoots truthfully answers (empty set), but no change notifications are promised since no roots provider exists (RFC-0006 §3.3). Revisit at E2. |
 
 ## Phase B — Security & correctness (phase-b-security-correctness.md)
@@ -76,15 +76,16 @@ Legend: `TODO` · `IN PROGRESS` · `BLOCKED (reason)` · `DONE (verification)` �
 | E2. Roots | DONE-BY-DECISION (A8) | Disclaimed honestly (`list_changed:false`); provider deferred until a consumer exists |
 | E3. `PolicyEngine` trait + audit verbosity | DONE (3-hook test + unit test; 527 ws tests green) | `macp_runtime::policy_engine::PolicyEngine` — async identity-aware INGRESS gating (session start / message / session access), injectable via `MacpServer::with_policy_engine`, deny-on-error, denials surface as POLICY_DENIED. Determinism boundary documented: rejected traffic never enters history, so async engines can't diverge replay; commitment governance stays with the pure `PolicyEvaluator` (RFC-0012 §6.3). Audit: `rules.audit.level="info"` elevates per-message audit lines per bound policy. |
 | E4. Conformance pack + CI oracle | LOCAL PART DONE (canonical format + schema, C5) · publishing + spec-repo CI oracle UPSTREAM (rfc-changes.md item 15) |
-| E5. §3.5 consistency cleanups | MOSTLY DONE | Commitment epilogue extracted to `util::enforce_commitment_policy` (5 modes, ~150 lines removed); shared mode-state codec added; `extract_commitment_rules` deduped to the core impl; dead `HandoffContext` authorize branch removed; eval-time rule-parse failures now DENY loudly (were silently evaluating empty defaults). Remaining (deliberate): participant-validation normalization needs per-RFC verification; registry file-persistence machinery kept (rewritten correctly in D2); per-mode `encode_state` wrappers may delegate to the codec as polish. |
+| E5. §3.5 consistency cleanups | DONE (participant validation per-RFC verified 2026-07-05) | Commitment epilogue extracted to `util::enforce_commitment_policy` (5 modes, ~150 lines removed); shared mode-state codec added; `extract_commitment_rules` deduped to the core impl; dead `HandoffContext` authorize branch removed; eval-time rule-parse failures now DENY loudly (were silently evaluating empty defaults). Participant validation verified against RFCs 0007–0011: Task's `initiator ∈ participants` check conflicted with RFC-0009 role-based authority — relaxed to "≥1 non-initiator assignee"; Handoff's strictness justified by the delegated model (RFC-0010 §2), now documented at the check; Decision/Proposal/Quorum conformant as-is. Remaining polish only: per-mode `encode_state` wrappers may delegate to the codec. |
 | E6. Transcript visualizer + buf.build | Visualizer DONE (2 tests; renders all 13 fixtures + session logs) · buf.build UPSTREAM (spec repo owns protos) |
 
 ## RFC filings (rfc-changes.md)
 
 | Item | Status |
 |---|---|
-| 1–6 blocking normative issues | TODO (needs repo owner to file upstream) |
-| 7–15 corrections | TODO |
+| 1–6 blocking normative issues | DONE (filed 2026-07-05 as spec-repo issues #34–#39; 1–3 flagged freeze-blocking) |
+| 7–15 corrections | DONE (filed 2026-07-05: 7–11 batched as doc-drift issue #40; 12→#41, 13→#42, 14→#43, 15→#44) |
+| Spec PRs for 1, 3, 4 | TODO (per checklist: draft once maintainers ack direction) |
 
 ---
 
@@ -352,3 +353,57 @@ Legend: `TODO` · `IN PROGRESS` · `BLOCKED (reason)` · `DONE (verification)` �
   sessions / made retry logs unreplayable (post-commit snapshot failure is
   now non-fatal, matching the log-authoritative doctrine). 532 tests,
   clippy 0. Tier-1 gate rerunning.
+- **2026-07-05** — **Post-review gate CONFIRMED GREEN on `422085b`**: workspace
+  tests pass (exit 0), tier-1 75/75, tier1_jwt 8/8, tier-2 Rig tools 5/5
+  (tier-3 ignored as designed). The adversarial-review fix commit is fully
+  gated. Also verified: `plans/` IS git-tracked — the master plan's
+  version-control warning (gitignored, sole-copy risk) is stale/resolved.
+- **2026-07-05** — **RFC filings DONE** (rfc-changes.md items 1–15): filed as
+  11 GitHub issues on the spec repo
+  (multiagentcoordinationprotocol/multiagentcoordinationprotocol):
+  #34 MAX_SUSPEND_MS binding, #35 handoff timer contract, #36 policy_version
+  echo (all three flagged freeze-blocking), #37 quorum threshold schema
+  defects, #38 ListSessions pagination, #39 multi-round proto + macp-proto
+  release, #40 doc-drift batch (items 7–11), #41 intent undocumented,
+  #42 vote cardinality, #43 passive-subscribe sequence definition (the B2
+  contract proposed upstream), #44 conformance fixture ownership + schema.
+  Spec PRs for 1/3/4 remain per the checklist (await maintainer ack).
+- **2026-07-05** — **A7 code complete** (master §4.5). Spec repo: canonical
+  `macp/modes/multi_round/v1/multi_round.proto` (`ContributePayload{string
+  value=1}` — string over bytes/structured: equality-compared opaque values,
+  extensible via new fields) + entrypoint proto + the three hardcoded
+  codegen lists (Makefile, ci.yml, publish workflow) + raw-package sync +
+  python scaffolding; buf lint / proto compile / sync check green; PR #45.
+  Runtime: `multi_round_pb` generated in macp-pb, re-exported; mode accepts
+  proto and legacy JSON with **JSON-first parse order, permanently** — a
+  deliberate deviation from the plan's "protobuf first": pathological legacy
+  JSON bytes CAN decode as valid proto (e.g. `{` opens a group a later `|`
+  closes) which would silently change a replayed contribution, while a proto
+  payload can never parse as a JSON object — JSON-first is the only
+  replay-safe order (RFC-0003 §1). Empty payloads stay rejected (proto3
+  can't encode value="" non-emptily). Conformance loader + client emit
+  proto; tests: json_fallback_still_accepted, proto/json equivalence
+  (no round advance on same value), empty rejected. Verified with temporary
+  path dep on the spec repo; committed on `feat/a7-multi-round-proto`
+  against `macp-proto = "0.1.4"` — the branch builds the moment the release
+  lands (tag `proto-v0.1.4` after PR #45 merges).
+- **2026-07-05** — **E5 participant-validation residual closed** (per-RFC
+  verification, all six modes): no RFC specifies a numeric participant
+  minimum — all count checks are runtime policy. Findings: Decision/
+  Proposal/Quorum conformant (non-empty only; RFC-0007 §2 and RFC-0011 §2
+  make initiator authority role-based, NOT membership-based — quorum
+  explicitly separates coordinator from voter pool). **Task's
+  `initiator ∈ participants` check contradicted RFC-0009** (§2/§4 authorize
+  TaskRequest by initiator role; a pure external orchestrator was wrongly
+  rejected) — relaxed to "≥1 participant other than the initiator" (the
+  orchestrated model's real invariant: at least one eligible assignee);
+  new test `session_start_accepts_external_orchestrator`. Handoff keeps
+  both strict checks — intrinsic to the delegated model (owner IS the
+  initiator and a transfer party, RFC-0010 §2/§3) — now documented at the
+  check. CHANGELOG entries added.
+- **2026-07-05** — **JWKS follow-up (adversarial-review advisory)**: refresh
+  is now single-flight (refresh mutex + cache re-check; 8 concurrent
+  refreshes provably coalesce into 1 fetch —
+  `concurrent_jwks_refresh_is_single_flight` with a real local listener)
+  and the reqwest client is built once and reused (was per-fetch). 44 auth
+  tests green.
