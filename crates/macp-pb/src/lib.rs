@@ -29,3 +29,7 @@ pub mod handoff_pb {
 pub mod quorum_pb {
     include!(concat!(env!("OUT_DIR"), "/macp.modes.quorum.v1.rs"));
 }
+
+pub mod multi_round_pb {
+    include!(concat!(env!("OUT_DIR"), "/macp.modes.multi_round.v1.rs"));
+}

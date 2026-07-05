@@ -6,7 +6,7 @@ pub mod pb {
     tonic::include_proto!("macp.v1");
 }
 
-pub use macp_pb::{decision_pb, handoff_pb, proposal_pb, quorum_pb, task_pb};
+pub use macp_pb::{decision_pb, handoff_pb, multi_round_pb, proposal_pb, quorum_pb, task_pb};
 
 pub mod error;
 pub mod metrics;

@@ -64,6 +64,11 @@ workspace version in the root `Cargo.toml`.
   (RFC-MACP-0010 §2), now documented at the check.
 
 ### Changed
+- `ext.multi_round.v1` `Contribute` payloads use the canonical protobuf
+  encoding (`macp.modes.multi_round.v1.ContributePayload`) — the last
+  advertised mode off the canonical wire format. Legacy JSON
+  (`{"value":"..."}`) payloads remain accepted (tried first, permanently, so
+  pre-proto histories replay byte-identically). Requires `macp-proto` ≥ 0.1.4.
 - `PolicyEvaluator` is now a single-method trait:
   `evaluate_commitment(&CommitmentContext)`. The per-mode methods remain as
   deprecated shims for one release. All five standard modes pass
