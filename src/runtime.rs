@@ -258,6 +258,7 @@ impl Runtime {
             timestamp_unix_ms: env.timestamp_unix_ms,
             bound_mode_version: None,
             semantics_rev: 0,
+            bound_max_suspend_ms: None,
             compacted_incoming_ordinals: 0,
         }
     }
@@ -282,6 +283,7 @@ impl Runtime {
             timestamp_unix_ms: now,
             bound_mode_version: None,
             semantics_rev: 0,
+            bound_max_suspend_ms: None,
             compacted_incoming_ordinals: 0,
         }
     }
@@ -439,9 +441,19 @@ impl Runtime {
             accepted_at
         };
         let ttl_expiry = ttl_base.saturating_add(ttl_ms);
+        // Resolve the suspension cap (RFC-MACP-0001 §7.5): the payload's
+        // positive value, else the runtime default. The RESOLVED value is
+        // bound on the session and recorded on the SessionStart log entry so
+        // replay uses it — never live configuration (RFC-MACP-0003 §2).
+        let bound_max_suspend_ms = if start_payload.max_suspend_ms > 0 {
+            start_payload.max_suspend_ms
+        } else {
+            macp_core::session::MAX_SUSPEND_MS
+        };
         let session = Session::builder(env.session_id.clone(), mode_name, env.sender.clone())
             .ttl_expiry(ttl_expiry)
             .ttl_ms(ttl_ms)
+            .max_suspend_ms(bound_max_suspend_ms)
             .started_at_unix_ms(accepted_at)
             .participants(start_payload.participants.clone())
             .intent(start_payload.intent.clone())
@@ -528,6 +540,7 @@ impl Runtime {
         let mut incoming_entry = Self::make_incoming_entry(env, accepted_at);
         incoming_entry.bound_mode_version = bound_mode_version;
         incoming_entry.semantics_rev = semantics_rev;
+        incoming_entry.bound_max_suspend_ms = Some(bound_max_suspend_ms);
         if self
             .storage
             .append_log_entry(&env.session_id, &incoming_entry)
@@ -1034,6 +1047,7 @@ impl Runtime {
             timestamp_unix_ms: now,
             bound_mode_version: None,
             semantics_rev: 0,
+            bound_max_suspend_ms: None,
             compacted_incoming_ordinals: 0,
         };
         if let Err(e) = self.storage.append_log_entry(session_id, &checkpoint).await {
@@ -1254,6 +1268,7 @@ mod tests {
             context_id: String::new(),
             extensions: std::collections::HashMap::new(),
             roots: vec![],
+            max_suspend_ms: 0,
         }
         .encode_to_vec()
     }
@@ -1400,6 +1415,7 @@ mod tests {
             context_id: String::new(),
             extensions: std::collections::HashMap::new(),
             roots: vec![],
+            max_suspend_ms: 0,
         }
         .encode_to_vec();
         rt.process(
@@ -1565,6 +1581,7 @@ mod tests {
             context_id: String::new(),
             extensions: std::collections::HashMap::new(),
             roots: vec![],
+            max_suspend_ms: 0,
         }
         .encode_to_vec();
         rt.process(
@@ -2030,6 +2047,7 @@ mod tests {
             context_id: String::new(),
             extensions: std::collections::HashMap::new(),
             roots: vec![],
+            max_suspend_ms: 0,
         }
         .encode_to_vec();
         rt.process(
@@ -2084,6 +2102,7 @@ mod tests {
             context_id: String::new(),
             extensions: std::collections::HashMap::new(),
             roots: vec![],
+            max_suspend_ms: 0,
         }
         .encode_to_vec();
         rt.process(
@@ -2194,6 +2213,7 @@ mod tests {
             context_id: String::new(),
             extensions: std::collections::HashMap::new(),
             roots: vec![],
+            max_suspend_ms: 0,
         }
         .encode_to_vec();
 
@@ -2417,6 +2437,72 @@ mod tests {
         .unwrap();
         let log2 = rt.log_store.get_log(&sid2).await.unwrap();
         assert_eq!(log2[0].bound_mode_version, None);
+    }
+
+    /// The RESOLVED suspension cap is bound on the session and recorded on
+    /// the SessionStart log entry (RFC-MACP-0001 §7.5, RFC-MACP-0003 §2):
+    /// the payload's positive value verbatim, or the runtime default when
+    /// the payload carried 0 — never left unrecorded on new sessions.
+    #[tokio::test]
+    async fn session_start_binds_and_records_max_suspend_cap() {
+        let rt = make_runtime();
+
+        // Explicit cap: recorded verbatim.
+        let sid = new_sid();
+        let payload = SessionStartPayload {
+            participants: vec!["alice".into(), "bob".into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            ttl_ms: 60_000,
+            max_suspend_ms: 12_345,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        rt.process(
+            &env(
+                "macp.mode.decision.v1",
+                "SessionStart",
+                "m1",
+                &sid,
+                "alice",
+                payload,
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+        let log = rt.log_store.get_log(&sid).await.unwrap();
+        assert_eq!(log[0].bound_max_suspend_ms, Some(12_345));
+
+        // Payload 0: the runtime default is resolved and recorded.
+        let sid2 = new_sid();
+        let payload2 = SessionStartPayload {
+            participants: vec!["alice".into(), "bob".into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            ttl_ms: 60_000,
+            max_suspend_ms: 0,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        rt.process(
+            &env(
+                "macp.mode.decision.v1",
+                "SessionStart",
+                "m2",
+                &sid2,
+                "alice",
+                payload2,
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+        let log2 = rt.log_store.get_log(&sid2).await.unwrap();
+        assert_eq!(
+            log2[0].bound_max_suspend_ms,
+            Some(macp_core::session::MAX_SUSPEND_MS)
+        );
     }
 
     #[test]

@@ -386,6 +386,7 @@ async fn run_conformance_fixture(path: &Path) {
         context_id: String::new(),
         extensions: std::collections::HashMap::new(),
         roots: vec![],
+        max_suspend_ms: 0,
     }
     .encode_to_vec();
 

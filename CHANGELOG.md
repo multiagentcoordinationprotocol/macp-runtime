@@ -63,6 +63,15 @@ workspace version in the root `Cargo.toml`.
   keeps requiring initiator membership — intrinsic to the delegated model
   (RFC-MACP-0010 §2), now documented at the check.
 
+### Added
+- The maximum-suspension cap is session-bound: `SessionStartPayload.max_suspend_ms`
+  (macp-proto ≥ 0.1.5) binds a per-session cap at start; `0`/absent selects the
+  runtime default (7 days). The **resolved** cap is recorded on the session and
+  its SessionStart log entry, and replay uses the recorded value — never live
+  configuration (RFC-MACP-0001 §7.5, RFC-MACP-0003 §2). Legacy histories carry
+  no recorded cap and keep default-cap semantics. Negative values are rejected
+  at SessionStart.
+
 ### Changed
 - `ext.multi_round.v1` `Contribute` payloads use the canonical protobuf
   encoding (`macp.modes.multi_round.v1.ContributePayload`) — the last

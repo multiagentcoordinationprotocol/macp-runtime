@@ -24,6 +24,7 @@ fn session_start(participants: Vec<String>) -> Vec<u8> {
         context_id: String::new(),
         extensions: std::collections::HashMap::new(),
         roots: vec![],
+        max_suspend_ms: 0,
     }
     .encode_to_vec()
 }
@@ -251,6 +252,7 @@ async fn disk_gc_deletes_terminal_sessions_only() {
             context_id: String::new(),
             extensions: Default::default(),
             roots: vec![],
+            max_suspend_ms: 0,
         }),
     };
 

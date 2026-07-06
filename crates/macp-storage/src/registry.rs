@@ -46,6 +46,10 @@ pub struct PersistedSession {
     /// Legacy snapshots deserialize as 0 and keep legacy behavior.
     #[serde(default)]
     pub semantics_rev: u32,
+    /// Suspension cap bound at SessionStart. Legacy snapshots deserialize as
+    /// 0 (= default-cap semantics via `Session::effective_max_suspend_ms`).
+    #[serde(default)]
+    pub max_suspend_ms: i64,
 }
 
 fn default_schema_version() -> u32 {
@@ -85,6 +89,7 @@ impl From<&Session> for PersistedSession {
             suspended_at_ms: session.suspended_at_ms,
             accumulated_suspended_ms: session.accumulated_suspended_ms,
             semantics_rev: session.semantics_rev,
+            max_suspend_ms: session.max_suspend_ms,
         }
     }
 }
@@ -128,6 +133,7 @@ impl From<PersistedSession> for Session {
             .suspended_at_ms(session.suspended_at_ms)
             .accumulated_suspended_ms(session.accumulated_suspended_ms)
             .semantics_rev(session.semantics_rev)
+            .max_suspend_ms(session.max_suspend_ms)
             .build()
     }
 }

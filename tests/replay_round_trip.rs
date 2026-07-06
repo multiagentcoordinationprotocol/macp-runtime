@@ -22,6 +22,7 @@ fn start_payload(participants: Vec<&str>) -> Vec<u8> {
         context_id: String::new(),
         extensions: std::collections::HashMap::new(),
         roots: vec![],
+        max_suspend_ms: 0,
     }
     .encode_to_vec()
 }
@@ -47,6 +48,7 @@ fn incoming(
         timestamp_unix_ms: ts,
         bound_mode_version: None,
         semantics_rev: 0,
+        bound_max_suspend_ms: None,
         compacted_incoming_ordinals: 0,
     }
 }
