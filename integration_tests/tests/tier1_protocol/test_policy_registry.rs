@@ -287,6 +287,7 @@ async fn unknown_policy_version_rejects_session_start() {
         context_id: String::new(),
         extensions: std::collections::HashMap::new(),
         roots: vec![],
+        max_suspend_ms: 0,
     }
     .encode_to_vec();
 
@@ -351,6 +352,7 @@ async fn policy_enforcement_blocks_commitment_in_decision_mode() {
         context_id: String::new(),
         extensions: std::collections::HashMap::new(),
         roots: vec![],
+        max_suspend_ms: 0,
     }
     .encode_to_vec();
 

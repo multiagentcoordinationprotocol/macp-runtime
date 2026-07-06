@@ -7,8 +7,12 @@ use std::collections::{HashMap, HashSet};
 
 pub const MAX_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 
-/// Hard cap on the cumulative time a session may spend `Suspended` before it is
-/// force-expired (RFC-MACP-0001 §7.5). Bounds indefinite human-in-the-loop holds.
+/// Default cap on the cumulative time a session may spend `Suspended` before
+/// it is force-expired (RFC-MACP-0001 §7.5). Bounds indefinite
+/// human-in-the-loop holds. Sessions may bind their own cap via
+/// `SessionStartPayload.max_suspend_ms` (0 selects this default); the
+/// resolved cap is recorded at SessionStart and used by replay
+/// (RFC-MACP-0003 §2) — see [`Session::effective_max_suspend_ms`].
 pub const MAX_SUSPEND_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 /// Current session-semantics revision. Recorded at SessionStart (on the
@@ -83,6 +87,12 @@ pub struct Session {
     /// Session-semantics revision this session was accepted under. See
     /// [`CURRENT_SEMANTICS_REV`]. Legacy persisted sessions load as `0`.
     pub semantics_rev: u32,
+    /// Maximum-suspension cap bound at SessionStart (RFC-MACP-0001 §7.5,
+    /// RFC-MACP-0003 §2). `0` = unbound (legacy sessions and library
+    /// defaults) — the [`MAX_SUSPEND_MS`] default applies; see
+    /// [`Session::effective_max_suspend_ms`]. The kernel records the
+    /// *resolved* value here for new sessions.
+    pub max_suspend_ms: i64,
 }
 
 impl Session {
@@ -123,6 +133,7 @@ impl Session {
                 suspended_at_ms: None,
                 accumulated_suspended_ms: 0,
                 semantics_rev: CURRENT_SEMANTICS_REV,
+                max_suspend_ms: 0,
             },
         }
     }
@@ -152,6 +163,16 @@ impl Session {
     /// TTL deadline (`ttl_expiry += now - suspended_at`). If the cumulative
     /// suspended time would exceed `MAX_SUSPEND_MS`, the session is force-expired
     /// instead and `MacpError::TtlExpired` is returned.
+    /// The suspension cap governing this session: the value bound at
+    /// SessionStart, or the [`MAX_SUSPEND_MS`] default when unbound (0).
+    pub fn effective_max_suspend_ms(&self) -> i64 {
+        if self.max_suspend_ms > 0 {
+            self.max_suspend_ms
+        } else {
+            MAX_SUSPEND_MS
+        }
+    }
+
     pub fn resume(&mut self, now_ms: i64) -> Result<(), MacpError> {
         if self.state != SessionState::Suspended {
             return Err(MacpError::SessionNotOpen);
@@ -160,7 +181,7 @@ impl Session {
         let banked = (now_ms - suspended_at).max(0);
         self.accumulated_suspended_ms = self.accumulated_suspended_ms.saturating_add(banked);
         self.suspended_at_ms = None;
-        if self.accumulated_suspended_ms > MAX_SUSPEND_MS {
+        if self.accumulated_suspended_ms > self.effective_max_suspend_ms() {
             self.state = SessionState::Expired;
             return Err(MacpError::TtlExpired);
         }
@@ -187,9 +208,9 @@ impl Session {
             Some(at) => {
                 self.accumulated_suspended_ms
                     .saturating_add((now_ms - at).max(0))
-                    > MAX_SUSPEND_MS
+                    > self.effective_max_suspend_ms()
             }
-            None => self.accumulated_suspended_ms > MAX_SUSPEND_MS,
+            None => self.accumulated_suspended_ms > self.effective_max_suspend_ms(),
         }
     }
 
@@ -250,6 +271,9 @@ impl SessionBuilder {
         suspended_at_ms: Option<i64>,
         accumulated_suspended_ms: i64,
         semantics_rev: u32,
+        /// Suspension cap bound at SessionStart; 0 = use the
+        /// [`MAX_SUSPEND_MS`] default (legacy sessions, library consumers).
+        max_suspend_ms: i64,
     }
 
     pub fn intent(mut self, value: impl Into<String>) -> Self {
@@ -338,6 +362,12 @@ pub fn validate_canonical_session_start_payload(
         }
     }
 
+    // max_suspend_ms: 0 selects the runtime default; a positive value binds a
+    // session-specific cap (RFC-MACP-0001 §7.1). Negative is meaningless.
+    if payload.max_suspend_ms < 0 {
+        return Err(MacpError::InvalidPayload);
+    }
+
     Ok(())
 }
 
@@ -412,6 +442,7 @@ mod tests {
             context_id: String::new(),
             extensions: std::collections::HashMap::new(),
             roots: vec![],
+            max_suspend_ms: 0,
         };
         payload.encode_to_vec()
     }
@@ -502,6 +533,7 @@ mod tests {
             suspended_at_ms: None,
             accumulated_suspended_ms: 0,
             semantics_rev: CURRENT_SEMANTICS_REV,
+            max_suspend_ms: 0,
         }
     }
 
@@ -543,6 +575,74 @@ mod tests {
         let err = s.resume(MAX_SUSPEND_MS + 1).unwrap_err();
         assert!(matches!(err, MacpError::TtlExpired));
         assert_eq!(s.state, SessionState::Expired);
+    }
+
+    /// A session-bound cap (SessionStartPayload.max_suspend_ms) overrides the
+    /// default: resuming past the BOUND cap force-expires even though the
+    /// default cap is nowhere near exceeded.
+    #[test]
+    fn bound_cap_overrides_default_on_resume() {
+        let mut s = open_session(10_000);
+        s.max_suspend_ms = 500;
+        s.suspend(0).unwrap();
+        let err = s.resume(501).unwrap_err();
+        assert!(matches!(err, MacpError::TtlExpired));
+        assert_eq!(s.state, SessionState::Expired);
+    }
+
+    #[test]
+    fn bound_cap_within_limit_resumes_and_banks_ttl() {
+        let mut s = open_session(10_000);
+        s.max_suspend_ms = 500;
+        s.suspend(0).unwrap();
+        s.resume(400).unwrap();
+        assert_eq!(s.state, SessionState::Open);
+        assert_eq!(s.ttl_expiry, 10_400);
+    }
+
+    #[test]
+    fn suspend_cap_exceeded_uses_bound_cap() {
+        let mut s = open_session(10_000);
+        s.max_suspend_ms = 500;
+        s.suspend(0).unwrap();
+        assert!(!s.suspend_cap_exceeded(400));
+        assert!(s.suspend_cap_exceeded(501));
+    }
+
+    #[test]
+    fn unbound_session_uses_default_cap() {
+        let s = open_session(10_000);
+        assert_eq!(s.max_suspend_ms, 0);
+        assert_eq!(s.effective_max_suspend_ms(), MAX_SUSPEND_MS);
+    }
+
+    #[test]
+    fn negative_max_suspend_ms_rejected_in_canonical_payload() {
+        let payload = SessionStartPayload {
+            participants: vec!["a".into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            ttl_ms: 60_000,
+            max_suspend_ms: -1,
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_canonical_session_start_payload(&payload)
+                .unwrap_err()
+                .to_string(),
+            "InvalidPayload"
+        );
+        // 0 (runtime default) and positive values are both valid.
+        let ok0 = SessionStartPayload {
+            max_suspend_ms: 0,
+            ..payload.clone()
+        };
+        validate_canonical_session_start_payload(&ok0).unwrap();
+        let ok_pos = SessionStartPayload {
+            max_suspend_ms: 60_000,
+            ..payload
+        };
+        validate_canonical_session_start_payload(&ok_pos).unwrap();
     }
 
     #[test]

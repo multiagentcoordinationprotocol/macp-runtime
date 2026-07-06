@@ -69,6 +69,7 @@ pub fn session_start_payload(intent: &str, participants: &[&str], ttl_ms: i64) -
         context_id: String::new(),
         extensions: std::collections::HashMap::new(),
         roots: vec![],
+        max_suspend_ms: 0,
     }
     .encode_to_vec()
 }

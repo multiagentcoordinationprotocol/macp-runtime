@@ -33,6 +33,7 @@ fn start_payload() -> Vec<u8> {
         context_id: String::new(),
         extensions: Default::default(),
         roots: vec![],
+        max_suspend_ms: 0,
     }
     .encode_to_vec()
 }
@@ -55,6 +56,7 @@ fn incoming(message_id: &str, message_type: &str, sender: &str, payload: Vec<u8>
         timestamp_unix_ms: 1_700_000_000_000,
         bound_mode_version: None,
         semantics_rev: 1,
+        bound_max_suspend_ms: None,
         compacted_incoming_ordinals: 0,
     }
 }

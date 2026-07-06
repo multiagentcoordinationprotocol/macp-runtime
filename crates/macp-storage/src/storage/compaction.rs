@@ -36,6 +36,7 @@ pub async fn compact_session_log(
         // mode_version), so no separate binding record is needed here.
         bound_mode_version: None,
         semantics_rev: 0,
+        bound_max_suspend_ms: None,
         // Preserve the passive-subscribe sequence across compaction: the
         // checkpoint records how many accepted ordinals it replaced, so
         // post-compaction entries keep contiguous client-visible ordinals

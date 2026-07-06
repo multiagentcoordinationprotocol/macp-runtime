@@ -291,6 +291,7 @@ mod tests {
             timestamp_unix_ms: 1_700_000_000_000,
             bound_mode_version: None,
             semantics_rev: 0,
+            bound_max_suspend_ms: None,
             compacted_incoming_ordinals: 0,
         }
     }

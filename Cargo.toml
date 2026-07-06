@@ -62,7 +62,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rocksdb = { version = "0.22" }
 redis = { version = "0.27", features = ["tokio-comp", "aio"] }
-macp-proto = "0.1.4"
+macp-proto = "0.1.5"
 tonic-prost-build = "0.14"
 tempfile = "3"
 base64 = "0.22"

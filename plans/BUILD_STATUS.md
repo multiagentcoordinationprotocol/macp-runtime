@@ -93,15 +93,9 @@ Legend: `TODO` · `IN PROGRESS` · `BLOCKED (reason)` · `DONE (verification)` �
 
 Recommended order; the first two are the substantive engineering items.
 
-1. **Runtime: bind `max_suspend_ms` at SessionStart** — follow-through on spec
-   PR #46 (freeze-blocking determinism fix; wire-affecting, so it belongs
-   before the release). Blocked on: merge #46, release `macp-proto` 0.1.5
-   (tag `proto-v0.1.5`). Work: parse the new field, resolve 0→config default,
-   record the resolved cap on the session AND the SessionStart log entry
-   (serde-default → legacy sessions keep legacy config-cap semantics — the
-   established `bound_mode_version`/`semantics_rev` migration pattern), TTL
-   sweep + replay use the recorded cap, suspend→expire conformance vector,
-   tier-1 test.
+1. ~~Runtime: bind `max_suspend_ms` at SessionStart~~ — **DONE 2026-07-05**
+   (spec #46 merged, macp-proto 0.1.5 released, runtime branch
+   `feat/bind-max-suspend-ms`; see work log).
 2. **E4 steps 3–4 (master §5.7): single canonical fixture source + CI
    oracle** — reconcile the runtime's 13 fixtures + `schema.json` with the
    spec repo's `schemas/conformance/` (upstream issue #44 proposes spec repo
@@ -125,6 +119,18 @@ Recommended order; the first two are the substantive engineering items.
    `max_suspend_ms`. §9 deferred items remain blocked as documented.
 
 ## Work log
+
+- **2026-07-05** — **`max_suspend_ms` bound at SessionStart** (spec #46
+  follow-through; macp-proto → 0.1.5). Resolution: payload's positive value,
+  else the 7-day default const; the RESOLVED cap lands on
+  `Session.max_suspend_ms` and the SessionStart entry's
+  `LogEntry.bound_max_suspend_ms` (serde-default `None` → legacy histories
+  stay on default-cap semantics — the `bound_mode_version` pattern).
+  `resume()`/cap sweep use `effective_max_suspend_ms()`; replay uses only
+  the recorded value; negative payload values rejected in the canonical
+  contract. 8 new tests (core cap behavior ×5, runtime records
+  verbatim+default, replay recorded-wins + legacy-default, legacy-JSON
+  serde default). 544 ws tests, clippy 0 on 1.89 AND 1.96.
 
 - **2026-07-04** — BUILD_STATUS.md created; baseline build+test green.
 - **2026-07-04** — **A4 done**: `validate_session_id_for_acceptance` no longer

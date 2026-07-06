@@ -290,6 +290,9 @@ fn replay_from_start(
         // Replay under the semantics revision the session was accepted with
         // (legacy entries record 0 via serde default).
         .semantics_rev(start_entry.semantics_rev)
+        // Suspension cap recorded at acceptance; legacy entries (None) load
+        // as 0 = default-cap semantics, matching how they were accepted.
+        .max_suspend_ms(start_entry.bound_max_suspend_ms.unwrap_or(0))
         .ttl_expiry(ttl_expiry)
         .ttl_ms(ttl_ms)
         .started_at_unix_ms(started_at_unix_ms)
@@ -355,6 +358,7 @@ mod tests {
             context_id: String::new(),
             extensions: std::collections::HashMap::new(),
             roots: vec![],
+            max_suspend_ms: 0,
         }
         .encode_to_vec()
     }
@@ -379,6 +383,7 @@ mod tests {
             timestamp_unix_ms: received_at_ms,
             bound_mode_version: None,
             semantics_rev: 0,
+            bound_max_suspend_ms: None,
             compacted_incoming_ordinals: 0,
         }
     }
@@ -397,6 +402,7 @@ mod tests {
             timestamp_unix_ms: received_at_ms,
             bound_mode_version: None,
             semantics_rev: 0,
+            bound_max_suspend_ms: None,
             compacted_incoming_ordinals: 0,
         }
     }
@@ -604,6 +610,7 @@ mod tests {
             timestamp_unix_ms: 3000,
             bound_mode_version: None,
             semantics_rev: 0,
+            bound_max_suspend_ms: None,
             compacted_incoming_ordinals: 0,
         };
 
@@ -683,6 +690,7 @@ mod tests {
             timestamp_unix_ms: 1000,
             bound_mode_version,
             semantics_rev: 0,
+            bound_max_suspend_ms: None,
             compacted_incoming_ordinals: 0,
         }
     }
@@ -730,6 +738,34 @@ mod tests {
         // Legacy entries also carry no semantics revision: rev 0 (legacy
         // acceptance-time behavior) via serde default.
         assert_eq!(entry.semantics_rev, 0);
+        // And no bound suspension cap: default-cap semantics via serde default.
+        assert_eq!(entry.bound_max_suspend_ms, None);
+    }
+
+    /// Replay applies the suspension cap recorded at acceptance — never a
+    /// re-derived or configured value.
+    #[test]
+    fn replay_uses_recorded_max_suspend_cap() {
+        let registry = ext_registry_with_dyn_mode("1.0.0");
+        let mut entry = ext_start_entry(Some("1.0.0".into()));
+        entry.bound_max_suspend_ms = Some(1234);
+        let session = replay_session("s1", &[entry], &registry, None).unwrap();
+        assert_eq!(session.max_suspend_ms, 1234);
+        assert_eq!(session.effective_max_suspend_ms(), 1234);
+    }
+
+    /// Legacy entries (recorded before the cap was bindable) load unbound and
+    /// keep default-cap semantics — how they were accepted.
+    #[test]
+    fn replay_legacy_entry_keeps_default_cap_semantics() {
+        let registry = ext_registry_with_dyn_mode("1.0.0");
+        let entries = vec![ext_start_entry(None)];
+        let session = replay_session("s1", &entries, &registry, None).unwrap();
+        assert_eq!(session.max_suspend_ms, 0);
+        assert_eq!(
+            session.effective_max_suspend_ms(),
+            macp_core::session::MAX_SUSPEND_MS
+        );
     }
 
     /// Replay binds the session to the semantics revision recorded at

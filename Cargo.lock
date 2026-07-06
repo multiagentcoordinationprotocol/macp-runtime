@@ -1315,9 +1315,9 @@ dependencies = [
 
 [[package]]
 name = "macp-proto"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "509c8aa343e01329f0aa7b7b581518fb31c772686e1883844a40fda66e04f072"
+checksum = "e04a97288880d38709177e259629f881031dfe978cea66f5c7a105df86bde5d0"
 
 [[package]]
 name = "macp-runtime"

@@ -1673,6 +1673,7 @@ mod tests {
             context_id: String::new(),
             extensions: std::collections::HashMap::new(),
             roots: vec![],
+            max_suspend_ms: 0,
         }
         .encode_to_vec()
     }
@@ -2237,6 +2238,7 @@ mod tests {
             context_id: String::new(),
             extensions: std::collections::HashMap::new(),
             roots: vec![],
+            max_suspend_ms: 0,
         }
         .encode_to_vec()
     }
@@ -2618,6 +2620,7 @@ mod tests {
             context_id: String::new(),
             extensions: Default::default(),
             roots: vec![],
+            max_suspend_ms: 0,
         }
         .encode_to_vec();
         let start_env = |sender: &str, sid: &str| Envelope {
@@ -2720,6 +2723,7 @@ mod tests {
             context_id: String::new(),
             extensions: Default::default(),
             roots: vec![],
+            max_suspend_ms: 0,
         }
         .encode_to_vec();
         runtime

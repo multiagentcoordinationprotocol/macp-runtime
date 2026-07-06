@@ -39,6 +39,13 @@ pub struct LogEntry {
     /// histories keep the acceptance-time behavior they were written under.
     #[serde(default)]
     pub semantics_rev: u32,
+    /// Suspension cap resolved and bound at SessionStart acceptance
+    /// (payload value, or the runtime default when the payload carried 0).
+    /// Replay uses this recorded value, never live configuration
+    /// (RFC-MACP-0003 §2). `None` on legacy entries — those sessions keep
+    /// default-cap semantics.
+    #[serde(default)]
+    pub bound_max_suspend_ms: Option<i64>,
     /// On `Checkpoint` entries produced by log compaction: how many accepted
     /// (Incoming) envelope ordinals the compaction discarded. Ordinals of
     /// entries after the checkpoint continue from this base, keeping the
@@ -160,6 +167,7 @@ mod tests {
             timestamp_unix_ms: 1_700_000_000_000,
             bound_mode_version: None,
             semantics_rev: 0,
+            bound_max_suspend_ms: None,
             compacted_incoming_ordinals: 0,
         }
     }
