@@ -1,10 +1,48 @@
 use std::net::TcpListener;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, Once};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use macp_runtime::pb::macp_runtime_service_client::MacpRuntimeServiceClient;
 use macp_runtime::pb::InitializeRequest;
+
+/// PIDs of servers still running, killed+reaped at process exit.
+///
+/// `ServerManager`s held in `static`s (the per-binary shared servers in
+/// `tests/common` and `tier1_jwt`) are never dropped — Rust does not drop
+/// statics — so Drop-based cleanup alone leaked one server per test binary
+/// on every run. The atexit hook covers exactly that path; normally-owned
+/// managers still clean up via `stop()`/Drop, which deregisters them here.
+static LIVE_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+static ATEXIT_REGISTER: Once = Once::new();
+
+extern "C" fn kill_live_servers_at_exit() {
+    // atexit context: must not panic or allocate carelessly.
+    if let Ok(pids) = LIVE_PIDS.lock() {
+        for pid in pids.iter() {
+            unsafe {
+                libc::kill(*pid as i32, libc::SIGKILL);
+                libc::waitpid(*pid as i32, std::ptr::null_mut(), 0);
+            }
+        }
+    }
+}
+
+fn track_live_pid(pid: u32) {
+    ATEXIT_REGISTER.call_once(|| unsafe {
+        libc::atexit(kill_live_servers_at_exit);
+    });
+    if let Ok(mut pids) = LIVE_PIDS.lock() {
+        pids.push(pid);
+    }
+}
+
+fn untrack_live_pid(pid: u32) {
+    if let Ok(mut pids) = LIVE_PIDS.lock() {
+        pids.retain(|p| *p != pid);
+    }
+}
 
 /// Manages the lifecycle of a local MACP runtime server subprocess.
 pub struct ServerManager {
@@ -38,9 +76,16 @@ impl ServerManager {
         for (k, v) in extra_env {
             cmd.env(k, v);
         }
+        // Do NOT inherit the test binary's stdio: a long-lived child holding
+        // the parent's stdout/stderr write ends keeps piped `cargo test`
+        // output from ever reaching EOF, even after all tests pass. No test
+        // asserts on the shared server's output (output-asserting tests use
+        // `Command::output()` on their own spawns).
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
         let child = cmd
             .spawn()
             .with_context(|| format!("failed to start runtime binary: {binary_path}"))?;
+        track_live_pid(child.id());
 
         let mut manager = Self {
             process: Some(child),
@@ -62,6 +107,7 @@ impl ServerManager {
             tracing::info!("Stopping MACP runtime (pid={})", child.id());
             let _ = child.kill();
             let _ = child.wait();
+            untrack_live_pid(child.id());
         }
     }
 }

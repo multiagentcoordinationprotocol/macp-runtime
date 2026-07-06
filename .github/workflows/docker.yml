@@ -1,11 +1,12 @@
 name: Build & Push Docker Image
 
+# Build-and-PUSH on main/tags only. PRs get a build-only gate via the
+# `docker-build` job in ci.yml (part of the required ci-pass gate), so a
+# broken image build blocks merges without pushing PR images to GHCR.
 on:
   push:
     branches: [main]
     tags: ["v*"]
-  pull_request:
-    branches: [main]
 
 env:
   REGISTRY: ghcr.io

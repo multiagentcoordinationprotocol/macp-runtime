@@ -76,7 +76,7 @@ Legend: `TODO` · `IN PROGRESS` · `BLOCKED (reason)` · `DONE (verification)` �
 | E2. Roots | DONE-BY-DECISION (A8) | Disclaimed honestly (`list_changed:false`); provider deferred until a consumer exists |
 | E3. `PolicyEngine` trait + audit verbosity | DONE (3-hook test + unit test; 527 ws tests green) | `macp_runtime::policy_engine::PolicyEngine` — async identity-aware INGRESS gating (session start / message / session access), injectable via `MacpServer::with_policy_engine`, deny-on-error, denials surface as POLICY_DENIED. Determinism boundary documented: rejected traffic never enters history, so async engines can't diverge replay; commitment governance stays with the pure `PolicyEvaluator` (RFC-0012 §6.3). Audit: `rules.audit.level="info"` elevates per-message audit lines per bound policy. |
 | E4. Conformance pack + CI oracle | LOCAL PART DONE (canonical format + schema, C5) · publishing + spec-repo CI oracle UPSTREAM (rfc-changes.md item 15) |
-| E5. §3.5 consistency cleanups | DONE (participant validation per-RFC verified 2026-07-05) | Commitment epilogue extracted to `util::enforce_commitment_policy` (5 modes, ~150 lines removed); shared mode-state codec added; `extract_commitment_rules` deduped to the core impl; dead `HandoffContext` authorize branch removed; eval-time rule-parse failures now DENY loudly (were silently evaluating empty defaults). Participant validation verified against RFCs 0007–0011: Task's `initiator ∈ participants` check conflicted with RFC-0009 role-based authority — relaxed to "≥1 non-initiator assignee"; Handoff's strictness justified by the delegated model (RFC-0010 §2), now documented at the check; Decision/Proposal/Quorum conformant as-is. Remaining polish only: per-mode `encode_state` wrappers may delegate to the codec. |
+| E5. §3.5 consistency cleanups | DONE (participant validation per-RFC verified 2026-07-05) | Commitment epilogue extracted to `util::enforce_commitment_policy` (5 modes, ~150 lines removed); shared mode-state codec added; `extract_commitment_rules` deduped to the core impl; dead `HandoffContext` authorize branch removed; eval-time rule-parse failures now DENY loudly (were silently evaluating empty defaults). Participant validation verified against RFCs 0007–0011: Task's `initiator ∈ participants` check conflicted with RFC-0009 role-based authority — relaxed to "≥1 non-initiator assignee"; Handoff's strictness justified by the delegated model (RFC-0010 §2), now documented at the check; Decision/Proposal/Quorum conformant as-is. Codec delegation completed 2026-07-05 (all six modes use the shared util codec; shared encode now fails loudly). E5 fully closed. |
 | E6. Transcript visualizer + buf.build | Visualizer DONE (2 tests; renders all 13 fixtures + session logs) · buf.build UPSTREAM (spec repo owns protos) |
 
 ## RFC filings (rfc-changes.md)
@@ -85,9 +85,44 @@ Legend: `TODO` · `IN PROGRESS` · `BLOCKED (reason)` · `DONE (verification)` �
 |---|---|
 | 1–6 blocking normative issues | DONE (filed 2026-07-05 as spec-repo issues #34–#39; 1–3 flagged freeze-blocking) |
 | 7–15 corrections | DONE (filed 2026-07-05: 7–11 batched as doc-drift issue #40; 12→#41, 13→#42, 14→#43, 15→#44) |
-| Spec PRs for 1, 3, 4 | TODO (per checklist: draft once maintainers ack direction) |
+| Spec PRs for 1, 3, 4 | DONE (opened 2026-07-05: #46 max_suspend_ms session binding, #47 policy_version echo contract, #48 quorum threshold schema) |
 
 ---
+
+## Next up (analyzed 2026-07-05, post A–E merge)
+
+Recommended order; the first two are the substantive engineering items.
+
+1. **Runtime: bind `max_suspend_ms` at SessionStart** — follow-through on spec
+   PR #46 (freeze-blocking determinism fix; wire-affecting, so it belongs
+   before the release). Blocked on: merge #46, release `macp-proto` 0.1.5
+   (tag `proto-v0.1.5`). Work: parse the new field, resolve 0→config default,
+   record the resolved cap on the session AND the SessionStart log entry
+   (serde-default → legacy sessions keep legacy config-cap semantics — the
+   established `bound_mode_version`/`semantics_rev` migration pattern), TTL
+   sweep + replay use the recorded cap, suspend→expire conformance vector,
+   tier-1 test.
+2. **E4 steps 3–4 (master §5.7): single canonical fixture source + CI
+   oracle** — reconcile the runtime's 13 fixtures + `schema.json` with the
+   spec repo's `schemas/conformance/` (upstream issue #44 proposes spec repo
+   owns, runtime consumes), then a CI job running the runtime's conformance
+   loader against the spec repo's fixtures so spec and implementation cannot
+   drift silently.
+3. **Spec: handoff implicit-accept timer design (issue #35)** — the one
+   freeze-blocking decision still without a spec PR; needs real design
+   (synthetic-accept emission, sender convention, suspension interaction,
+   RFC-0012 §4.5 + RFC-0010 text). Runtime then implements the timer,
+   replacing the A6 interim acceptance-clock fix.
+4. **Spec: doc-drift batch PR (issue #40, items 7–11)** — mechanical text
+   fixes, one PR. Optionally also draft the ListSessions pagination proto
+   (issue #38) while in there.
+5. **Release macp-runtime v0.5.0** — after item 1 lands (unary-first freeze
+   per the master plan): bump `[workspace.package]` + internal dep versions,
+   tag, publish workflow. CHANGELOG's Unreleased section is already complete.
+6. Later: remove the multi-round JSON *client* fallback one release after
+   0.5.0 (replay fallback stays); SDK repos (typescript/python) pick up
+   `macp-proto` ≥0.1.4 for the multi-round payload and ≥0.1.5 for
+   `max_suspend_ms`. §9 deferred items remain blocked as documented.
 
 ## Work log
 
@@ -414,6 +449,39 @@ Legend: `TODO` · `IN PROGRESS` · `BLOCKED (reason)` · `DONE (verification)` �
   version explicitly, but future releases should tag `proto-vX.Y.Z` (or
   dispatch consistently) so tag-triggered publishes work and spec-version
   `v*` tags stay unambiguous.
+- **2026-07-05** — **A–E MERGED to main** (PR #41 → `a0f6c5d`, PR #42 → `62c2e4f`).
+  Two post-merge defects found and fixed the same day: (1) first real
+  Actions run exposed `rust-toolchain.toml` hijacking the stable CI jobs
+  (fixed with workflow-level `RUSTUP_TOOLCHAIN`, the publish.yml pattern) and
+  clippy-1.96 `manual_is_multiple_of` findings invisible on the 1.89 pin
+  (fixed, MSRV-safe); (2) the main Docker image build broke — D1's
+  `[[bench]]` target wasn't copied into the builder stage (PR #43, merged) —
+  and its check had been RED on PR #41 without blocking: the docker workflow
+  was never in the required gate (also, the session's check-watcher parsed
+  multi-word check names wrong; both fixed).
+- **2026-07-05** — **Post-merge follow-ups (PR #44)**: (1) Docker image build
+  is now a required gate — build-only `docker-build` job inside ci.yml's
+  `ci-pass`; docker.yml pushes only on main/tags (PR images no longer pushed
+  to GHCR). (2) Tier-1 harness leak fixed — root cause: shared per-binary
+  `ServerManager`s live in `static OnceLock`s and Rust never drops statics
+  (kill+wait never ran), plus inherited stdio let the orphans hold the test
+  binary's stdout pipe open (piped runs hung at EOF after passing). Fix:
+  `Stdio::null` for server output + `libc::atexit` kill+reap of tracked
+  pids; verified — piped full run reaches EOF, 88/88, zero stragglers.
+  (3) E5 codec delegation completed (six modes on the shared util codec,
+  loud-failure encode). PR #44 green incl. the new docker gate check.
+- **2026-07-05** — **Spec PRs for the freeze-blocking decisions opened**
+  (filing-checklist completion): **#46** `max_suspend_ms` bound at
+  SessionStart (proto field 10 + RFC-0001 §7.1/§7.5 + RFC-0003 §2 corrected —
+  the old text claimed a config cap was "on the replayed timeline"; buf
+  breaking clean; needs macp-proto 0.1.5 after merge); **#47** policy echo
+  contract (RFC-0012 §6.1: metadata records the RESOLVED id; empty commitment
+  policy_version matches the bound policy; never require echoing
+  `policy.default` — blesses the runtime's A3 behavior); **#48** quorum
+  threshold schema (percentage = integer 0–100 with if/then bound;
+  threshold is the ONLY gate in schema_version ≤2, participation quorums
+  need a future field — blesses the A2/§1.10 fix; abstention wording flagged
+  for maintainer follow-up in the PR).
 - **2026-07-05** — **JWKS follow-up (adversarial-review advisory)**: refresh
   is now single-flight (refresh mutex + cache re-check; 8 concurrent
   refreshes provably coalesce into 1 fetch —
