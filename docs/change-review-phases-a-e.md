@@ -718,6 +718,20 @@ found in the gaps between them. All four are fixed (commit following
   window can report `duplicate=true` with a non-Open state — cosmetic,
   self-corrects on retry.
 
+### Post-review outcomes (addendum, 2026-07-05)
+
+Dispositions of the advisory notes after the change set merged and v0.5.0
+shipped: the **JWKS single-flight + client reuse** advisory was implemented
+(refresh mutex + cache re-check, one fetch under 8-way concurrency, proven
+by test) and released; the **`max_open_sessions` conservative-count bias**
+remains accepted as documented; the **duplicate-SessionStart ack** cosmetic
+is recorded in `plans/defer/follow_ons.md`. Of the "explicitly NOT claimed"
+items, `MAX_SUSPEND_MS` session binding has since shipped (spec PR #46 +
+runtime, v0.5.0) and the RFC-0012 §4.5 handoff timer is now fully specified
+upstream (RFC-0010 §5.1) with the runtime implementation queued in
+`follow_ons.md`; Redis power-loss durability and multi-node/HA remain
+disclosed non-goals.
+
 ### What this verification cycle demonstrates
 The document's per-task claims survived adversarial reading; the defects
 lived in *interactions between* independently-correct changes (E3's hooks vs
