@@ -199,7 +199,7 @@ Setting `allowed_modes` to an empty array (or omitting it) grants access to all 
 
 ### JWT mode
 
-The runtime accepts JWT bearer tokens when `MACP_AUTH_ISSUER` is set. Configure a JWKS source (`MACP_AUTH_JWKS_JSON` inline, or `MACP_AUTH_JWKS_URL` fetched + cached) and optionally override `MACP_AUTH_AUDIENCE` (default `macp-runtime`) and `MACP_AUTH_JWKS_TTL_SECS` (default 300). Supported signature algorithms are `RS256`, `ES256`, and `HS256`.
+The runtime accepts JWT bearer tokens when `MACP_AUTH_ISSUER` is set. Configure a JWKS source (`MACP_AUTH_JWKS_JSON` inline, or `MACP_AUTH_JWKS_URL` fetched + cached) and optionally override `MACP_AUTH_AUDIENCE` (default `macp-runtime`) and `MACP_AUTH_JWKS_TTL_SECS` (default 300). The default algorithm allowlist is `RS256` and `ES256`; `HS256` (shared-secret) requires explicit opt-in via `MACP_AUTH_JWT_ALGS=HS256` (see CHANGELOG 0.5.0 — symmetric keys must never become verifiable just because a JWKS contains an `oct` key).
 
 ```bash
 export MACP_AUTH_ISSUER=https://issuer.example.com
