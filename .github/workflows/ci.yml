@@ -379,6 +379,63 @@ jobs:
         env:
           MACP_TEST_BINARY: ../target/debug/macp-runtime
 
+  # Conformance oracle: the spec repo's schemas/conformance/ is the single
+  # canonical fixture source; this repo vendors byte-identical copies under
+  # tests/conformance/ for hermetic local runs. This job (a) byte-compares
+  # the vendored copies against canonical and (b) re-runs the conformance
+  # suite directly against the canonical files — spec and runtime cannot
+  # drift silently (master plan §5.7 step 4, upstream issue #44).
+  conformance-oracle:
+    name: Conformance oracle (spec-repo fixtures)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout spec repo (canonical fixtures)
+        uses: actions/checkout@v4
+        with:
+          repository: multiagentcoordinationprotocol/multiagentcoordinationprotocol
+          path: spec-repo
+
+      - name: Vendored fixtures are byte-identical to canonical
+        run: |
+          status=0
+          for f in tests/conformance/*.json; do
+            b=$(basename "$f")
+            if ! diff -u "spec-repo/schemas/conformance/$b" "$f"; then
+              echo "DRIFT: $b differs from the canonical spec-repo copy" >&2
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Run conformance suite against canonical fixtures
+        env:
+          MACP_CONFORMANCE_FIXTURES_DIR: ${{ github.workspace }}/spec-repo/schemas/conformance
+        run: cargo test --test conformance_loader
+
   # Build-only Docker gate: proves the published image still builds without
   # pushing anything. The push happens in docker.yml on main/tags. Added after
   # the A-E merge broke the main image build while its (non-required) check
@@ -405,7 +462,7 @@ jobs:
   ci-pass:
     name: All Checks Passed
     runs-on: ubuntu-latest
-    needs: [check, fmt, clippy, test, build, deps-isolation, features, integration-tier1, docker-build]
+    needs: [check, fmt, clippy, test, build, deps-isolation, features, integration-tier1, docker-build, conformance-oracle]
 
     steps:
       - name: Summary

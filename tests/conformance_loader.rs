@@ -494,13 +494,24 @@ async fn run_conformance_fixture(path: &Path) {
     }
 }
 
+/// Directory the conformance fixtures load from. Defaults to the vendored
+/// copies in `tests/conformance/`; the CI oracle job overrides it with
+/// `MACP_CONFORMANCE_FIXTURES_DIR` to run this same suite against the spec
+/// repo's canonical `schemas/conformance/` — the single fixture source. The
+/// oracle also byte-compares the vendored copies against canonical, so the
+/// two locations cannot drift silently.
+fn fixtures_dir() -> std::path::PathBuf {
+    match std::env::var("MACP_CONFORMANCE_FIXTURES_DIR") {
+        Ok(dir) if !dir.is_empty() => std::path::PathBuf::from(dir),
+        _ => Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/conformance"),
+    }
+}
+
 macro_rules! conformance_test {
     ($name:ident, $file:expr) => {
         #[tokio::test]
         async fn $name() {
-            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/conformance")
-                .join($file);
+            let path = fixtures_dir().join($file);
             run_conformance_fixture(&path).await;
         }
     };
