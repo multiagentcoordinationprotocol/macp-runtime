@@ -1080,6 +1080,7 @@ dependencies = [
  "base64",
  "chrono",
  "jsonwebtoken",
+ "libc",
  "macp-runtime",
  "prost",
  "rig-core",
@@ -1131,9 +1132,9 @@ dependencies = [
 
 [[package]]
 name = "macp-proto"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01a473ffafa6754cff55cf8e24961c448f5e649ebe0e8b663a21e9c168abe353"
+checksum = "509c8aa343e01329f0aa7b7b581518fb31c772686e1883844a40fda66e04f072"
 
 [[package]]
 name = "macp-runtime"

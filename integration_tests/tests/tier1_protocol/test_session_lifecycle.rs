@@ -147,11 +147,8 @@ async fn watch_sessions_emits_created_exactly_once_per_session() {
             && created_counts.get(&sid_after).copied().unwrap_or(0) >= 1
         {
             // Drain briefly for any straggling duplicate before asserting.
-            let grace = tokio::time::timeout(
-                std::time::Duration::from_millis(300),
-                stream.message(),
-            )
-            .await;
+            let grace =
+                tokio::time::timeout(std::time::Duration::from_millis(300), stream.message()).await;
             if let Ok(Ok(Some(resp))) = grace {
                 if let Some(event) = resp.event {
                     if event.event_type == 1 {

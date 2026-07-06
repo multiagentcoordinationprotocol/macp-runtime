@@ -5,8 +5,8 @@ use std::process::Command;
 /// silently running dev-mode auth where any bearer token is fully privileged.
 #[test]
 fn startup_refuses_without_auth_or_insecure_flag() {
-    let binary = std::env::var("MACP_TEST_BINARY")
-        .unwrap_or_else(|_| "../target/debug/macp-runtime".into());
+    let binary =
+        std::env::var("MACP_TEST_BINARY").unwrap_or_else(|_| "../target/debug/macp-runtime".into());
     let output = Command::new(&binary)
         .env_remove("MACP_ALLOW_INSECURE")
         .env_remove("MACP_AUTH_TOKENS_FILE")
@@ -31,8 +31,8 @@ fn startup_refuses_without_auth_or_insecure_flag() {
 /// drain deadline instead of being killed mid-flight.
 #[test]
 fn sigint_shuts_down_gracefully_within_deadline() {
-    let binary = std::env::var("MACP_TEST_BINARY")
-        .unwrap_or_else(|_| "../target/debug/macp-runtime".into());
+    let binary =
+        std::env::var("MACP_TEST_BINARY").unwrap_or_else(|_| "../target/debug/macp-runtime".into());
     let mut child = std::process::Command::new(&binary)
         .env("MACP_ALLOW_INSECURE", "1")
         .env("MACP_MEMORY_ONLY", "1")
@@ -55,11 +55,15 @@ fn sigint_shuts_down_gracefully_within_deadline() {
     loop {
         match child.try_wait().expect("try_wait") {
             Some(status) => {
-                assert!(status.success(), "graceful shutdown must exit 0, got {status:?}");
+                assert!(
+                    status.success(),
+                    "graceful shutdown must exit 0, got {status:?}"
+                );
                 break;
             }
             None if std::time::Instant::now() > deadline => {
                 let _ = child.kill();
+                let _ = child.wait();
                 panic!("runtime did not exit within the drain deadline after SIGINT");
             }
             None => std::thread::sleep(std::time::Duration::from_millis(100)),
@@ -71,8 +75,8 @@ fn sigint_shuts_down_gracefully_within_deadline() {
 #[test]
 fn metrics_endpoint_serves_prometheus_text() {
     use std::io::{Read, Write};
-    let binary = std::env::var("MACP_TEST_BINARY")
-        .unwrap_or_else(|_| "../target/debug/macp-runtime".into());
+    let binary =
+        std::env::var("MACP_TEST_BINARY").unwrap_or_else(|_| "../target/debug/macp-runtime".into());
     let metrics_addr = "127.0.0.1:19464";
     let mut child = std::process::Command::new(&binary)
         .env("MACP_ALLOW_INSECURE", "1")
@@ -101,11 +105,13 @@ fn metrics_endpoint_serves_prometheus_text() {
             }
             Err(e) => {
                 let _ = child.kill();
+                let _ = child.wait();
                 panic!("metrics endpoint never came up: {e}");
             }
         }
     };
     let _ = child.kill();
+    let _ = child.wait();
     assert!(response.starts_with("HTTP/1.1 200 OK"), "got: {response}");
     assert!(response.contains("text/plain"), "got: {response}");
 }
@@ -115,8 +121,8 @@ fn metrics_endpoint_serves_prometheus_text() {
 #[tokio::test]
 async fn policies_dir_loads_and_registry_is_read_only() {
     use macp_integration_tests::server_manager::ServerManager;
-    let binary = std::env::var("MACP_TEST_BINARY")
-        .unwrap_or_else(|_| "../target/debug/macp-runtime".into());
+    let binary =
+        std::env::var("MACP_TEST_BINARY").unwrap_or_else(|_| "../target/debug/macp-runtime".into());
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -136,11 +142,12 @@ async fn policies_dir_loads_and_registry_is_read_only() {
     let manager = ServerManager::start_with_env(&binary, &[("MACP_POLICIES_DIR", &dir_str)])
         .await
         .expect("runtime must start with a valid policies dir");
-    let mut client = macp_runtime::pb::macp_runtime_service_client::MacpRuntimeServiceClient::connect(
-        manager.endpoint.clone(),
-    )
-    .await
-    .expect("connect");
+    let mut client =
+        macp_runtime::pb::macp_runtime_service_client::MacpRuntimeServiceClient::connect(
+            manager.endpoint.clone(),
+        )
+        .await
+        .expect("connect");
 
     fn auth<T>(inner: T) -> tonic::Request<T> {
         let mut req = tonic::Request::new(inner);
@@ -202,8 +209,8 @@ async fn policies_dir_loads_and_registry_is_read_only() {
 /// a policy file is invalid.
 #[test]
 fn startup_refuses_invalid_policies_dir() {
-    let binary = std::env::var("MACP_TEST_BINARY")
-        .unwrap_or_else(|_| "../target/debug/macp-runtime".into());
+    let binary =
+        std::env::var("MACP_TEST_BINARY").unwrap_or_else(|_| "../target/debug/macp-runtime".into());
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("bad.json"), "{not json").unwrap();
 
@@ -214,7 +221,10 @@ fn startup_refuses_invalid_policies_dir() {
         .env("MACP_POLICIES_DIR", dir.path())
         .output()
         .expect("binary must run");
-    assert!(!output.status.success(), "invalid policy file must be fatal");
+    assert!(
+        !output.status.success(),
+        "invalid policy file must be fatal"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("MACP_POLICIES_DIR"),

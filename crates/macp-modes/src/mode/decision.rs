@@ -38,11 +38,11 @@ impl DecisionMode {
     }
 
     fn encode_state(state: &DecisionState) -> Vec<u8> {
-        serde_json::to_vec(state).expect("DecisionState is always serializable")
+        crate::mode::util::encode_mode_state(state)
     }
 
     fn decode_state(data: &[u8]) -> Result<DecisionState, MacpError> {
-        serde_json::from_slice(data).map_err(|_| MacpError::InvalidModeState)
+        crate::mode::util::decode_mode_state(data)
     }
 
     fn ensure_not_committed(state: &DecisionState) -> Result<(), MacpError> {

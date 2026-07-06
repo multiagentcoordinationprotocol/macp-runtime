@@ -78,11 +78,11 @@ impl ProposalMode {
     }
 
     fn encode_state(state: &ProposalState) -> Vec<u8> {
-        serde_json::to_vec(state).expect("ProposalState is always serializable")
+        crate::mode::util::encode_mode_state(state)
     }
 
     fn decode_state(data: &[u8]) -> Result<ProposalState, MacpError> {
-        serde_json::from_slice(data).map_err(|_| MacpError::InvalidModeState)
+        crate::mode::util::decode_mode_state(data)
     }
 
     fn live_proposal<'a>(

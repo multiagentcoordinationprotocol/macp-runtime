@@ -126,8 +126,10 @@ pub fn enforce_commitment_policy(
 }
 
 /// Shared mode-state JSON codec (extracted from six per-mode copies).
+/// Encoding a mode-state struct cannot fail; if it ever does, panic loudly
+/// rather than silently persisting an empty state.
 pub fn encode_mode_state<T: serde::Serialize>(state: &T) -> Vec<u8> {
-    serde_json::to_vec(state).unwrap_or_default()
+    serde_json::to_vec(state).expect("mode state is always serializable")
 }
 
 pub fn decode_mode_state<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, MacpError> {
