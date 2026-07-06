@@ -6,6 +6,10 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.5.0] — 2026-07-05
+
 ### Security
 - **Dev-mode auth is now opt-in**: with no authentication configured
   (`MACP_AUTH_TOKENS_*` / `MACP_AUTH_ISSUER` unset) the runtime refuses to

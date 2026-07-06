@@ -21,7 +21,7 @@ exclude = ["integration_tests"]
 # Shared package metadata inherited by every workspace crate via
 # `<field>.workspace = true`, so version and release metadata live in one place.
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.89.0"
 license = "Apache-2.0"
@@ -34,12 +34,12 @@ authors = ["Ajit Koti <ajitkoti@zer07labs.com>"]
 # `path` (used for local workspace builds).
 [workspace.dependencies]
 # Internal crates
-macp-pb = { version = "0.4.0", path = "crates/macp-pb" }
-macp-core = { version = "0.4.0", path = "crates/macp-core" }
-macp-policy = { version = "0.4.0", path = "crates/macp-policy" }
-macp-storage = { version = "0.4.0", path = "crates/macp-storage" }
-macp-auth = { version = "0.4.0", path = "crates/macp-auth" }
-macp-modes = { version = "0.4.0", path = "crates/macp-modes" }
+macp-pb = { version = "0.5.0", path = "crates/macp-pb" }
+macp-core = { version = "0.5.0", path = "crates/macp-core" }
+macp-policy = { version = "0.5.0", path = "crates/macp-policy" }
+macp-storage = { version = "0.5.0", path = "crates/macp-storage" }
+macp-auth = { version = "0.5.0", path = "crates/macp-auth" }
+macp-modes = { version = "0.5.0", path = "crates/macp-modes" }
 # External
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.14", features = ["transport", "tls-ring"] }
