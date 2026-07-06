@@ -113,6 +113,19 @@ Recommended order; the first two are the substantive engineering items.
 
 ## Work log
 
+- **2026-07-05** — **v0.5.0 RELEASED AND VERIFIED**. Merge sequence executed
+  exactly as planned: spec #49 → runtime #46 (oracle green once canonical
+  fixtures landed) → spec #50/#51/#52 → tag `proto-v0.1.6` (macp-proto
+  0.1.6 live on crates.io — correct tag convention this time) → runtime #47
+  → tag `v0.5.0`. Verified: **all seven workspace crates at 0.5.0 on
+  crates.io** (first `cargo publish --workspace` release — publish.yml
+  succeeded), Docker image pushed for v0.5.0, main CI green including the
+  conformance oracle. The unary-first freeze release is out. Remaining
+  queued work (non-blocking, on macp-proto 0.1.6): handoff timer
+  implementation per RFC-0010 §5.1 (replaces the A6 interim fix, new
+  semantics rev) and real ListSessions pagination (replace the server-side
+  cap). Master-plan §8 phases A–F: complete except those two follow-ons
+  and the §9 hard-blocked deferrals.
 - **2026-07-05** — **Post-release-prep sweep (everything in order)**:
   - **E4 done**: spec PR #49 makes `schemas/conformance/` the single
     canonical source (runtime-verified fixtures — codes verified by the
