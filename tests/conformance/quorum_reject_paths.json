@@ -1,7 +1,11 @@
 {
   "mode": "macp.mode.quorum.v1",
   "initiator": "agent://coordinator",
-  "participants": ["agent://alice", "agent://bob", "agent://carol"],
+  "participants": [
+    "agent://alice",
+    "agent://bob",
+    "agent://carol"
+  ],
   "mode_version": "1.0.0",
   "configuration_version": "cfg-1",
   "policy_version": "",
@@ -11,21 +15,33 @@
       "sender": "agent://alice",
       "message_type": "Approve",
       "payload_type": "macp.modes.quorum.v1.ApprovePayload",
-      "payload": { "request_id": "r1", "reason": "lgtm" },
-      "expect": "reject"
+      "payload": {
+        "request_id": "r1",
+        "reason": "lgtm"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
     },
     {
       "sender": "agent://coordinator",
       "message_type": "ApprovalRequest",
       "payload_type": "macp.modes.quorum.v1.ApprovalRequestPayload",
-      "payload": { "request_id": "r1", "action": "deploy", "summary": "Deploy v2", "required_approvals": 2 },
+      "payload": {
+        "request_id": "r1",
+        "action": "deploy",
+        "summary": "Deploy v2",
+        "required_approvals": 2
+      },
       "expect": "accept"
     },
     {
       "sender": "agent://alice",
       "message_type": "Approve",
       "payload_type": "macp.modes.quorum.v1.ApprovePayload",
-      "payload": { "request_id": "r1", "reason": "lgtm" },
+      "payload": {
+        "request_id": "r1",
+        "reason": "lgtm"
+      },
       "expect": "accept"
     },
     {
@@ -42,7 +58,8 @@
         "configuration_version": "cfg-1",
         "outcome_positive": true
       },
-      "expect": "reject"
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
     }
   ],
   "expected_final_state": "Open"

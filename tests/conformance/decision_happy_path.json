@@ -29,7 +29,7 @@
       "payload_type": "macp.modes.decision.v1.VotePayload",
       "payload": {
         "proposal_id": "p1",
-        "vote": "approve",
+        "vote": "APPROVE",
         "reason": "good"
       },
       "expect": "accept"

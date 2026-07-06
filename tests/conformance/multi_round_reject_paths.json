@@ -1,7 +1,10 @@
 {
   "mode": "ext.multi_round.v1",
   "initiator": "agent://coordinator",
-  "participants": ["agent://alice", "agent://bob"],
+  "participants": [
+    "agent://alice",
+    "agent://bob"
+  ],
   "mode_version": "1.0.0",
   "configuration_version": "cfg-1",
   "policy_version": "",
@@ -21,20 +24,25 @@
         "configuration_version": "cfg-1",
         "outcome_positive": true
       },
-      "expect": "reject"
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
     },
     {
       "sender": "agent://alice",
       "message_type": "Contribute",
       "payload_type": "macp.modes.multi_round.v1.ContributePayload",
-      "payload": { "value": "option_a" },
+      "payload": {
+        "value": "option_a"
+      },
       "expect": "accept"
     },
     {
       "sender": "agent://bob",
       "message_type": "Contribute",
       "payload_type": "macp.modes.multi_round.v1.ContributePayload",
-      "payload": { "value": "option_a" },
+      "payload": {
+        "value": "option_a"
+      },
       "expect": "accept"
     },
     {
@@ -51,7 +59,8 @@
         "configuration_version": "cfg-1",
         "outcome_positive": true
       },
-      "expect": "reject"
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
     }
   ],
   "expected_final_state": "Open"

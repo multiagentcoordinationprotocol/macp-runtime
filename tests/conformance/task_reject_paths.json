@@ -1,7 +1,10 @@
 {
   "mode": "macp.mode.task.v1",
   "initiator": "agent://planner",
-  "participants": ["agent://planner", "agent://worker"],
+  "participants": [
+    "agent://planner",
+    "agent://worker"
+  ],
   "mode_version": "1.0.0",
   "configuration_version": "cfg-1",
   "policy_version": "",
@@ -11,22 +14,42 @@
       "sender": "agent://worker",
       "message_type": "TaskRequest",
       "payload_type": "macp.modes.task.v1.TaskRequestPayload",
-      "payload": { "task_id": "t1", "title": "Build", "instructions": "Do it", "requested_assignee": "agent://worker", "deadline_unix_ms": 0 },
-      "expect": "reject"
+      "payload": {
+        "task_id": "t1",
+        "title": "Build",
+        "instructions": "Do it",
+        "requested_assignee": "agent://worker",
+        "deadline_unix_ms": 0
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
     },
     {
       "sender": "agent://planner",
       "message_type": "TaskRequest",
       "payload_type": "macp.modes.task.v1.TaskRequestPayload",
-      "payload": { "task_id": "t1", "title": "Build", "instructions": "Do it", "requested_assignee": "agent://worker", "deadline_unix_ms": 0 },
+      "payload": {
+        "task_id": "t1",
+        "title": "Build",
+        "instructions": "Do it",
+        "requested_assignee": "agent://worker",
+        "deadline_unix_ms": 0
+      },
       "expect": "accept"
     },
     {
       "sender": "agent://planner",
       "message_type": "TaskRequest",
       "payload_type": "macp.modes.task.v1.TaskRequestPayload",
-      "payload": { "task_id": "t2", "title": "Another", "instructions": "Do more", "requested_assignee": "agent://worker", "deadline_unix_ms": 0 },
-      "expect": "reject"
+      "payload": {
+        "task_id": "t2",
+        "title": "Another",
+        "instructions": "Do more",
+        "requested_assignee": "agent://worker",
+        "deadline_unix_ms": 0
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
     }
   ],
   "expected_final_state": "Open"
