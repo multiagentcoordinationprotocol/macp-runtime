@@ -96,29 +96,50 @@ Recommended order; the first two are the substantive engineering items.
 1. ~~Runtime: bind `max_suspend_ms` at SessionStart~~ — **DONE 2026-07-05**
    (spec #46 merged, macp-proto 0.1.5 released, runtime branch
    `feat/bind-max-suspend-ms`; see work log).
-2. **E4 steps 3–4 (master §5.7): single canonical fixture source + CI
-   oracle** — reconcile the runtime's 13 fixtures + `schema.json` with the
-   spec repo's `schemas/conformance/` (upstream issue #44 proposes spec repo
-   owns, runtime consumes), then a CI job running the runtime's conformance
-   loader against the spec repo's fixtures so spec and implementation cannot
-   drift silently.
-3. **Spec: handoff implicit-accept timer design (issue #35)** — the one
-   freeze-blocking decision still without a spec PR; needs real design
-   (synthetic-accept emission, sender convention, suspension interaction,
-   RFC-0012 §4.5 + RFC-0010 text). Runtime then implements the timer,
-   replacing the A6 interim acceptance-clock fix.
-4. **Spec: doc-drift batch PR (issue #40, items 7–11)** — mechanical text
-   fixes, one PR. Optionally also draft the ListSessions pagination proto
-   (issue #38) while in there.
-5. **Release macp-runtime v0.5.0** — after item 1 lands (unary-first freeze
-   per the master plan): bump `[workspace.package]` + internal dep versions,
-   tag, publish workflow. CHANGELOG's Unreleased section is already complete.
+2. ~~E4 conformance pack + CI oracle~~ — **DONE 2026-07-05** (spec PR #49 +
+   runtime PR #46 pair; oracle red on #46 until #49 merges — by design).
+3. ~~Handoff timer design (issue #35)~~ — **SPEC PR #50 opened 2026-07-05**
+   (RFC-0010 §5.1 full contract + HandoffAcceptPayload.implicit proto field).
+   Runtime timer implementation follows the next macp-proto release (0.1.6).
+4. ~~Doc-drift batch + pagination~~ — **DONE 2026-07-05** (spec PRs #52 and
+   #51).
+5. ~~Release v0.5.0 prep~~ — **PR #47 opened 2026-07-05**; after merge:
+   `git tag v0.5.0 && git push origin v0.5.0` (publish.yml; dry_run
+   validation recommended first).
 6. Later: remove the multi-round JSON *client* fallback one release after
    0.5.0 (replay fallback stays); SDK repos (typescript/python) pick up
    `macp-proto` ≥0.1.4 for the multi-round payload and ≥0.1.5 for
    `max_suspend_ms`. §9 deferred items remain blocked as documented.
 
 ## Work log
+
+- **2026-07-05** — **Post-release-prep sweep (everything in order)**:
+  - **E4 done**: spec PR #49 makes `schemas/conformance/` the single
+    canonical source (runtime-verified fixtures — codes verified by the
+    harness, mode-aware linter fixing the initiator-membership rule that
+    contradicted RFC-0011 §2, schema.json, README contract); runtime PR #46
+    adds the required `conformance-oracle` CI job (byte-parity + suite run
+    against canonical). Oracle red on #46 until #49 merges — the drift
+    signal working as designed. Loader gained
+    MACP_CONFORMANCE_FIXTURES_DIR; local fixtures enriched
+    (documented vote casing, expected_error_code on every reject).
+  - **Handoff timer contract designed** (spec PR #50, closes #35):
+    RFC-0010 §5.1 — timing from the offer's RECORDED acceptance time,
+    suspended time excluded; synthetic accept enters accepted history
+    (eager SHOULD, lazy-before-commitment MUST) so the timer is outside
+    the replay boundary and its product inside; runtime-emitted envelope
+    (sender = target, implicit = true — new proto field, deterministic
+    message_id); races resolve by history order. Runtime implementation
+    follows macp-proto 0.1.6.
+  - **Pagination proto** (spec PR #51, closes #38): page_size/page_token/
+    next_page_token, buf breaking clean. Bundle with #50's field as 0.1.6.
+  - **Doc-drift batch** (spec PR #52, closes #40): context→context_id in
+    six RFC references, RFC-0006 lifecycle event list (§3.8 — issue said
+    §3.6; file numbering is itself disordered), policy.proto schema_version
+    comment, spec CLAUDE.md lifecycle/SessionEnd (gitignored there — local
+    fix only), RFC-0012 added to the RFC-0001 index. README had no drift.
+  - **v0.5.0 release prepped** (runtime PR #47): workspace + internal dep
+    versions, CHANGELOG 0.5.0 section, README highlights. Tag after merge.
 
 - **2026-07-05** — **`max_suspend_ms` bound at SessionStart** (spec #46
   follow-through; macp-proto → 0.1.5). Resolution: payload's positive value,

@@ -1,8 +1,19 @@
-# macp-runtime v0.4.0
+# macp-runtime v0.5.0
 
 Reference runtime for the Multi-Agent Coordination Protocol (MACP).
 
 This runtime implements the current MACP core/service surface, five standards-track modes, and one built-in extension mode. The focus of this release is freeze-readiness for SDKs and real-world unary and streaming integrations: strict `SessionStart`, mode-semantic correctness, authenticated senders, bounded resources, durable restart recovery, and extension mode lifecycle management.
+
+## What changed in v0.5.0
+
+The improvement-plan release (see `CHANGELOG.md` for the complete list):
+
+- **Security**: dev-mode auth is opt-in (`MACP_ALLOW_INSECURE=1` required with no auth configured); HS256 removed from the default JWT allowlist; `WatchSignals` authenticated; JWKS hardening (timeouts, stale-cache grace, kid selection, single-flight refresh); handoff implicit-accept timing no longer trusts client timestamps.
+- **Determinism**: session-bound `max_suspend_ms` (recorded at SessionStart, used by replay); passive-subscribe sequence contract (1-based accepted-envelope ordinals, exclusive `after_sequence`, compaction-stable); extension-mode version binding recorded and replayed.
+- **Durability**: RocksDB appends fsync before ack; atomic Redis `replace_log`; corrupt-entry parity across backends; crash-atomic snapshot writes.
+- **Throughput**: per-session locking replaces the global write lock (−38% on the fsync-contended path); bounded memory (eviction covers registry, log cache, stream channels); tonic limits + graceful shutdown.
+- **Operations**: opt-in Prometheus metrics endpoint; disk retention/GC; replay-consistency validation at recovery; `MACP_POLICIES_DIR` (RFC-0012 §9 read-only registry profile); pluggable ingress `PolicyEngine`.
+- **Wire**: `ext.multi_round.v1` on the canonical proto payload (JSON still accepted for replay compatibility); Task mode accepts an external orchestrator (RFC-0009 conformance); quorum `threshold` is the RFC-0012 §4.2 approval bar.
 
 ## What changed in v0.4.0
 
@@ -370,7 +381,7 @@ See `docs/testing.md` for full details on running locally, in CI, or against a h
 ## Releasing
 
 The workspace publishes to crates.io as seven crates that share one version
-(`0.4.0`), pinned in `[workspace.package]`. Internal dependencies are declared
+(`0.5.0`), pinned in `[workspace.package]`. Internal dependencies are declared
 as `{ version = "...", path = "..." }`, so the same manifests build locally
 from `path` and resolve from the registry once published.
 
