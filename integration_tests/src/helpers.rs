@@ -27,7 +27,10 @@ pub fn new_message_id() -> String {
     uuid::Uuid::new_v4().as_hyphenated().to_string()
 }
 
-fn with_sender<T>(sender: &str, inner: T) -> Request<T> {
+/// Wrap a request with the dev-mode bearer identity (`Bearer <sender>`).
+/// Public because streaming RPCs (e.g. authenticated `WatchSignals`) need it
+/// outside this module.
+pub fn with_sender<T>(sender: &str, inner: T) -> Request<T> {
     let mut request = Request::new(inner);
     request.metadata_mut().insert(
         "authorization",
