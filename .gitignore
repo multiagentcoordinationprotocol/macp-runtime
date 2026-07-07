@@ -31,4 +31,5 @@ integration_tests/target/
 # OS
 .DS_Store
 Thumbs.db
-.macp-data/.DS_Store
+# Local runtime persistence (MACP_DATA_DIR default)
+.macp-data/
