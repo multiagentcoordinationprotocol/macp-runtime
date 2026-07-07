@@ -47,7 +47,14 @@ the fsync load on the hot path. Needs care with shutdown/crash windows
 snapshot (master §3.2). Dedup is normative — a windowed design needs spec
 coordination first (file upstream before implementing).
 
-## 7. Small/cosmetic
+## 7. Built-in recommended policies (gated on upstream reservation)
+Master plan §4.2's companion: ship `policy.majority`, `policy.supermajority`,
+and `policy.unanimous` as optional pre-registered built-ins once the spec
+repo reserves the identifiers and pins their canonical rule definitions —
+filed as spec issue #55. Without the reservation, runtime built-ins could
+collide with user registrations of the same names.
+
+## 8. Small/cosmetic
 - Duplicate-SessionStart ack during a failed start's rollback window can
   report `duplicate=true` with a non-Open state (adversarial-review
   advisory; self-corrects on retry).

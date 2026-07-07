@@ -5,8 +5,14 @@ long term, no shortcuts. Every change lands with its tests; no task is marked DO
 without a green build + targeted tests; behavior changes get regression tests and,
 where replay is affected, a pre-fix log fixture.
 
-**Sources:** `plans/IMPROVEMENT_PLAN.md` (master, evidence/rationale) ·
-`plans/current/*.md` (execution plans).
+**Sources (historical):** `plans/IMPROVEMENT_PLAN.md` (master plan,
+evidence/rationale) and `plans/current/*.md` (execution plans) were DELETED
+on 2026-07-06 after a full-implementation audit — every task executed and
+released as v0.5.0; retrieve them from git history (last present at the
+parent of the plans-cleanup commit). Section references (§N.N) throughout
+this log refer to the master plan. Remaining work lives ONLY in
+`plans/defer/` (`follow_ons.md` for actionable items, `README.md` for
+hard-blocked ones).
 
 Legend: `TODO` · `IN PROGRESS` · `BLOCKED (reason)` · `DONE (verification)` · `DEFERRED`
 
@@ -112,6 +118,19 @@ Recommended order; the first two are the substantive engineering items.
    `max_suspend_ms`. §9 deferred items remain blocked as documented.
 
 ## Work log
+
+- **2026-07-06** — **Plans directory audited and pruned.** Every task in the
+  master plan and the five phase execution plans verified implemented and
+  released (v0.5.0 + macp-proto 0.1.8); the audit found exactly two loose
+  ends: (1) the C1 guard "Redis tests FAIL (not skip) when
+  MACP_TEST_REDIS_URL is set but unreachable" was never implemented —
+  implemented now (make_backend panics on set-but-unreachable; silent skip
+  only when unset); (2) master §4.2's companion (built-in
+  policy.majority/supermajority/unanimous, gated on upstream identifier
+  reservation) had no tracking — filed as spec issue #55 and added to
+  defer/follow_ons.md. IMPROVEMENT_PLAN.md and plans/current/ deleted
+  (git history retains them); plans/ now contains only this log and
+  defer/.
 
 - **2026-07-05** — **v0.5.0 RELEASED AND VERIFIED**. Merge sequence executed
   exactly as planned: spec #49 → runtime #46 (oracle green once canonical

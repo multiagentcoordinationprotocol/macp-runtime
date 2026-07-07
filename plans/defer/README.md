@@ -14,9 +14,11 @@ Two kinds of remaining work live here:
 
 History: on 2026-07-03 this directory was merged into
 **`plans/IMPROVEMENT_PLAN.md`** (the master plan), which was decomposed on
-2026-07-04 into execution plans under `plans/current/`. All actionable
-deferred items were promoted into that roadmap — and, as of 2026-07-05, all
-of them shipped (multi-round proto in 0.1.4/A7; test gaps in Phase B;
+2026-07-04 into execution plans under `plans/current/`. Both were DELETED on
+2026-07-06 after the full-implementation audit (git history retains them;
+`plans/BUILD_STATUS.md` remains as the execution record). All actionable
+deferred items had been promoted into that roadmap — and, as of 2026-07-05,
+all of them shipped (multi-round proto in 0.1.4/A7; test gaps in Phase B;
 replay validation D7; conformance pack C5/E4 + CI oracle; recovery benches
 D1; policy engine + audit E3; visualizer + buf.build publishing in Phase F
 — BSR push verified on spec-repo main). Their absorbed-item table is kept

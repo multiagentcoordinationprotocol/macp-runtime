@@ -206,7 +206,17 @@ mod tests {
     async fn make_backend() -> Option<RedisBackend> {
         let url = std::env::var("MACP_TEST_REDIS_URL").ok()?;
         let prefix = format!("macp_test_{}", uuid::Uuid::new_v4());
-        RedisBackend::connect(&url, &prefix).await.ok()
+        // Silent-skip is only legitimate when the env var is UNSET. When it
+        // is set (CI provides a service container), an unreachable Redis is
+        // a broken environment and must FAIL — otherwise a dead container
+        // green-lights every Redis test (the C1 guard from the master plan).
+        match RedisBackend::connect(&url, &prefix).await {
+            Ok(backend) => Some(backend),
+            Err(e) => panic!(
+                "MACP_TEST_REDIS_URL is set but Redis is unreachable ({e}) — \
+                 refusing to silently skip"
+            ),
+        }
     }
 
     async fn cleanup(backend: &RedisBackend) {
