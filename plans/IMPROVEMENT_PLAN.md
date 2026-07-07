@@ -1,6 +1,6 @@
 # macp-runtime Improvement Plan
 
-**Date:** 2026-07-03 · **Baseline:** v0.4.0 (`732b689`) · **Status:** Draft for review
+**Date:** 2026-07-03 · **Baseline:** v0.4.0 (`732b689`) · **Status:** **EXECUTED — released as v0.5.0 on 2026-07-05** (all seven crates on crates.io; see `plans/BUILD_STATUS.md` for the task-by-task record and `docs/change-review-phases-a-e.md` for the engineering review). Remaining work: actionable follow-ons in `plans/defer/follow_ons.md`; hard-blocked items in `plans/defer/README.md` (§9 unchanged). This document is retained as the rationale/evidence source of record.
 
 This plan is the result of a full audit of the runtime against the normative spec
 (`../multiagentcoordinationprotocol/`, RFCs 0001–0012), covering the kernel/transport
@@ -21,12 +21,11 @@ retains only the still-blocked plans and a slim index. Note that the old defer d
 predate the workspace split — their `src/mode/*`, `src/policy/*` paths are stale;
 paths in this document are current.
 
-**Version-control warning:** `plans/` is gitignored and the deleted defer files were
-never committed — this document is now the **sole copy** of their content (the load-
-bearing details are inlined below, not referenced). This file now lives at
-`plans/IMPROVEMENT_PLAN.md`, inside the gitignored directory: to track it, add a
-`.gitignore` exception (e.g. `!/plans/`) or `git add -f plans/`. Until then the
-entire planning corpus (this file + `plans/current/`) is uncommitted.
+**Version-control note (resolved 2026-07-05):** `plans/` is gitignored but the
+planning corpus was force-added (`git add -f plans/`) and is committed — this
+file, `plans/current/`, `plans/defer/`, and `BUILD_STATUS.md` are all tracked.
+The original warning (sole uncommitted copy of the absorbed defer content) no
+longer applies.
 
 **Framing constraint:** v0.4.0 is a *unary-first freeze candidate*. Anything that is a
 breaking API or wire-adjacent change must land **before** the freeze; that drives the

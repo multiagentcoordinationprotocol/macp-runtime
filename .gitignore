@@ -31,4 +31,4 @@ integration_tests/target/
 # OS
 .DS_Store
 Thumbs.db
-.macp-data/
+.macp-data/.DS_Store

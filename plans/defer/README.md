@@ -1,11 +1,26 @@
 # Deferred Work
 
-**Last reviewed**: 2026-07-03 (against v0.4.0 codebase)
+**Last reviewed**: 2026-07-05 (against v0.5.0 — the improvement plan is
+EXECUTED and released; all seven crates at 0.5.0 on crates.io)
 
-On 2026-07-03 this directory was merged into **`plans/IMPROVEMENT_PLAN.md`** (the
-master plan), which was decomposed on 2026-07-04 into execution plans under
-`plans/current/`. All actionable deferred items were promoted into that roadmap and
-their plan files deleted (content absorbed, stale pre-workspace paths corrected):
+Two kinds of remaining work live here:
+
+- **`follow_ons.md`** — actionable, scoped items that deliberately did not
+  gate the v0.5.0 release (handoff timer implementation, ListSessions
+  pagination, JSON client-fallback deprecation, persistence optimizations,
+  small/cosmetic items). Not blocked; pick up any time.
+- **The hard-blocked table below** — items with external blockers,
+  unchanged.
+
+History: on 2026-07-03 this directory was merged into
+**`plans/IMPROVEMENT_PLAN.md`** (the master plan), which was decomposed on
+2026-07-04 into execution plans under `plans/current/`. All actionable
+deferred items were promoted into that roadmap — and, as of 2026-07-05, all
+of them shipped (multi-round proto in 0.1.4/A7; test gaps in Phase B;
+replay validation D7; conformance pack C5/E4 + CI oracle; recovery benches
+D1; policy engine + audit E3; visualizer + buf.build publishing in Phase F
+— BSR push verified on spec-repo main). Their absorbed-item table is kept
+for the paper trail:
 
 | Absorbed item | Now lives at |
 |---|---|
