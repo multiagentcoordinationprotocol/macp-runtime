@@ -108,8 +108,10 @@ async fn decision_with_signals_full_flow() {
         )
         .await
         .unwrap();
+    // WatchSignals requires authentication since v0.5.0 (ambient payloads are
+    // agent data): subscribe as the orchestrator identity.
     let mut signal_stream = signal_watcher
-        .watch_signals(WatchSignalsRequest {})
+        .watch_signals(with_sender(orch_id, WatchSignalsRequest {}))
         .await
         .unwrap()
         .into_inner();
