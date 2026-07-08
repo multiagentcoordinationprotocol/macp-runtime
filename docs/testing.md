@@ -12,7 +12,7 @@ make test-conformance             # JSON fixture-driven conformance suite
 make test-all                     # fmt -> clippy -> test -> integration -> conformance
 ```
 
-Unit tests live inside `src/` modules under `#[cfg(test)]` and cover mode state machines, policy evaluation algorithms, storage backends, replay logic, and error handling. The conformance fixtures in `tests/conformance/` define mode lifecycles as JSON files and verify that each mode's happy path and reject paths produce the expected results.
+Unit tests live inside `src/` modules under `#[cfg(test)]` and cover mode state machines, policy evaluation algorithms, storage backends (including compaction, legacy-format migration, and crash-recovery paths), replay logic, metrics rendering, the extension registry, JWT auth including remote-JWKS fetch/caching/rotation, the auth resolver chain, and error handling. The conformance fixtures in `tests/conformance/` define mode lifecycles as JSON files and verify that each mode's happy path and reject paths produce the expected results.
 
 ## Integration test suite
 
@@ -37,7 +37,7 @@ integration_tests/
 
 ### Three tiers
 
-**Tier 1: Protocol tests** exercise every mode through scripted gRPC calls. These tests cover the full protocol surface: `Initialize` negotiation, happy-path flows for all five standard modes plus multi-round, signals, deduplication, version binding, cancellation authorization, session lifecycle, `StreamSession` including RFC-MACP-0006-A1 passive subscribe (`test_passive_subscribe.rs` -- history replay with `after_sequence` offsets, unknown-session and non-participant rejection, late-joiner replay-then-live delivery), mode registry operations, JWT bearer auth, and discovery RPCs. They run in under a second with no external dependencies.
+**Tier 1: Protocol tests** exercise every mode through scripted gRPC calls. These tests cover the full protocol surface: `Initialize` negotiation, happy-path flows for all five standard modes plus multi-round (consolidated in `test_mode_happy_paths.rs`), signals, deduplication, version binding, cancellation authorization, session suspend/resume, session lifecycle, `StreamSession` including RFC-MACP-0006-A1 passive subscribe (`test_passive_subscribe.rs` -- history replay with `after_sequence` offsets, unknown-session and non-participant rejection, late-joiner replay-then-live delivery), mode registry operations including `PromoteMode` and the `WatchModeRegistry`/`WatchPolicies`/`WatchRoots` observation streams, JWT bearer auth, TLS transport (self-signed round-trip plus a no-plaintext-fallback check), persistence and restart-replay against a real data directory, payload-size and per-sender rate limits, true concurrent senders racing into one session, and discovery RPCs. Most tests share one dev-mode server; tests that need special server configuration (TLS, limits, persistence, promotion) spawn their own on dynamic ports. They run in a few seconds with no external dependencies.
 
 **Tier 2: Rig agent tools** (5 tests) validate the MACP operations implemented as Rig `Tool` trait objects. These are called through `ToolSet::call()`, the same interface an LLM agent would use. They cover all five standard modes and verify that the tool abstraction correctly maps to gRPC operations.
 
@@ -82,6 +82,8 @@ make test-integration-hosted    # All tiers against MACP_TEST_ENDPOINT
 | `MACP_TEST_ENDPOINT` | Hosted runtime to test against (skips local server) | Starts local server |
 | `MACP_TEST_TLS` | Use TLS for hosted connection | `0` |
 | `MACP_TEST_AUTH_TOKEN` | Bearer token for hosted runtime | Dev headers |
+| `MACP_TEST_BACKEND` | Run the storage-backend smoke test on `rocksdb`/`redis`/`file` (binary must be built with the matching feature) | Test skips if unset |
+| `MACP_TEST_REDIS_URL` | Redis endpoint for the redis backend smoke test | `redis://127.0.0.1:6379` |
 | `OPENAI_API_KEY` | Required for Tier 3 tests | Tier 3 tests skip if unset |
 
 ## Policy tests
@@ -98,10 +100,12 @@ The policy engine has dedicated coverage across multiple test layers:
 
 ## CI/CD
 
-Integration tests run via manual GitHub Actions dispatch rather than on every pull request:
+Every pull request runs the full gate in `.github/workflows/ci.yml`: MSRV check (1.89.0), fmt, clippy, rustdoc (`-D warnings`), unit + conformance + policy tests, release build, crate dependency-isolation checks, a blocking `cargo audit` (ignore list in `.cargo/audit.toml`), feature-gated builds and tests for the rocksdb/redis/otel features (including backend smoke tests through the real gRPC binary against rocksdb and a live redis service), the Tier 1 + Tier 2 integration suites, the conformance oracle against the spec repo's canonical fixtures, and a build-only Docker gate. Coverage uploads to Codecov as advisory. All jobs run on the toolchain pinned in `rust-toolchain.toml`; a weekly scheduled audit (`scheduled-audit.yml`) catches new RUSTSEC advisories between PRs.
+
+Tier 3 runs only via manual GitHub Actions dispatch:
 
 ```
-Actions -> "Integration Tests" -> Run workflow -> optionally check "Run Tier 3 E2E"
+Actions -> "Integration Tests" -> Run workflow -> check "Run Tier 3 E2E"
 ```
 
 Tier 3 tests require the `OPENAI_API_KEY` repository secret. Tiers 1 and 2 run without any secrets.

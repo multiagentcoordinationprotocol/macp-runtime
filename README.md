@@ -301,7 +301,7 @@ gRPC server + binary; the lower crates form a one-way dependency graph with
 runtime/
 ├── src/                    # macp-runtime crate: kernel + gRPC server + binary
 │   ├── main.rs             # server startup, TLS, persistence, auth wiring
-│   ├── server.rs           # gRPC adapter (22 RPCs) and envelope validation
+│   ├── server.rs           # gRPC adapter (24 RPCs) and envelope validation
 │   ├── runtime.rs          # coordination kernel, mode dispatch, lifecycle bus
 │   ├── replay.rs           # session rebuild from append-only log
 │   ├── stream_bus.rs       # per-session broadcast channels
@@ -372,7 +372,7 @@ MACP_TEST_BINARY=../target/debug/macp-runtime cargo test -- --test-threads=1
 
 The integration suite has three tiers:
 
-- **Tier 1 (Protocol)** — 74 scripted gRPC tests (including JWT bearer auth, passive subscribe, and policy registry coverage) across all modes, error paths, signals, version binding, dedup, and RFC cross-cutting features
+- **Tier 1 (Protocol)** — 90 scripted gRPC tests plus 8 JWT bearer auth tests: all modes, error paths, signals, version binding, dedup, suspend/resume, TLS transport, persistence/restart-replay, payload and rate limits, concurrent senders, passive subscribe, policy registry and watch streams, mode promotion, and RFC cross-cutting features
 - **Tier 2 (Rig Tools)** — 5 tests using [Rig](https://rig.rs) agent framework `Tool` implementations for all MACP operations
 - **Tier 3 (E2E)** — 3 tests with real OpenAI GPT-4o-mini agents coordinating through the runtime (requires `OPENAI_API_KEY`)
 
@@ -389,9 +389,14 @@ Releases are automated by `.github/workflows/publish.yml`, triggered by pushing
 a version tag:
 
 ```bash
-git tag v0.4.0
-git push origin v0.4.0
+git tag v0.5.0
+git push origin v0.5.0
 ```
+
+The publish workflow verifies the tag against the workspace version, checks
+that `CHANGELOG.md` has a section for the release, runs `cargo semver-checks`
+against the last published release, publishes the workspace, and creates a
+GitHub Release with the CHANGELOG section as its notes.
 
 The workflow verifies the tag matches the workspace version, then publishes
 bottom-up so each crate's dependencies are already on the index:

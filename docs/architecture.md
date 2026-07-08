@@ -14,7 +14,7 @@ Agents (external)
   v  gRPC (tonic)
 +-----------------------------------------------------------+
 |  Transport Layer (src/server.rs)                          |
-|    22 RPC handlers, envelope validation, sender            |
+|    24 RPC handlers, envelope validation, sender            |
 |    derivation, rate limiting                               |
 +-----------------------------------------------------------+
   |
@@ -221,7 +221,7 @@ At runtime, the registry supports dynamic extension management: `RegisterExtMode
 ```
 src/
   main.rs              -- Startup, TLS config, persistence wiring, background tasks
-  server.rs            -- gRPC adapter (22 RPCs), envelope validation, streaming
+  server.rs            -- gRPC adapter (24 RPCs), envelope validation, streaming
   runtime.rs           -- Coordination kernel, session lifecycle, mode dispatch,
                           session lifecycle broadcast
   session.rs           -- Session model, SessionStart validation, ID rules

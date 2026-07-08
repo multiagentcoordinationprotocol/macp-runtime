@@ -1,6 +1,6 @@
 # API Reference
 
-This is the reference for all 22 gRPC RPCs exposed by the MACP Runtime on `macp.v1.MACPRuntimeService`. The default endpoint is `127.0.0.1:50051`, configurable via `MACP_BIND_ADDR`.
+This is the reference for all 24 gRPC RPCs exposed by the MACP Runtime on `macp.v1.MACPRuntimeService`. The default endpoint is `127.0.0.1:50051`, configurable via `MACP_BIND_ADDR`.
 
 For protocol-level transport semantics, see the [protocol transports documentation](https://www.multiagentcoordinationprotocol.io/docs/transports).
 
@@ -27,7 +27,7 @@ The client sends its supported protocol versions in descending preference order.
 | Field | Type | Description |
 |-------|------|-------------|
 | `selected_protocol_version` | string | Selected mutual version |
-| `runtime_info` | RuntimeInfo | `name: "macp-runtime"`, `version: "0.4.0"` |
+| `runtime_info` | RuntimeInfo | `name: "macp-runtime"`, `version: "0.5.0"` (tracks the crate version) |
 | `capabilities` | Capabilities | Runtime capabilities (streaming, cancellation, policy, etc.) |
 | `supported_modes` | repeated string | All supported mode identifiers |
 | `instructions` | string | Optional human-readable guidance |
@@ -126,6 +126,28 @@ rpc CancelSession(CancelSessionRequest) returns (CancelSessionResponse)
 **Request fields**: `session_id` (string), `reason` (string, optional).
 
 Only the session initiator can cancel. The runtime writes a `SessionCancelPayload` to the log with `cancelled_by` set to the authenticated sender. If the session is already terminal, the current state is returned without error.
+
+### SuspendSession
+
+Suspends an `OPEN` session (RFC-MACP-0001 §7.5). Like `CancelSession`, this is a core control-plane operation restricted to the session initiator or policy-delegated roles -- mode authorization does not apply.
+
+```protobuf
+rpc SuspendSession(SuspendSessionRequest) returns (SuspendSessionResponse)
+```
+
+**Request fields**: `session_id` (string), `reason` (string, optional).
+
+While suspended, mode traffic into the session is rejected. Time spent suspended is banked against the session's `max_suspend_ms` bound (from `SessionStartPayload`, defaulting to the runtime cap when 0); exceeding it expires the session.
+
+### ResumeSession
+
+Resumes a `SUSPENDED` session back to `OPEN`, banking the suspended duration into the TTL deadline. Same authority model as `SuspendSession`.
+
+```protobuf
+rpc ResumeSession(ResumeSessionRequest) returns (ResumeSessionResponse)
+```
+
+**Request fields**: `session_id` (string), `reason` (string, optional).
 
 ## Discovery
 
