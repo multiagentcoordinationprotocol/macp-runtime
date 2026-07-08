@@ -809,7 +809,9 @@ impl MacpRuntimeService for MacpServer {
             runtime_info: Some(RuntimeInfo {
                 name: "macp-runtime".into(),
                 title: "MACP Reference Runtime".into(),
-                version: "0.4.0".into(),
+                // Tracks the workspace version; a literal here drifted once
+                // (still advertising 0.4.0 after the 0.5.0 release).
+                version: env!("CARGO_PKG_VERSION").into(),
                 description: "Reference implementation of the Multi-Agent Coordination Protocol"
                     .into(),
                 website_url: String::new(),

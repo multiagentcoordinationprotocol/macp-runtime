@@ -333,7 +333,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tls_cert = std::env::var("MACP_TLS_CERT_PATH").ok();
     let tls_key = std::env::var("MACP_TLS_KEY_PATH").ok();
 
-    tracing::info!(%addr, "macp-runtime v0.4.0 listening");
+    tracing::info!(%addr, "macp-runtime v{} listening", env!("CARGO_PKG_VERSION"));
 
     // Server resource limits (RFC-MACP-0004 §7 DoS defenses). Combined with
     // per-session locking these bound how much work one client can queue.
