@@ -306,7 +306,9 @@ jobs:
           tool: cargo-tarpaulin
 
       - name: Generate coverage
-        run: cargo tarpaulin --all-targets --out xml
+        # tarpaulin already instruments all targets by default and rejects a
+        # second explicit --all-targets, so it is not passed here.
+        run: cargo tarpaulin --out xml
         env:
           MACP_MEMORY_ONLY: "1"
 

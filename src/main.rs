@@ -85,7 +85,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "otel")]
     {
-        use opentelemetry::trace::TracerProvider;
         use opentelemetry_otlp::WithExportConfig;
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
@@ -95,12 +94,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let exporter = opentelemetry_otlp::new_exporter()
             .tonic()
             .with_endpoint(&otlp_endpoint);
-        let provider = opentelemetry_otlp::new_pipeline()
+        // `install_batch` returns the batch-exporting `Tracer` directly
+        // (opentelemetry-otlp 0.15), so it is used as-is; there is no separate
+        // provider to call `.tracer()` on.
+        let tracer = opentelemetry_otlp::new_pipeline()
             .tracing()
             .with_exporter(exporter)
             .install_batch(opentelemetry_sdk::runtime::Tokio)
             .expect("failed to init OTEL tracer");
-        let tracer = provider.tracer("macp-runtime");
         let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
         tracing_subscriber::registry()
