@@ -11,37 +11,39 @@ on:
         description: "Package and verify without uploading"
         type: boolean
         default: true
+      skip_semver_checks:
+        description: "Skip cargo-semver-checks (escape hatch for false positives)"
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
-  # Workspace publishing (`cargo publish --workspace`) resolves internal path
-  # deps locally, so a dry-run validates the whole graph before anything is on
-  # the index. It needs a toolchain new enough to have the flag stabilized.
-  RUST_TOOLCHAIN: "1.95.0"
-  # The repo pins the MSRV via rust-toolchain.toml (channel = "1.89.0"), and
-  # that file wins over the installed default for plain `cargo`. RUSTUP_TOOLCHAIN
-  # has higher precedence than the file, so it forces this job's cargo to the
-  # newer toolchain installed above without touching the repo-wide MSRV pin.
-  RUSTUP_TOOLCHAIN: "1.95.0"
+  # Workspace publishing (`cargo publish --workspace`, stabilized in 1.90)
+  # runs on the repo toolchain pin. Keep in sync with rust-toolchain.toml.
+  RUST_TOOLCHAIN: "1.96.1"
 
 jobs:
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
+    permissions:
+      # Needed to create the GitHub Release after a successful publish.
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Install protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        with:
+          version: "31.x"
+          repo-token: ${{ github.token }}
 
       # Guard against tagging a release whose version doesn't match the
       # workspace. The tag drives the release; the manifest must agree.
@@ -56,6 +58,31 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME does not match workspace version $ws"
             exit 1
           fi
+
+      # A release tag without release notes is a process bug: the CHANGELOG
+      # must have a section for the version being published.
+      - name: Verify CHANGELOG documents this version
+        if: github.ref_type == 'tag'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          if ! grep -Eq "^## \[$tag\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$tag]' section for this release"
+            exit 1
+          fi
+
+      - name: Install cargo-semver-checks
+        if: ${{ !inputs.skip_semver_checks }}
+        uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.9.4
+        with:
+          tool: cargo-semver-checks
+
+      # Blocking: the workspace version bump must be adequate for the API
+      # changes since the last published release (0.x minor bumps permit
+      # breaking changes per cargo's semver interpretation). Escape hatch:
+      # the skip_semver_checks dispatch input.
+      - name: Semver check against latest published release
+        if: ${{ !inputs.skip_semver_checks }}
+        run: cargo semver-checks --workspace
 
       # `cargo publish --workspace` computes the dependency order itself, builds
       # each crate's verify step against its sibling path deps (so a dry-run
@@ -103,4 +130,28 @@ jobs:
           else
             echo "==> publish workspace"
             cargo publish --workspace --locked ${exclude_args[@]+"${exclude_args[@]}"}
+          fi
+
+      # Tag-driven releases also get a GitHub Release whose notes are the
+      # CHANGELOG section for the version (verified to exist above).
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          # Extract the "## [<tag>]" section body (up to the next "## [").
+          awk -v ver="$tag" '
+            $0 ~ "^## \\[" ver "\\]" { hit = 1; next }
+            hit && /^## \[/ { exit }
+            hit { print }
+          ' CHANGELOG.md > release-notes.md
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists; skipping (re-run safe)"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "macp-runtime $GITHUB_REF_NAME" \
+              --notes-file release-notes.md
           fi
