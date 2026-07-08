@@ -5,29 +5,46 @@ on:
   push:
     branches: [ main ]
 
+# Cancel superseded runs on the same PR/branch; never cancel main pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
-  # Main jobs run on stable; MSRV_TOOLCHAIN gates the minimum supported
-  # version via the `check` job (previously EVERYTHING ran only on the pin,
-  # so latest-stable regressions surfaced first at publish time).
-  RUST_TOOLCHAIN: "stable"
+  # rust-toolchain.toml pins the workspace toolchain; keep this in sync with
+  # it (it is passed to the toolchain action so jobs get rustfmt/clippy
+  # components instead of rustup's minimal auto-install of the file pin).
+  RUST_TOOLCHAIN: "1.96.1"
+  # Minimum supported Rust version, gated by the `check` job. Must match
+  # `rust-version` in the root Cargo.toml.
   MSRV_TOOLCHAIN: "1.89.0"
-  # The repo pins the MSRV via rust-toolchain.toml (channel = "1.89.0"), and
-  # that file wins over the installed default for plain `cargo` — without
-  # this, every "stable" job silently resolves to a minimal auto-installed
-  # 1.89.0 (no rustfmt/clippy components) and fails. RUSTUP_TOOLCHAIN has
-  # higher precedence than the file (same pattern as publish.yml); the MSRV
-  # job overrides it back to the pin at job level.
-  RUSTUP_TOOLCHAIN: "stable"
+  PROTOC_VERSION: "31.x"
 
 jobs:
+  actionlint:
+    name: Lint workflows (advisory)
+    runs-on: ubuntu-latest
+    # Advisory: workflow lint findings surface as annotations without
+    # blocking unrelated changes.
+    continue-on-error: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
+
   check:
     name: Check (MSRV)
     runs-on: ubuntu-latest
     env:
-      # Job-level override: the MSRV gate must run on the pin, not stable.
-      # (Hardcoded because workflow env isn't referencable in job-level env;
-      # keep in sync with MSRV_TOOLCHAIN above.)
+      # Job-level override: the MSRV gate must run on 1.89.0, not the
+      # rust-toolchain.toml pin. (Hardcoded because workflow env isn't
+      # referencable in job-level env; keep in sync with MSRV_TOOLCHAIN.)
       RUSTUP_TOOLCHAIN: "1.89.0"
 
     steps:
@@ -35,24 +52,20 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.MSRV_TOOLCHAIN }}
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: msrv
 
       - name: Install protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ github.token }}
 
       - name: Cargo check
         run: cargo check --all-targets
@@ -66,7 +79,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
@@ -83,28 +96,53 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: main
 
       - name: Install protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ github.token }}
 
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
+
+  docs:
+    name: Rustdoc
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          shared-key: main
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ github.token }}
+
+      - name: Build docs (deny warnings)
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
 
   test:
     name: Test
@@ -115,24 +153,20 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: main
 
       - name: Install protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ github.token }}
 
       - name: Run tests
         run: cargo test --all-targets
@@ -158,24 +192,20 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: release
 
       - name: Install protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ github.token }}
 
       - name: Build release
         run: cargo build --release
@@ -189,14 +219,15 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Install protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ github.token }}
 
       # Enforce the workspace's layering invariants: the transport-free
       # vocabulary and logic crates must not pull in transport, storage, auth,
@@ -230,18 +261,18 @@ jobs:
           done
 
   audit:
-    name: Security Audit (advisory)
+    name: Security Audit
     runs-on: ubuntu-latest
-    # Advisory: a new upstream RUSTSEC entry must not fail unrelated PRs.
-    # Findings surface as annotations; not part of the required gate.
-    continue-on-error: true
+    # Blocking: a RUSTSEC advisory fails the gate. The escape hatch for
+    # advisories without an available fix is the ignore list in
+    # .cargo/audit.toml (each entry documents its justification).
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Run cargo audit
-        uses: rustsec/audit-check@v2.0.0
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -254,27 +285,23 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: coverage
 
       - name: Install protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ github.token }}
 
       - name: Install cargo-tarpaulin
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.9.4
         with:
           tool: cargo-tarpaulin
 
@@ -284,13 +311,13 @@ jobs:
           MACP_MEMORY_ONLY: "1"
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@0f8570b1a125f4937846a11fcfa3bcd548bd8c97 # v4.6.0
         with:
           files: cobertura.xml
           fail_ci_if_error: false
 
   features:
-    name: Feature-gated backends (rocksdb, redis)
+    name: Feature-gated code (rocksdb, redis, otel)
     runs-on: ubuntu-latest
     services:
       redis:
@@ -308,30 +335,36 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-features-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-features-
+          shared-key: features
 
       - name: Install protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ github.token }}
 
       # These backends were previously never compiled in CI — clippy had
       # never seen the code and a broken backend could not fail a build.
       - name: Clippy (feature-gated code)
         run: cargo clippy -p macp-storage --features rocksdb-backend,redis-backend --all-targets -- -D warnings
+
+      # The otel exporter feature on the root crate was never compiled in CI.
+      - name: Clippy (otel feature)
+        run: cargo clippy -p macp-runtime --features otel --all-targets -- -D warnings
+
+      # Both backends enabled together must also build at the root crate —
+      # feature unification across the workspace is not covered by the
+      # per-feature runs below.
+      - name: Check root crate with all storage backends
+        run: cargo check -p macp-runtime --features rocksdb-backend,redis-backend --all-targets
 
       - name: Test rocksdb backend
         run: cargo test -p macp-storage --features rocksdb-backend
@@ -341,8 +374,34 @@ jobs:
         env:
           MACP_TEST_REDIS_URL: redis://127.0.0.1:6379
 
-  integration-tier1:
-    name: Tier-1 integration (real gRPC boundary)
+      - name: Test both backends enabled together
+        run: cargo test -p macp-storage --features rocksdb-backend,redis-backend
+        env:
+          MACP_TEST_REDIS_URL: redis://127.0.0.1:6379
+
+      # End-to-end: the runtime binary actually running on each backend
+      # through the gRPC boundary (previously only the storage crate's own
+      # unit tests covered these features).
+      - name: Build runtime binary with storage backends
+        run: cargo build --features rocksdb-backend,redis-backend
+
+      - name: Backend smoke test through gRPC (rocksdb)
+        working-directory: integration_tests
+        run: cargo test --test tier1 configured_backend -- --test-threads=1
+        env:
+          MACP_TEST_BINARY: ../target/debug/macp-runtime
+          MACP_TEST_BACKEND: rocksdb
+
+      - name: Backend smoke test through gRPC (redis)
+        working-directory: integration_tests
+        run: cargo test --test tier1 configured_backend -- --test-threads=1
+        env:
+          MACP_TEST_BINARY: ../target/debug/macp-runtime
+          MACP_TEST_BACKEND: redis
+          MACP_TEST_REDIS_URL: redis://127.0.0.1:6379
+
+  integration:
+    name: Integration (tier 1 + 2, real gRPC boundary)
     runs-on: ubuntu-latest
 
     steps:
@@ -350,34 +409,37 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            integration_tests/target
-          key: ${{ runner.os }}-cargo-tier1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-tier1-
+          shared-key: integration
+          workspaces: |
+            .
+            integration_tests
 
       - name: Install protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ github.token }}
 
       - name: Build runtime binary
         run: cargo build
 
-      - name: Run tier-1 protocol suite
+      # Tier 2 (Rig ToolSet against the live server) is deterministic — no
+      # LLM, no network beyond localhost — so it runs on every PR alongside
+      # tier 1. Tier 3 (real OpenAI agents) stays behind the manual
+      # integration-tests.yml dispatch.
+      - name: Run tier-1 + tier-2 suites
         working-directory: integration_tests
-        run: cargo test --test tier1 --test tier1_jwt -- --test-threads=1
+        run: cargo test --test tier1 --test tier1_jwt --test tier2 -- --test-threads=1
         env:
           MACP_TEST_BINARY: ../target/debug/macp-runtime
+        timeout-minutes: 15
 
   # Conformance oracle: the spec repo's schemas/conformance/ is the single
   # canonical fixture source; this repo vendors byte-identical copies under
@@ -412,24 +474,20 @@ jobs:
           exit $status
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: main
 
       - name: Install protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ github.token }}
 
       - name: Run conformance suite against canonical fixtures
         env:
@@ -462,18 +520,20 @@ jobs:
   ci-pass:
     name: All Checks Passed
     runs-on: ubuntu-latest
-    needs: [check, fmt, clippy, test, build, deps-isolation, features, integration-tier1, docker-build, conformance-oracle]
+    needs: [check, fmt, clippy, docs, test, build, deps-isolation, audit, features, integration, docker-build, conformance-oracle]
 
     steps:
       - name: Summary
         run: |
           echo "All checks passed successfully"
-          echo "  - cargo check (MSRV)"
+          echo "  - cargo check (MSRV 1.89.0)"
           echo "  - cargo fmt"
           echo "  - cargo clippy"
+          echo "  - cargo doc (deny warnings)"
           echo "  - cargo test"
           echo "  - cargo build --release"
           echo "  - crate dependency isolation"
-          echo "  - feature-gated backends (rocksdb, redis)"
-          echo "  - tier-1 integration suite"
+          echo "  - security audit (blocking)"
+          echo "  - feature-gated code (rocksdb, redis, otel)"
+          echo "  - tier-1 + tier-2 integration suites"
           echo "  - docker image build"

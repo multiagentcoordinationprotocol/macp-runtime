@@ -1,2 +1,8 @@
 [toolchain]
-channel = "1.89.0"
+# Pinned to current stable so local dev, CI, and publish all run the same
+# compiler (previously local ran the 1.89.0 MSRV pin while CI ran floating
+# stable, so clippy results diverged). The MSRV itself is declared as
+# `rust-version = "1.89.0"` in Cargo.toml and gated by the CI `check` job.
+# Keep this in sync with RUST_TOOLCHAIN in .github/workflows/*.yml and the
+# builder image in Dockerfile.
+channel = "1.96.1"
