@@ -412,4 +412,51 @@ mod tests {
         let loaded = backend.load_session("s1").await.unwrap().unwrap();
         assert_eq!(loaded.ttl_ms, 60_000);
     }
+
+    #[tokio::test]
+    async fn load_log_skips_truncated_trailing_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileBackend::new(dir.path().to_path_buf()).unwrap();
+        backend.create_session_storage("s1").await.unwrap();
+
+        backend
+            .append_log_entry("s1", &sample_entry("m1"))
+            .await
+            .unwrap();
+        backend
+            .append_log_entry("s1", &sample_entry("m2"))
+            .await
+            .unwrap();
+
+        // Simulate a torn write: the process died mid-append, leaving the
+        // final line truncated in the middle of the JSON object.
+        let full_line = serde_json::to_string(&sample_entry("m3")).unwrap();
+        let torn = &full_line[..full_line.len() / 2];
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(backend.log_file("s1"))
+            .unwrap();
+        f.write_all(torn.as_bytes()).unwrap();
+        drop(f);
+
+        // load_log's documented intent is to warn and skip unparseable
+        // lines, preserving all prior intact entries.
+        let log = backend.load_log("s1").await.unwrap();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].message_id, "m1");
+        assert_eq!(log[1].message_id, "m2");
+    }
+
+    #[tokio::test]
+    async fn load_session_errors_on_corrupt_session_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileBackend::new(dir.path().to_path_buf()).unwrap();
+        backend.create_session_storage("s1").await.unwrap();
+
+        fs::write(backend.session_file("s1"), b"{not valid json").unwrap();
+
+        let err = backend.load_session("s1").await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
 }

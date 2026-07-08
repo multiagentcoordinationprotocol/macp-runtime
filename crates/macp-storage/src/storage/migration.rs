@@ -237,4 +237,100 @@ mod tests {
         let log = backend.load_log("s1").await.unwrap();
         assert_eq!(log.len(), 2);
     }
+
+    #[test]
+    fn fresh_install_writes_current_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        migrate_if_needed(base).unwrap();
+
+        assert_eq!(read_storage_version(base).unwrap(), Some(STORAGE_VERSION));
+        // A fresh install has nothing to migrate; no sessions dir is required.
+        assert!(!base.join("sessions").exists());
+    }
+
+    #[test]
+    fn already_current_dir_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::create_dir_all(base.join("sessions")).unwrap();
+        write_storage_version(base).unwrap();
+        let before = fs::read(base.join("storage_version.json")).unwrap();
+
+        migrate_if_needed(base).unwrap();
+
+        assert_eq!(read_storage_version(base).unwrap(), Some(STORAGE_VERSION));
+        let after = fs::read(base.join("storage_version.json")).unwrap();
+        assert_eq!(before, after);
+        assert!(!base.join("sessions.json.migrated").exists());
+        assert!(!base.join("logs.json.migrated").exists());
+    }
+
+    #[test]
+    fn v2_dir_gets_version_bumped_to_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::create_dir_all(base.join("sessions")).unwrap();
+        fs::write(base.join("storage_version.json"), br#"{"version":2}"#).unwrap();
+        assert_eq!(read_storage_version(base).unwrap(), Some(2));
+
+        migrate_if_needed(base).unwrap();
+
+        assert_eq!(read_storage_version(base).unwrap(), Some(STORAGE_VERSION));
+    }
+
+    #[test]
+    fn sessions_dir_without_version_file_gets_version_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::create_dir_all(base.join("sessions")).unwrap();
+        assert_eq!(read_storage_version(base).unwrap(), None);
+
+        migrate_if_needed(base).unwrap();
+
+        assert_eq!(read_storage_version(base).unwrap(), Some(STORAGE_VERSION));
+    }
+
+    #[test]
+    fn malformed_legacy_sessions_json_errors_and_preserves_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("sessions.json"), b"{not json").unwrap();
+
+        let err = migrate_if_needed(base).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        // The malformed legacy file must be left in place for operator
+        // inspection, not renamed away or deleted.
+        assert!(base.join("sessions.json").exists());
+        assert_eq!(fs::read(base.join("sessions.json")).unwrap(), b"{not json");
+        assert!(!base.join("sessions.json.migrated").exists());
+    }
+
+    #[test]
+    fn legacy_logs_without_sessions_creates_log_only_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        let entries = vec![sample_entry("m1"), sample_entry("m2")];
+        let logs_map: HashMap<String, Vec<LogEntry>> =
+            [("orphan".into(), entries)].into_iter().collect();
+        fs::write(
+            base.join("logs.json"),
+            serde_json::to_vec_pretty(&logs_map).unwrap(),
+        )
+        .unwrap();
+
+        migrate_if_needed(base).unwrap();
+
+        assert!(base.join("sessions/orphan/log.jsonl").exists());
+        assert!(!base.join("sessions/orphan/session.json").exists());
+        assert!(base.join("logs.json.migrated").exists());
+        assert!(!base.join("logs.json").exists());
+        assert_eq!(read_storage_version(base).unwrap(), Some(STORAGE_VERSION));
+
+        let content = fs::read_to_string(base.join("sessions/orphan/log.jsonl")).unwrap();
+        assert_eq!(content.lines().count(), 2);
+    }
 }

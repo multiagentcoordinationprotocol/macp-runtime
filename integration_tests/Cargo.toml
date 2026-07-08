@@ -7,7 +7,8 @@ publish = false
 [dependencies]
 macp-runtime = { path = ".." }
 
-tonic = { version = "0.14", features = ["transport"] }
+# tls-ring: the TLS transport test connects as a TLS client.
+tonic = { version = "0.14", features = ["transport", "tls-ring"] }
 prost = "0.14"
 
 tokio = { version = "1", features = ["full", "process"] }
@@ -30,3 +31,5 @@ async-trait = "0.1"
 tempfile = "3"
 jsonwebtoken = "9"
 base64 = "0.22"
+# Self-signed certificates for the TLS transport test.
+rcgen = "0.13"

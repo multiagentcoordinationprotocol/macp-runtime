@@ -25,25 +25,34 @@ async fn session_expires_after_ttl() {
     .unwrap();
     assert!(ack.ok);
 
-    // Wait for TTL to expire
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-    // Try sending — should fail because session expired
-    let ack = send_as(
-        &mut client,
-        agent,
-        envelope(
-            MODE_DECISION,
-            "Proposal",
-            &new_message_id(),
-            &sid,
+    // Poll until the TTL lapses and a send is rejected, instead of a single
+    // fixed sleep — a loaded machine can delay either the test or the
+    // runtime's expiry sweep past any one hardcoded pause.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let ack = send_as(
+            &mut client,
             agent,
-            proposal_payload("p1", "late", "expired"),
-        ),
-    )
-    .await
-    .unwrap();
-    assert!(!ack.ok);
+            envelope(
+                MODE_DECISION,
+                "Proposal",
+                &new_message_id(),
+                &sid,
+                agent,
+                proposal_payload("p1", "late", "expired"),
+            ),
+        )
+        .await
+        .unwrap();
+        if !ack.ok {
+            break; // rejected: session expired as required
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session with a 100ms TTL still accepted messages after 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }
 
 #[tokio::test]

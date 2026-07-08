@@ -396,6 +396,61 @@ mod tests {
         m
     }
 
+    fn jwks_with(kid: &str, secret: &[u8]) -> String {
+        let k = base64::engine::general_purpose::STANDARD.encode(secret);
+        serde_json::json!({
+            "keys": [
+                { "kty": "oct", "alg": "HS256", "kid": kid, "k": k }
+            ]
+        })
+        .to_string()
+    }
+
+    fn sign_with(kid: &str, secret: &[u8], claims: &TestClaims) -> String {
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(kid.to_string());
+        encode(&header, claims, &EncodingKey::from_secret(secret)).unwrap()
+    }
+
+    /// Serve canned JWKS documents over plain HTTP/1.1 on an ephemeral local
+    /// port (same pattern as `concurrent_jwks_refresh_is_single_flight`).
+    /// Request N gets `bodies[N]` (the last body repeats once exhausted);
+    /// the returned counter tracks how many fetches the resolver made.
+    /// `Connection: close` keeps one accepted connection == one fetch even
+    /// though the resolver's reqwest client pools connections.
+    async fn spawn_jwks_server(
+        bodies: Vec<String>,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = requests.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                let body = bodies[n.min(bodies.len() - 1)].clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let _ = sock.read(&mut buf).await;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        (format!("http://{addr}/jwks"), requests)
+    }
+
     #[tokio::test]
     async fn valid_jwt_resolves_to_identity_with_scopes() {
         let resolver = JwtBearerResolver::from_inline_json(config(), &jwks_inline()).unwrap();
@@ -615,5 +670,137 @@ mod tests {
             .expect("ok")
             .expect("some");
         assert_eq!(id.sender, "agent://alice");
+    }
+
+    #[tokio::test]
+    async fn jwks_url_happy_path_token_validates() {
+        let (url, requests) = spawn_jwks_server(vec![jwks_inline()]).await;
+        let resolver = JwtBearerResolver::from_url(config(), url, 300);
+        let token = sign(&TestClaims {
+            sub: "agent://alice",
+            iss: ISSUER,
+            aud: AUDIENCE,
+            exp: (chrono::Utc::now().timestamp() + 300),
+            macp_scopes: None,
+        });
+
+        let id = resolver
+            .resolve(&bearer(&token))
+            .await
+            .expect("ok")
+            .expect("some");
+        assert_eq!(id.sender, "agent://alice");
+        assert_eq!(id.resolver, "jwt_bearer");
+        assert_eq!(
+            requests.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly one JWKS fetch for the first validation"
+        );
+    }
+
+    /// Within the cache TTL a second validation must be served from the
+    /// cached JWKS — no second fetch against the endpoint.
+    #[tokio::test]
+    async fn jwks_url_second_validation_within_ttl_does_not_refetch() {
+        let (url, requests) = spawn_jwks_server(vec![jwks_inline()]).await;
+        let resolver = JwtBearerResolver::from_url(config(), url, 300);
+        let token = sign(&TestClaims {
+            sub: "agent://alice",
+            iss: ISSUER,
+            aud: AUDIENCE,
+            exp: (chrono::Utc::now().timestamp() + 300),
+            macp_scopes: None,
+        });
+
+        for _ in 0..2 {
+            let id = resolver.resolve(&bearer(&token)).await.unwrap().unwrap();
+            assert_eq!(id.sender, "agent://alice");
+        }
+        assert_eq!(
+            requests.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "second validation within TTL must be served from cache"
+        );
+    }
+
+    /// Key rotation: once the TTL lapses, the next validation refetches the
+    /// JWKS and a token signed with the NEW kid verifies against the rotated
+    /// key. There is no unknown-kid on-miss refresh path — refresh happens
+    /// only on TTL expiry — so a zero TTL (every call refetches) exercises
+    /// the refresh path deterministically without sleeping.
+    #[tokio::test]
+    async fn jwks_url_refresh_after_ttl_picks_up_rotated_key() {
+        const NEW_SECRET: &[u8] = b"rotated-secret-symmetric-32-byte";
+        let (url, requests) = spawn_jwks_server(vec![
+            jwks_with("old-key", SECRET),
+            jwks_with("new-key", NEW_SECRET),
+        ])
+        .await;
+        let resolver = JwtBearerResolver::from_url(config(), url, 0);
+
+        let old_token = sign_with(
+            "old-key",
+            SECRET,
+            &TestClaims {
+                sub: "agent://alice",
+                iss: ISSUER,
+                aud: AUDIENCE,
+                exp: (chrono::Utc::now().timestamp() + 300),
+                macp_scopes: None,
+            },
+        );
+        let id = resolver
+            .resolve(&bearer(&old_token))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(id.sender, "agent://alice");
+
+        // Cache is already expired (TTL 0): the next validation refetches and
+        // gets the rotated JWKS, so the new-kid token verifies.
+        let new_token = sign_with(
+            "new-key",
+            NEW_SECRET,
+            &TestClaims {
+                sub: "agent://rotated",
+                iss: ISSUER,
+                aud: AUDIENCE,
+                exp: (chrono::Utc::now().timestamp() + 300),
+                macp_scopes: None,
+            },
+        );
+        let id = resolver
+            .resolve(&bearer(&new_token))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(id.sender, "agent://rotated");
+        assert_eq!(
+            requests.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "rotation requires exactly one refetch after TTL expiry"
+        );
+    }
+
+    /// An unreachable JWKS endpoint with an empty cache must surface a clean
+    /// FetchFailed error on first validation — no panic, no identity.
+    #[tokio::test]
+    async fn jwks_url_unreachable_endpoint_fails_cleanly() {
+        // Bind then drop to obtain a port that refuses connections.
+        let addr = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap()
+        };
+        let resolver = JwtBearerResolver::from_url(config(), format!("http://{addr}/jwks"), 300);
+        let token = sign(&TestClaims {
+            sub: "agent://alice",
+            iss: ISSUER,
+            aud: AUDIENCE,
+            exp: (chrono::Utc::now().timestamp() + 300),
+            macp_scopes: None,
+        });
+
+        let err = resolver.resolve(&bearer(&token)).await.unwrap_err();
+        assert!(matches!(err, AuthError::FetchFailed(_)), "got {err:?}");
     }
 }

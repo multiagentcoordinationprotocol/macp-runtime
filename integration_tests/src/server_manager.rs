@@ -118,8 +118,44 @@ impl Drop for ServerManager {
     }
 }
 
+/// Panic-safe guard for tests that spawn the runtime binary directly instead
+/// of through [`ServerManager`] (e.g. to send it signals or read its exit
+/// code). The child is registered with the atexit reaper on creation and
+/// killed + reaped + deregistered on drop, so a panic between spawn and the
+/// test's own cleanup cannot leak a server process (a leaked child holding
+/// inherited pipes hangs piped `cargo test` runs).
+pub struct TrackedChild(Option<Child>);
+
+impl TrackedChild {
+    pub fn new(child: Child) -> Self {
+        track_live_pid(child.id());
+        Self(Some(child))
+    }
+
+    pub fn id(&self) -> u32 {
+        self.0.as_ref().expect("child taken only in drop").id()
+    }
+
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.0
+            .as_mut()
+            .expect("child taken only in drop")
+            .try_wait()
+    }
+}
+
+impl Drop for TrackedChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            untrack_live_pid(child.id());
+        }
+    }
+}
+
 /// Find a free TCP port by binding to port 0 and reading the assigned port.
-fn find_free_port() -> Result<u16> {
+pub fn find_free_port() -> Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     drop(listener);
