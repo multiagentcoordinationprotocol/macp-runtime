@@ -260,6 +260,44 @@ jobs:
             fi
           done
 
+      # Every workspace crate must publish at one lockstep version. Package
+      # versions are structurally pinned via `version.workspace = true`, but the
+      # `version` literals in `[workspace.dependencies]` for the internal crates
+      # are hand-maintained and can drift on a bump. A `0.6.0` crate that still
+      # requires `^0.5.0` of a sibling won't resolve at publish time (0.x minors
+      # are breaking) — catch that here instead of mid-release.
+      - name: Internal crate versions are in lockstep
+        run: |
+          set -euo pipefail
+          meta=$(cargo metadata --format-version 1 --no-deps)
+          ws=$(echo "$meta" | jq -r '.packages[] | select(.name=="macp-runtime") | .version')
+          echo "workspace version = $ws"
+          fail=0
+
+          # 1) Every member's package version matches the workspace version.
+          while read -r name ver; do
+            if [ "$ver" != "$ws" ]; then
+              echo "::error::$name package version $ver != workspace $ws"; fail=1
+            fi
+          done < <(echo "$meta" | jq -r '.packages[] | "\(.name) \(.version)"')
+
+          # 2) Every internal dependency requirement is exactly ^<workspace ver>.
+          while read -r from to req; do
+            if [ "$req" != "^$ws" ]; then
+              echo "::error::$from depends on $to with req '$req', expected '^$ws'"; fail=1
+            fi
+          done < <(echo "$meta" | jq -r '
+            (.packages | map(.name)) as $members
+            | .packages[] | . as $p
+            | $p.dependencies[]
+            | select([.name] | inside($members))
+            | "\($p.name) \(.name) \(.req)"')
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::workspace crate versions are not in lockstep"; exit 1
+          fi
+          echo "All workspace crates and internal deps pinned at $ws"
+
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
