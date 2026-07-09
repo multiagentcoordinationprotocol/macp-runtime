@@ -60,7 +60,7 @@ reqwest = { version = "0.12", features = ["json"], default-features = false }
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rocksdb = { version = "0.22" }
+rocksdb = { version = "0.24" }
 redis = { version = "0.27", features = ["tokio-comp", "aio"] }
 macp-proto = "0.1.5"
 tonic-prost-build = "0.14"
