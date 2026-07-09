@@ -1,0 +1,50 @@
+# release-plz configuration.
+#
+# release-plz owns the release process: on every push to main it opens (or
+# updates) a "release PR" that bumps the workspace version and updates
+# CHANGELOG.md from the conventional-commit history; merging that PR tags the
+# release, publishes every workspace crate to crates.io, and cuts a GitHub
+# Release. This replaces the previous manual tag-driven publish.yml flow.
+[workspace]
+# Run cargo-semver-checks while computing the release PR, where the version
+# bumps actually happen. An API break that rides an unmarked commit blocks the
+# release PR instead of only surfacing later. (0.x minor bumps still permit
+# breaking changes per cargo's semver interpretation.)
+semver_check = true
+
+# Label the release PRs release-plz opens.
+pr_labels = ["release"]
+
+# Create a GitHub Release (tag + notes) for each published version.
+git_release_enable = true
+
+# Lockstep versioning: macp-runtime is one runtime split across seven crates
+# that must be consumed as a coherent set — shared vocabulary flows across
+# crate boundaries via macp-core / macp-pb, and a fresh resolver must never mix
+# release generations. Putting every member in one `version_group` makes
+# release-plz assign them all the same next version, bumping the whole family
+# together (even unchanged crates). The version itself lives once in
+# [workspace.package] (root Cargo.toml) and each member inherits it via
+# `version.workspace = true`; the internal-lockstep CI guard in ci.yml verifies
+# the result. `semver_check` above still guards real API breaks.
+[[package]]
+name = "macp-pb"
+version_group = "macp"
+[[package]]
+name = "macp-core"
+version_group = "macp"
+[[package]]
+name = "macp-policy"
+version_group = "macp"
+[[package]]
+name = "macp-storage"
+version_group = "macp"
+[[package]]
+name = "macp-auth"
+version_group = "macp"
+[[package]]
+name = "macp-modes"
+version_group = "macp"
+[[package]]
+name = "macp-runtime"
+version_group = "macp"
