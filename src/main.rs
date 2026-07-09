@@ -85,7 +85,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "otel")]
     {
-        use opentelemetry::trace::TracerProvider;
         use opentelemetry_otlp::WithExportConfig;
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
@@ -95,12 +94,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let exporter = opentelemetry_otlp::new_exporter()
             .tonic()
             .with_endpoint(&otlp_endpoint);
-        let provider = opentelemetry_otlp::new_pipeline()
+        // `install_batch` returns the batch-exporting `Tracer` directly
+        // (opentelemetry-otlp 0.15), so it is used as-is; there is no separate
+        // provider to call `.tracer()` on.
+        let tracer = opentelemetry_otlp::new_pipeline()
             .tracing()
             .with_exporter(exporter)
             .install_batch(opentelemetry_sdk::runtime::Tokio)
             .expect("failed to init OTEL tracer");
-        let tracer = provider.tracer("macp-runtime");
         let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
         tracing_subscriber::registry()
@@ -333,7 +334,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tls_cert = std::env::var("MACP_TLS_CERT_PATH").ok();
     let tls_key = std::env::var("MACP_TLS_KEY_PATH").ok();
 
-    tracing::info!(%addr, "macp-runtime v0.4.0 listening");
+    tracing::info!(%addr, "macp-runtime v{} listening", env!("CARGO_PKG_VERSION"));
 
     // Server resource limits (RFC-MACP-0004 §7 DoS defenses). Combined with
     // per-session locking these bound how much work one client can queue.

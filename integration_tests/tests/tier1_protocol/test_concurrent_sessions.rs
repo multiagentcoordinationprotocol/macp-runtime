@@ -129,3 +129,79 @@ async fn parallel_decision_sessions_are_independent() {
     let resp2 = get_session_as(&mut client, coord, &sid2).await.unwrap();
     assert_eq!(resp2.metadata.unwrap().state, 1); // OPEN
 }
+
+/// True concurrency: multiple clients on independent connections race sends
+/// into one session. The kernel must serialize acceptance — every distinct
+/// message is accepted exactly once and the session stays consistent. (The
+/// two tests above cover session *independence*; this one covers write
+/// contention, which sequential loops never exercised.)
+#[tokio::test]
+async fn concurrent_senders_race_into_one_session() {
+    let mut client = common::grpc_client().await;
+    let sid = new_session_id();
+    let initiator = "agent://race-initiator";
+    let senders = [
+        "agent://racer-1",
+        "agent://racer-2",
+        "agent://racer-3",
+        "agent://racer-4",
+    ];
+    let mut participants = vec![initiator];
+    participants.extend(senders);
+
+    let ack = send_as(
+        &mut client,
+        initiator,
+        envelope(
+            MODE_DECISION,
+            "SessionStart",
+            &new_message_id(),
+            &sid,
+            initiator,
+            session_start_payload("write contention", &participants, 60_000),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(ack.ok);
+
+    const PROPOSALS_PER_SENDER: usize = 5;
+    let mut handles = Vec::new();
+    for (i, sender) in senders.iter().enumerate() {
+        let sid = sid.clone();
+        let sender = sender.to_string();
+        handles.push(tokio::spawn(async move {
+            // Each task gets its own channel so requests genuinely race.
+            let mut client = common::grpc_client().await;
+            for j in 0..PROPOSALS_PER_SENDER {
+                let ack = send_as(
+                    &mut client,
+                    &sender,
+                    envelope(
+                        MODE_DECISION,
+                        "Proposal",
+                        &new_message_id(),
+                        &sid,
+                        &sender,
+                        proposal_payload(&format!("p-{i}-{j}"), "racing", "concurrent write"),
+                    ),
+                )
+                .await
+                .expect("send must not transport-fail");
+                assert!(
+                    ack.ok,
+                    "concurrent proposal {i}/{j} rejected: {:?}",
+                    ack.error
+                );
+                assert!(!ack.duplicate, "distinct message flagged duplicate");
+            }
+        }));
+    }
+    for handle in handles {
+        handle.await.expect("sender task must not panic");
+    }
+
+    // The session survived the contention in a consistent state.
+    let resp = get_session_as(&mut client, initiator, &sid).await.unwrap();
+    assert_eq!(resp.metadata.expect("metadata").state, 1); // OPEN
+}

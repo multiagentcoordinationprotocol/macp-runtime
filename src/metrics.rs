@@ -215,3 +215,211 @@ impl MetricsSnapshot {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EXPECTED_METRIC_NAMES: [&str; 10] = [
+        "macp_messages_accepted_total",
+        "macp_messages_rejected_total",
+        "macp_sessions_started_total",
+        "macp_sessions_resolved_total",
+        "macp_sessions_expired_total",
+        "macp_sessions_cancelled_total",
+        "macp_sessions_suspended_total",
+        "macp_sessions_resumed_total",
+        "macp_commitments_accepted_total",
+        "macp_commitments_rejected_total",
+    ];
+
+    fn snapshot_map(m: &RuntimeMetrics) -> HashMap<String, MetricsSnapshot> {
+        m.snapshot().into_iter().collect()
+    }
+
+    /// Assert one Prometheus text-format sample line: either
+    /// `name{labels} value` or `name value`, with a numeric value and a
+    /// well-formed metric name.
+    fn assert_valid_prometheus_line(line: &str) {
+        let (series, value) = line
+            .rsplit_once(' ')
+            .unwrap_or_else(|| panic!("sample line must contain a value: {line:?}"));
+        assert!(
+            value.parse::<u64>().is_ok(),
+            "sample value must be numeric: {line:?}"
+        );
+        let name = match series.split_once('{') {
+            Some((name, labels)) => {
+                assert!(labels.ends_with('}'), "label set must be closed: {line:?}");
+                name
+            }
+            None => series,
+        };
+        assert!(!name.is_empty(), "metric name must be non-empty: {line:?}");
+        let mut chars = name.chars();
+        let first = chars.next().unwrap();
+        assert!(
+            first.is_ascii_alphabetic() || first == '_' || first == ':',
+            "metric name must not start with a digit: {line:?}"
+        );
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':'),
+            "metric name has invalid characters: {line:?}"
+        );
+    }
+
+    #[test]
+    fn counters_record_per_mode_increments() {
+        let m = RuntimeMetrics::new();
+
+        m.record_session_start("macp.mode.decision.v1");
+        m.record_message_accepted("macp.mode.decision.v1");
+        m.record_message_accepted("macp.mode.decision.v1");
+        m.record_message_rejected("macp.mode.decision.v1");
+        m.record_session_resolved("macp.mode.decision.v1");
+        m.record_commitment_accepted("macp.mode.decision.v1");
+
+        m.record_session_start("macp.mode.quorum.v1");
+        m.record_session_expired("macp.mode.quorum.v1");
+        m.record_session_cancelled("macp.mode.quorum.v1");
+        m.record_session_suspended("macp.mode.quorum.v1");
+        m.record_session_resumed("macp.mode.quorum.v1");
+        m.record_commitment_rejected("macp.mode.quorum.v1");
+
+        let snap = snapshot_map(&m);
+        assert_eq!(snap.len(), 2, "one entry per distinct mode");
+
+        let d = &snap["macp.mode.decision.v1"];
+        assert_eq!(d.sessions_started, 1);
+        assert_eq!(d.messages_accepted, 2);
+        assert_eq!(d.messages_rejected, 1);
+        assert_eq!(d.sessions_resolved, 1);
+        assert_eq!(d.commitments_accepted, 1);
+        assert_eq!(d.sessions_expired, 0);
+        assert_eq!(d.sessions_cancelled, 0);
+        assert_eq!(d.sessions_suspended, 0);
+        assert_eq!(d.sessions_resumed, 0);
+        assert_eq!(d.commitments_rejected, 0);
+
+        let q = &snap["macp.mode.quorum.v1"];
+        assert_eq!(q.sessions_started, 1);
+        assert_eq!(q.sessions_expired, 1);
+        assert_eq!(q.sessions_cancelled, 1);
+        assert_eq!(q.sessions_suspended, 1);
+        assert_eq!(q.sessions_resumed, 1);
+        assert_eq!(q.commitments_rejected, 1);
+        assert_eq!(q.messages_accepted, 0);
+        assert_eq!(q.messages_rejected, 0);
+        assert_eq!(q.sessions_resolved, 0);
+        assert_eq!(q.commitments_accepted, 0);
+    }
+
+    #[test]
+    fn replay_mismatch_counter_accumulates() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.replay_mismatches(), 0);
+        m.record_replay_mismatch(2);
+        m.record_replay_mismatch(3);
+        assert_eq!(m.replay_mismatches(), 5);
+    }
+
+    #[test]
+    fn prometheus_rendering_reflects_recorded_counts() {
+        let m = RuntimeMetrics::new();
+        m.record_message_accepted("macp.mode.decision.v1");
+        m.record_message_accepted("macp.mode.decision.v1");
+        m.record_message_rejected("macp.mode.decision.v1");
+        m.record_session_start("macp.mode.decision.v1");
+
+        let mut body = String::new();
+        for (mode, snap) in m.snapshot() {
+            snap.prometheus_lines(&mode, &mut body);
+        }
+
+        for name in EXPECTED_METRIC_NAMES {
+            assert!(
+                body.contains(name),
+                "rendered output must include {name}:\n{body}"
+            );
+        }
+        assert!(body.contains("macp_messages_accepted_total{mode=\"macp.mode.decision.v1\"} 2"));
+        assert!(body.contains("macp_messages_rejected_total{mode=\"macp.mode.decision.v1\"} 1"));
+        assert!(body.contains("macp_sessions_started_total{mode=\"macp.mode.decision.v1\"} 1"));
+        assert!(body.contains("macp_sessions_resolved_total{mode=\"macp.mode.decision.v1\"} 0"));
+    }
+
+    #[test]
+    fn prometheus_lines_are_valid_exposition_format() {
+        let m = RuntimeMetrics::new();
+        m.record_session_start("macp.mode.task.v1");
+        m.record_commitment_accepted("macp.mode.task.v1");
+        m.record_session_start("ext.multi_round.v1");
+
+        let mut body = String::new();
+        for (mode, snap) in m.snapshot() {
+            snap.prometheus_lines(&mode, &mut body);
+        }
+
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(
+            lines.len(),
+            2 * EXPECTED_METRIC_NAMES.len(),
+            "10 samples per mode"
+        );
+        for line in lines {
+            assert_valid_prometheus_line(line);
+        }
+    }
+
+    #[test]
+    fn zero_state_rendering_does_not_panic() {
+        // A metrics registry with no recorded activity snapshots to nothing.
+        let m = RuntimeMetrics::new();
+        assert!(m.snapshot().is_empty());
+
+        // An all-zero snapshot renders every sample with value 0.
+        let zero = MetricsSnapshot {
+            messages_accepted: 0,
+            messages_rejected: 0,
+            sessions_started: 0,
+            sessions_resolved: 0,
+            sessions_expired: 0,
+            sessions_cancelled: 0,
+            commitments_accepted: 0,
+            commitments_rejected: 0,
+            sessions_suspended: 0,
+            sessions_resumed: 0,
+        };
+        let mut body = String::new();
+        zero.prometheus_lines("macp.mode.decision.v1", &mut body);
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), EXPECTED_METRIC_NAMES.len());
+        for line in lines {
+            assert!(
+                line.ends_with(" 0"),
+                "zero-state sample must be 0: {line:?}"
+            );
+            assert_valid_prometheus_line(line);
+        }
+    }
+
+    #[test]
+    fn mode_cardinality_overflow_aggregates_into_overflow_bucket() {
+        let m = RuntimeMetrics::new();
+        for i in 0..MAX_MODE_CARDINALITY {
+            m.record_message_accepted(&format!("mode-{i}"));
+        }
+        // Beyond the cardinality limit, new modes fold into "_overflow".
+        m.record_message_accepted("mode-beyond-limit-a");
+        m.record_message_accepted("mode-beyond-limit-b");
+        // Existing modes keep their own bucket.
+        m.record_message_accepted("mode-0");
+
+        let snap = snapshot_map(&m);
+        assert_eq!(snap.len(), MAX_MODE_CARDINALITY + 1);
+        assert!(!snap.contains_key("mode-beyond-limit-a"));
+        assert_eq!(snap[OVERFLOW_MODE].messages_accepted, 2);
+        assert_eq!(snap["mode-0"].messages_accepted, 2);
+    }
+}

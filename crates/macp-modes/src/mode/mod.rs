@@ -42,7 +42,7 @@ pub trait Mode: Send + Sync {
     fn on_message(&self, session: &Session, env: &Envelope) -> Result<ModeResponse, MacpError>;
 
     /// Kernel entry point: `on_message` plus the runtime's
-    /// [`MessageContext`] (acceptance clock). Defaulted to plain
+    /// [`macp_core::mode::MessageContext`] (acceptance clock). Defaulted to plain
     /// `on_message` so most modes ignore it; modes that need a trustworthy
     /// time source (Handoff) override this instead of reading the forgeable
     /// `Envelope.timestamp_unix_ms`. The runtime and replay always call this,

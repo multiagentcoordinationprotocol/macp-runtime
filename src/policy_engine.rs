@@ -66,3 +66,143 @@ pub fn require_allow(decision: PolicyDecision, what: &str) -> Result<(), tonic::
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tonic::Code;
+
+    /// Minimal inline engine returning a fixed decision at every point.
+    struct FixedEngine {
+        decision: PolicyDecision,
+    }
+
+    #[async_trait::async_trait]
+    impl PolicyEngine for FixedEngine {
+        async fn evaluate_session_start(
+            &self,
+            _identity: &AuthIdentity,
+            _mode: &str,
+            _env: &Envelope,
+        ) -> PolicyDecision {
+            self.decision.clone()
+        }
+
+        async fn evaluate_message(
+            &self,
+            _identity: &AuthIdentity,
+            _session: &Session,
+            _env: &Envelope,
+        ) -> PolicyDecision {
+            self.decision.clone()
+        }
+
+        async fn evaluate_session_access(
+            &self,
+            _identity: &AuthIdentity,
+            _session: &Session,
+        ) -> PolicyDecision {
+            self.decision.clone()
+        }
+    }
+
+    fn identity(sender: &str) -> AuthIdentity {
+        AuthIdentity {
+            sender: sender.into(),
+            allowed_modes: None,
+            can_start_sessions: true,
+            max_open_sessions: None,
+            can_manage_mode_registry: false,
+            is_observer: false,
+        }
+    }
+
+    fn session() -> Session {
+        Session::builder("s1", "macp.mode.decision.v1", "agent-a").build()
+    }
+
+    #[test]
+    fn require_allow_maps_allow_to_ok() {
+        assert!(require_allow(PolicyDecision::Allow { reasons: vec![] }, "send").is_ok());
+        // Reasons on an Allow are advisory and must not affect the outcome.
+        assert!(require_allow(
+            PolicyDecision::Allow {
+                reasons: vec!["matched rule r1".into()]
+            },
+            "session start",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn require_allow_maps_deny_to_permission_denied_with_reasons() {
+        let err = require_allow(
+            PolicyDecision::Deny {
+                reasons: vec!["sender not on roster".into(), "mode locked".into()],
+            },
+            "session start",
+        )
+        .expect_err("deny must map to an error");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert!(err.message().contains("policy engine denied session start"));
+        assert!(
+            err.message().contains("sender not on roster; mode locked"),
+            "deny reasons must be joined into the message: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn require_allow_deny_with_no_reasons_still_denies() {
+        let err = require_allow(PolicyDecision::Deny { reasons: vec![] }, "message")
+            .expect_err("deny must map to an error even without reasons");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert!(err.message().contains("policy engine denied message"));
+    }
+
+    #[tokio::test]
+    async fn allow_engine_decisions_pass_all_ingress_points() {
+        let engine = FixedEngine {
+            decision: PolicyDecision::Allow { reasons: vec![] },
+        };
+        let id = identity("agent-a");
+        let sess = session();
+        let env = Envelope::default();
+
+        let d = engine
+            .evaluate_session_start(&id, "macp.mode.decision.v1", &env)
+            .await;
+        assert!(require_allow(d, "session start").is_ok());
+        let d = engine.evaluate_message(&id, &sess, &env).await;
+        assert!(require_allow(d, "send").is_ok());
+        let d = engine.evaluate_session_access(&id, &sess).await;
+        assert!(require_allow(d, "session access").is_ok());
+    }
+
+    #[tokio::test]
+    async fn deny_engine_decisions_fail_closed_at_all_ingress_points() {
+        let engine = FixedEngine {
+            decision: PolicyDecision::Deny {
+                reasons: vec!["external engine said no".into()],
+            },
+        };
+        let id = identity("agent-a");
+        let sess = session();
+        let env = Envelope::default();
+
+        let d = engine
+            .evaluate_session_start(&id, "macp.mode.decision.v1", &env)
+            .await;
+        let err = require_allow(d, "session start").expect_err("must deny");
+        assert_eq!(err.code(), Code::PermissionDenied);
+
+        let d = engine.evaluate_message(&id, &sess, &env).await;
+        let err = require_allow(d, "send").expect_err("must deny");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert!(err.message().contains("external engine said no"));
+
+        let d = engine.evaluate_session_access(&id, &sess).await;
+        let err = require_allow(d, "session access").expect_err("must deny");
+        assert_eq!(err.code(), Code::PermissionDenied);
+    }
+}

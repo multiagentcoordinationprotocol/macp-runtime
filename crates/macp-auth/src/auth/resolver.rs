@@ -59,3 +59,47 @@ pub trait AuthResolver: Send + Sync {
 
     async fn resolve(&self, metadata: &MetadataMap) -> Result<Option<ResolvedIdentity>, AuthError>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_error_display_covers_all_variants() {
+        assert_eq!(
+            AuthError::InvalidCredential("bad token".to_string()).to_string(),
+            "invalid credential: bad token"
+        );
+        assert_eq!(AuthError::Expired.to_string(), "credential expired");
+        assert_eq!(
+            AuthError::MissingClaim("sub".to_string()).to_string(),
+            "missing required claim: sub"
+        );
+        assert_eq!(
+            AuthError::FetchFailed("connection refused".to_string()).to_string(),
+            "key fetch failed: connection refused"
+        );
+    }
+
+    #[test]
+    fn resolved_identity_converts_to_auth_identity_preserving_fields() {
+        let modes: HashSet<String> = ["macp.mode.decision.v1".to_string()].into_iter().collect();
+        let resolved = ResolvedIdentity {
+            sender: "agent://alice".to_string(),
+            allowed_modes: Some(modes.clone()),
+            can_start_sessions: false,
+            max_open_sessions: Some(3),
+            can_manage_mode_registry: true,
+            is_observer: true,
+            resolver: "jwt_bearer".to_string(),
+        };
+
+        let identity: AuthIdentity = resolved.into();
+        assert_eq!(identity.sender, "agent://alice");
+        assert_eq!(identity.allowed_modes, Some(modes));
+        assert!(!identity.can_start_sessions);
+        assert_eq!(identity.max_open_sessions, Some(3));
+        assert!(identity.can_manage_mode_registry);
+        assert!(identity.is_observer);
+    }
+}

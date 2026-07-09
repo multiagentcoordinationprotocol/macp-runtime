@@ -717,34 +717,15 @@ mod tests {
     }
 
     #[test]
-    fn standard_mode_names_returns_five() {
+    fn default_registry_shape_is_five_standard_plus_one_extension() {
         let registry = ModeRegistry::build_default(Arc::new(macp_policy::DefaultPolicyEvaluator));
         assert_eq!(registry.standard_mode_names().len(), 5);
-    }
-
-    #[test]
-    fn standard_mode_descriptors_returns_five() {
-        let registry = ModeRegistry::build_default(Arc::new(macp_policy::DefaultPolicyEvaluator));
         assert_eq!(registry.standard_mode_descriptors().len(), 5);
-    }
-
-    #[test]
-    fn all_mode_names_returns_six() {
-        let registry = ModeRegistry::build_default(Arc::new(macp_policy::DefaultPolicyEvaluator));
         assert_eq!(registry.all_mode_names().len(), 6);
-    }
-
-    #[test]
-    fn extension_mode_names_returns_one() {
-        let registry = ModeRegistry::build_default(Arc::new(macp_policy::DefaultPolicyEvaluator));
-        let ext = registry.extension_mode_names();
-        assert_eq!(ext.len(), 1);
-        assert!(ext.contains(&"ext.multi_round.v1".to_string()));
-    }
-
-    #[test]
-    fn extension_mode_descriptors_returns_one() {
-        let registry = ModeRegistry::build_default(Arc::new(macp_policy::DefaultPolicyEvaluator));
+        assert_eq!(
+            registry.extension_mode_names(),
+            vec!["ext.multi_round.v1".to_string()]
+        );
         let descs = registry.extension_mode_descriptors();
         assert_eq!(descs.len(), 1);
         assert_eq!(descs[0].mode, "ext.multi_round.v1");

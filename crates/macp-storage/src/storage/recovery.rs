@@ -103,6 +103,32 @@ mod tests {
     }
 
     #[test]
+    fn recovery_ignores_entries_with_empty_message_id() {
+        let mut session = sample_session();
+        let before = session.seen_message_ids.len();
+
+        let entries = vec![sample_entry(""), sample_entry("m2")];
+        recover_session(&mut session, &entries);
+
+        assert!(!session.seen_message_ids.contains(""));
+        assert!(session.seen_message_ids.contains("m2"));
+        assert_eq!(session.seen_message_ids.len(), before + 1);
+    }
+
+    #[test]
+    fn recovery_is_idempotent() {
+        let mut session = sample_session();
+        let entries = vec![sample_entry("m1"), sample_entry("m2"), sample_entry("m3")];
+
+        recover_session(&mut session, &entries);
+        let after_first = session.seen_message_ids.clone();
+
+        recover_session(&mut session, &entries);
+        assert_eq!(session.seen_message_ids, after_first);
+        assert_eq!(session.seen_message_ids.len(), after_first.len());
+    }
+
+    #[test]
     fn cleanup_temp_files_removes_orphans() {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path();
@@ -115,5 +141,30 @@ mod tests {
         cleanup_temp_files(base);
 
         assert!(!sessions_dir.join("session.json.tmp").exists());
+    }
+
+    #[test]
+    fn cleanup_temp_files_preserves_non_tmp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let session_dir = base.join("sessions").join("s1");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        fs::write(session_dir.join("session.json"), b"{}").unwrap();
+        fs::write(session_dir.join("log.jsonl"), b"").unwrap();
+        fs::write(session_dir.join("session.json.tmp"), b"partial").unwrap();
+
+        cleanup_temp_files(base);
+
+        assert!(session_dir.join("session.json").exists());
+        assert!(session_dir.join("log.jsonl").exists());
+        assert!(!session_dir.join("session.json.tmp").exists());
+    }
+
+    #[test]
+    fn cleanup_temp_files_handles_missing_sessions_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // No sessions/ dir at all: must be a silent no-op, not a panic.
+        cleanup_temp_files(dir.path());
     }
 }

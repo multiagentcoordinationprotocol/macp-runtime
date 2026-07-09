@@ -6,7 +6,7 @@ For protocol concepts like sessions, modes, and the two-plane model, see the [pr
 
 ## Prerequisites
 
-You need a Rust stable toolchain (1.75 or later) and the Protocol Buffers compiler.
+You need a Rust toolchain and the Protocol Buffers compiler. The repo's `rust-toolchain.toml` pins the exact compiler version and rustup installs it automatically on first build; the minimum supported version is 1.89.0.
 
 ```bash
 # macOS
@@ -70,7 +70,7 @@ The client sends its supported protocol versions and the runtime selects one. Th
 
 <- InitializeResponse {
      selected_protocol_version: "1.0",
-     runtime_info: { name: "macp-runtime", version: "0.4.0" },
+     runtime_info: { name: "macp-runtime", version: "0.5.0" },
      supported_modes: [
        "macp.mode.decision.v1",
        "macp.mode.proposal.v1",

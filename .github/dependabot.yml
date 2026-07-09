@@ -1,0 +1,30 @@
+version: 2
+updates:
+  # Rust dependencies (workspace + integration_tests crate).
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # Patch/minor bumps arrive as one PR to keep review load down; majors
+      # stay individual because they usually need code changes.
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: cargo
+    directory: "/integration_tests"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # GitHub Actions — keeps the SHA-pinned actions current (dependabot updates
+  # both the SHA and the version comment).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3

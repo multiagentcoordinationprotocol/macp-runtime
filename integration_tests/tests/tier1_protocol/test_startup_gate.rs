@@ -31,20 +31,33 @@ fn startup_refuses_without_auth_or_insecure_flag() {
 /// drain deadline instead of being killed mid-flight.
 #[test]
 fn sigint_shuts_down_gracefully_within_deadline() {
+    use macp_integration_tests::server_manager::{find_free_port, TrackedChild};
     let binary =
         std::env::var("MACP_TEST_BINARY").unwrap_or_else(|_| "../target/debug/macp-runtime".into());
-    let mut child = std::process::Command::new(&binary)
-        .env("MACP_ALLOW_INSECURE", "1")
-        .env("MACP_MEMORY_ONLY", "1")
-        .env("MACP_BIND_ADDR", "127.0.0.1:0")
-        .env("MACP_SHUTDOWN_DRAIN_SECS", "2")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("binary must start");
+    // Bind to a known free port so readiness can be observed by connecting,
+    // instead of a fixed sleep hoping the server is up before the SIGINT.
+    let bind_addr = format!("127.0.0.1:{}", find_free_port().expect("free port"));
+    let mut child = TrackedChild::new(
+        std::process::Command::new(&binary)
+            .env("MACP_ALLOW_INSECURE", "1")
+            .env("MACP_MEMORY_ONLY", "1")
+            .env("MACP_BIND_ADDR", &bind_addr)
+            .env("MACP_SHUTDOWN_DRAIN_SECS", "2")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("binary must start"),
+    );
 
-    // Give it a moment to bind, then SIGINT.
-    std::thread::sleep(std::time::Duration::from_millis(800));
+    // Wait until the listener accepts connections, then SIGINT.
+    let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect(&bind_addr).is_err() {
+        assert!(
+            std::time::Instant::now() < ready_deadline,
+            "runtime never started listening on {bind_addr}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     let _ = std::process::Command::new("kill")
         .args(["-INT", &child.id().to_string()])
         .status()
@@ -62,8 +75,6 @@ fn sigint_shuts_down_gracefully_within_deadline() {
                 break;
             }
             None if std::time::Instant::now() > deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
                 panic!("runtime did not exit within the drain deadline after SIGINT");
             }
             None => std::thread::sleep(std::time::Duration::from_millis(100)),
@@ -74,24 +85,29 @@ fn sigint_shuts_down_gracefully_within_deadline() {
 /// D5: the opt-in Prometheus endpoint serves text-format counters.
 #[test]
 fn metrics_endpoint_serves_prometheus_text() {
+    use macp_integration_tests::server_manager::{find_free_port, TrackedChild};
     use std::io::{Read, Write};
     let binary =
         std::env::var("MACP_TEST_BINARY").unwrap_or_else(|_| "../target/debug/macp-runtime".into());
-    let metrics_addr = "127.0.0.1:19464";
-    let mut child = std::process::Command::new(&binary)
-        .env("MACP_ALLOW_INSECURE", "1")
-        .env("MACP_MEMORY_ONLY", "1")
-        .env("MACP_BIND_ADDR", "127.0.0.1:0")
-        .env("MACP_METRICS_ADDR", metrics_addr)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("binary must start");
+    // Dynamic port: a fixed one collides with concurrent runs or anything
+    // else on the machine that happens to hold it.
+    let metrics_addr = format!("127.0.0.1:{}", find_free_port().expect("free port"));
+    let _child = TrackedChild::new(
+        std::process::Command::new(&binary)
+            .env("MACP_ALLOW_INSECURE", "1")
+            .env("MACP_MEMORY_ONLY", "1")
+            .env("MACP_BIND_ADDR", "127.0.0.1:0")
+            .env("MACP_METRICS_ADDR", &metrics_addr)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("binary must start"),
+    );
 
     // Retry-connect until the endpoint is up (bounded).
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let response = loop {
-        match std::net::TcpStream::connect(metrics_addr) {
+        match std::net::TcpStream::connect(&metrics_addr) {
             Ok(mut stream) => {
                 stream
                     .write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -103,15 +119,9 @@ fn metrics_endpoint_serves_prometheus_text() {
             Err(_) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("metrics endpoint never came up: {e}");
-            }
+            Err(e) => panic!("metrics endpoint never came up: {e}"),
         }
     };
-    let _ = child.kill();
-    let _ = child.wait();
     assert!(response.starts_with("HTTP/1.1 200 OK"), "got: {response}");
     assert!(response.contains("text/plain"), "got: {response}");
 }

@@ -1,6 +1,6 @@
 # MACP Runtime Documentation
 
-**Version**: v0.4.0 | **Protocol**: MACP 1.0 | **Language**: Rust
+**Version**: v0.5.0 | **Protocol**: MACP 1.0 | **Language**: Rust
 
 The MACP Runtime is the reference implementation of the [Multi-Agent Coordination Protocol](https://www.multiagentcoordinationprotocol.io). It is a coordination kernel written in Rust that enforces session boundaries, validates messages, manages append-only history, and serializes concurrent agent interactions over gRPC.
 
@@ -8,7 +8,7 @@ This documentation covers the **runtime implementation** -- how to build, config
 
 ## What the runtime provides
 
-The runtime ships as a single binary that exposes 22 gRPC RPCs over TLS. It supports the five standards-track coordination modes (Decision, Proposal, Task, Handoff, Quorum) and one built-in extension mode for iterative convergence. A governance policy framework evaluates rules at commitment time, and pluggable storage backends (file, RocksDB, Redis, or in-memory) handle persistence with append-only logs and checkpoint-based replay.
+The runtime ships as a single binary that exposes 24 gRPC RPCs over TLS. It supports the five standards-track coordination modes (Decision, Proposal, Task, Handoff, Quorum) and one built-in extension mode for iterative convergence. A governance policy framework evaluates rules at commitment time, and pluggable storage backends (file, RocksDB, Redis, or in-memory) handle persistence with append-only logs and checkpoint-based replay.
 
 Authentication is layered as a resolver chain: JWT bearer (when an issuer and JWKS are configured), then static bearer tokens, with a dev-mode fallback only when neither is set. Identities expose capability flags -- `allowed_modes`, `can_start_sessions`, `max_open_sessions`, `can_manage_mode_registry`, and `is_observer` -- that are enforced on every request. Per-sender sliding-window rate limits cover both session creation and message throughput. Session lifecycle transitions can be observed in real time through `ListSessions` and `WatchSessions`, and accepted envelope history can be replayed into a stream via passive subscribe.
 
@@ -22,7 +22,7 @@ Internally the runtime is a Cargo workspace with a one-way dependency graph: the
 
 ### Implementation reference
 - [**Architecture**](architecture.md) -- Rust layer design, request processing flows, concurrency model, and source layout
-- [**API Reference**](API.md) -- All 22 gRPC RPCs with request/response fields, authentication, and rate limiting
+- [**API Reference**](API.md) -- All 24 gRPC RPCs with request/response fields, authentication, and rate limiting
 - [**Modes**](modes.md) -- Runtime implementation details for each mode's state machine
 - [**Policy**](policy.md) -- Policy registration, JSON rule examples, evaluation internals, and error handling
 

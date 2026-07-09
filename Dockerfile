@@ -1,5 +1,6 @@
 # Stage 1: Build
-FROM rust:1.89-bookworm AS builder
+# Keep in sync with rust-toolchain.toml (channel pin).
+FROM rust:1.96-bookworm AS builder
 
 RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
 

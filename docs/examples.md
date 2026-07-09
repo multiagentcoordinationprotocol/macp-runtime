@@ -4,7 +4,7 @@ The runtime ships with example clients in `src/bin` that demonstrate each coordi
 
 For protocol-level example transcripts, see the [protocol examples documentation](https://www.multiagentcoordinationprotocol.io/docs/examples).
 
-All examples target `macp-runtime v0.4.0` and use the development security shortcut:
+All examples target `macp-runtime v0.5.0` and use the development security shortcut:
 
 ```bash
 export MACP_ALLOW_INSECURE=1
