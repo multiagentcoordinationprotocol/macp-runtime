@@ -1270,7 +1270,13 @@ impl MacpRuntimeService for MacpServer {
         let sessions = self.runtime.registry.get_all_sessions().await;
         let metadata: Vec<SessionMetadata> =
             sessions.iter().map(Self::session_to_metadata).collect();
-        Ok(Response::new(ListSessionsResponse { sessions: metadata }))
+        // macp-proto 0.1.8 added next_page_token to ListSessionsResponse; this
+        // handler returns all sessions in one response, so there is never a next
+        // page — an empty token signals "no more pages".
+        Ok(Response::new(ListSessionsResponse {
+            sessions: metadata,
+            next_page_token: String::new(),
+        }))
     }
 
     async fn watch_sessions(
