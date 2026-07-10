@@ -55,7 +55,7 @@ tokio-stream = "0.1"
 futures-core = "0.3"
 async-stream = "0.3"
 async-trait = "0.1"
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 reqwest = { version = "0.12", features = ["json"], default-features = false }
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
