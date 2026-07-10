@@ -338,6 +338,7 @@ async fn handoff_full_lifecycle_through_runtime() {
         handoff_id: "h1".into(),
         accepted_by: "agent://target".into(),
         reason: "ready".into(),
+        implicit: false,
     }
     .encode_to_vec();
     rt.process(

@@ -394,6 +394,7 @@ mod tests {
             handoff_id: handoff_id.into(),
             accepted_by: accepted_by.into(),
             reason: "ready".into(),
+            implicit: false,
         }
         .encode_to_vec()
     }

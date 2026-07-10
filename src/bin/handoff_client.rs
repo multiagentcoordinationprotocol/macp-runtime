@@ -75,6 +75,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handoff_id: "h1".into(),
         accepted_by: "target".into(),
         reason: "taking ownership".into(),
+        // Explicit client accept — implicit=true is reserved for the runtime's
+        // synthetic timeout accept (RFC-MACP-0010 §5.1); clients MUST send false.
+        implicit: false,
     };
     let ack = send_as(
         &mut client,
