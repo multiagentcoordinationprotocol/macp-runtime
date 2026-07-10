@@ -7,13 +7,25 @@ on:
       - 'docs/**'
       - 'README.md'
 
+permissions: {}
+
 jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
+      # Zero-PAT: mint a short-lived macp-deps-bot token scoped to website.
+      - name: Mint GitHub App token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.MACP_BOT_APP_ID }}
+          private-key: ${{ secrets.MACP_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: website
+
       - name: Trigger website sync
         uses: peter-evans/repository-dispatch@v4
         with:
-          token: ${{ secrets.WEBSITE_SYNC_TOKEN }}
+          token: ${{ steps.app.outputs.token }}
           repository: multiagentcoordinationprotocol/website
           event-type: docs-updated
