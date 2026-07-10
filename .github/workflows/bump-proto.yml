@@ -1,0 +1,18 @@
+name: bump proto
+on:
+  repository_dispatch:
+    types: [proto-released]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Explicit macp-proto version (blank = event payload / latest)'
+        required: false
+        default: ''
+jobs:
+  bump:
+    uses: multiagentcoordinationprotocol/macp-ci/.github/workflows/bump-consume.yml@v1
+    with:
+      ecosystem: cargo
+      package: 'macp-proto'
+      version: ${{ github.event.inputs.version }}
+    secrets: inherit
