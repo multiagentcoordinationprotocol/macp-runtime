@@ -1,0 +1,14 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.5.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-auth-v0.5.0...macp-auth-v0.5.1) - 2026-07-10
+
+### Other
+
+- prune redundant tests, de-flake the harness, fill coverage gaps
