@@ -1,6 +1,8 @@
 version: 2
 updates:
-  # Rust dependencies (workspace + integration_tests crate).
+  # Rust dependencies (workspace). Grouped to keep PR volume low:
+  #   minor-and-patch -> one auto-mergeable PR
+  #   major-updates   -> one PR for review (majors usually need code changes)
   - package-ecosystem: cargo
     directory: "/"
     schedule:
@@ -9,8 +11,9 @@ updates:
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
+      major-updates:
+        update-types: ["major"]
     ignore:
-      # Major crate bumps that need code changes — do deliberately.
       - dependency-name: "jsonwebtoken"
         update-types: ["version-update:semver-major"]
 
@@ -22,12 +25,18 @@ updates:
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
+      major-updates:
+        update-types: ["major"]
 
+  # All GitHub Actions bumps arrive as ONE grouped PR (SHA + comment updates).
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
+    groups:
+      actions:
+        patterns: ["*"]
 
   - package-ecosystem: docker
     directory: /
