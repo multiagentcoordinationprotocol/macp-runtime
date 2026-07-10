@@ -62,7 +62,7 @@ jobs:
           shared-key: msrv
 
       - name: Install protoc
-        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ github.token }}
@@ -107,7 +107,7 @@ jobs:
           shared-key: main
 
       - name: Install protoc
-        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ github.token }}
@@ -134,7 +134,7 @@ jobs:
           shared-key: main
 
       - name: Install protoc
-        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ github.token }}
@@ -163,7 +163,7 @@ jobs:
           shared-key: main
 
       - name: Install protoc
-        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ github.token }}
@@ -202,7 +202,7 @@ jobs:
           shared-key: release
 
       - name: Install protoc
-        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ github.token }}
@@ -224,7 +224,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Install protoc
-        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ github.token }}
@@ -333,7 +333,7 @@ jobs:
           shared-key: coverage
 
       - name: Install protoc
-        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ github.token }}
@@ -386,7 +386,7 @@ jobs:
           shared-key: features
 
       - name: Install protoc
-        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ github.token }}
@@ -462,7 +462,7 @@ jobs:
             integration_tests
 
       - name: Install protoc
-        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ github.token }}
@@ -524,7 +524,7 @@ jobs:
           shared-key: main
 
       - name: Install protoc
-        uses: arduino/setup-protoc@f4d5893b897028ff5739576ea0409746887fa536 # v3.0.0
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ github.token }}
