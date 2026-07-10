@@ -1,0 +1,62 @@
+{
+  "mode": "macp.mode.proposal.v1",
+  "initiator": "agent://buyer",
+  "participants": [
+    "agent://buyer",
+    "agent://seller"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://seller",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.proposal.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "title": "offer",
+        "summary": "terms",
+        "details": [],
+        "tags": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://buyer",
+      "message_type": "Reject",
+      "payload_type": "macp.modes.proposal.v1.RejectPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "reason": "terms unacceptable",
+        "terminal": true
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://buyer",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "proposal.rejected",
+        "authority_scope": "test",
+        "reason": "terminal rejection",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "proposal.rejected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": false
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "mode": "macp.mode.handoff.v1",
+  "initiator": "agent://owner",
+  "participants": [
+    "agent://owner",
+    "agent://target"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://owner",
+      "message_type": "HandoffOffer",
+      "payload_type": "macp.modes.handoff.v1.HandoffOfferPayload",
+      "payload": {
+        "handoff_id": "h1",
+        "target_participant": "agent://target",
+        "scope": "support",
+        "reason": "escalate"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://target",
+      "message_type": "HandoffDecline",
+      "payload_type": "macp.modes.handoff.v1.HandoffDeclinePayload",
+      "payload": {
+        "handoff_id": "h1",
+        "declined_by": "agent://target",
+        "reason": "out of scope"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://owner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "handoff.declined",
+        "authority_scope": "test",
+        "reason": "target declined",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "handoff.declined",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": false
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "mode": "macp.mode.task.v1",
+  "initiator": "agent://planner",
+  "participants": [
+    "agent://planner",
+    "agent://worker"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://planner",
+      "message_type": "TaskRequest",
+      "payload_type": "macp.modes.task.v1.TaskRequestPayload",
+      "payload": {
+        "task_id": "t1",
+        "title": "Build",
+        "instructions": "Do it",
+        "requested_assignee": "agent://worker",
+        "input": [],
+        "deadline_unix_ms": 0
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://worker",
+      "message_type": "TaskAccept",
+      "payload_type": "macp.modes.task.v1.TaskAcceptPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://worker",
+        "reason": "ready"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://worker",
+      "message_type": "TaskFail",
+      "payload_type": "macp.modes.task.v1.TaskFailPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://worker",
+        "error_code": "BUILD_FAILED",
+        "reason": "compilation error",
+        "retryable": false
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://planner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "task.failed",
+        "authority_scope": "test",
+        "reason": "assignee reported failure",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "task.failed",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": false
+  }
+}

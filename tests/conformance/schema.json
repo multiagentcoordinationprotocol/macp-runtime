@@ -88,6 +88,12 @@
             "type": "string"
           }
         },
+        "patternProperties": {
+          "^_": {
+            "type": "string",
+            "description": "Non-normative annotation (e.g. _comment). Harnesses MUST ignore keys starting with '_'."
+          }
+        },
         "additionalProperties": false
       }
     },
@@ -115,6 +121,12 @@
     "policy": {
       "type": "object",
       "description": "Optional inline PolicyDefinition registered before SessionStart"
+    }
+  },
+  "patternProperties": {
+    "^_": {
+      "type": "string",
+      "description": "Non-normative annotation (e.g. _comment). Harnesses MUST ignore keys starting with '_'."
     }
   },
   "additionalProperties": false
