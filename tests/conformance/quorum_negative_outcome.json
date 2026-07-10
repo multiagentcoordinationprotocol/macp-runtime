@@ -1,0 +1,72 @@
+{
+  "mode": "macp.mode.quorum.v1",
+  "initiator": "agent://coordinator",
+  "participants": [
+    "agent://alice",
+    "agent://bob",
+    "agent://carol"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://coordinator",
+      "message_type": "ApprovalRequest",
+      "payload_type": "macp.modes.quorum.v1.ApprovalRequestPayload",
+      "payload": {
+        "request_id": "r1",
+        "action": "deploy",
+        "summary": "Deploy v2",
+        "details": [],
+        "required_approvals": 2
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://alice",
+      "message_type": "Reject",
+      "payload_type": "macp.modes.quorum.v1.RejectPayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "not ready"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://bob",
+      "message_type": "Abstain",
+      "payload_type": "macp.modes.quorum.v1.AbstainPayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "no opinion"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://coordinator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "quorum.rejected",
+        "authority_scope": "test",
+        "reason": "threshold unreachable",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "quorum.rejected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": false
+  }
+}

@@ -200,6 +200,14 @@ fn encode_task_payload(msg: &ConformanceMessage) -> Vec<u8> {
             summary: p["summary"].as_str().unwrap_or_default().into(),
         }
         .encode_to_vec(),
+        "TaskFail" => macp_runtime::task_pb::TaskFailPayload {
+            task_id: p["task_id"].as_str().unwrap_or_default().into(),
+            assignee: p["assignee"].as_str().unwrap_or_default().into(),
+            error_code: p["error_code"].as_str().unwrap_or_default().into(),
+            reason: p["reason"].as_str().unwrap_or_default().into(),
+            retryable: p["retryable"].as_bool().unwrap_or(false),
+        }
+        .encode_to_vec(),
         _ => panic!("Unhandled task message: {}", msg.message_type),
     }
 }
@@ -251,6 +259,16 @@ fn encode_quorum_payload(msg: &ConformanceMessage) -> Vec<u8> {
         }
         .encode_to_vec(),
         "Approve" => macp_runtime::quorum_pb::ApprovePayload {
+            request_id: p["request_id"].as_str().unwrap_or_default().into(),
+            reason: p["reason"].as_str().unwrap_or_default().into(),
+        }
+        .encode_to_vec(),
+        "Reject" => macp_runtime::quorum_pb::RejectPayload {
+            request_id: p["request_id"].as_str().unwrap_or_default().into(),
+            reason: p["reason"].as_str().unwrap_or_default().into(),
+        }
+        .encode_to_vec(),
+        "Abstain" => macp_runtime::quorum_pb::AbstainPayload {
             request_id: p["request_id"].as_str().unwrap_or_default().into(),
             reason: p["reason"].as_str().unwrap_or_default().into(),
         }
@@ -538,12 +556,28 @@ conformance_test!(
     conformance_proposal_reject_paths,
     "proposal_reject_paths.json"
 );
+conformance_test!(
+    conformance_proposal_negative_outcome,
+    "proposal_negative_outcome.json"
+);
 conformance_test!(conformance_task_reject_paths, "task_reject_paths.json");
+conformance_test!(
+    conformance_task_negative_outcome,
+    "task_negative_outcome.json"
+);
 conformance_test!(
     conformance_handoff_reject_paths,
     "handoff_reject_paths.json"
 );
+conformance_test!(
+    conformance_handoff_negative_outcome,
+    "handoff_negative_outcome.json"
+);
 conformance_test!(conformance_quorum_reject_paths, "quorum_reject_paths.json");
+conformance_test!(
+    conformance_quorum_negative_outcome,
+    "quorum_negative_outcome.json"
+);
 conformance_test!(
     conformance_multi_round_reject_paths,
     "multi_round_reject_paths.json"
