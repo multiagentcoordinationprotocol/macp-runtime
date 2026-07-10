@@ -327,6 +327,7 @@ pub fn handoff_accept_payload(handoff_id: &str, accepted_by: &str, reason: &str)
         handoff_id: handoff_id.into(),
         accepted_by: accepted_by.into(),
         reason: reason.into(),
+        implicit: false,
     }
     .encode_to_vec()
 }
