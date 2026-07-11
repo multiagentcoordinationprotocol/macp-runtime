@@ -1,34 +1,38 @@
 name: Publish Crates
 
-# Publishes the workspace crates to crates.io in dependency order when a
-# version tag (e.g. v0.4.0) is pushed. Can also be run manually for a dry run.
+# Sole crates.io publisher for the workspace.
+#
+# Division of labour with release-plz.yml:
+#   - release-plz owns versioning + git: it opens the version-bump PR and, on
+#     merge, creates the git tags and the GitHub Release. Its config sets
+#     `publish = false`, so it does NOT upload to crates.io.
+#   - THIS workflow uploads to crates.io. `cargo publish --workspace` computes
+#     the 7-crate dependency order itself and waits for index propagation
+#     between crates — which release-plz's own publisher does not, and which
+#     previously caused a partial publish (macp-modes tried to build against an
+#     unpublished macp-policy).
+#
+# It fires on the `macp-runtime-v*` tag release-plz creates on release, and can
+# be dispatched manually (defaults to a dry run) for recovery.
 on:
   push:
-    tags: ["v*"]
+    tags: ["macp-runtime-v*"]
   workflow_dispatch:
     inputs:
       dry_run:
         description: "Package and verify without uploading"
         type: boolean
         default: true
-      skip_semver_checks:
-        description: "Skip cargo-semver-checks (escape hatch for false positives)"
-        type: boolean
-        default: false
 
 env:
   CARGO_TERM_COLOR: always
-  # Workspace publishing (`cargo publish --workspace`, stabilized in 1.90)
-  # runs on the repo toolchain pin. Keep in sync with rust-toolchain.toml.
+  # Keep in sync with rust-toolchain.toml.
   RUST_TOOLCHAIN: "1.96.1"
 
 jobs:
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    permissions:
-      # Needed to create the GitHub Release after a successful publish.
-      contents: write
 
     steps:
       - name: Checkout repository
@@ -45,51 +49,12 @@ jobs:
           version: "31.x"
           repo-token: ${{ github.token }}
 
-      # Guard against tagging a release whose version doesn't match the
-      # workspace. The tag drives the release; the manifest must agree.
-      - name: Verify tag matches workspace version
-        if: github.ref_type == 'tag'
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          ws=$(cargo metadata --format-version 1 --no-deps \
-            | jq -r '.packages[] | select(.name=="macp-runtime") | .version')
-          echo "tag=$tag workspace=$ws"
-          if [ "$tag" != "$ws" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match workspace version $ws"
-            exit 1
-          fi
-
-      # A release tag without release notes is a process bug: the CHANGELOG
-      # must have a section for the version being published.
-      - name: Verify CHANGELOG documents this version
-        if: github.ref_type == 'tag'
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          if ! grep -Eq "^## \[$tag\]" CHANGELOG.md; then
-            echo "::error::CHANGELOG.md has no '## [$tag]' section for this release"
-            exit 1
-          fi
-
-      - name: Install cargo-semver-checks
-        if: ${{ !inputs.skip_semver_checks }}
-        uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.9.4
-        with:
-          tool: cargo-semver-checks
-
-      # Blocking: the workspace version bump must be adequate for the API
-      # changes since the last published release (0.x minor bumps permit
-      # breaking changes per cargo's semver interpretation). Escape hatch:
-      # the skip_semver_checks dispatch input.
-      - name: Semver check against latest published release
-        if: ${{ !inputs.skip_semver_checks }}
-        run: cargo semver-checks --workspace
-
-      # `cargo publish --workspace` computes the dependency order itself, builds
-      # each crate's verify step against its sibling path deps (so a dry-run
-      # validates the whole graph without anything on the index yet), and waits
-      # for each upload to appear on the index before publishing its dependents.
+      # `cargo publish --workspace` (stable since 1.90) computes the dependency
+      # order itself, builds each crate's verify step against its sibling path
+      # deps, and waits for each upload to appear on the index before publishing
+      # its dependents.
       #
-      # Re-run safety: a crate whose current version is already live is passed
+      # Re-run safety: any crate whose current version is already live is passed
       # via --exclude, so re-running after a mid-release failure skips the
       # already-published members instead of erroring on "already exists".
       - name: Publish workspace to crates.io
@@ -130,28 +95,4 @@ jobs:
           else
             echo "==> publish workspace"
             cargo publish --workspace --locked ${exclude_args[@]+"${exclude_args[@]}"}
-          fi
-
-      # Tag-driven releases also get a GitHub Release whose notes are the
-      # CHANGELOG section for the version (verified to exist above).
-      - name: Create GitHub Release
-        if: github.ref_type == 'tag'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
-          # Extract the "## [<tag>]" section body (up to the next "## [").
-          awk -v ver="$tag" '
-            $0 ~ "^## \\[" ver "\\]" { hit = 1; next }
-            hit && /^## \[/ { exit }
-            hit { print }
-          ' CHANGELOG.md > release-notes.md
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME already exists; skipping (re-run safe)"
-          else
-            gh release create "$GITHUB_REF_NAME" \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "macp-runtime $GITHUB_REF_NAME" \
-              --notes-file release-notes.md
           fi

@@ -12,14 +12,11 @@ concurrency:
   group: release-plz-${{ github.ref }}
   cancel-in-progress: false
 
-# Supply-chain note (crates.io provenance): release-plz drives `cargo publish`,
-# which today has no build-provenance / attestation mechanism comparable to npm
-# --provenance or PyPI attestations; crates.io Trusted Publishing (OIDC, no
-# long-lived token) is being rolled out upstream. This workflow is deliberately
-# left on the CARGO_REGISTRY_TOKEN flow. Migrating to Trusted Publishing is a
-# conservative follow-up: when release-plz-action documents an
-# `id-token: write` OIDC path, add `permissions: id-token: write` to THIS job
-# only and drop CARGO_REGISTRY_TOKEN.
+# release-plz owns versioning + git only. `publish = false` in release-plz.toml
+# means it never runs `cargo publish` here (so no CARGO_REGISTRY_TOKEN is needed);
+# it opens the version-bump PR and, on merge, creates the git tags + GitHub
+# Release. The crates.io upload is done by publish.yml, triggered by the
+# `macp-runtime-v*` tag created here.
 jobs:
   release-plz:
     name: release-plz
@@ -49,4 +46,3 @@ jobs:
       - uses: MarcoIeni/release-plz-action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

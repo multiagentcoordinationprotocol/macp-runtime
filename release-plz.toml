@@ -1,10 +1,13 @@
 # release-plz configuration.
 #
-# release-plz owns the release process: on every push to main it opens (or
+# release-plz owns VERSIONING and GIT: on every push to main it opens (or
 # updates) a "release PR" that bumps the workspace version and updates
-# CHANGELOG.md from the conventional-commit history; merging that PR tags the
-# release, publishes every workspace crate to crates.io, and cuts a GitHub
-# Release. This replaces the previous manual tag-driven publish.yml flow.
+# CHANGELOG.md from the conventional-commit history; merging that PR creates the
+# git tags and a GitHub Release. It does NOT upload to crates.io — `publish =
+# false` below. The actual crates.io upload is done by publish.yml, which runs
+# `cargo publish --workspace` (correct dependency ordering + index-propagation
+# waits, which release-plz's own publisher does not do for this 7-crate graph).
+# publish.yml is triggered by the `macp-runtime-v*` tag created here.
 [workspace]
 # Run cargo-semver-checks while computing the release PR, where the version
 # bumps actually happen. An API break that rides an unmarked commit blocks the
@@ -15,8 +18,16 @@ semver_check = true
 # Label the release PRs release-plz opens.
 pr_labels = ["release"]
 
-# Create a GitHub Release (tag + notes) for each published version.
-git_release_enable = true
+# Do not publish to crates.io from release-plz — publish.yml owns that (see the
+# header comment). release-plz still creates git tags and the GitHub Release.
+publish = false
+
+# One GitHub Release per version, on the umbrella crate only (enabled per-package
+# below); suppress the six per-crate releases to avoid seven-releases-per-version
+# noise. Per-crate git *tags* are still created (release-plz reads them to
+# compute the next version), and `macp-runtime-v{version}` is what triggers
+# publish.yml.
+git_release_enable = false
 
 # Lockstep versioning: macp-runtime is one runtime split across seven crates
 # that must be consumed as a coherent set — shared vocabulary flows across
@@ -48,3 +59,6 @@ version_group = "macp"
 [[package]]
 name = "macp-runtime"
 version_group = "macp"
+# The one GitHub Release per version rides the umbrella crate's tag
+# (`macp-runtime-v{version}`), which is also what triggers publish.yml.
+git_release_enable = true
