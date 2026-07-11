@@ -6,6 +6,40 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.6.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.5.0...macp-runtime-v0.6.1) - 2026-07-11
+
+### Fixed
+
+- *(release-plz)* stop ignoring the tracked plans/ docs
+- green the new CI gates (otel build, rustdoc, coverage)
+- derive advertised runtime version from the crate version
+
+### Other
+
+- restore publish.yml to finish the 0.6.0 workspace publish
+- *(release)* 0.6.0 ([#94](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/94))
+- *(dependabot)* weekly -> monthly to cut PR volume ([#90](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/90))
+- *(dependabot)* group updates to cut PR volume ([#88](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/88))
+- *(deps)* bump rust in the docker group across 1 directory ([#70](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/70))
+- *(deps)* bump redis from 0.27.6 to 1.2.4 ([#76](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/76))
+- *(deps)* bump reqwest from 0.12.28 to 0.13.4 ([#78](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/78))
+- *(dependabot)* ignore breaking major bumps that need migration ([#79](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/79))
+- SHA-pin third-party GitHub Actions ([#80](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/80))
+- *(deps)* bump docker/login-action from 3 to 4 ([#73](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/73))
+- *(deps)* bump arduino/setup-protoc ([#72](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/72))
+- *(deps)* bump docker/setup-qemu-action from 3 to 4 ([#71](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/71))
+- *(dependabot)* add docker ecosystem for base-image updates ([#69](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/69))
+- SHA-pin peter-evans/repository-dispatch (v4.0.1) ([#68](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/68))
+- retire WEBSITE_SYNC_TOKEN PAT in notify-website (use macp-deps-bot App token) ([#66](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/66))
+- add auto-merge + event-driven bump-proto (cargo) callers ([#64](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/64))
+- automate releases with release-plz (lockstep via version_group)
+- refresh for the CI/test overhaul; document Suspend/Resume; fix stale versions
+- prune redundant tests, de-flake the harness, fill coverage gaps
+- *(release)* semver-checks + changelog gate + GitHub Release; weekly audit; multi-arch image
+- pin toolchain to current stable everywhere, harden workflows
+- *(deps)* bump crossbeam-epoch 0.9.20, anyhow 1.0.103 (RUSTSEC-2026-0204, RUSTSEC-2026-0190)
+- ignore .macp-data/ (local runtime persistence; only its .DS_Store was ignored before)
+
 _Nothing yet._
 
 ## [0.6.0] — 2026-07-10
