@@ -8,6 +8,28 @@ workspace version in the root `Cargo.toml`.
 
 _Nothing yet._
 
+## [0.6.0] — 2026-07-10
+
+Maintenance release; realigns the runtime with the SDK version line (the
+TypeScript SDK advanced to 0.6.0). No changes to the wire protocol, gRPC
+surface, or mode semantics — a `Send`/`StreamSession` client built against
+0.5.0 interoperates unchanged.
+
+### Added
+- Negative-outcome conformance fixtures for the proposal, task, handoff, and
+  quorum modes (`task.failed`, `proposal.rejected`, `handoff.declined`,
+  `quorum.rejected`), exercising the `TaskFail`, quorum `Reject`/`Abstain`, and
+  `HandoffDecline` message types end-to-end.
+
+### Changed
+- Releases are now automated with release-plz; all seven crates are pinned to a
+  single lockstep version via `version_group`, enforced by a CI guard.
+
+### Fixed
+- Green the new CI gates (otel build, rustdoc, coverage) and de-flake the test
+  harness; corrected the release tooling's handling of the tracked `plans/`
+  docs.
+
 ## [0.5.0] — 2026-07-05
 
 ### Security
