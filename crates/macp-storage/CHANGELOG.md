@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-storage-v0.5.0...macp-storage-v0.6.1) - 2026-07-11
+
+### Other
+
+- release v0.6.0 ([#95](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/95))
+- prune redundant tests, de-flake the harness, fill coverage gaps
+- *(plans)* prune fully-implemented plans; close the two audit findings
+
 ## [0.6.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-storage-v0.5.0...macp-storage-v0.6.0) - 2026-07-11
 
 ### Other
