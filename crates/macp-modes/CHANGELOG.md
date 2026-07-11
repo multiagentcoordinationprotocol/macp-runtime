@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-modes-v0.5.0...macp-modes-v0.6.1) - 2026-07-11
+
+### Fixed
+
+- green the new CI gates (otel build, rustdoc, coverage)
+
+### Other
+
+- release v0.6.0 ([#95](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/95))
+- prune redundant tests, de-flake the harness, fill coverage gaps
+
 ## [0.6.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-modes-v0.5.0...macp-modes-v0.6.0) - 2026-07-11
 
 ### Fixed
