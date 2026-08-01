@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.repository_owner == 'multiagentcoordinationprotocol' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -43,6 +43,6 @@ jobs:
           version: "31.x"
           repo-token: ${{ github.token }}
 
-      - uses: MarcoIeni/release-plz-action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
+      - uses: MarcoIeni/release-plz-action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
