@@ -46,8 +46,23 @@ pub fn validate_commitment_payload_for_session(
     // cross-session, so the kernel checks only well-formedness here (and
     // authority, separately) — it does NOT verify the referenced commitment
     // exists, was sealed, or is unforked. Those are consumer governance.
+    // RFC-MACP-0013 §9 additionally tightens `commitment_hash` to the
+    // canonical shape (`sha256:` + 64 lowercase hex chars) with an immediate
+    // hard reject — no dual-read/transitional window is permitted.
     if let Some(ref sup) = commitment.supersedes {
-        if sup.session_id.trim().is_empty() || sup.commitment_hash.trim().is_empty() {
+        if sup.session_id.trim().is_empty() {
+            tracing::warn!(
+                session_id = %sup.session_id,
+                "supersedes.session_id must be non-empty"
+            );
+            return Err(MacpError::InvalidPayload);
+        }
+        if !is_canonical_commitment_hash(&sup.commitment_hash) {
+            tracing::warn!(
+                commitment_hash = %sup.commitment_hash,
+                "supersedes.commitment_hash must be a canonical RFC-MACP-0013 hash: \
+                 'sha256:' followed by 64 lowercase hex characters"
+            );
             return Err(MacpError::InvalidPayload);
         }
     }
@@ -56,6 +71,22 @@ pub fn validate_commitment_payload_for_session(
     validate_outcome_positive(&commitment)?;
 
     Ok(commitment)
+}
+
+/// Check whether `s` is a canonical RFC-MACP-0013 commitment hash: the
+/// literal prefix `sha256:` followed by exactly 64 lowercase hex characters.
+/// No trimming is performed — leading/trailing whitespace is a rejection,
+/// not something to be trimmed away before checking.
+fn is_canonical_commitment_hash(s: &str) -> bool {
+    match s.strip_prefix("sha256:") {
+        Some(rest) => {
+            rest.len() == 64
+                && rest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }
+        None => false,
+    }
 }
 
 /// Validate that `outcome_positive` is consistent with the `action` field.
@@ -231,13 +262,19 @@ mod tests {
             .build()
     }
 
+    // Pinned vector hash for `cmt_hash_001_minimal` from the RFC-MACP-0013
+    // conformance vectors (see crates/macp-core/src/commitment_hash.rs's test
+    // module) — a real canonical commitment hash, not an arbitrary literal.
+    const VALID_COMMITMENT_HASH: &str =
+        "sha256:9f58e9d114d11860d48aa2bcb8cda458b9618b1cc8560595a802b68c4af85d41";
+
     #[test]
     fn well_formed_supersedes_is_accepted() {
         let session = session_for_commitment();
         let mut c = make_commitment("decision.selected", true);
         c.supersedes = Some(macp_pb::pb::CommitmentRef {
             session_id: "prior-session".into(),
-            commitment_hash: "abc123".into(),
+            commitment_hash: VALID_COMMITMENT_HASH.into(),
         });
         assert!(validate_commitment_payload_for_session(&session, &c.encode_to_vec()).is_ok());
     }
@@ -245,7 +282,23 @@ mod tests {
     #[test]
     fn malformed_supersedes_is_rejected() {
         let session = session_for_commitment();
-        for bad in [("", "abc123"), ("prior-session", ""), ("  ", "abc123")] {
+        for bad in [
+            ("", VALID_COMMITMENT_HASH),
+            ("prior-session", ""),
+            ("  ", VALID_COMMITMENT_HASH),
+            // Non-empty but no `sha256:` prefix at all.
+            ("prior-session", "not-a-hash"),
+            // Correct length, but uppercase hex (RFC requires lowercase).
+            (
+                "prior-session",
+                "sha256:9F58E9D114D11860D48AA2BCB8CDA458B9618B1CC8560595A802B68C4AF85D41",
+            ),
+            // Right prefix, one hex char short of 64.
+            (
+                "prior-session",
+                "sha256:9f58e9d114d11860d48aa2bcb8cda458b9618b1cc8560595a802b68c4af85d4",
+            ),
+        ] {
             let mut c = make_commitment("decision.selected", true);
             c.supersedes = Some(macp_pb::pb::CommitmentRef {
                 session_id: bad.0.into(),
@@ -256,6 +309,89 @@ mod tests {
                 "expected rejection for supersedes {bad:?}"
             );
         }
+    }
+
+    // --- is_canonical_commitment_hash direct unit tests (RFC-MACP-0013 §9) ---
+
+    #[test]
+    fn canonical_hash_valid_is_accepted() {
+        assert!(is_canonical_commitment_hash(VALID_COMMITMENT_HASH));
+    }
+
+    #[test]
+    fn canonical_hash_rejects_uppercase() {
+        assert!(!is_canonical_commitment_hash(
+            "sha256:9F58E9D114D11860D48AA2BCB8CDA458B9618B1CC8560595A802B68C4AF85D41"
+        ));
+    }
+
+    #[test]
+    fn canonical_hash_rejects_uppercase_prefix() {
+        // The "sha256:" prefix itself must be lowercase — case-insensitive
+        // prefix matching would silently loosen this guard.
+        assert!(!is_canonical_commitment_hash(&format!(
+            "SHA256:{}",
+            VALID_COMMITMENT_HASH.strip_prefix("sha256:").unwrap()
+        )));
+    }
+
+    #[test]
+    fn canonical_hash_rejects_63_chars() {
+        assert!(!is_canonical_commitment_hash(
+            "sha256:9f58e9d114d11860d48aa2bcb8cda458b9618b1cc8560595a802b68c4af85d4"
+        ));
+    }
+
+    #[test]
+    fn canonical_hash_rejects_65_chars() {
+        assert!(!is_canonical_commitment_hash(
+            "sha256:9f58e9d114d11860d48aa2bcb8cda458b9618b1cc8560595a802b68c4af85d411"
+        ));
+    }
+
+    #[test]
+    fn canonical_hash_rejects_missing_prefix() {
+        assert!(!is_canonical_commitment_hash(
+            "9f58e9d114d11860d48aa2bcb8cda458b9618b1cc8560595a802b68c4af85d41"
+        ));
+    }
+
+    #[test]
+    fn canonical_hash_rejects_wrong_prefix() {
+        assert!(!is_canonical_commitment_hash(
+            "sha512:9f58e9d114d11860d48aa2bcb8cda458b9618b1cc8560595a802b68c4af85d41"
+        ));
+    }
+
+    #[test]
+    fn canonical_hash_rejects_empty_string() {
+        assert!(!is_canonical_commitment_hash(""));
+    }
+
+    #[test]
+    fn canonical_hash_rejects_leading_whitespace() {
+        assert!(!is_canonical_commitment_hash(&format!(
+            " {VALID_COMMITMENT_HASH}"
+        )));
+    }
+
+    #[test]
+    fn canonical_hash_rejects_trailing_whitespace() {
+        assert!(!is_canonical_commitment_hash(&format!(
+            "{VALID_COMMITMENT_HASH} "
+        )));
+    }
+
+    #[test]
+    fn canonical_hash_rejects_non_hex_characters() {
+        // 'g' is not a valid hex digit.
+        assert!(!is_canonical_commitment_hash(
+            "sha256:gf58e9d114d11860d48aa2bcb8cda458b9618b1cc8560595a802b68c4af85d41"
+        ));
+        // '!' is not a valid hex digit either.
+        assert!(!is_canonical_commitment_hash(
+            "sha256:9f58e9d114d11860d48aa2bcb8cda458b9618b1cc8560595a802b68c4af85d4!"
+        ));
     }
 
     // --- policy_version echo (master plan §2.3) ---
