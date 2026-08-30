@@ -504,13 +504,18 @@ jobs:
       - name: Vendored fixtures are byte-identical to canonical
         run: |
           status=0
-          for f in tests/conformance/*.json; do
-            b=$(basename "$f")
-            if ! diff -u "spec-repo/schemas/conformance/$b" "$f"; then
-              echo "DRIFT: $b differs from the canonical spec-repo copy" >&2
-              status=1
-            fi
-          done
+          check_dir() {
+            local vendored_dir="$1" canonical_dir="$2"
+            for f in "$vendored_dir"/*.json; do
+              b=$(basename "$f")
+              if ! diff -u "$canonical_dir/$b" "$f"; then
+                echo "DRIFT: $b differs from the canonical spec-repo copy ($canonical_dir)" >&2
+                status=1
+              fi
+            done
+          }
+          check_dir "tests/conformance" "spec-repo/schemas/conformance"
+          check_dir "tests/conformance/cmt-hash" "spec-repo/schemas/conformance/cmt-hash"
           exit $status
 
       - name: Install Rust toolchain

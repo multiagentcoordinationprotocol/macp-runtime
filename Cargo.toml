@@ -66,6 +66,7 @@ macp-proto = "0.1.5"
 tonic-prost-build = "0.14"
 tempfile = "3"
 base64 = "0.22"
+sha2 = "0.10"
 
 [features]
 default = []
@@ -97,10 +98,15 @@ async-trait = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-opentelemetry = { version = "0.22", optional = true }
-opentelemetry_sdk = { version = "0.22", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.15", features = ["tonic"], optional = true }
-tracing-opentelemetry = { version = "0.23", optional = true }
+opentelemetry = { version = "0.32", optional = true }
+opentelemetry_sdk = { version = "0.32", optional = true }
+# 0.32 defaults switched to HTTP transport (http-proto + reqwest-blocking-client)
+# plus metrics/logs; disable them and select the gRPC/tonic trace path explicitly.
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+    "grpc-tonic",
+    "trace",
+], optional = true }
+tracing-opentelemetry = { version = "0.33", optional = true }
 macp-proto = { workspace = true }
 
 [dev-dependencies]

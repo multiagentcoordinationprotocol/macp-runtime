@@ -11,7 +11,9 @@
 //! - [`policy`] — [`policy::PolicyDefinition`], [`policy::PolicyDecision`],
 //!   [`policy::PolicyError`], the shared [`policy::CommitmentRules`], and the
 //!   [`policy::PolicyEvaluator`] trait that modes call through
+//! - [`commitment_hash`] — the RFC-MACP-0013 canonical commitment hash
 
+pub mod commitment_hash;
 pub mod decision;
 pub mod error;
 pub mod mode;

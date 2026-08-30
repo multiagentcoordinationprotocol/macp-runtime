@@ -4,13 +4,4 @@
 # Revisit each one when the blocking upstream dependency updates.
 
 [advisories]
-ignore = [
-    # RUSTSEC-2026-0097 — `rand 0.8.5` is unsound when a custom logger uses `rand::rng()`.
-    # Pulled in transitively via the `otel` feature (opentelemetry 0.22 → opentelemetry_sdk,
-    # tracing-opentelemetry 0.23, opentelemetry-otlp 0.15, which in turn drag tonic 0.11
-    # → tower 0.4 → rand 0.8). This is an *unsoundness warning*, not a runtime CVE, and
-    # the `otel` feature is not in default-features. Clearing it requires upgrading the
-    # opentelemetry stack from 0.22 → 0.31 (major API churn across versions). Tracked
-    # separately; revisit when the otel stack is upgraded.
-    "RUSTSEC-2026-0097",
-]
+ignore = []
