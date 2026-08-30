@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multiagentcoordinationprotocol.io/schemas/cmt-hash-vector.schema.json",
+  "title": "MACP canonical commitment hash test vector",
+  "description": "A reference vector for RFC-MACP-0013 Section 4 (canonical commitment hash algorithm). Pins the projected payload, the JCS-canonicalized bytes, the domain-separated preimage, and the resulting hash so a diverging implementation can identify at which step it diverged. This is a different shape from schemas/conformance/schema.json (session transcripts) and is validated separately.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "description", "label", "payload", "jcs_utf8_hex", "preimage_utf8_hex", "hash"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Vector identifier; MUST match the file's basename (without .json).",
+      "pattern": "^cmt_hash_[0-9]{3}_[a-z_]+$"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "label": {
+      "type": "string",
+      "description": "The commitment-hash label (RFC-MACP-0013 Section 5/7) that produced this vector.",
+      "const": "macp-commitment-hash/1"
+    },
+    "payload": {
+      "type": "object",
+      "description": "The CommitmentPayload projection (RFC-MACP-0013 Section 3), exactly as hashed.",
+      "additionalProperties": false,
+      "required": [
+        "commitment_id",
+        "action",
+        "authority_scope",
+        "reason",
+        "mode_version",
+        "policy_version",
+        "configuration_version",
+        "outcome_positive"
+      ],
+      "properties": {
+        "commitment_id": { "type": "string" },
+        "action": { "type": "string" },
+        "authority_scope": { "type": "string" },
+        "reason": { "type": "string" },
+        "mode_version": { "type": "string" },
+        "policy_version": { "type": "string" },
+        "configuration_version": { "type": "string" },
+        "outcome_positive": { "type": "boolean" },
+        "supersedes": {
+          "type": "object",
+          "description": "Present only when the payload's supersedes field is set (RFC-MACP-0013 Section 3, rule 3). Absent entirely otherwise -- never null or {}.",
+          "additionalProperties": false,
+          "required": ["session_id", "commitment_hash"],
+          "properties": {
+            "session_id": { "type": "string" },
+            "commitment_hash": { "type": "string" }
+          }
+        }
+      }
+    },
+    "jcs_utf8_hex": {
+      "type": "string",
+      "description": "Lowercase hex encoding of the UTF-8 bytes of the RFC 8785 JCS canonicalization of 'payload'.",
+      "pattern": "^([0-9a-f]{2})*$"
+    },
+    "preimage_utf8_hex": {
+      "type": "string",
+      "description": "Lowercase hex encoding of the UTF-8 bytes of 'macp-commitment-hash/1:' concatenated with the JCS bytes.",
+      "pattern": "^([0-9a-f]{2})*$"
+    },
+    "hash": {
+      "type": "string",
+      "description": "The canonical commitment hash: sha256: followed by 64 lowercase hex characters.",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "must_differ_from": {
+      "type": "string",
+      "description": "Name of another vector whose 'hash' this vector's 'hash' MUST NOT equal. Machine-checked by scripts/check-cmt-hash-vectors.py.",
+      "pattern": "^cmt_hash_[0-9]{3}_[a-z_]+$"
+    }
+  }
+}

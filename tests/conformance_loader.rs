@@ -637,7 +637,7 @@ fn fixtures_conform_to_canonical_format() {
         checked += 1;
     }
     assert!(
-        checked >= 13,
+        checked >= 17,
         "expected all fixtures checked, got {checked}"
     );
 }
