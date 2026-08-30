@@ -66,6 +66,7 @@ macp-proto = "0.1.5"
 tonic-prost-build = "0.14"
 tempfile = "3"
 base64 = "0.22"
+sha2 = "0.10"
 
 [features]
 default = []
