@@ -1270,7 +1270,12 @@ impl MacpRuntimeService for MacpServer {
         let sessions = self.runtime.registry.get_all_sessions().await;
         let metadata: Vec<SessionMetadata> =
             sessions.iter().map(Self::session_to_metadata).collect();
-        Ok(Response::new(ListSessionsResponse { sessions: metadata }))
+        // Unpaginated: always returns every session in one response, so
+        // there is never a further page to continue from.
+        Ok(Response::new(ListSessionsResponse {
+            sessions: metadata,
+            next_page_token: String::new(),
+        }))
     }
 
     async fn watch_sessions(

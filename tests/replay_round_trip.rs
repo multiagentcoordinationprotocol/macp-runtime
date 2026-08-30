@@ -313,6 +313,7 @@ fn replay_handoff_session() {
                 handoff_id: "h1".into(),
                 accepted_by: "agent://target".into(),
                 reason: "ready".into(),
+                implicit: false,
             }
             .encode_to_vec(),
             mode,

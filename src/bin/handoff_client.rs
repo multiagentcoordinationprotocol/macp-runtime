@@ -75,6 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handoff_id: "h1".into(),
         accepted_by: "target".into(),
         reason: "taking ownership".into(),
+        implicit: false,
     };
     let ack = send_as(
         &mut client,

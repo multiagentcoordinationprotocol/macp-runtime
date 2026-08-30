@@ -233,6 +233,13 @@ impl HandoffMode {
             "HandoffAccept" => {
                 let payload = HandoffAcceptPayload::decode(&*env.payload)
                     .map_err(|_| MacpError::InvalidPayload)?;
+                // RFC-MACP-0010 §5.1: `implicit` is runtime-synthesized only
+                // (see the implicit_accept_timeout_ms handling below, which
+                // never constructs this message type). A client-submitted
+                // accept setting it MUST be rejected.
+                if payload.implicit {
+                    return Err(MacpError::InvalidPayload);
+                }
                 let offer = state
                     .offers
                     .get_mut(&payload.handoff_id)
@@ -394,6 +401,7 @@ mod tests {
             handoff_id: handoff_id.into(),
             accepted_by: accepted_by.into(),
             reason: "ready".into(),
+            implicit: false,
         }
         .encode_to_vec()
     }
@@ -619,6 +627,36 @@ mod tests {
             }
             _ => panic!("Expected PersistState"),
         }
+    }
+
+    #[test]
+    fn client_submitted_implicit_accept_is_rejected() {
+        // RFC-MACP-0010 §5.1: `implicit` is runtime-synthesized only; a
+        // client MUST NOT submit it, and the runtime MUST reject it.
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = base_session();
+        let result = mode
+            .on_session_start(&session, &env("owner", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+        let result = mode
+            .on_message(
+                &session,
+                &env("owner", "HandoffOffer", make_offer("h1", "target")),
+            )
+            .unwrap();
+        apply(&mut session, result);
+        let forged_accept = HandoffAcceptPayload {
+            handoff_id: "h1".into(),
+            accepted_by: "target".into(),
+            reason: "ready".into(),
+            implicit: true,
+        }
+        .encode_to_vec();
+        let err = mode
+            .on_message(&session, &env("target", "HandoffAccept", forged_accept))
+            .unwrap_err();
+        assert_eq!(err.to_string(), "InvalidPayload");
     }
 
     #[test]

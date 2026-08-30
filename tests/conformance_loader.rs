@@ -226,6 +226,7 @@ fn encode_handoff_payload(msg: &ConformanceMessage) -> Vec<u8> {
             handoff_id: p["handoff_id"].as_str().unwrap_or_default().into(),
             accepted_by: p["accepted_by"].as_str().unwrap_or_default().into(),
             reason: p["reason"].as_str().unwrap_or_default().into(),
+            implicit: p["implicit"].as_bool().unwrap_or(false),
         }
         .encode_to_vec(),
         "HandoffDecline" => macp_runtime::handoff_pb::HandoffDeclinePayload {
