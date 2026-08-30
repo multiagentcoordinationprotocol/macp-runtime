@@ -398,7 +398,7 @@ async fn hs256_rejected_without_explicit_algorithm_opt_in() {
         macp_scopes: None,
     });
     // ListSessions requires authentication (GetManifest is open discovery).
-    let mut request = tonic::Request::new(macp_runtime::pb::ListSessionsRequest {});
+    let mut request = tonic::Request::new(macp_runtime::pb::ListSessionsRequest::default());
     request.metadata_mut().insert(
         "authorization",
         format!("Bearer {token}").parse().expect("valid header"),
