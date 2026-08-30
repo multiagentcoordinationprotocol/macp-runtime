@@ -84,24 +84,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
     #[cfg(feature = "otel")]
-    {
+    let tracer_provider = {
+        use opentelemetry::trace::TracerProvider as _;
         use opentelemetry_otlp::WithExportConfig;
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
 
         let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:4317".into());
-        let exporter = opentelemetry_otlp::new_exporter()
-            .tonic()
-            .with_endpoint(&otlp_endpoint);
-        // `install_batch` returns the batch-exporting `Tracer` directly
-        // (opentelemetry-otlp 0.15), so it is used as-is; there is no separate
-        // provider to call `.tracer()` on.
-        let tracer = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_exporter(exporter)
-            .install_batch(opentelemetry_sdk::runtime::Tokio)
-            .expect("failed to init OTEL tracer");
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(&otlp_endpoint)
+            .build()
+            .expect("failed to build OTLP span exporter");
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .build();
+        let tracer = provider.tracer("macp-runtime");
         let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
         tracing_subscriber::registry()
@@ -113,7 +112,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "OpenTelemetry tracing enabled (endpoint: {})",
             otlp_endpoint
         );
-    }
+        provider
+    };
 
     #[cfg(not(feature = "otel"))]
     {
@@ -519,6 +519,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     tracing::info!("state persisted, goodbye");
+
+    // Flush and shut down the OTLP batch span processor before exiting so
+    // buffered spans (including shutdown-path spans) are exported.
+    #[cfg(feature = "otel")]
+    if let Err(e) = tracer_provider.shutdown() {
+        tracing::warn!(error = %e, "failed to shut down OpenTelemetry tracer provider");
+    }
 
     Ok(())
 }
