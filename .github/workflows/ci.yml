@@ -504,12 +504,36 @@ jobs:
       - name: Vendored fixtures are byte-identical to canonical
         run: |
           status=0
+          # Drift is checked in BOTH directions. The canonical -> vendored loop
+          # is the load-bearing one: iterating only the vendored side can never
+          # reach a fixture that was added upstream and never vendored here, so
+          # the runtime would silently stop covering the canonical set while
+          # this job stayed green. Mirrors the SDKs' `verify-fixtures` targets.
           check_dir() {
             local vendored_dir="$1" canonical_dir="$2"
-            for f in "$vendored_dir"/*.json; do
+            if [ ! -d "$canonical_dir" ]; then
+              echo "MISSING: canonical directory $canonical_dir does not exist" >&2
+              status=1
+              return
+            fi
+            # canonical -> vendored: upstream additions and content drift
+            for f in "$canonical_dir"/*.json; do
+              [ -e "$f" ] || continue
               b=$(basename "$f")
-              if ! diff -u "$canonical_dir/$b" "$f"; then
+              if [ ! -f "$vendored_dir/$b" ]; then
+                echo "MISSING: $canonical_dir/$b has no vendored copy at $vendored_dir/$b -- vendor it and reference it from the conformance suite" >&2
+                status=1
+              elif ! diff -u "$canonical_dir/$b" "$vendored_dir/$b"; then
                 echo "DRIFT: $b differs from the canonical spec-repo copy ($canonical_dir)" >&2
+                status=1
+              fi
+            done
+            # vendored -> canonical: local files with no canonical source
+            for f in "$vendored_dir"/*.json; do
+              [ -e "$f" ] || continue
+              b=$(basename "$f")
+              if [ ! -f "$canonical_dir/$b" ]; then
+                echo "EXTRA: $vendored_dir/$b has no canonical source at $canonical_dir/$b" >&2
                 status=1
               fi
             done
