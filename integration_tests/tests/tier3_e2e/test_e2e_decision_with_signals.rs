@@ -3,7 +3,6 @@ use macp_integration_tests::helpers::*;
 use macp_integration_tests::macp_tools::{self, decision::*};
 use macp_runtime::pb::{Envelope, SendRequest, SignalPayload, WatchSignalsRequest};
 use prost::Message;
-use rig::completion::Prompt;
 use rig::prelude::*;
 use rig::providers::openai;
 use tonic::Request;
@@ -177,6 +176,11 @@ async fn decision_with_signals_full_flow() {
     let openai_client = openai::Client::from_env();
     let scenario =
         "A $4,800 wire transfer triggered fraud alerts. Proposal: require step-up verification.";
+    // Hang guard + transient-provider retry; see `prompt_with_retry`. This test
+    // previously awaited each agent with no timeout at all, so a stalled
+    // provider call could only be stopped by the CI job's 10-minute cap.
+    const AGENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+    const AGENT_ATTEMPTS: u32 = 3;
 
     // Build specialist agents
     let fraud_grpc = macp_tools::shared_client(ep).await;
@@ -234,7 +238,14 @@ async fn decision_with_signals_full_flow() {
                 &sid_clone,
             )
             .await;
-            let result = fraud_agent.prompt(&eval_prompt("fraud-risk")).await;
+            let result = super::prompt_with_retry(
+                "Fraud",
+                &fraud_agent,
+                &eval_prompt("fraud-risk"),
+                AGENT_TIMEOUT,
+                AGENT_ATTEMPTS,
+            )
+            .await;
             send_signal(
                 &mut sig_client,
                 fraud_id,
@@ -263,9 +274,14 @@ async fn decision_with_signals_full_flow() {
                 &sid_clone,
             )
             .await;
-            let result = growth_agent
-                .prompt(&eval_prompt("customer-experience"))
-                .await;
+            let result = super::prompt_with_retry(
+                "Growth",
+                &growth_agent,
+                &eval_prompt("customer-experience"),
+                AGENT_TIMEOUT,
+                AGENT_ATTEMPTS,
+            )
+            .await;
             send_signal(
                 &mut sig_client,
                 growth_id,
@@ -294,9 +310,14 @@ async fn decision_with_signals_full_flow() {
                 &sid_clone,
             )
             .await;
-            let result = compliance_agent
-                .prompt(&eval_prompt("regulatory-compliance"))
-                .await;
+            let result = super::prompt_with_retry(
+                "Compliance",
+                &compliance_agent,
+                &eval_prompt("regulatory-compliance"),
+                AGENT_TIMEOUT,
+                AGENT_ATTEMPTS,
+            )
+            .await;
             send_signal(
                 &mut sig_client,
                 compliance_id,
@@ -313,18 +334,10 @@ async fn decision_with_signals_full_flow() {
     let parallel_duration = start.elapsed();
 
     // Log LLM results
-    match &fraud_res {
-        Ok(text) => eprintln!("   [Fraud LLM]      {text}"),
-        Err(e) => panic!("Fraud agent failed: {e}"),
-    }
-    match &growth_res {
-        Ok(text) => eprintln!("   [Growth LLM]     {text}"),
-        Err(e) => panic!("Growth agent failed: {e}"),
-    }
-    match &compliance_res {
-        Ok(text) => eprintln!("   [Compliance LLM] {text}"),
-        Err(e) => panic!("Compliance agent failed: {e}"),
-    }
+    // `prompt_with_retry` panics if an agent is unreachable, so these are replies.
+    eprintln!("   [Fraud LLM]      {fraud_res}");
+    eprintln!("   [Growth LLM]     {growth_res}");
+    eprintln!("   [Compliance LLM] {compliance_res}");
     eprintln!();
     eprintln!(
         "   All 3 specialists completed in {:.1}s (parallel)\n",
@@ -357,6 +370,16 @@ async fn decision_with_signals_full_flow() {
     }
     eprintln!();
     eprintln!("   Total Signals received: {signal_count}");
+    // Ambient-plane *delivery* is half of what this test exists to prove, but
+    // `signal_count` was only ever printed. `send_signal` asserts each Signal is
+    // accepted, so a broken WatchSignals stream delivered nothing and the test
+    // still passed, printing "0 signals observed". Each of the 3 specialists
+    // emits `progress` then `completed`; the signal bus is a 256-slot broadcast
+    // channel, so 6 cannot be dropped for lag.
+    assert_eq!(
+        signal_count, 6,
+        "expected 6 ambient Signals (progress + completed from each of 3 specialists)"
+    );
     eprintln!("   These Signals are ambient — session history is unaffected.\n");
 
     // ═══════════════════════════════════════════════════════════════════
@@ -401,7 +424,13 @@ async fn decision_with_signals_full_flow() {
         let resp = get_session_as(&mut client, orch_id, &sid).await.unwrap();
         let meta = resp.metadata.unwrap();
         assert_eq!(meta.state, 2);
+        // The banner below claims Evaluations [3][4][5] entered session history.
+        // Decision mode commits on a Proposal alone, so RESOLVED does not show
+        // that — without this assertion the banner prints those lines whether or
+        // not any specialist was ever heard.
+        super::assert_participants_contributed(&meta, &[fraud_id, growth_id, compliance_id], 1);
         eprintln!("   Session state: {} (RESOLVED)", meta.state);
+        eprintln!("   Verified: all 3 specialist Evaluations are in accepted history");
     }
 
     eprintln!();
