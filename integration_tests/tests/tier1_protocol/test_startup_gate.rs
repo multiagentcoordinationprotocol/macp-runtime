@@ -12,6 +12,13 @@ fn startup_refuses_without_auth_or_insecure_flag() {
         .env_remove("MACP_AUTH_TOKENS_FILE")
         .env_remove("MACP_AUTH_TOKENS_JSON")
         .env_remove("MACP_AUTH_ISSUER")
+        // `output()` is safe here only because a second, independent gate
+        // (`src/main.rs`, "TLS is required unless MACP_ALLOW_INSECURE=1")
+        // still aborts if the auth gate is ever weakened. Ambient TLS paths
+        // in the environment would satisfy that gate and remove the backstop,
+        // turning a clean failure into a hang.
+        .env_remove("MACP_TLS_CERT_PATH")
+        .env_remove("MACP_TLS_KEY_PATH")
         .env("MACP_MEMORY_ONLY", "1")
         .env("MACP_BIND_ADDR", "127.0.0.1:0")
         .output()
@@ -224,18 +231,14 @@ fn startup_refuses_invalid_policies_dir() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("bad.json"), "{not json").unwrap();
 
-    let output = std::process::Command::new(&binary)
-        .env("MACP_ALLOW_INSECURE", "1")
-        .env("MACP_MEMORY_ONLY", "1")
-        .env("MACP_BIND_ADDR", "127.0.0.1:0")
-        .env("MACP_POLICIES_DIR", dir.path())
-        .output()
-        .expect("binary must run");
-    assert!(
-        !output.status.success(),
-        "invalid policy file must be fatal"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Bounded wait, not `output()`: if this validation is ever relaxed (e.g.
+    // "skip invalid policy files and warn"), the binary starts a server and
+    // `output()` would block until CI's 15-minute step timeout with no test
+    // named. The helper turns that into a ~15s named failure.
+    let dir_str = dir.path().display().to_string();
+    let (_stdout, stderr, status) =
+        run_expecting_startup_abort(&binary, &[("MACP_POLICIES_DIR", &dir_str)]);
+    assert!(!status.success(), "invalid policy file must be fatal");
     assert!(
         stderr.contains("MACP_POLICIES_DIR"),
         "error must name the policies dir; stderr: {stderr}"
@@ -248,6 +251,12 @@ fn startup_refuses_invalid_policies_dir() {
 /// closes its pipes, so if the startup validation under test ever regresses the
 /// binary starts a server that never exits and the test hangs forever instead
 /// of failing. Bounding the wait turns that regression into a real failure.
+///
+/// Constraint: the pipes are drained only after the child exits, not while
+/// polling. That is safe at the current volume — an aborting start writes a
+/// few hundred bytes against a >=16KB pipe buffer — but a future change that
+/// dumps effective configuration at startup could fill the buffer, block the
+/// child's write, and surface here as the deadline panic below.
 ///
 /// Returns `(stdout, stderr, exit_status)`.
 fn run_expecting_startup_abort(

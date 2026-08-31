@@ -87,7 +87,11 @@ fn validate_env_config() -> Vec<String> {
             // cap, but they are not the same operator mistake — and the
             // unparseable one already gets its own error from the loop above,
             // so claiming the var is unset here contradicts it.
-            let (max_size, max_source) = match max_raw.as_ref().and_then(|raw| raw.parse::<u64>().ok()) {
+            let (max_size, max_source) = match max_raw
+                .as_ref()
+                .and_then(|raw| raw.parse::<u64>().ok())
+                .filter(|&v| v > 0)
+            {
                 Some(max_size) => (
                     max_size,
                     "MACP_LIST_SESSIONS_MAX_PAGE_SIZE, explicitly configured".to_string(),
@@ -104,7 +108,7 @@ fn validate_env_config() -> Vec<String> {
             };
             if default_size > max_size {
                 errors.push(format!(
-                    "MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE ({default_size}) must not exceed the effective maximum page size ({max_size}) [{max_source}]"
+                    "MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE ({default_size}) must not exceed the effective maximum page size ({max_size}) [{max_source}]; raise MACP_LIST_SESSIONS_MAX_PAGE_SIZE or lower the default"
                 ));
             }
         }
