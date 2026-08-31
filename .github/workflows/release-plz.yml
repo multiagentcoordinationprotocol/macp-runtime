@@ -13,15 +13,24 @@ concurrency:
   cancel-in-progress: false
 
 # release-plz owns versioning + git only. `publish = false` in release-plz.toml
-# means it never runs `cargo publish` here (so no CARGO_REGISTRY_TOKEN is needed);
-# it opens the version-bump PR and, on merge, creates the git tags + GitHub
-# Release. The crates.io upload is done by publish.yml, triggered by the
-# `macp-runtime-v*` tag created here.
+# means it never runs `cargo publish` here; it opens the version-bump PR and, on
+# merge, creates the git tags + GitHub Release. The crates.io upload is done by
+# publish.yml.
+#
+# publish.yml is CALLED here rather than left to its `macp-runtime-v*` tag
+# trigger. That trigger cannot work from this workflow: GitHub does not start
+# workflow runs from events created with the default GITHUB_TOKEN, so the tags
+# release-plz pushes are invisible to it. That is why 0.6.1 was tagged and
+# GitHub-released on 2026-07-12 but never published — the tag fired nothing.
+# `workflow_call` runs inside this same run, so the recursion guard never
+# applies and no PAT is needed.
 jobs:
   release-plz:
     name: release-plz
     runs-on: ubuntu-latest
     if: ${{ github.repository_owner == 'multiagentcoordinationprotocol' }}
+    outputs:
+      releases_created: ${{ steps.release-plz.outputs.releases_created }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -44,5 +53,16 @@ jobs:
           repo-token: ${{ github.token }}
 
       - uses: MarcoIeni/release-plz-action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
+        id: release-plz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Only when the step above actually cut a release (tags + GitHub Release).
+  # A run that merely opens or refreshes the release PR sets this false and
+  # publishes nothing.
+  publish:
+    name: publish
+    needs: release-plz
+    if: ${{ needs.release-plz.outputs.releases_created == 'true' }}
+    uses: ./.github/workflows/publish.yml
+    secrets: inherit

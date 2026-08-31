@@ -12,9 +12,25 @@ name: Publish Crates
 #     previously caused a partial publish (macp-modes tried to build against an
 #     unpublished macp-policy).
 #
-# It fires on the `macp-runtime-v*` tag release-plz creates on release, and can
-# be dispatched manually (defaults to a dry run) for recovery.
+# Invoked three ways:
+#   - `workflow_call` from release-plz.yml, immediately after it creates the
+#     tags. THIS is the live path.
+#   - the `macp-runtime-v*` tag push. Kept as a backstop, but note it does NOT
+#     fire for tags release-plz creates: GitHub does not start workflow runs
+#     from events made with the default GITHUB_TOKEN (the recursion guard), so
+#     this trigger sat inert and 0.6.1 was tagged 2026-07-12 and never reached
+#     crates.io. It still fires for a tag pushed by a human or a PAT.
+#   - `workflow_dispatch`, defaulting to a dry run, for recovery.
 on:
+  workflow_call:
+    inputs:
+      dry_run:
+        description: "Package and verify without uploading"
+        type: boolean
+        default: false
+    secrets:
+      CARGO_REGISTRY_TOKEN:
+        required: true
   push:
     tags: ["macp-runtime-v*"]
   workflow_dispatch:
@@ -60,7 +76,7 @@ jobs:
       - name: Publish workspace to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
         run: |
           set -euo pipefail
 
