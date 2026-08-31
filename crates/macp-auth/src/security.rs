@@ -49,6 +49,27 @@ pub struct RateLimitConfig {
     pub window: Duration,
 }
 
+/// Effective `ListSessions` page size when the client sends `page_size = 0`.
+/// Overridable with `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE`.
+pub const DEFAULT_LIST_SESSIONS_PAGE_SIZE: usize = 100;
+
+/// Hard cap on `ListSessions` page size; a larger client-requested `page_size`
+/// is clamped down to it. Overridable with `MACP_LIST_SESSIONS_MAX_PAGE_SIZE`.
+pub const MAX_LIST_SESSIONS_PAGE_SIZE: usize = 1000;
+
+/// Raw (unparsed) values of the two `ListSessions` page-size env vars.
+///
+/// A named struct rather than two positional `Option<String>` parameters
+/// precisely because the two arguments are the same type: with positional
+/// arguments, transposing them at the call site compiles, and the resulting
+/// misconfiguration (`MAX` feeding the default and vice versa) is invisible to
+/// every test that only drives the resolver. Naming the fields forces the call
+/// site to write the field name next to the env-var name it reads.
+struct RawPageSizeEnv {
+    default_raw: Option<String>,
+    max_raw: Option<String>,
+}
+
 #[derive(Default)]
 struct RateBucket {
     start_events: Mutex<HashMap<String, VecDeque<Instant>>>,
@@ -67,6 +88,10 @@ pub struct SecurityLayer {
     rate_bucket: Arc<RateBucket>,
     auth_chain: Option<Arc<crate::auth::AuthResolverChain>>,
     pub max_payload_bytes: usize,
+    /// Effective `ListSessions` page size when the client sends `page_size = 0`.
+    pub list_sessions_default_page_size: usize,
+    /// Hard cap applied to a client-requested `ListSessions` page size.
+    pub list_sessions_max_page_size: usize,
     session_start_rate: RateLimitConfig,
     message_rate: RateLimitConfig,
 }
@@ -81,6 +106,13 @@ impl SecurityLayer {
             rate_bucket: Arc::new(RateBucket::default()),
             auth_chain: None,
             max_payload_bytes: 1_048_576,
+            // Deliberately the PRODUCTION defaults, not `usize::MAX`. The two
+            // rate limits below are unlimited because that is the safe test
+            // default, but an unlimited page size would make "the default cap
+            // was applied" assertions pass vacuously in unit tests while the
+            // same code path capped requests over the wire.
+            list_sessions_default_page_size: DEFAULT_LIST_SESSIONS_PAGE_SIZE,
+            list_sessions_max_page_size: MAX_LIST_SESSIONS_PAGE_SIZE,
             session_start_rate: RateLimitConfig {
                 limit: usize::MAX,
                 window: Duration::from_secs(60),
@@ -115,11 +147,103 @@ impl SecurityLayer {
         Err(MacpError::Unauthenticated)
     }
 
+    /// Resolves the two `ListSessions` page-size limits from raw env-var
+    /// values. Split out of `from_env` so the parse/clamp behavior is unit
+    /// testable without mutating the process environment, which races with
+    /// concurrently running tests under cargo's test thread pool.
+    ///
+    /// Like the other numeric vars this layer reads, it is silent on bad
+    /// input: an unparseable value — and `0`, which is just as much an
+    /// operator error — falls back to the compiled-in default rather than
+    /// producing a degenerate page size.
+    ///
+    /// Being silent here is only safe for the `macp-runtime` **binary**, which
+    /// runs `validate_env_config` in `src/main.rs` first and refuses to start
+    /// on either kind of bad input. A library embedder calling
+    /// [`SecurityLayer::from_env`] directly gets no such validation, so this
+    /// fallback — not a startup abort — is what it actually sees.
+    fn resolve_list_sessions_page_sizes(raw: RawPageSizeEnv) -> (usize, usize) {
+        let RawPageSizeEnv {
+            default_raw,
+            max_raw,
+        } = raw;
+        // `filter(|&v| v > 0)` rather than a trailing `.max(1)`: `0` is the
+        // same class of operator error as `"abc"` and gets the same treatment
+        // (fall back to the compiled-in value) instead of silently becoming a
+        // one-item page. The limits are still never zero.
+        let max = max_raw
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(MAX_LIST_SESSIONS_PAGE_SIZE);
+        let default_from_env = default_raw
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v > 0);
+        // Provenance, not just the value: the clamp warning must not name
+        // `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE` when nothing set it. Note this
+        // tracks where the value in hand actually came from, so an unparseable
+        // or zero default counts as built-in — that operator is told about the
+        // max they *did* set, and `validate_env_config` reports the bad default
+        // separately.
+        let mut default = default_from_env.unwrap_or(DEFAULT_LIST_SESSIONS_PAGE_SIZE);
+        if default > max {
+            tracing::warn!(
+                effective_default = default,
+                default_source = Self::page_size_default_source(default_from_env.is_some()),
+                max,
+                "{}",
+                Self::clamp_warning_message(default_from_env.is_some())
+            );
+            default = max;
+        }
+        (default, max)
+    }
+
+    /// Where the effective `ListSessions` default page size came from, as a
+    /// log field.
+    fn page_size_default_source(default_from_env: bool) -> &'static str {
+        if default_from_env {
+            "MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE"
+        } else {
+            "built-in"
+        }
+    }
+
+    /// Wording for the clamp warning emitted by
+    /// [`SecurityLayer::resolve_list_sessions_page_sizes`].
+    ///
+    /// Split out purely so the *choice* between the two messages is unit
+    /// testable: this crate has no test subscriber, so the emitted line itself
+    /// cannot be asserted without a new dev-dependency.
+    ///
+    /// The built-in wording exists because the reachable-for-the-binary case
+    /// (see `from_env_clamps_default_page_size_to_max`) is the one where the
+    /// operator set only the max. Naming a variable they never configured
+    /// sends them grepping for it.
+    fn clamp_warning_message(default_from_env: bool) -> &'static str {
+        if default_from_env {
+            "MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE exceeds MACP_LIST_SESSIONS_MAX_PAGE_SIZE; clamping the default down to the max"
+        } else {
+            "the effective ListSessions default page size is the built-in one and exceeds MACP_LIST_SESSIONS_MAX_PAGE_SIZE; clamping the default down to the max"
+        }
+    }
+
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
         let max_payload_bytes = std::env::var("MACP_MAX_PAYLOAD_BYTES")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(1_048_576);
+
+        // The field names below are the only thing tying each env var to the
+        // parameter it feeds; keep them next to their `std::env::var` call.
+        // Unit tests here can only exercise the resolver, so they cannot catch
+        // a transposition at this call site — the end-to-end coverage that
+        // pins the binding will live with the `ListSessions` handler (Tier 1,
+        // Phase 3 — not yet written).
+        let (list_sessions_default_page_size, list_sessions_max_page_size) =
+            Self::resolve_list_sessions_page_sizes(RawPageSizeEnv {
+                default_raw: std::env::var("MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE").ok(),
+                max_raw: std::env::var("MACP_LIST_SESSIONS_MAX_PAGE_SIZE").ok(),
+            });
 
         let session_start_rate = RateLimitConfig {
             limit: std::env::var("MACP_SESSION_START_LIMIT_PER_MINUTE")
@@ -228,6 +352,8 @@ impl SecurityLayer {
             rate_bucket: Arc::new(RateBucket::default()),
             auth_chain,
             max_payload_bytes,
+            list_sessions_default_page_size,
+            list_sessions_max_page_size,
             session_start_rate,
             message_rate,
         })
@@ -418,6 +544,8 @@ mod tests {
             rate_bucket: Arc::new(RateBucket::default()),
             auth_chain: None,
             max_payload_bytes: 1_048_576,
+            list_sessions_default_page_size: DEFAULT_LIST_SESSIONS_PAGE_SIZE,
+            list_sessions_max_page_size: MAX_LIST_SESSIONS_PAGE_SIZE,
             session_start_rate: RateLimitConfig {
                 limit: usize::MAX,
                 window: Duration::from_secs(60),
@@ -436,6 +564,8 @@ mod tests {
             rate_bucket: Arc::new(RateBucket::default()),
             auth_chain: None,
             max_payload_bytes: 1_048_576,
+            list_sessions_default_page_size: DEFAULT_LIST_SESSIONS_PAGE_SIZE,
+            list_sessions_max_page_size: MAX_LIST_SESSIONS_PAGE_SIZE,
             session_start_rate: RateLimitConfig {
                 limit: usize::MAX,
                 window: Duration::from_secs(60),
@@ -484,6 +614,231 @@ mod tests {
         // Verify default configuration via direct construction.
         let layer = insecure_layer();
         assert_eq!(layer.max_payload_bytes, 1_048_576);
+    }
+
+    // ---------------------------------------------------------------
+    // 2b. ListSessions page-size limits (D5)
+    // ---------------------------------------------------------------
+    //
+    // These tests never call `std::env::set_var`. Cargo runs unit tests
+    // multi-threaded in a single process, so mutating the process environment
+    // would race with any concurrently running test that reads it. The
+    // existing precedent in this file (`from_env_defaults_without_env_vars`
+    // above) sidesteps that by asserting on a directly constructed layer
+    // rather than on `from_env`; the same discipline is applied here by
+    // driving the pure resolver `from_env` delegates to.
+
+    /// Test helper mirroring the shape `from_env` builds, so each test case
+    /// still names which raw value is which.
+    fn raw_page_sizes(default_raw: Option<&str>, max_raw: Option<&str>) -> RawPageSizeEnv {
+        RawPageSizeEnv {
+            default_raw: default_raw.map(str::to_owned),
+            max_raw: max_raw.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn from_env_page_size_defaults_without_env_vars() {
+        // Neither variable present -> the production defaults.
+        assert_eq!(
+            SecurityLayer::resolve_list_sessions_page_sizes(RawPageSizeEnv {
+                default_raw: None,
+                max_raw: None,
+            }),
+            (DEFAULT_LIST_SESSIONS_PAGE_SIZE, MAX_LIST_SESSIONS_PAGE_SIZE)
+        );
+        assert_eq!(DEFAULT_LIST_SESSIONS_PAGE_SIZE, 100);
+        assert_eq!(MAX_LIST_SESSIONS_PAGE_SIZE, 1000);
+
+        // And `from_env` really does carry those values through — but only
+        // assert it when the ambient environment leaves the vars it reads
+        // unset, so a developer who exports them does not get a spurious
+        // failure. `from_env` is fallible on the auth vars too (it reads a
+        // token file / parses JSON / builds a JWT resolver), so those are part
+        // of the same guard.
+        if [
+            "MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE",
+            "MACP_LIST_SESSIONS_MAX_PAGE_SIZE",
+            "MACP_AUTH_TOKENS_FILE",
+            "MACP_AUTH_TOKENS_JSON",
+            "MACP_AUTH_ISSUER",
+        ]
+        .iter()
+        .all(|v| std::env::var_os(v).is_none())
+        {
+            let layer = SecurityLayer::from_env().expect("from_env with no auth configured");
+            assert_eq!(layer.list_sessions_default_page_size, 100);
+            assert_eq!(layer.list_sessions_max_page_size, 1000);
+        }
+    }
+
+    #[test]
+    fn dev_mode_uses_production_page_size_defaults() {
+        let layer = SecurityLayer::dev_mode();
+        assert_eq!(layer.list_sessions_default_page_size, 100);
+        assert_eq!(layer.list_sessions_max_page_size, 1000);
+        // Unlike the rate limits, these must NOT be unlimited: an unbounded
+        // page size would make Phase 3's cap assertions pass vacuously.
+        assert_ne!(layer.list_sessions_default_page_size, usize::MAX);
+        assert_ne!(layer.list_sessions_max_page_size, usize::MAX);
+    }
+
+    #[test]
+    fn from_env_clamps_default_page_size_to_max() {
+        // Default above the (defaulted) max is clamped down; a `tracing::warn!`
+        // fires on the clamp (not asserted here — this crate has no test
+        // subscriber and adding one is not worth a dev-dependency).
+        //
+        // For the `macp-runtime` binary this branch is unreachable *when the
+        // default is explicitly set*: `validate_env_config` aborts startup on
+        // an explicit default above the effective max, whether or not the max
+        // itself was set. It is still reached by the binary when only the max
+        // is set, below the built-in default — `MACP_LIST_SESSIONS_MAX_PAGE_SIZE=50`
+        // alone passes validation (the cross-field check only fires on an
+        // explicit default) and then clamps 100 down to 50. That case is
+        // covered by `clamps_builtin_default_against_a_smaller_explicit_max`.
+        // The clamp also stays as defense in depth for library embedders that
+        // call `from_env` without any validation.
+        assert_eq!(
+            SecurityLayer::resolve_list_sessions_page_sizes(raw_page_sizes(Some("5000"), None)),
+            (1000, 1000)
+        );
+        // Also clamped against an explicitly configured, smaller max.
+        assert_eq!(
+            SecurityLayer::resolve_list_sessions_page_sizes(raw_page_sizes(
+                Some("2000"),
+                Some("50")
+            )),
+            (50, 50)
+        );
+        // A default at or below the max is left alone.
+        assert_eq!(
+            SecurityLayer::resolve_list_sessions_page_sizes(raw_page_sizes(
+                Some("50"),
+                Some("200")
+            )),
+            (50, 200)
+        );
+        assert_eq!(
+            SecurityLayer::resolve_list_sessions_page_sizes(raw_page_sizes(
+                Some("200"),
+                Some("200")
+            )),
+            (200, 200)
+        );
+    }
+
+    /// The one clamp case the `macp-runtime` binary can actually reach, and
+    /// the one every other clamp test misses: only the max is set, below the
+    /// built-in default. `validate_env_config`'s cross-field check fires only
+    /// on an explicitly set default, so `MACP_LIST_SESSIONS_MAX_PAGE_SIZE=50`
+    /// alone starts the server and lands here.
+    ///
+    /// Without this, making the clamp conditional on an explicitly supplied
+    /// default survives the whole suite while shipping `default=100 > max=50`.
+    #[test]
+    fn clamps_builtin_default_against_a_smaller_explicit_max() {
+        assert_eq!(
+            SecurityLayer::resolve_list_sessions_page_sizes(raw_page_sizes(None, Some("50"))),
+            (50, 50),
+            "the built-in default must clamp to a smaller explicit max, not stay above it"
+        );
+
+        // The warning this path takes must not name a variable the operator
+        // never set. Only the message *choice* is asserted, not the emitted
+        // line: capturing `tracing` output would need a dev-dependency this
+        // crate does not carry.
+        let builtin = SecurityLayer::clamp_warning_message(false);
+        let explicit = SecurityLayer::clamp_warning_message(true);
+        assert!(
+            !builtin.contains("MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE"),
+            "the built-in-default warning must not name an unset variable: {builtin}"
+        );
+        assert!(
+            builtin.contains("built-in") && builtin.contains("MACP_LIST_SESSIONS_MAX_PAGE_SIZE"),
+            "the built-in-default warning must say where the default came from and name the max: {builtin}"
+        );
+        assert!(
+            explicit.contains("MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE"),
+            "an explicitly configured default must still be named: {explicit}"
+        );
+        assert_eq!(SecurityLayer::page_size_default_source(false), "built-in");
+        assert_eq!(
+            SecurityLayer::page_size_default_source(true),
+            "MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE"
+        );
+    }
+
+    #[test]
+    fn page_size_resolver_treats_zero_like_garbage() {
+        // Unparseable values fall back to the defaults — this layer stays
+        // silent on bad input. For the binary, `validate_env_config` in
+        // `src/main.rs` refuses to start first; a library embedder calling
+        // `from_env` directly sees exactly the fallbacks asserted here.
+        assert_eq!(
+            SecurityLayer::resolve_list_sessions_page_sizes(raw_page_sizes(Some("abc"), Some(""))),
+            (100, 1000)
+        );
+        assert_eq!(
+            SecurityLayer::resolve_list_sessions_page_sizes(raw_page_sizes(
+                Some("-1"),
+                Some("1e3")
+            )),
+            (100, 1000)
+        );
+
+        // `0` is the same class of operator error as `"abc"` and gets exactly
+        // the same treatment: fall back to the compiled-in value. Notably it
+        // does NOT floor to 1 — a one-item page is a far more surprising
+        // outcome to attach to the more plausible typo.
+        assert_eq!(
+            SecurityLayer::resolve_list_sessions_page_sizes(raw_page_sizes(Some("0"), None)),
+            (100, 1000),
+            "a default of 0 falls back to the compiled-in default, not to 1"
+        );
+        assert_eq!(
+            SecurityLayer::resolve_list_sessions_page_sizes(raw_page_sizes(None, Some("0"))),
+            (100, 1000),
+            "a max of 0 falls back to the compiled-in max and leaves the default alone"
+        );
+        assert_eq!(
+            SecurityLayer::resolve_list_sessions_page_sizes(raw_page_sizes(Some("0"), Some("0"))),
+            (100, 1000)
+        );
+        // Bad input on one side must not disturb a good value on the other.
+        assert_eq!(
+            SecurityLayer::resolve_list_sessions_page_sizes(raw_page_sizes(Some("0"), Some("25"))),
+            (25, 25),
+            "the good max is honored, and the fallback default clamps to it"
+        );
+        assert_eq!(
+            SecurityLayer::resolve_list_sessions_page_sizes(raw_page_sizes(Some("7"), Some("0"))),
+            (7, 1000),
+            "the good default is honored against the compiled-in max"
+        );
+
+        // Whatever the input, neither limit is ever degenerate.
+        for (default_raw, max_raw) in [
+            (Some("0"), None),
+            (None, Some("0")),
+            (Some("0"), Some("0")),
+            (Some("abc"), Some("0")),
+        ] {
+            let (default, max) = SecurityLayer::resolve_list_sessions_page_sizes(raw_page_sizes(
+                default_raw,
+                max_raw,
+            ));
+            assert!(
+                default > 0 && max > 0,
+                "{default_raw:?}/{max_raw:?} -> ({default}, {max})"
+            );
+        }
+
+        // A max larger than the default raises only the ceiling.
+        assert_eq!(
+            SecurityLayer::resolve_list_sessions_page_sizes(raw_page_sizes(None, Some("100000"))),
+            (100, 100_000)
+        );
     }
 
     // ---------------------------------------------------------------
@@ -613,6 +968,8 @@ mod tests {
             rate_bucket: Arc::new(RateBucket::default()),
             auth_chain: None,
             max_payload_bytes: 1_048_576,
+            list_sessions_default_page_size: DEFAULT_LIST_SESSIONS_PAGE_SIZE,
+            list_sessions_max_page_size: MAX_LIST_SESSIONS_PAGE_SIZE,
             session_start_rate: RateLimitConfig {
                 limit: usize::MAX,
                 window: Duration::from_secs(60),
@@ -638,6 +995,8 @@ mod tests {
             rate_bucket: Arc::new(RateBucket::default()),
             auth_chain: None,
             max_payload_bytes: 1_048_576,
+            list_sessions_default_page_size: DEFAULT_LIST_SESSIONS_PAGE_SIZE,
+            list_sessions_max_page_size: MAX_LIST_SESSIONS_PAGE_SIZE,
             session_start_rate: RateLimitConfig {
                 limit: usize::MAX,
                 window: Duration::from_secs(60),
@@ -665,6 +1024,8 @@ mod tests {
             rate_bucket: Arc::new(RateBucket::default()),
             auth_chain: None,
             max_payload_bytes: 1_048_576,
+            list_sessions_default_page_size: DEFAULT_LIST_SESSIONS_PAGE_SIZE,
+            list_sessions_max_page_size: MAX_LIST_SESSIONS_PAGE_SIZE,
             session_start_rate: RateLimitConfig {
                 limit: usize::MAX,
                 window: Duration::from_secs(60),
@@ -835,6 +1196,8 @@ mod tests {
             rate_bucket: Arc::new(RateBucket::default()),
             auth_chain: None,
             max_payload_bytes: 1_048_576,
+            list_sessions_default_page_size: DEFAULT_LIST_SESSIONS_PAGE_SIZE,
+            list_sessions_max_page_size: MAX_LIST_SESSIONS_PAGE_SIZE,
             session_start_rate: RateLimitConfig {
                 limit: 3,
                 window: Duration::from_secs(60),
@@ -865,6 +1228,8 @@ mod tests {
             rate_bucket: Arc::new(RateBucket::default()),
             auth_chain: None,
             max_payload_bytes: 1_048_576,
+            list_sessions_default_page_size: DEFAULT_LIST_SESSIONS_PAGE_SIZE,
+            list_sessions_max_page_size: MAX_LIST_SESSIONS_PAGE_SIZE,
             session_start_rate: RateLimitConfig {
                 limit: usize::MAX,
                 window: Duration::from_secs(60),
@@ -892,6 +1257,8 @@ mod tests {
             rate_bucket: Arc::new(RateBucket::default()),
             auth_chain: None,
             max_payload_bytes: 1_048_576,
+            list_sessions_default_page_size: DEFAULT_LIST_SESSIONS_PAGE_SIZE,
+            list_sessions_max_page_size: MAX_LIST_SESSIONS_PAGE_SIZE,
             session_start_rate: RateLimitConfig {
                 limit: 1,
                 window: Duration::from_secs(60),
@@ -917,6 +1284,8 @@ mod tests {
             rate_bucket: Arc::new(RateBucket::default()),
             auth_chain: None,
             max_payload_bytes: 1_048_576,
+            list_sessions_default_page_size: DEFAULT_LIST_SESSIONS_PAGE_SIZE,
+            list_sessions_max_page_size: MAX_LIST_SESSIONS_PAGE_SIZE,
             session_start_rate: RateLimitConfig {
                 limit: 1,
                 window: Duration::from_millis(1), // very short window
