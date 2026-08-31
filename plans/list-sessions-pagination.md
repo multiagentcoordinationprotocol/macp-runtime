@@ -499,7 +499,7 @@ Also untouched: `docs/testing.md` (line 40 has no hardcoded count).
 
 ## Phase 6 — Ship (branch, PR, CI). No merge.
 
-**Status:** NOT STARTED
+**Status:** DONE — branch `feat/list-sessions-pagination`, PR #116, all 16 CI checks green. Reconciled at closeout (2026-08-30): six assumptions resolved to `DECISIONS.md` — five confirmed, one changed (the `macp-core` re-export, which lands separately off `main` because it belongs to the commitment-hash plan and must precede the 0.7.0 release PR #114). Two review findings fixed on this branch: the `MACP_LIST_SESSIONS_MAX_PAGE_SIZE=0` layer disagreement, and the startup-gate hang risk in `startup_refuses_invalid_policies_dir`.
 
 **Delivers.** A feature branch off current `main` (`d500910`), one commit per phase, a PR whose body names the behavior change, and green CI. **The human merges. This plan does not.**
 

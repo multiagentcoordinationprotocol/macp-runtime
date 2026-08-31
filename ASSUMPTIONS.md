@@ -4,7 +4,11 @@
 - **Chose:** Left this alone in Phase 1 — `commitment_hash` is a new module-only export in `macp-core` (no flat function re-export at that crate's root either, since the crate's existing flat re-exports are all types, and a function re-export shadowing its own module name would read oddly at a call site). Whether `macp-runtime`'s root should also re-export `macp_core` wholesale is a pre-existing gap this phase surfaced, not one it introduced.
 - **Alternatives:** Add `pub use macp_core;` (or a narrower `pub mod commitment_hash` shim) to `src/lib.rs` in this same PR.
 - **Blast radius if wrong:** Low and cheap to reverse — adding a re-export later is backward-compatible (additive) and doesn't touch any existing call site.
-- **Status:** UNCONFIRMED
+- **Status:** CHANGED (2026-08-30) — re-export added; see `DECISIONS.md`. The entry under-scoped the
+  problem: `macp_core::mode::MessageContext` appears in the signature of `Mode::on_message_at`, a defaulted
+  method on the publicly re-exported `Mode` trait, so an external consumer could not override the one method
+  that offers a trustworthy clock. Resolved by `pub use macp_core;` plus adding `MessageContext` to the
+  existing `crates/macp-modes/src/mode/mod.rs` re-export.
 
 ## Startup config errors folded into the returned Err (stderr), not just tracing
 - **Plan:** `plans/list-sessions-pagination.md` (Phase 2, config plumbing)
@@ -12,7 +16,9 @@
 - **Chose:** Folded the collected error details into the returned `Err` so they reach stderr regardless of logging configuration, keeping the existing `tracing::error!` calls for structured logs. Taken as a tier-2 call under `/drive` (needs judgment, not a one-way door): it is text-only, changes no abort condition, exit code, or validation order, and it is what makes the phase's own acceptance criterion actually true rather than true-only-with-logging-on. A startup abort is the one message that must be self-sufficient.
 - **Alternatives:** Leave it and keep the tests asserting across stdout-or-stderr (the executor's original, correctly flagged rather than silently applied); or switch the subscriber's writer to stderr globally (larger blast radius — changes every log line's stream, not just the abort path).
 - **Blast radius if wrong:** Low. Text of one error string; revert is a two-line change. Risk is cosmetic duplication (detail appears on both stdout via tracing and stderr via the Err) for operators who do run with logging on.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-08-30) — the stdout-default claim was independently verified against
+  `tracing-subscriber` and the running binary. The change removed an inconsistency rather than creating one:
+  this was the sole fatal startup path whose detail could be silenced by a log filter.
 
 ## Startup-gate tests must poll try_wait, never Command::output()
 - **Plan:** `plans/list-sessions-pagination.md` (Phase 2, config plumbing)
@@ -20,7 +26,13 @@
 - **Chose:** `run_expecting_startup_abort` spawns with piped stdio and polls `try_wait` against a 15s deadline, killing and failing if the process is still alive. This converts a future regression into a **test failure in ~30s** instead of a hung CI job.
 - **Alternatives:** `Command::output()` (the obvious form, and what the two pre-existing tests in this file still use — `startup_refuses_invalid_policies_dir` and `startup_refuses_without_auth_or_insecure_flag` carry the same latent hazard; left alone as out of scope for this plan).
 - **Blast radius if wrong:** Low for this feature. But the two pre-existing tests remain a latent CI-hang risk if either of their validations is ever weakened — worth a separate follow-up, noted here so it is not lost.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-08-30), with a correction and the follow-up done. **The two pre-existing tests
+  did not carry the same hazard.** Only `startup_refuses_invalid_policies_dir` was genuinely hang-prone — it
+  sets `MACP_ALLOW_INSECURE=1`, so nothing but the policies-dir check stands between it and a running server;
+  it is now on the bounded helper. `startup_refuses_without_auth_or_insecure_flag` has a structural backstop
+  (the independent TLS gate in `src/main.rs`), so it keeps `output()` and instead gained `env_remove` for the
+  two TLS paths that would defeat that backstop. The helper drains its pipes only after exit — safe at a few
+  hundred bytes against a >=16KB buffer, now recorded in its doc comment.
 
 ## Config-consistency guard made symmetric (aborts instead of silently clamping)
 - **Plan:** `plans/list-sessions-pagination.md` (Phase 2, config plumbing) — **revises the phase's own acceptance criterion 3**
@@ -28,7 +40,12 @@
 - **Chose:** Compare an explicitly-set `DEFAULT` against the **effective** max — explicit when set, otherwise the built-in 1000 — and abort in both cases, naming the effective max and whether it was explicit or the default. Kept `default.min(max)` in the resolver as defence-in-depth for library consumers of `SecurityLayer::from_env()`, who never reach `validate_env_config` (private to `src/main.rs`); it simply stops firing for the binary. Tier-2 call under `/drive`: reversible, config-only, no wire or persisted format.
 - **Alternatives:** Leave the asymmetry and record it (what the verifier offered as the other option) — rejected because half a guard is worse than either whole option; or drop the abort entirely and always clamp — rejected because it discards stated operator intent silently, which is the failure mode the guard exists to prevent.
 - **Blast radius if wrong:** Moderate-but-contained. A deployment that sets a large DEFAULT and relies on being clamped would now fail to start rather than running with a smaller page size. No such deployment can exist — both variables are new in this change and unreleased. Reversing is a small edit to one validation block.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-08-30), with two fixes. **Correction:** "it simply stops firing for the binary"
+  is wrong — the resolver clamp still fires for the binary when `MAX` is set and `DEFAULT` is not; only the
+  explicit-default branch stops firing. **Fixed:** `MACP_LIST_SESSIONS_MAX_PAGE_SIZE=0` was parsed in
+  `src/main.rs` without a `> 0` filter, so it produced a spurious second error naming an effective maximum of
+  `0` while `security.rs` treated the same value as the built-in 1000 — the two layers disagreed on what `0`
+  meant. The filter is now mirrored, and the abort message states the remedy.
 
 ## The env-var-to-field binding is unproven until an end-to-end test exists
 - **Plan:** `plans/list-sessions-pagination.md` (Phase 2 → carried into Phase 3/4 as a hard requirement)
@@ -36,7 +53,11 @@
 - **Chose:** Two-part fix. Now: replace the positional `Option<String>` pair with a named struct so the call site must write the field name beside the env-var name. **Correction — this does NOT make the error unrepresentable, as first claimed.** The fixer demonstrated the residual: swapping the field initialisers is now a semantic no-op (field order carries no meaning), but transposing the env-var *name strings* while leaving the field names in place still compiles and still passes all 626 workspace and 105 integration tests. The struct converts an invisible positional hazard into a visible name/name mismatch in adjacent text; it does not eliminate the class. **The gap is closed only by the Phase 3 end-to-end test**, which is why a pointer comment sits at the call site. Later (recorded as a hard requirement in the Phase 3 section): Tier-1 coverage via `server_manager::start_with_env` asserting a distinctive non-default default page size and a **different** distinctive max, since identical values would not detect a swap.
 - **Alternatives:** Rely on the named struct alone — rejected, and the demonstration above is why: it does not even prevent the mistake, only makes it more visible to a reader. Or add the Tier-1 test in Phase 2 — impossible, nothing reads the fields until the handler exists.
 - **Blast radius if wrong:** High if it were to regress and go unnoticed — a silently wrong page cap is invisible to clients that ignore `next_page_token`, which is the exact failure mode this whole feature exists to fix. Low now, given the named struct plus the pending end-to-end test.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-08-30) — gap closed. Independently re-derived rather than taken from the phase
+  log: `page_size_above_max_is_clamped` sets D=2/M=3, so correct wiring resolves to `(2, 3)` and a transposition
+  to `(2, 2)`; the `page_size=1000` assertion then sees 2 where it expects 3 and fails. The 7/900 tests are
+  transposition-blind, as recorded. Residual: retuning that one test to reuse 7/900 would silently erase the
+  proof — the doc comment explaining the choice of 2 and 3 is the guard.
 
 ## CLAUDE.md is gitignored, so its env-table copy cannot be kept in sync by a PR
 - **Plan:** `plans/list-sessions-pagination.md` (Phase 5, docs + env-table sync)
@@ -44,4 +65,6 @@
 - **Chose:** Updated it anyway (it is the file agents in this working copy actually read, so a stale copy here misleads every future session), and recorded the limitation rather than changing repo policy. **Did not un-ignore it** — adding a ~370-line instruction file to the tracked tree is a visible repo-policy decision outside this feature's scope, and it may be ignored deliberately.
 - **Alternatives:** Remove `.gitignore:20` and commit `CLAUDE.md` so the fourth mirror actually ships (makes the anti-drift guarantee real, but is a repo-policy change the owner should make deliberately); or stop treating it as a mirror and delete the env table from it (loses the local reference).
 - **Blast radius if wrong:** Low but persistent. Three tracked tables stay in sync; the fourth silently diverges for every clone. A future contributor reading a fresh checkout's `CLAUDE.md` — if they create one — would not see the two page-size variables at all.
-- **Status:** UNCONFIRMED — needs the repo owner's call at PR time.
+- **Status:** CONFIRMED (2026-08-30) — repo owner's call: `CLAUDE.md` **stays gitignored**. Accepted
+  consequence: three tracked env-var tables stay in sync and the local copy silently diverges for anyone
+  cloning fresh. Not revisited unless the file is ever tracked.
