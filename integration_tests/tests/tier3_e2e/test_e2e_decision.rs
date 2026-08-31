@@ -1,7 +1,6 @@
 use crate::common;
 use macp_integration_tests::helpers::*;
 use macp_integration_tests::macp_tools::{self, decision::*};
-use rig::completion::Prompt;
 use rig::prelude::*;
 use rig::providers::openai;
 
@@ -165,21 +164,43 @@ async fn real_llm_agents_coordinate_decision() {
     };
 
     // Launch all 3 evaluations concurrently with tokio::join!
+    //
+    // The per-agent budget guards against an indefinite hang; it is not a
+    // latency SLO for OpenAI. At the original 30s it was itself a flake source
+    // — an unloaded run of this test measured 28.6s for the parallel batch, and
+    // a later run failed with "Compliance agent timed out". The `e2e` CI job's
+    // own 10-minute cap is the real backstop.
+    const AGENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+    const AGENT_ATTEMPTS: u32 = 3;
     let start = std::time::Instant::now();
     eprintln!("   Launching 3 LLM agents concurrently...");
 
+    // Bound outside `join!` so the prompt strings outlive the borrowed futures.
+    let fraud_prompt = eval_prompt("fraud-risk");
+    let growth_prompt = eval_prompt("customer-experience and growth");
+    let compliance_prompt = eval_prompt("regulatory compliance");
+
     let (fraud_result, growth_result, compliance_result) = tokio::join!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            fraud_agent.prompt(&eval_prompt("fraud-risk")),
+        super::prompt_with_retry(
+            "Fraud",
+            &fraud_agent,
+            &fraud_prompt,
+            AGENT_TIMEOUT,
+            AGENT_ATTEMPTS,
         ),
-        tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            growth_agent.prompt(&eval_prompt("customer-experience and growth")),
+        super::prompt_with_retry(
+            "Growth",
+            &growth_agent,
+            &growth_prompt,
+            AGENT_TIMEOUT,
+            AGENT_ATTEMPTS,
         ),
-        tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            compliance_agent.prompt(&eval_prompt("regulatory compliance")),
+        super::prompt_with_retry(
+            "Compliance",
+            &compliance_agent,
+            &compliance_prompt,
+            AGENT_TIMEOUT,
+            AGENT_ATTEMPTS,
         ),
     );
 
@@ -189,22 +210,11 @@ async fn real_llm_agents_coordinate_decision() {
         parallel_duration.as_secs_f64()
     );
 
-    // Log results
-    match &fraud_result {
-        Ok(Ok(text)) => eprintln!("   [Fraud]      {text}\n"),
-        Ok(Err(e)) => panic!("Fraud agent failed: {e}"),
-        Err(_) => panic!("Fraud agent timed out"),
-    }
-    match &growth_result {
-        Ok(Ok(text)) => eprintln!("   [Growth]     {text}\n"),
-        Ok(Err(e)) => panic!("Growth agent failed: {e}"),
-        Err(_) => panic!("Growth agent timed out"),
-    }
-    match &compliance_result {
-        Ok(Ok(text)) => eprintln!("   [Compliance] {text}\n"),
-        Ok(Err(e)) => panic!("Compliance agent failed: {e}"),
-        Err(_) => panic!("Compliance agent timed out"),
-    }
+    // `prompt_with_retry` panics if an agent cannot be reached at all, so a
+    // returned value here is a real reply.
+    eprintln!("   [Fraud]      {fraud_result}\n");
+    eprintln!("   [Growth]     {growth_result}\n");
+    eprintln!("   [Compliance] {compliance_result}\n");
 
     // ═══════════════════════════════════════════════════════════════════
     // STEP 3: Orchestrator commits (deterministic)
@@ -248,7 +258,13 @@ async fn real_llm_agents_coordinate_decision() {
             .expect("GetSession should succeed");
         let meta = resp.metadata.expect("metadata present");
         assert_eq!(meta.state, 2);
+        // RESOLVED alone does not prove the specialists were heard: decision
+        // mode's `commitment_ready` requires only a Proposal, so this exact
+        // sequence resolves with zero Evaluations. Assert the LLM-produced
+        // Evaluations actually entered accepted history.
+        super::assert_participants_contributed(&meta, &[fraud_id, growth_id, compliance_id], 1);
         eprintln!("   Session state: {} (RESOLVED)", meta.state);
+        eprintln!("   Verified: all 3 specialist Evaluations are in accepted history");
     }
 
     eprintln!("\n═══════════════════════════════════════════════════════════════");
