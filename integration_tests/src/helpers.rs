@@ -1,8 +1,8 @@
 use macp_runtime::pb::macp_runtime_service_client::MacpRuntimeServiceClient;
 use macp_runtime::pb::{
     Ack, CancelSessionRequest, CommitmentPayload, Envelope, GetSessionRequest, GetSessionResponse,
-    InitializeRequest, InitializeResponse, ListModesRequest, ListModesResponse, SendRequest,
-    SessionStartPayload,
+    InitializeRequest, InitializeResponse, ListModesRequest, ListModesResponse,
+    ListSessionsRequest, ListSessionsResponse, SendRequest, SessionStartPayload,
 };
 use prost::Message;
 use tonic::transport::Channel;
@@ -124,6 +124,27 @@ pub async fn get_session_as(
             sender,
             GetSessionRequest {
                 session_id: session_id.into(),
+            },
+        ))
+        .await
+        .map(|r| r.into_inner())
+}
+
+/// `ListSessions` as `sender`, with an explicit page size and continuation
+/// token. `page_size = 0` asks the server for its default page size; an empty
+/// `page_token` starts a fresh traversal.
+pub async fn list_sessions_as(
+    client: &mut MacpRuntimeServiceClient<Channel>,
+    sender: &str,
+    page_size: i32,
+    page_token: &str,
+) -> Result<ListSessionsResponse, tonic::Status> {
+    client
+        .list_sessions(with_sender(
+            sender,
+            ListSessionsRequest {
+                page_size,
+                page_token: page_token.into(),
             },
         ))
         .await

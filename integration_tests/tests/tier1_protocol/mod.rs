@@ -5,6 +5,7 @@ mod test_decision_mode;
 mod test_error_paths;
 mod test_initialize;
 mod test_limits;
+mod test_list_sessions_pagination;
 mod test_mode_happy_paths;
 mod test_mode_registry;
 mod test_passive_subscribe;
