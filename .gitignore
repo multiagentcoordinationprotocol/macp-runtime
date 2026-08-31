@@ -32,3 +32,6 @@ integration_tests/target/
 Thumbs.db
 # Local runtime persistence (MACP_DATA_DIR default)
 .macp-data/
+
+# Local /drive session lock — a working-copy artifact, never part of a release.
+.drive.lock
