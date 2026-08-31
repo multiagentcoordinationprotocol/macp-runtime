@@ -188,7 +188,7 @@ Also out of scope and untouched: `ListPolicies` (`src/server.rs:1541-1561`), `Li
 
 ## Phase 1 — Deterministic bounded page selection in the registry
 
-**Status:** NOT STARTED
+**Status:** DONE — `0c2df9b` (PASS after 2 verify rounds; accumulating, not shipped standalone)
 
 **Delivers.** `SessionRegistry::session_ids_after(after, limit)` — a keyset primitive returning up to `limit` session IDs strictly greater than `after`, in ascending byte order, cloning only the survivors. Plus the `debug_assert` that pins D1's map-key invariant. Nothing on the wire changes; `get_all_sessions()` is untouched and still used by `watch_sessions`.
 
@@ -253,7 +253,7 @@ All four existing call sites pass matching pairs (`src/main.rs:261`; `registry.r
 
 ## Phase 2 — Config plumbing for the two page-size limits
 
-**Status:** NOT STARTED
+**Status:** DONE — `9b91fbf` (PASS after 3 verify rounds; accumulating)
 
 **Delivers.** `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE` and `MACP_LIST_SESSIONS_MAX_PAGE_SIZE` parsed, defaulted, clamped, startup-validated, and carried on `SecurityLayer`. Nothing reads them yet; nothing on the wire changes. **This phase runs before the handler so the handler never reads a field that does not exist yet.**
 
@@ -270,7 +270,7 @@ All four existing call sites pass matching pairs (`src/main.rs:261`; `registry.r
 **Acceptance criteria.**
 1. With neither var set, `SecurityLayer::from_env()` yields `100` / `1000`.
 2. `SecurityLayer::dev_mode()` yields `100` / `1000` — **not** `usize::MAX`.
-3. `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE=5000` with max unset yields an effective default of `1000` (clamped), and logs a warning.
+3. **REVISED after Phase 2 verification.** `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE=5000` with max unset **aborts startup**, naming the effective max and whether it was explicit or the built-in default. The original criterion (clamp to 1000, warn, start) left the guard asymmetric: an explicit `DEFAULT > MAX` aborted loudly, while the identical operator error with `MAX` unset was silently clamped behind a `tracing::warn!` that goes to stdout and vanishes under `RUST_LOG=off`. The resolver's `default.min(max)` clamp is retained as defence-in-depth for library consumers who call `SecurityLayer::from_env()` directly and never reach `validate_env_config` (which is private to `src/main.rs`); it simply stops firing for the binary.
 4. Setting either var to `0` or to a non-integer aborts startup with a message naming the variable — proven by an actual process spawn that sets `MACP_ALLOW_INSECURE=1`, so the abort is attributable to page-size validation and not to the auth gate.
 5. Setting `DEFAULT=2000 MAX=1000` aborts startup with the cross-field message (same `MACP_ALLOW_INSECURE=1` condition).
 6. **All eleven** `SecurityLayer` construction sites compile; `cargo test -p macp-auth` green.
@@ -289,7 +289,7 @@ All four existing call sites pass matching pairs (`src/main.rs:261`; `registry.r
 
 ## Phase 3 — Page-token codec and the paged handler (the behavior change)
 
-**Status:** NOT STARTED
+**Status:** DONE — `3532390` (PASS round 1)
 
 **Delivers.** `src/pagination.rs` (crate-private) with `encode_page_token(session_id) -> String`, `decode_page_token(token) -> Result<String, PageTokenError>` and `MAX_PAGE_TOKEN_CHARS` — **and, in the same diff**, the `list_sessions` rewrite that calls them. `list_sessions` honors `page_size` and `page_token` and emits a real `next_page_token`. **This is the deliberate, spec-sanctioned behavior change.**
 
@@ -404,13 +404,15 @@ with `make_server()` reduced to `make_server_with_security(SecurityLayer::dev_mo
 
 **Docs.** None in this phase — Phase 5 owns every doc edit.
 
+**HARD REQUIREMENT carried from Phase 2 verification — the env-var binding is currently unproven.** Phase 2's `from_env` passes the two page-size env values into the resolver, and a verifier swapped them so `MACP_LIST_SESSIONS_MAX_PAGE_SIZE` fed the default and vice-versa: **the entire suite still passed** (626 workspace, 92 Tier-1, 8 JWT, 5 Tier-2, zero failures). Every unit test drives the name-agnostic pure resolver, and the one `from_env` test runs with both vars unset, where a swap is indistinguishable. Phase 2 made the swap unrepresentable via a named struct, but only an end-to-end test proves the binding. This phase (or Phase 4) MUST add Tier-1 coverage using `server_manager::start_with_env` that sets `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE` to a distinctive non-default (e.g. `7`) and asserts `ListSessions{page_size: 0}` returns exactly that many rows, plus a second case setting `MACP_LIST_SESSIONS_MAX_PAGE_SIZE` to a **different** distinctive value (e.g. `3`) and asserting an over-large `page_size` clamps to it. **The two values must differ** — identical values would not detect a swap.
+
 **Verifier tier.** **Opus.** Wire-visible but not a one-way door: nothing persisted in a new format, no on-wire format committed (the `v1:` prefix reserves the escape hatch), single-function revert. The irreversible moment is the human's merge, which is outside this plan.
 
 ---
 
 ## Phase 4 — Tier-1 gRPC integration tests
 
-**Status:** NOT STARTED
+**Status:** DONE — `06b5d94` (PASS round 1; Tier-1 92→100)
 
 **Delivers.** The required tests exercised through the real gRPC boundary against the real binary, plus a reusable `list_sessions_as` helper.
 
@@ -442,7 +444,7 @@ Sessions are created with existing `send_as` + `session_start_payload` helpers s
    - `negative_page_size_is_rejected`
    - `replayed_page_token_returns_the_identical_page` — the Tier-1 companion to Phase 3's G4 unit test
 2. `full_traversal_...` creates ≥ 25 sessions, pages at size 4, and asserts both `set.len() == 25` **and** `total_collected == 25` (together these rule out duplicates *and* drops — a set alone hides duplicates). It stays under the session-start rate limit per G5.
-3. `garbage_page_token_...` sends at minimum `"not-a-token"`, base64url of `"v2:abc"`, a truncated valid token, and an **oversized token of ~64 KiB** — each asserting `Code::InvalidArgument`. **Not 2 MiB over the wire:** `src/main.rs:407` sets `max_decoding_message_size(max_payload_bytes + ENVELOPE_OVERHEAD_BYTES)` = 1 MiB + 64 KiB by default (`:390`), so a 2 MiB request is rejected by tonic at decode with a *different* status code and never reaches the handler's length check. 64 KiB is far above `MAX_PAGE_TOKEN_CHARS` (1024) and far below the decode limit, so it proves the handler's own branch. (The 2 MiB case belongs in the Phase 3 unit test, where no gRPC decode is involved.)
+3. `garbage_page_token_...` sends at minimum `"not-a-token"`, base64url of `"v2:abc"`, a token whose **prefix** is damaged (base64url of `"v1"`, plus a front-truncated `valid[1..]`), and an **oversized token of ~64 KiB** — each asserting `Code::InvalidArgument`. **Not 2 MiB over the wire:** `src/main.rs:407` sets `max_decoding_message_size(max_payload_bytes + ENVELOPE_OVERHEAD_BYTES)` = 1 MiB + 64 KiB by default (`:390`), so a 2 MiB request is rejected by tonic at decode with a *different* status code and never reaches the handler's length check. 64 KiB is far above `MAX_PAGE_TOKEN_CHARS` (1024) and far below the decode limit, so it proves the handler's own branch. (The 2 MiB case belongs in the Phase 3 unit test, where no gRPC decode is involved.) **Also corrected during Phase 3: do NOT use an end-truncated valid token.** Chopping bytes off the end of an encoded token frequently yields a well-formed *shorter* cursor — `base64url("v1:session-000")` truncated by 3 chars decodes cleanly to `v1:session-0` — so the handler correctly returns a page instead of rejecting, and the assertion fails. This is harmless in itself (a cursor is a position, not a handle, so a shorter cursor yields a differently-positioned but still-correct page), but it means D3's "the prefix check covers truncation" holds only for damage that actually reaches the prefix.
 4. `page_size_above_max_is_clamped` runs with `MACP_LIST_SESSIONS_MAX_PAGE_SIZE=3`, creates 10 sessions, requests `page_size=1000`, asserts exactly 3 returned with a non-empty token.
 5. `mod.rs` declares the new module; the suite runs clean under `--test-threads=1`.
 6. Tier-1 suite green; record the real observed test count (was 90 + 8 JWT).
@@ -456,7 +458,7 @@ Sessions are created with existing `send_as` + `session_start_payload` helpers s
 
 ## Phase 5 — Documentation, env-var table sync, and deferred-item bookkeeping
 
-**Status:** NOT STARTED
+**Status:** DONE — `d77e9c1` (PASS after 2 rounds)
 
 **Delivers.** Every doc describing `ListSessions` or the env-var surface reflects the new contract; the mirrored env tables stay in sync; `plans/defer/follow_ons.md` item 2 is correctly narrowed rather than wrongly closed, and its live index in `plans/defer/README.md` is narrowed with it.
 
