@@ -6,6 +6,30 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.6.0...macp-runtime-v0.7.0) - 2026-08-31
+
+### Added
+
+- paginate ListSessions (page_size, opaque page_token, next_page_token) ([#116](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/116))
+- implement RFC-MACP-0013 canonical commitment hash and tighten the §7.3.1 supersedes check ([#108](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/108))
+
+### Fixed
+
+- *(ci)* call publish.yml from release-plz instead of relying on the tag trigger ([#119](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/119))
+- remove the stray .drive.lock committed in #117 ([#118](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/118))
+
+### Other
+
+- *(release)* bump the workspace to 0.7.0 ([#121](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/121))
+- *(deps)* bump macp-proto to 0.1.9 ([#120](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/120))
+- re-export macp-core, clear RUSTSEC advisories, audit the second lockfile ([#117](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/117))
+- close the one-way gap in the conformance-oracle drift guard ([#115](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/115))
+- *(deps)* bump the minor-and-patch group across 1 directory with 16 updates ([#113](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/113))
+- *(deps)* bump the actions group across 1 directory with 11 updates ([#112](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/112))
+- *(deps)* bump the major-updates group across 1 directory with 5 updates ([#110](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/110))
+- release v0.6.1 ([#100](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/100))
+- split release into release-plz (version+git) and publish.yml (crates.io) ([#99](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/99))
+
 ## [0.6.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.6.0...macp-runtime-v0.6.1) - 2026-07-11
 
 ### Other
