@@ -70,7 +70,7 @@ The improvement-plan release (see `CHANGELOG.md` for the complete list):
   - Per-mode rule schemas (voting, objection handling, quorum thresholds, acceptance, assignment, handoff acceptance)
   - Policies evaluated at commitment time; version binding enforced at SessionStart
 - **Session lifecycle observability**
-  - `ListSessions` enumerates current session metadata
+  - `ListSessions` enumerates current session metadata in bounded pages (`page_size` clamped to a server maximum; pass `next_page_token` back verbatim until it comes back empty)
   - `WatchSessions` streams `Created`/`Resolved`/`Expired` events with a `Created` initial-sync on connect
 - **Session extension plumbing**
   - `SessionExtensionProvider` trait and `ExtensionProviderRegistry` let hosts hook lifecycle callbacks for custom session-level extensions carried in the `extensions` map; provider errors are non-fatal
@@ -194,6 +194,8 @@ Token JSON may be either a raw list or an object with a `tokens` array. Example:
 | `MACP_MAX_PAYLOAD_BYTES` | max envelope payload size | `1048576` |
 | `MACP_SESSION_START_LIMIT_PER_MINUTE` | per-sender session start limit | `60` |
 | `MACP_MESSAGE_LIMIT_PER_MINUTE` | per-sender message limit | `600` |
+| `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE` | `ListSessions` page size when the request sends `page_size = 0` | `100` |
+| `MACP_LIST_SESSIONS_MAX_PAGE_SIZE` | hard cap a requested `ListSessions` `page_size` is clamped to | `1000` |
 
 ## Quick start
 
@@ -372,7 +374,7 @@ MACP_TEST_BINARY=../target/debug/macp-runtime cargo test -- --test-threads=1
 
 The integration suite has three tiers:
 
-- **Tier 1 (Protocol)** — 90 scripted gRPC tests plus 8 JWT bearer auth tests: all modes, error paths, signals, version binding, dedup, suspend/resume, TLS transport, persistence/restart-replay, payload and rate limits, concurrent senders, passive subscribe, policy registry and watch streams, mode promotion, and RFC cross-cutting features
+- **Tier 1 (Protocol)** — 100 scripted gRPC tests plus 8 JWT bearer auth tests: all modes, error paths, signals, version binding, dedup, suspend/resume, TLS transport, persistence/restart-replay, payload and rate limits, `ListSessions` pagination, concurrent senders, passive subscribe, policy registry and watch streams, mode promotion, and RFC cross-cutting features
 - **Tier 2 (Rig Tools)** — 5 tests using [Rig](https://rig.rs) agent framework `Tool` implementations for all MACP operations
 - **Tier 3 (E2E)** — 3 tests with real OpenAI GPT-4o-mini agents coordinating through the runtime (requires `OPENAI_API_KEY`)
 

@@ -1262,19 +1262,99 @@ impl MacpRuntimeService for MacpServer {
         &self,
         request: Request<ListSessionsRequest>,
     ) -> Result<Response<ListSessionsResponse>, Status> {
+        // Authentication stays the FIRST statement: an unauthenticated caller
+        // must see UNAUTHENTICATED, never a request-shape error, which would
+        // confirm the endpoint is live and leak validation order pre-auth.
         let _identity = self
             .security
             .authenticate_metadata(request.metadata())
             .await
             .map_err(Self::status_from_error)?;
-        let sessions = self.runtime.registry.get_all_sessions().await;
-        let metadata: Vec<SessionMetadata> =
-            sessions.iter().map(Self::session_to_metadata).collect();
-        // Unpaginated: always returns every session in one response, so
-        // there is never a further page to continue from.
+        let req = request.into_inner();
+
+        // Paged: a keyset scan over session IDs in ascending byte order, with
+        // `next_page_token` carrying the last emitted ID as the cursor. Per
+        // `macp-proto` core.proto:411-426, `page_size = 0` means the
+        // server-chosen default, the server MAY cap the effective size, and a
+        // response is complete only when `next_page_token` is empty — a page
+        // may be short while more results remain.
+        if req.page_size < 0 {
+            return Err(Status::invalid_argument(
+                "INVALID_ARGUMENT: page_size must not be negative",
+            ));
+        }
+        // The cast is safe only below the negative guard above: `page_size` is
+        // an int32, and `-1 as usize` is astronomically large on 64-bit.
+        let effective = if req.page_size == 0 {
+            self.security.list_sessions_default_page_size
+        } else {
+            (req.page_size as usize).min(self.security.list_sessions_max_page_size)
+        };
+        // Floor, not redundant: at `effective == 0`, `page_ids` is `&ids[..0]`,
+        // so `page_ids.last()` is `None` and the `next_page_token` match below
+        // falls to its `_` arm — an empty page paired with an empty token,
+        // which looks complete. The traversal terminates immediately and
+        // `ListSessions` silently returns nothing, forever. The configured
+        // values are `>= 1` four ways today, but both fields are deliberately
+        // `pub`, so a library consumer or a test can set 0.
+        let effective = effective.max(1);
+
+        let cursor = if req.page_token.is_empty() {
+            None
+        } else {
+            // Every decode failure collapses to one opaque message: the token
+            // must not be an oracle for which check rejected it. The error
+            // discriminant is dropped here and never logged (see
+            // `crate::pagination` — the token is attacker-chosen bytes).
+            Some(
+                crate::pagination::decode_page_token(&req.page_token).map_err(|_| {
+                    Status::invalid_argument(
+                        "INVALID_ARGUMENT: page_token is not a valid continuation token",
+                    )
+                })?,
+            )
+        };
+
+        // Fetch one extra ID than the page holds: its presence is an exact
+        // "more results exist" signal, so the terminal page carries an empty
+        // token with no extra round trip. `saturating_add` because `effective`
+        // is operator-controlled.
+        let ids = self
+            .runtime
+            .registry
+            .session_ids_after(cursor.as_deref(), effective.saturating_add(1))
+            .await;
+        let has_more = ids.len() > effective;
+        let page_ids = &ids[..effective.min(ids.len())];
+
+        // The cursor comes from the ID list, NOT from the materialized
+        // sessions below. A session can be removed between the ID scan and the
+        // fetch; deriving the cursor from what survived would stall the cursor
+        // (re-emitting the same page) or, if the whole page vanished, drop
+        // every remaining session by terminating the traversal early.
+        let next_page_token = match (has_more, page_ids.last()) {
+            (true, Some(last)) => crate::pagination::encode_page_token(last),
+            _ => String::new(),
+        };
+
+        let mut metadata: Vec<SessionMetadata> = Vec::with_capacity(page_ids.len());
+        for id in page_ids {
+            // A `None` here means the session was removed between the scan and
+            // this fetch; skipping it is correct. The resulting short page with
+            // a non-empty token is explicitly permitted by core.proto:411-414.
+            if let Some(session) = self.runtime.registry.get_session(id).await {
+                debug_assert_eq!(
+                    session.session_id, *id,
+                    "registry map key must equal Session::session_id — paging orders \
+                     by the key but emits the field"
+                );
+                metadata.push(Self::session_to_metadata(&session));
+            }
+        }
+
         Ok(Response::new(ListSessionsResponse {
             sessions: metadata,
-            next_page_token: String::new(),
+            next_page_token,
         }))
     }
 
@@ -1646,12 +1726,19 @@ mod tests {
     }
 
     fn make_server() -> (MacpServer, Arc<Runtime>) {
+        make_server_with_security(SecurityLayer::dev_mode())
+    }
+
+    /// Same harness, with the `SecurityLayer` supplied by the caller so a test
+    /// can pin `list_sessions_{default,max}_page_size` without touching process
+    /// env (which is not deterministic under `cargo test`'s thread pool).
+    fn make_server_with_security(security: SecurityLayer) -> (MacpServer, Arc<Runtime>) {
         let storage: Arc<dyn crate::storage::StorageBackend> =
             Arc::new(crate::storage::MemoryBackend);
         let registry = Arc::new(SessionRegistry::new());
         let log_store = Arc::new(LogStore::new());
         let runtime = Arc::new(Runtime::new(storage, registry, log_store));
-        let server = MacpServer::new(runtime.clone(), SecurityLayer::dev_mode());
+        let server = MacpServer::new(runtime.clone(), security);
         (server, runtime)
     }
 
@@ -2804,5 +2891,411 @@ mod tests {
             .await
             .expect_err("stream subscribe from embargoed sender must be denied");
         assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}");
+    }
+    // ── ListSessions pagination (core.proto:411-426) ───────────────────
+
+    fn paged_session(id: &str) -> crate::session::Session {
+        crate::session::Session::builder(id, "macp.mode.decision.v1", "agent://initiator")
+            .participants(vec!["agent://a".into()])
+            .mode_version("1.0.0")
+            .configuration_version("cfg-1")
+            .started_at_unix_ms(1)
+            .build()
+    }
+
+    /// Insert sessions straight into the registry, with each `Session`'s
+    /// `session_id` equal to its map key (the Phase 1 `debug_assert_eq!`
+    /// enforces the pair).
+    async fn seed_sessions(runtime: &Arc<Runtime>, ids: &[String]) {
+        for id in ids {
+            runtime
+                .registry
+                .insert_recovered_session(id.clone(), paged_session(id))
+                .await;
+        }
+    }
+
+    fn list_sessions_req(page_size: i32, page_token: &str) -> Request<ListSessionsRequest> {
+        let mut req = Request::new(ListSessionsRequest {
+            page_size,
+            page_token: page_token.to_string(),
+        });
+        req.metadata_mut()
+            .insert("authorization", "Bearer agent://observer".parse().unwrap());
+        req
+    }
+
+    fn page_size_security(default: usize, max: usize) -> SecurityLayer {
+        let mut security = SecurityLayer::dev_mode();
+        security.list_sessions_default_page_size = default;
+        security.list_sessions_max_page_size = max;
+        security
+    }
+
+    fn seed_ids(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("session-{i:03}")).collect()
+    }
+
+    #[tokio::test]
+    async fn list_sessions_applies_default_page_size_when_zero() {
+        let (server, runtime) = make_server_with_security(page_size_security(3, 1000));
+        seed_sessions(&runtime, &seed_ids(10)).await;
+
+        let resp = server
+            .list_sessions(list_sessions_req(0, ""))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.sessions.len(), 3);
+        assert!(!resp.next_page_token.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_honors_explicit_page_size() {
+        let (server, runtime) = make_server_with_security(page_size_security(100, 1000));
+        seed_sessions(&runtime, &seed_ids(10)).await;
+
+        let resp = server
+            .list_sessions(list_sessions_req(4, ""))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.sessions.len(), 4);
+        assert!(!resp.next_page_token.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_clamps_page_size_above_max() {
+        let (server, runtime) = make_server_with_security(page_size_security(100, 3));
+        seed_sessions(&runtime, &seed_ids(10)).await;
+
+        let resp = server
+            .list_sessions(list_sessions_req(1000, ""))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.sessions.len(), 3);
+        assert!(!resp.next_page_token.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_rejects_negative_page_size() {
+        let (server, runtime) = make_server();
+        seed_sessions(&runtime, &seed_ids(3)).await;
+
+        let err = server
+            .list_sessions(list_sessions_req(-1, ""))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
+        assert!(err.message().contains("page_size"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_rejects_garbage_page_token() {
+        use base64::Engine;
+        let (server, runtime) = make_server();
+        seed_sessions(&runtime, &seed_ids(3)).await;
+
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let valid = engine.encode("v1:session-000");
+        let tokens = vec![
+            // not base64url
+            "not-a-token!".to_string(),
+            // wrong version prefix
+            engine.encode("v2:session-000"),
+            // prefix present, cursor empty
+            engine.encode("v1:"),
+            // truncated *through* the version prefix. Note that lopping bytes
+            // off the end of an encoded token instead yields a valid, shorter
+            // cursor — harmless, since a cursor is a position, not a handle —
+            // so the truncation that must be rejected is the one that damages
+            // the prefix.
+            engine.encode("v1"),
+            // front-truncated: the leading base64 character is gone, so the
+            // decoded bytes are no longer valid UTF-8 (and could not carry the
+            // prefix regardless).
+            valid[1..].to_string(),
+            // oversized: rejected by the length branch, before any decode
+            "A".repeat(2 * 1024 * 1024),
+        ];
+        for token in tokens {
+            let err = server
+                .list_sessions(list_sessions_req(0, &token))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::InvalidArgument);
+            // One opaque message for every rejection reason.
+            assert_eq!(
+                err.message(),
+                "INVALID_ARGUMENT: page_token is not a valid continuation token"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn list_sessions_full_traversal_visits_every_session_exactly_once() {
+        let (server, runtime) = make_server_with_security(page_size_security(100, 1000));
+        let ids = seed_ids(25);
+        seed_sessions(&runtime, &ids).await;
+
+        let mut collected: Vec<String> = Vec::new();
+        let mut token = String::new();
+        for _ in 0..100 {
+            let resp = server
+                .list_sessions(list_sessions_req(4, &token))
+                .await
+                .unwrap()
+                .into_inner();
+            collected.extend(resp.sessions.iter().map(|s| s.session_id.clone()));
+            token = resp.next_page_token;
+            if token.is_empty() {
+                break;
+            }
+        }
+        assert!(token.is_empty(), "traversal did not terminate");
+        let unique: std::collections::HashSet<&String> = collected.iter().collect();
+        // Both assertions: the set alone would hide duplicates, the total
+        // alone would hide a duplicate paired with a drop.
+        assert_eq!(unique.len(), 25, "sessions were dropped or duplicated");
+        assert_eq!(collected.len(), 25, "sessions were duplicated");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_terminal_page_has_empty_next_page_token() {
+        let (server, runtime) = make_server_with_security(page_size_security(100, 1000));
+        seed_sessions(&runtime, &seed_ids(10)).await;
+
+        let mut tokens: Vec<String> = Vec::new();
+        let mut token = String::new();
+        for _ in 0..20 {
+            let resp = server
+                .list_sessions(list_sessions_req(5, &token))
+                .await
+                .unwrap()
+                .into_inner();
+            token = resp.next_page_token;
+            tokens.push(token.clone());
+            if token.is_empty() {
+                break;
+            }
+        }
+        // 10 sessions at 5/page: exactly two pages, and only the last one
+        // carries the empty token.
+        assert_eq!(tokens.len(), 2, "{tokens:?}");
+        assert!(!tokens[0].is_empty());
+        assert!(tokens[1].is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_orders_by_session_id_ascending() {
+        let (server, runtime) = make_server_with_security(page_size_security(100, 1000));
+        // Insertion order deliberately unrelated to sort order.
+        let ids: Vec<String> = ["delta", "alpha", "echo", "charlie", "bravo"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        seed_sessions(&runtime, &ids).await;
+
+        let mut collected: Vec<String> = Vec::new();
+        let mut token = String::new();
+        loop {
+            let resp = server
+                .list_sessions(list_sessions_req(2, &token))
+                .await
+                .unwrap()
+                .into_inner();
+            collected.extend(resp.sessions.iter().map(|s| s.session_id.clone()));
+            token = resp.next_page_token;
+            if token.is_empty() {
+                break;
+            }
+        }
+        // Ascending across the whole traversal, not merely within a page.
+        assert_eq!(
+            collected,
+            vec!["alpha", "bravo", "charlie", "delta", "echo"]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_sessions_still_requires_authentication() {
+        let (server, runtime) = make_server();
+        seed_sessions(&runtime, &seed_ids(3)).await;
+
+        // No authorization metadata, and a request body that would otherwise
+        // be INVALID_ARGUMENT: authentication must still be what answers.
+        let req = Request::new(ListSessionsRequest {
+            page_size: -1,
+            page_token: String::new(),
+        });
+        let err = server.list_sessions(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_tolerates_cursor_for_removed_session() {
+        let (server, runtime) = make_server_with_security(page_size_security(100, 1000));
+        let ids = seed_ids(4);
+        seed_sessions(&runtime, &ids).await;
+
+        let first = server
+            .list_sessions(list_sessions_req(1, ""))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(first.sessions[0].session_id, "session-000");
+        assert!(!first.next_page_token.is_empty());
+
+        // Delete the very session the cursor names. A keyset cursor is a
+        // position, not a handle, so paging must continue undisturbed.
+        runtime
+            .registry
+            .sessions
+            .write()
+            .await
+            .remove("session-000");
+
+        let second = server
+            .list_sessions(list_sessions_req(1, &first.next_page_token))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(second.sessions[0].session_id, "session-001");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_cursor_comes_from_the_id_list_not_the_returned_sessions() {
+        // The cursor must be the last *candidate ID*, not the last *returned
+        // session*. The two differ only when the registry is mutated between
+        // the ID scan and the per-ID fetch, so this test manufactures exactly
+        // that window: the handler parks on the first page entry's session
+        // mutex, and while it is parked the last page entry is removed.
+        //
+        // Deriving the cursor from the returned sessions instead would move it
+        // backwards, re-scanning IDs the page already accounted for — and, when
+        // an entire page vanishes, would emit an empty token and silently
+        // terminate the traversal, dropping every remaining session.
+        let (server, runtime) = make_server_with_security(page_size_security(100, 1000));
+        seed_sessions(&runtime, &seed_ids(6)).await;
+
+        // Hold the first page entry's session mutex: the handler's fetch loop
+        // parks there, which is the only deterministic yield point between the
+        // ID scan and the rest of the fetches.
+        let first = runtime.registry.get_shared("session-000").await.unwrap();
+        let guard = first.lock().await;
+
+        let handler = server.list_sessions(list_sessions_req(3, ""));
+        let mutator = async {
+            // The handler clones the Arc in `get_shared` before parking on the
+            // mutex, so a strong count of 3 (map + this test + handler) means
+            // it is parked. Bounded so a missed interleave fails loudly rather
+            // than hanging.
+            let mut spins = 0;
+            while Arc::strong_count(&first) < 3 {
+                assert!(spins < 10_000, "handler never parked on the session mutex");
+                spins += 1;
+                tokio::task::yield_now().await;
+            }
+            runtime
+                .registry
+                .sessions
+                .write()
+                .await
+                .remove("session-002");
+            drop(guard);
+        };
+        let (resp, ()) = tokio::join!(handler, mutator);
+        let resp = resp.unwrap().into_inner();
+
+        // The interleave actually happened: the last candidate was skipped.
+        assert_eq!(
+            resp.sessions.len(),
+            2,
+            "expected session-002 to vanish between the scan and the fetch"
+        );
+        assert_eq!(resp.sessions[1].session_id, "session-001");
+        // ...yet the cursor is the last candidate, not the last survivor.
+        assert_eq!(
+            crate::pagination::decode_page_token(&resp.next_page_token),
+            Ok("session-002".to_string()),
+            "cursor was derived from the returned sessions, not the ID list"
+        );
+
+        // Observable through the API too: put session-002 back and page on.
+        runtime
+            .registry
+            .insert_recovered_session("session-002".to_string(), paged_session("session-002"))
+            .await;
+        let second = server
+            .list_sessions(list_sessions_req(3, &resp.next_page_token))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            second.sessions[0].session_id, "session-003",
+            "the cursor moved backwards past an ID the page had already accounted for"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_sessions_replaying_a_token_returns_the_identical_page() {
+        let (server, runtime) = make_server_with_security(page_size_security(100, 1000));
+        seed_sessions(&runtime, &seed_ids(10)).await;
+
+        let first = server
+            .list_sessions(list_sessions_req(3, ""))
+            .await
+            .unwrap()
+            .into_inner();
+        let token = first.next_page_token;
+        assert!(!token.is_empty());
+
+        let page_a = server
+            .list_sessions(list_sessions_req(3, &token))
+            .await
+            .unwrap()
+            .into_inner();
+        let page_b = server
+            .list_sessions(list_sessions_req(3, &token))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let ids_a: Vec<&str> = page_a.sessions.iter().map(|s| &*s.session_id).collect();
+        let ids_b: Vec<&str> = page_b.sessions.iter().map(|s| &*s.session_id).collect();
+        assert_eq!(ids_a, ids_b);
+        assert_eq!(page_a.next_page_token, page_b.next_page_token);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_survives_zero_effective_page_size() {
+        // Both fields are `pub`, so a consumer can reach 0. The floor in the
+        // handler must keep the response well-formed: never an empty page
+        // paired with a non-empty token (which would never advance).
+        let (server, runtime) = make_server_with_security(page_size_security(0, 0));
+        seed_sessions(&runtime, &seed_ids(3)).await;
+
+        let resp = server
+            .list_sessions(list_sessions_req(0, ""))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            !resp.sessions.is_empty(),
+            "empty page with token {:?} — the traversal terminates and ListSessions returns nothing",
+            resp.next_page_token
+        );
+        assert_eq!(resp.sessions.len(), 1);
+        assert!(!resp.next_page_token.is_empty());
+
+        // And it actually advances.
+        let next = server
+            .list_sessions(list_sessions_req(0, &resp.next_page_token))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(next.sessions.len(), 1);
+        assert_ne!(next.sessions[0].session_id, resp.sessions[0].session_id);
     }
 }

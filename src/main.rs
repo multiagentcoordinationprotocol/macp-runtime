@@ -50,6 +50,8 @@ fn validate_env_config() -> Vec<String> {
         "MACP_MAX_PAYLOAD_BYTES",
         "MACP_SESSION_START_LIMIT_PER_MINUTE",
         "MACP_MESSAGE_LIMIT_PER_MINUTE",
+        "MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE",
+        "MACP_LIST_SESSIONS_MAX_PAGE_SIZE",
     ] {
         if let Ok(val) = std::env::var(var_name) {
             match val.parse::<u64>() {
@@ -62,6 +64,52 @@ fn validate_env_config() -> Vec<String> {
                         "{var_name}: '{val}' is not a valid positive integer"
                     ));
                 }
+            }
+        }
+    }
+
+    // Cross-field: a default ListSessions page size above the max in force is
+    // silently clamped down by SecurityLayer, which would discard the
+    // operator's stated intent without ever telling them. Refuse to start
+    // instead, naming both values.
+    //
+    // The comparison is against the EFFECTIVE max — the explicitly configured
+    // one when set, otherwise the built-in cap. Checking only the both-set
+    // case would leave the identical operator error (DEFAULT=5000 with the max
+    // unset) on a silent path: clamped to the built-in 1000 with nothing but a
+    // `tracing::warn!` that vanishes under `RUST_LOG=off`. The error message
+    // says which of the two the max came from, so `1000` appearing in it is
+    // never mistaken for a value the operator set.
+    if let Ok(default_raw) = std::env::var("MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE") {
+        if let Ok(default_size) = default_raw.parse::<u64>() {
+            let max_raw = std::env::var("MACP_LIST_SESSIONS_MAX_PAGE_SIZE").ok();
+            // "Unset" and "set but unparseable" both fall back to the built-in
+            // cap, but they are not the same operator mistake — and the
+            // unparseable one already gets its own error from the loop above,
+            // so claiming the var is unset here contradicts it.
+            let (max_size, max_source) = match max_raw
+                .as_ref()
+                .and_then(|raw| raw.parse::<u64>().ok())
+                .filter(|&v| v > 0)
+            {
+                Some(max_size) => (
+                    max_size,
+                    "MACP_LIST_SESSIONS_MAX_PAGE_SIZE, explicitly configured".to_string(),
+                ),
+                None => (
+                    macp_runtime::security::MAX_LIST_SESSIONS_PAGE_SIZE as u64,
+                    match max_raw {
+                        Some(raw) => format!(
+                            "MACP_LIST_SESSIONS_MAX_PAGE_SIZE is set to '{raw}', which is not a valid positive integer, so the built-in default applies"
+                        ),
+                        None => "MACP_LIST_SESSIONS_MAX_PAGE_SIZE unset, so the built-in default applies".to_string(),
+                    },
+                ),
+            };
+            if default_size > max_size {
+                errors.push(format!(
+                    "MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE ({default_size}) must not exceed the effective maximum page size ({max_size}) [{max_source}]; raise MACP_LIST_SESSIONS_MAX_PAGE_SIZE or lower the default"
+                ));
             }
         }
     }
@@ -126,9 +174,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for err in &config_errors {
             tracing::error!("Configuration error: {err}");
         }
+        // Fold the details into the returned error too: `tracing`'s default
+        // `fmt` writer is stdout and any filter can suppress it, so the abort
+        // message on stderr must name the offending variables by itself.
         return Err(format!(
-            "startup aborted: {} configuration error(s) detected",
-            config_errors.len()
+            "startup aborted: {} configuration error(s): {}",
+            config_errors.len(),
+            config_errors.join("; ")
         )
         .into());
     }

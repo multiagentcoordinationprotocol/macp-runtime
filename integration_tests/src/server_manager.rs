@@ -142,6 +142,17 @@ impl TrackedChild {
             .expect("child taken only in drop")
             .try_wait()
     }
+
+    /// Consume the guard and collect the (already exited, or about to exit)
+    /// child's remaining output. Deregisters the pid from the atexit reaper;
+    /// `Drop` then has nothing left to do.
+    pub fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {
+        let child = self.0.take().expect("child taken only in drop");
+        let pid = child.id();
+        let result = child.wait_with_output();
+        untrack_live_pid(pid);
+        result
+    }
 }
 
 impl Drop for TrackedChild {

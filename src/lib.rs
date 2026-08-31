@@ -28,6 +28,9 @@ pub use macp_policy as policy;
 pub use macp_storage::{log_store, registry, storage};
 
 pub mod extensions;
+// Crate-private: the ListSessions page-token codec is a transport detail of
+// `server.rs`, deliberately not part of the published API surface.
+mod pagination;
 pub mod policy_engine;
 pub mod server;
 

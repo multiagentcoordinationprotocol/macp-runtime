@@ -1203,6 +1203,7 @@ version = "0.6.1"
 dependencies = [
  "async-stream",
  "async-trait",
+ "base64 0.23.1",
  "chrono",
  "futures-core",
  "macp-auth",
