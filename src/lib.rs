@@ -8,6 +8,15 @@ pub mod pb {
 
 pub use macp_pb::{decision_pb, handoff_pb, multi_round_pb, proposal_pb, quorum_pb, task_pb};
 
+// The base vocabulary crate, re-exported whole. `macp-runtime`'s public
+// signatures already traffic in macp-core types, but four of the five lower
+// crates were reachable through this root and macp-core was not — so items
+// with no historical `macp_runtime::*` path (`commitment_hash`,
+// `mode::MessageContext`) could only be named by taking a second dependency.
+// Not aliased to `core`: that shadows the `core` extern prelude crate-wide.
+// The `error`/`session` shims below stay as the historical short paths.
+pub use macp_core;
+
 pub mod error;
 pub mod metrics;
 pub mod replay;

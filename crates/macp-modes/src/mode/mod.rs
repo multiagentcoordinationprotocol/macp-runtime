@@ -27,7 +27,7 @@ pub const EXTENSION_MODE_NAMES: &[&str] = &["ext.multi_round.v1"];
 // `ModeResponse` (data) lives in `macp-core` so `Session::apply_mode_response`
 // can consume it without a core->modes cycle. The `Mode` trait (behavior) stays
 // here. Re-exported so `crate::mode::ModeResponse` keeps resolving.
-pub use macp_core::mode::ModeResponse;
+pub use macp_core::mode::{MessageContext, ModeResponse};
 
 /// Trait that coordination modes implement.
 /// Modes receive immutable session references and return a ModeResponse.
