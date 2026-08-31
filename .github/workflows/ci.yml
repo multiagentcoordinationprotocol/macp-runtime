@@ -314,6 +314,19 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # The action above reads ./Cargo.lock only. `integration_tests/` is a
+      # separate crate outside the workspace with its own lockfile that
+      # dependabot does not update, so it drifted unaudited until it had
+      # accumulated five advisories including a high-severity one. Test-only
+      # code, never published — but it runs in CI, and an unwatched lockfile
+      # is how the drift went unnoticed rather than how it was harmless.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version ^0.21
+
+      - name: Run cargo audit (integration_tests lockfile)
+        working-directory: integration_tests
+        run: cargo audit --file Cargo.lock
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
