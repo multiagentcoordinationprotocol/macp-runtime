@@ -7,7 +7,11 @@
 # false` below. The actual crates.io upload is done by publish.yml, which runs
 # `cargo publish --workspace` (correct dependency ordering + index-propagation
 # waits, which release-plz's own publisher does not do for this 7-crate graph).
-# publish.yml is triggered by the `macp-runtime-v*` tag created here.
+# release-plz.yml CALLS publish.yml directly (workflow_call) after cutting a
+# release. It is not triggered by the tag: GitHub does not start workflow runs
+# from events created with the default GITHUB_TOKEN, so tags pushed here are
+# invisible to a tag trigger — that is why 0.6.1 was tagged 2026-07-12 and
+# never published.
 [workspace]
 # Run cargo-semver-checks while computing the release PR, where the version
 # bumps actually happen. An API break that rides an unmarked commit blocks the
@@ -60,5 +64,5 @@ version_group = "macp"
 name = "macp-runtime"
 version_group = "macp"
 # The one GitHub Release per version rides the umbrella crate's tag
-# (`macp-runtime-v{version}`), which is also what triggers publish.yml.
+# (`macp-runtime-v{version}`).
 git_release_enable = true
