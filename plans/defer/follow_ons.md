@@ -18,11 +18,23 @@ implicit accepts. Replaces the A6 interim in-commitment-handler check; gate
 on a new `semantics_rev` (=2) per the established migration pattern so
 rev≤1 histories replay under the interim semantics. Master plan §2.5.
 
-## 2. ListSessions pagination (runtime implementation)
-Proto fields shipped in 0.1.6 (spec PR #51). Implement `page_size` capping +
-opaque `page_token` / `next_page_token` in `server.rs` `list_sessions` and
-the `watch_sessions` initial sync; replace the documented server-side cap.
-Master plan §3.4.
+## 2. `watch_sessions` initial-sync memory bound
+Narrowed. The `list_sessions` half of this item **shipped**: `page_size`
+capping + opaque `page_token` / `next_page_token` are implemented in
+`server.rs` `list_sessions` (keyset cursor over session IDs, bounded by
+`MACP_LIST_SESSIONS_{DEFAULT,MAX}_PAGE_SIZE`). The original "replace the
+documented server-side cap" clause was **stale** and is dropped: `docs/API.md`
+documented no cap and the handler applied none, so there was nothing to
+replace.
+
+Still open: the `watch_sessions` initial sync emits one `Created` event per
+session in the registry with no bound, so a large registry produces an
+unbounded burst. Note this is a **memory** bound, not a protocol change —
+`WatchSessionsRequest` is empty in the proto, so there is nothing to paginate
+there without an upstream proto field; any fix is a server-side emission
+bound (chunking, or a documented cap with a reconcile-via-`ListSessions`
+contract). Proto fields for `list_sessions` shipped in 0.1.6 (spec PR #51);
+master plan §3.4.
 
 ## 3. Multi-round JSON client fallback removal (one release after 0.5.0)
 Per master §4.5 step 5: stop advertising/accepting JSON `Contribute` from

@@ -237,8 +237,11 @@ impl SecurityLayer {
         // parameter it feeds; keep them next to their `std::env::var` call.
         // Unit tests here can only exercise the resolver, so they cannot catch
         // a transposition at this call site — the end-to-end coverage that
-        // pins the binding will live with the `ListSessions` handler (Tier 1,
-        // Phase 3 — not yet written).
+        // pins the binding lives with the `ListSessions` handler, in
+        // `integration_tests/tests/tier1_protocol/test_list_sessions_pagination.rs`
+        // (`default_page_size_applied_when_page_size_is_zero` and
+        // `page_size_above_max_is_clamped` set the two vars to distinct values
+        // and assert the row counts each one produces).
         let (list_sessions_default_page_size, list_sessions_max_page_size) =
             Self::resolve_list_sessions_page_sizes(RawPageSizeEnv {
                 default_raw: std::env::var("MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE").ok(),
@@ -677,8 +680,14 @@ mod tests {
         let layer = SecurityLayer::dev_mode();
         assert_eq!(layer.list_sessions_default_page_size, 100);
         assert_eq!(layer.list_sessions_max_page_size, 1000);
-        // Unlike the rate limits, these must NOT be unlimited: an unbounded
-        // page size would make Phase 3's cap assertions pass vacuously.
+        // Unlike the rate limits, these must NOT be unlimited. No existing cap
+        // assertion depends on these two values — `src/server.rs`'s unit tests
+        // pin their own via `page_size_security(..)`, and the Tier 1 coverage in
+        // `integration_tests/tests/tier1_protocol/test_list_sessions_pagination.rs`
+        // pins its own via env. The assertion is here because `dev_mode` is a
+        // `pub` constructor: anything that builds a server from it must still
+        // page for real, so a future test written against it cannot pass
+        // vacuously on an unbounded page.
         assert_ne!(layer.list_sessions_default_page_size, usize::MAX);
         assert_ne!(layer.list_sessions_max_page_size, usize::MAX);
     }

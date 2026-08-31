@@ -97,13 +97,55 @@ Returns `SessionMetadata` with the session's mode, state, TTL deadline, bound ve
 
 ### ListSessions
 
-Enumerates metadata for every session currently held in the registry (including terminal sessions still within the retention window).
+Enumerates metadata for the sessions currently held in the registry (including terminal sessions still within the retention window), **one bounded page per call**.
 
 ```protobuf
 rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse)
 ```
 
-Returns a `sessions` array of `SessionMetadata` entries. Authentication is required; the RPC is not filtered by caller identity, so callers should apply their own participation or tenancy checks before exposing results to end users.
+**Request fields.**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `page_size` | `int32` | Maximum entries in this page. `0` means "server default" -- see below. |
+| `page_token` | `string` | Opaque continuation token from a previous response's `next_page_token`. Empty starts a new traversal. |
+
+**Page-size default and clamp.**
+
+- `page_size = 0` yields the server default, `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE` (default `100`).
+- `page_size` above `MACP_LIST_SESSIONS_MAX_PAGE_SIZE` (default `1000`) is clamped down to that maximum. The clamp is silent -- the response simply carries at most the maximum number of entries, with `next_page_token` set if more remain.
+- Otherwise `page_size` is honored as requested.
+
+See [Resource limits](#resource-limits) for both variables.
+
+**`INVALID_ARGUMENT` is returned when:**
+
+- `page_size` is negative (`INVALID_ARGUMENT: page_size must not be negative`), or
+- `page_token` is non-empty and cannot be decoded as a continuation token -- oversized, not valid base64url, not valid UTF-8, missing this runtime's `v1:` token-version prefix, or carrying an empty cursor after that prefix (`INVALID_ARGUMENT: page_token is not a valid continuation token`). The message is deliberately identical for every rejection cause, so the token is not an oracle for which check failed.
+
+The decode is a **format check, not a provenance check**. The token is unsigned and carries no proof it was minted by this runtime, so any correctly-formed token a caller synthesizes is accepted and used as a cursor. Do not treat a page token as an authenticated capability -- see [Observation-surface authorization](deployment.md#observation-surface-authorization) for why that is safe for this RPC today, and the condition that would void it.
+
+**Response.** A `sessions` array of `SessionMetadata` entries plus a `next_page_token`. Pass `next_page_token` back **verbatim** in the next request's `page_token` and stop when it comes back empty:
+
+```text
+token = ""
+loop:
+    resp = ListSessions(page_size = 100, page_token = token)
+    process(resp.sessions)
+    token = resp.next_page_token
+    if token == "":
+        break
+```
+
+Do not parse, truncate, or synthesize a token -- it is opaque and its format may change between runtime versions.
+
+**Traversal semantics.**
+
+> Traversal is a keyset scan over session IDs in ascending byte order. Every session that exists for the whole traversal is returned exactly once. A session created during a traversal is returned if and only if its ID sorts after the current cursor. A session deleted during a traversal may or may not appear, depending on whether the cursor had already passed it. A page is not a point-in-time snapshot; `next_page_token` is a position, not a snapshot handle. A page may contain fewer than `page_size` entries while `next_page_token` is still non-empty — per the proto, only an empty `next_page_token` means the result set is complete.
+
+Authentication is required; the RPC is not filtered by caller identity, so callers should apply their own participation or tenancy checks before exposing results to end users. (This unfiltered property is also why the continuation token carries no signature -- see [Observation-surface authorization](deployment.md#observation-surface-authorization).)
+
+> **Normative source.** This section follows the `macp-proto` contract in `proto/macp/v1/core.proto:411-426`, which defines `page_size`, `page_token`, and `next_page_token`. RFC-MACP-0006 §3.8 still describes `ListSessions` as an unpaginated listing: the RFC prose was never updated when the proto fields shipped. Where the two disagree, the proto is what this runtime implements. The RFC correction is tracked upstream as [multiagentcoordinationprotocol/multiagentcoordinationprotocol#76](https://github.com/multiagentcoordinationprotocol/multiagentcoordinationprotocol/issues/76), "RFC-MACP-0006 §3.8 and RFC-MACP-0001 §7 still describe ListSessions as unpaginated".
 
 ### WatchSessions
 
@@ -280,13 +322,26 @@ The runtime applies a resolver chain in this order:
 
 See the [Getting Started guide](getting-started.md) for token configuration examples.
 
-## Rate Limiting
+## Resource limits
 
-The runtime enforces per-sender sliding-window rate limits:
+Five bounds on request size, request frequency, and response size:
 
-| Limit | Default | Environment variable |
-|-------|---------|---------------------|
-| Session starts per minute | 60 | `MACP_SESSION_START_LIMIT_PER_MINUTE` |
-| Messages per minute | 600 | `MACP_MESSAGE_LIMIT_PER_MINUTE` |
+| Variable | Meaning | Default |
+|---|---|---|
+| `MACP_MAX_PAYLOAD_BYTES` | max envelope payload size, in bytes | `1048576` |
+| `MACP_SESSION_START_LIMIT_PER_MINUTE` | per-sender session start limit | `60` |
+| `MACP_MESSAGE_LIMIT_PER_MINUTE` | per-sender message limit | `600` |
+| `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE` | `ListSessions` page size used when the request sends `page_size = 0` | `100` |
+| `MACP_LIST_SESSIONS_MAX_PAGE_SIZE` | hard cap a requested `ListSessions` `page_size` is clamped to | `1000` |
 
-When a limit is exceeded, the runtime returns `RATE_LIMITED`.
+`MACP_MAX_PAYLOAD_BYTES` bounds the envelope *payload*; the gRPC request ceiling is `MACP_MAX_PAYLOAD_BYTES` plus a fixed 64 KiB envelope-overhead allowance (~1.06 MiB at the default), which is what `max_decoding_message_size` is set to.
+
+The same five variables appear in [`README.md`](../README.md) and [`docs/deployment.md`](deployment.md).
+
+### Rate limits
+
+`MACP_SESSION_START_LIMIT_PER_MINUTE` and `MACP_MESSAGE_LIMIT_PER_MINUTE` are per-sender sliding-window limits on session creation and message throughput. When either is exceeded, the runtime returns `RATE_LIMITED`.
+
+### Page caps
+
+`MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE` and `MACP_LIST_SESSIONS_MAX_PAGE_SIZE` bound the size of a single [`ListSessions`](#listsessions) response. They are **not** rate limits: exceeding the cap is not an error and never returns `RATE_LIMITED` -- an over-large `page_size` is silently clamped, and the caller continues the traversal with `next_page_token`. A caller may page as fast as the message rate limit allows.

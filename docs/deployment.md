@@ -37,6 +37,8 @@ Before exposing the runtime to production traffic, ensure these four items are c
 | `MACP_MAX_PAYLOAD_BYTES` | `1048576` | Maximum envelope payload size in bytes |
 | `MACP_SESSION_START_LIMIT_PER_MINUTE` | `60` | Per-sender session creation rate limit |
 | `MACP_MESSAGE_LIMIT_PER_MINUTE` | `600` | Per-sender message rate limit |
+| `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE` | `100` | `ListSessions` page size when the request sends `page_size = 0` |
+| `MACP_LIST_SESSIONS_MAX_PAGE_SIZE` | `1000` | Hard cap a requested `ListSessions` `page_size` is clamped to |
 | `MACP_CHECKPOINT_INTERVAL` | `0` (disabled) | Log entries between checkpoints |
 | `MACP_CLEANUP_INTERVAL_SECS` | `60` | Background TTL cleanup interval in seconds |
 | `MACP_SESSION_RETENTION_SECS` | `3600` | How long terminal sessions stay in memory |
@@ -79,7 +81,11 @@ identity (RFC-0006 permits this shape). Deployments with confidentiality
 requirements between agent groups should front these RPCs with a proxy or
 restrict which identities may call them. `WatchSignals` requires
 authentication; `ListModes`/`GetManifest`/`WatchModeRegistry`/`WatchRoots`
-are open discovery surfaces by design.
+are open discovery surfaces by design. `ListSessions` is now paged, and the
+decision not to sign its opaque `page_token` rests on exactly the unfiltered
+property described here -- a forged cursor can only reposition a caller within
+a listing it may already read in full, so if per-caller filtering is ever added
+to `ListSessions`, that no-signature decision must be re-analyzed first.
 
 **Memory-only mode** disables persistence entirely. Set `MACP_MEMORY_ONLY=1` for testing or ephemeral workloads. All session data is lost when the process exits.
 

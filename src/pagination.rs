@@ -212,9 +212,26 @@ mod tests {
                 "plaintext {plaintext:?}"
             );
         }
-        // Front-truncation corrupts the base64 alignment, so the decoded bytes
-        // are no longer valid UTF-8 (and could not carry the prefix
-        // regardless).
+        // Front-truncation corrupts the base64 alignment, and the rejection can
+        // come from either of the first two checks. Dropping the leading char of
+        // a 52-char token leaves 51 chars, i.e. a trailing 3-char group whose
+        // final symbol must carry zero low bits for the strict `URL_SAFE_NO_PAD`
+        // engine to accept it — true for only 16 of the 64 alphabet symbols, so
+        // roughly three quarters of tokens fail at the *base64* stage
+        // (`NotBase64`) and never reach the UTF-8 check. The rest decode to
+        // bytes that always begin `0x8C` — a bare continuation byte, fixed by
+        // the shifted encoding of the `v1:` prefix and independent of the
+        // cursor — and so are always rejected as `NotUtf8`. Measured over 2000
+        // random UUID-shaped cursors, `decode_page_token` returned 1518
+        // `NotBase64` and 482 `NotUtf8` — never a cursor. The two per-byte
+        // figures below cannot come from that same run, because the 1518 that
+        // fail base64 never produce decoded bytes to inspect; they come from a
+        // separate probe that force-decodes all 2000 leniently, ignoring the
+        // non-canonical trailing bits the strict engine rejects. When
+        // force-decoded that way: first decoded byte `0x8C` in 2000/2000,
+        // plaintext invalid UTF-8 in 2000/2000.
+        // Both paths collapse to the same `INVALID_ARGUMENT` at the handler, and
+        // neither could carry the prefix regardless.
         assert_ne!(
             decode_page_token(&token[1..]),
             Ok("3f2504e0-4f89-41d3-9a0c-0305e82c3301".to_string())

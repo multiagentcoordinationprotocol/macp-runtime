@@ -6,9 +6,10 @@ EXECUTED and released; all seven crates at 0.5.0 on crates.io)
 Two kinds of remaining work live here:
 
 - **`follow_ons.md`** — actionable, scoped items that deliberately did not
-  gate the v0.5.0 release (handoff timer implementation, ListSessions
-  pagination, JSON client-fallback deprecation, persistence optimizations,
-  small/cosmetic items). Not blocked; pick up any time.
+  gate the v0.5.0 release (handoff timer implementation, the
+  `watch_sessions` initial-sync memory bound, JSON client-fallback
+  deprecation, persistence optimizations, small/cosmetic items). Not
+  blocked; pick up any time.
 - **The hard-blocked table below** — items with external blockers,
   unchanged.
 
