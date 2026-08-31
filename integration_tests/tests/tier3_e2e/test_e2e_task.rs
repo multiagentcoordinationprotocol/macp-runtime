@@ -1,7 +1,6 @@
 use crate::common;
 use macp_integration_tests::helpers::*;
 use macp_integration_tests::macp_tools::{self, task::*};
-use rig::completion::Prompt;
 use rig::prelude::*;
 use rig::providers::openai;
 
@@ -123,9 +122,29 @@ async fn real_llm_agents_delegate_task() {
         .build();
 
     eprintln!("   [Data Analyst] Accepting and analyzing with GPT-4o-mini...");
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        worker_agent.prompt(&format!(
+
+    // GPT-4o-mini does not reliably chain both tool calls. Observed: it reports
+    // "the task has been successfully completed" in prose having landed only the
+    // TaskAccept — the tools report a runtime rejection as a successful call
+    // carrying `ok: false`, so the model narrates success regardless.
+    //
+    // That is an LLM reliability limit, not a runtime defect, but it used to
+    // surface two steps later as a bare `assert!(ack.ok)` on the planner's
+    // Commitment (task mode refuses to commit without a terminal report), which
+    // named neither the worker nor the cause. Check the worker's contribution
+    // here, where the diagnosis is obvious, and allow one bounded retry.
+    //
+    // Retrying is safe: `prompt` starts a fresh conversation, so a redundant
+    // TaskAccept is rejected harmlessly (`active_assignee` is already set) while
+    // the still-missing TaskComplete can land.
+    const WORKER_ATTEMPTS: u32 = 2;
+    for attempt in 1..=WORKER_ATTEMPTS {
+        // Hang guard + transient-provider retry; see `prompt_with_retry`. This
+        // worker chains two tool calls, so it is the slowest agent in the tier.
+        // Distinct from the surrounding loop: that one retries a *behavioural*
+        // miss (the model not landing both calls), this one retries a provider
+        // fault (503, stall) where no reply came back at all.
+        let worker_prompt = format!(
             "You have been assigned a task: \"Q4 Revenue Data Analysis\"\n\
              Instructions: Analyze Q4 revenue by region and identify top growth drivers. \
              Include YoY comparison and highlight any anomalies.\n\n\
@@ -133,13 +152,40 @@ async fn real_llm_agents_delegate_task() {
              - session_id: {sid}\n\
              - task_id: \"q4-analysis\"\n\
              For the completion summary, write realistic revenue analysis findings."
-        )),
-    )
-    .await;
-    match &result {
-        Ok(Ok(text)) => eprintln!("   Data Analyst response: {text}\n"),
-        Ok(Err(e)) => panic!("Worker agent failed: {e}"),
-        Err(_) => panic!("Worker agent timed out"),
+        );
+        let response = super::prompt_with_retry(
+            "Data Analyst",
+            &worker_agent,
+            &worker_prompt,
+            std::time::Duration::from_secs(90),
+            3,
+        )
+        .await;
+        eprintln!("   Data Analyst response: {response}\n");
+
+        let landed = {
+            let mut client = planner_client.lock().await;
+            let meta = get_session_as(&mut client, planner_id, &sid)
+                .await
+                .expect("GetSession should succeed")
+                .metadata
+                .expect("metadata present");
+            meta.participant_activity
+                .iter()
+                .find(|p| p.participant_id == worker_id)
+                .map_or(0, |p| p.message_count)
+        };
+        // TaskAccept + TaskComplete.
+        if landed >= 2 {
+            break;
+        }
+        assert!(
+            attempt < WORKER_ATTEMPTS,
+            "worker landed {landed} accepted message(s) after {attempt} attempt(s); \
+             expected TaskAccept + TaskComplete. The agent's prose claimed success but \
+             its tool calls did not enter accepted history."
+        );
+        eprintln!("   Worker landed only {landed} accepted message(s) — retrying once\n");
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -184,7 +230,15 @@ async fn real_llm_agents_delegate_task() {
             .expect("GetSession should succeed");
         let meta = resp.metadata.expect("metadata present");
         assert_eq!(meta.state, 2);
+        // Task mode already gates Commitment on a terminal report, which in turn
+        // requires TaskAccept then TaskComplete from the assignee — so RESOLVED
+        // does imply the worker acted. Assert it directly anyway: a silent
+        // worker then names itself here instead of surfacing as a puzzling
+        // rejected Commitment, and the check still holds if that gate is ever
+        // relaxed. Two messages: TaskAccept + TaskComplete.
+        super::assert_participants_contributed(&meta, &[worker_id], 2);
         eprintln!("   Session state: {} (RESOLVED)", meta.state);
+        eprintln!("   Verified: worker's TaskAccept + TaskComplete are in accepted history");
     }
 
     eprintln!("\n═══════════════════════════════════════════════════════════════");
