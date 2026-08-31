@@ -320,8 +320,11 @@ jobs:
       # accumulated five advisories including a high-severity one. Test-only
       # code, never published — but it runs in CI, and an unwatched lockfile
       # is how the drift went unnoticed rather than how it was harmless.
+      # 0.22 is a floor, not a preference: 0.21 cannot parse a CVSS 4.0 score
+      # and dies on the whole advisory database with "unsupported CVSS
+      # version: 4.0" — a hard error unrelated to any advisory this repo has.
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked --version ^0.21
+        run: cargo install cargo-audit --locked --version ^0.22
 
       - name: Run cargo audit (integration_tests lockfile)
         working-directory: integration_tests
