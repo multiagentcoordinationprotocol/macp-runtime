@@ -1200,9 +1200,9 @@ dependencies = [
 
 [[package]]
 name = "macp-proto"
-version = "0.1.8"
+version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8943aa07459ef2d29f144e986f5b7bd0c4123a68a4c3ae8368131093d46a2fb"
+checksum = "5afe7d6f5650d39d5210a2017008b281c61f7a732f82ef9f6b3a4ae4c63f9876"
 
 [[package]]
 name = "macp-runtime"
@@ -2144,7 +2144,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.1",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
