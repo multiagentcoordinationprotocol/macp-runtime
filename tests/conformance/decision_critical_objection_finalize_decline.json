@@ -1,0 +1,106 @@
+{
+  "description": "Decision mode: critical_objection_action 'finalize_decline' blocks a positive commitment but authorizes a negative one, resolving the session as a decline.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "_comment": "RFC-MACP-0012 Section 4.1 (:102): 'finalize_decline' finalizes the session as a negative outcome. voting.algorithm is 'none' deliberately — with any vote-based algorithm a decline additionally requires an explicit reject vote, which would confound this fixture's discriminator with the vote-gated decline already pinned by decision_negative_outcome.json.",
+    "policy_id": "policy.decision.critical-veto-decline",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 2,
+    "description": "Initiator-driven commitment where a critical-severity objection finalizes the session as a decline.",
+    "rules": {
+      "voting": { "algorithm": "none" },
+      "objection_handling": {
+        "critical_severity_vetoes": true,
+        "critical_objection_action": "finalize_decline"
+      },
+      "commitment": { "authority": "initiator_only" }
+    }
+  },
+  "policy_version": "policy.decision.critical-veto-decline",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://b",
+      "message_type": "Objection",
+      "payload_type": "macp.modes.decision.v1.ObjectionPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "reason": "unresolved data-retention finding",
+        "severity": "critical"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Under 'finalize_decline' the veto still blocks the POSITIVE direction — this is the arm shared with the default 'deny' action.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.approved",
+        "authority_scope": "test",
+        "reason": "attempt to commit over a standing critical objection",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.critical-veto-decline",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "_comment": "This is the discriminator. Under the default 'deny' action this same message is rejected with POLICY_DENIED; under 'finalize_decline' the veto authorizes the decline and the session resolves negatively. No vote was ever cast, so nothing but critical_objection_action can produce this outcome.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "outcome_positive": false,
+        "action": "decision.rejected",
+        "authority_scope": "test",
+        "reason": "critical objection finalized as a decline",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.critical-veto-decline",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.rejected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": false
+  },
+  "expected_mode_state": {
+    "phase": "Committed",
+    "proposals": {
+      "p1": {
+        "proposal_id": "p1",
+        "sender": "agent://orchestrator"
+      }
+    }
+  }
+}
