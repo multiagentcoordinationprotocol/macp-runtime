@@ -42,7 +42,15 @@ This is a one-way door (a public protocol contract, and — because `QuorumState
 
 The two SDK planning passes verified their issues against code rather than trusting them, and three findings change this program's shape:
 
-**a. Only one implementation of three actually replays reject-path fixtures.** `macp-runtime`'s harness asserts the rejection and matches `expected_error_code` (`tests/conformance_loader.rs:442-471`). Both SDKs *carry* reject fixtures but never replay them — TypeScript has a visible `it.skip`, Python skips at `tests/conformance/test_conformance_projections.py:154-156` and reads `expected_error_code` nowhere. **So spec S3's duplicate-ballot fixtures would ship with one oracle out of three**, which is most of the value missing. Wave 2 therefore grows harness work in both SDKs, and that work is a *prerequisite* for S3's value, not a follow-up.
+**a. ~~Only one implementation of three replays reject-path fixtures.~~ CORRECTED 2026-09-01 — there is no harness gap.** The original finding misread both SDKs, and the correction *reduces* scope, so it is recorded rather than quietly dropped.
+
+`macp-runtime` is indeed the only implementation that asserts the rejection itself (`tests/conformance_loader.rs:442-471`, matching `expected_error_code`). But that asymmetry is **correct by construction, not a deficiency**: only a runtime rejects, so only a runtime can be an oracle for the rejection decision. An in-process client projection cannot produce a NACK.
+
+Both SDKs already handle reject fixtures deliberately:
+- **Python** (`tests/conformance/test_conformance_projections.py:150-159`) replays the accepted *prefix* and skips individual rejected *messages* — commented "rejection is runtime-side ... in lockstep with the TypeScript harness." The earlier reading took `if msg.get("expect") != "accept": continue` as skipping the whole fixture; it skips one message.
+- **TypeScript** (`tests/conformance/conformance.test.ts:379-401`) has a reject-path block that **does run**, asserting every reject message carries a canonical `expected_error_code` and a resolvable `payload_type`. Its single `it.skip` is documented and correct for the reason above.
+
+**Consequence: Wave 2's harness-work prerequisite does not exist.** The three repos still must vendor the new fixtures, but no harness changes gate that. One genuine parity gap did survive the correction — Python never read `expected_error_code` at all — closed by `macp-sdk-python` #53.
 
 **b. Five of the ten "no normative rule" sites in TS #59/#60 do have one, and three are shipped violations.** Both issues assert that none of the ten has a confirmed rule behind it. That is wrong for five: Proposal `Accept` supersession (RFC-0008 `:70` plus the determinism MUST at `:89`), `TaskAccept` first-accept-wins (RFC-0009 `:70`/`:72`), Handoff accept/decline settle-once (RFC-0010 `:68`, `:113-116`), and post-`Commitment` terminality (RFC-0001 `:216`/`:238`/`:247`). Three are violated in shipped code today — most concretely `ProposalProjection.acceptedProposal()` (`proposal.ts:201-207`) returns `undefined` where the acceptance set is unambiguous after a legal re-accept. **Wave 4 is therefore no longer triage-only**: it splits into real fixes for the sites with rules, and spec issues for the two genuinely ambiguous ones.
 
@@ -104,8 +112,8 @@ Three PRs, in this order. Phases S1 and S2 are wording-only and break nothing do
 ### Wave 2 — vendor the fixtures (three repos, parallel, immediately after S3)
 
 - **R1 — `macp-runtime`.** Copy the new fixtures into `tests/conformance/`, confirm the Rust harness replays them, and confirm `conformance-oracle` goes green. Verify the harness handles the new reject paths and the three previously-unfixtured payload types; `Objection`/`Withdraw`/`TaskUpdate` have never been exercised by a fixture in any implementation. Also add the one unit test Wave 0 surfaced as missing: `duplicate_ballot_rejected` (`quorum.rs:609`) covers *same-type* duplicates, but nothing pins **cross-type** first-wins (a `Reject` after an accepted `Approve`), even though the same `contains_key` guard covers it. Test addition only — no behaviour change.
-- **T2 — `macp-sdk-typescript`.** `make sync-fixtures`, replay, green `verify-fixtures`. The `duplicate-ballots.ts` guard is pre-verified as needing **no change** (`:117` skips non-accept before bucketing). **Also teach the harness to replay reject fixtures** — per finding (a) it currently carries them and skips them.
-- **P3 — `macp-sdk-python`.** `make sync-fixtures` across both `FIXTURE_DIR_PAIRS` entries, replay, green `verify-fixtures`. Closes PY #51, whose own text says "Nothing to build here first." **Also teach the harness to replay reject fixtures** (`test_conformance_projections.py:154-156`), same reason.
+- **T2 — `macp-sdk-typescript`.** `make sync-fixtures`, replay, green `verify-fixtures`. The `duplicate-ballots.ts` guard is pre-verified as needing **no change** (`:117` skips non-accept before bucketing), and per corrected finding (a) the reject-path block needs no change either.
+- **P3 — `macp-sdk-python`.** `make sync-fixtures` across both `FIXTURE_DIR_PAIRS` entries, replay, green `verify-fixtures`. Closes PY #51, whose own text says "Nothing to build here first." Reject-path hygiene is already covered by #53.
 
 All three payload types (`Objection`/`Withdraw`/`TaskUpdate`) are pre-verified as decodable in both SDKs today, so the vendoring itself is mechanical; the harness work is the real content of T2/P3.
 
@@ -192,8 +200,6 @@ the verify gate changed the outcome rather than rubber-stamping it:
   red. That mattered more than any other check here, because the PR's entire premise is that a
   compile-only test gave false assurance.
 
-**Still open, unchanged in priority:** spec S3 (the #81 + #84 fixture fan-out) and Wave 2's three
-vendoring PRs — including the harness work in both SDKs, which finding (a) above established is a
-prerequisite rather than a follow-up, since `macp-runtime` is currently the only implementation that
-replays reject-path fixtures at all. Wave 4's five TS projection sites with governing RFC rules are
-likewise untouched.
+**Still open:** spec S3 (the #81 + #84 fixture fan-out) and Wave 2's three vendoring PRs. The harness
+work finding (a) originally called a prerequisite **does not exist** — see the correction above; the
+vendoring is mechanical. Wave 4's five TS projection sites with governing RFC rules are in progress.
