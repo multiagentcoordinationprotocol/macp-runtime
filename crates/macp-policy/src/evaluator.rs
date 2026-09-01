@@ -2091,4 +2091,211 @@ mod tests {
             );
         }
     }
+
+    // ── RFC-MACP-0012 §5.2 reserved governance profiles ─────────────
+    //
+    // These drive the *pre-registered canonical definitions* (not hand-rolled
+    // rules) through the evaluator, so they pin the §5.2 outcome table against
+    // whatever `defaults.rs` actually ships.
+
+    use crate::defaults::{std_majority_policy, std_supermajority_policy, std_unanimous_policy};
+
+    /// N voters, `approve` of whom approve and the rest reject, all on `p1`.
+    fn split_votes(approve: usize, reject: usize) -> (DecisionState, Vec<String>) {
+        let mut entries: Vec<(String, String)> = Vec::new();
+        for i in 0..approve {
+            entries.push((format!("agent://a{i}"), "APPROVE".to_string()));
+        }
+        for i in 0..reject {
+            entries.push((format!("agent://r{i}"), "REJECT".to_string()));
+        }
+        let refs: Vec<(&str, &str, &str)> = entries
+            .iter()
+            .map(|(voter, vote)| ("p1", voter.as_str(), vote.as_str()))
+            .collect();
+        let people = entries.iter().map(|(v, _)| v.clone()).collect();
+        (make_state_with_votes(refs), people)
+    }
+
+    fn approves(policy: &PolicyDefinition, state: &DecisionState, people: &[String]) -> bool {
+        matches!(
+            evaluate_decision_commitment_outcome(policy, state, people, true),
+            PolicyDecision::Allow { .. }
+        )
+    }
+
+    #[test]
+    fn std_majority_approves_an_even_split() {
+        // §5.2: the comparison is inclusive, so 1-of-2 approves.
+        let policy = std_majority_policy();
+        let (state, people) = split_votes(1, 1);
+        assert!(approves(&policy, &state, &people));
+    }
+
+    #[test]
+    fn std_majority_denies_a_minority() {
+        let policy = std_majority_policy();
+        let (state, people) = split_votes(1, 2);
+        assert!(!approves(&policy, &state, &people));
+    }
+
+    #[test]
+    fn std_majority_ignores_abstentions_in_the_denominator() {
+        // §4.1: the denominator is the decisive votes; abstentions neither
+        // help nor hinder. 1 approve / 1 reject / 3 abstain still approves.
+        let policy = std_majority_policy();
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://a0", "APPROVE"),
+            ("p1", "agent://r0", "REJECT"),
+            ("p1", "agent://x0", "ABSTAIN"),
+            ("p1", "agent://x1", "ABSTAIN"),
+            ("p1", "agent://x2", "ABSTAIN"),
+        ]);
+        let people: Vec<String> = ["a0", "r0", "x0", "x1", "x2"]
+            .iter()
+            .map(|s| format!("agent://{s}"))
+            .collect();
+        assert!(approves(&policy, &state, &people));
+    }
+
+    #[test]
+    fn std_majority_denies_with_no_votes() {
+        // require_vote_quorum = true, so an unvoted commitment is blocked.
+        let policy = std_majority_policy();
+        let state = make_state_with_votes(vec![]);
+        assert!(!approves(&policy, &state, &participants()));
+    }
+
+    #[test]
+    fn std_supermajority_matches_the_rfc_outcome_table() {
+        let policy = std_supermajority_policy();
+        for (approve, total) in [(2usize, 3usize), (4, 6), (20, 30), (67, 100)] {
+            let (state, people) = split_votes(approve, total - approve);
+            assert!(
+                approves(&policy, &state, &people),
+                "{approve} of {total} should approve under policy.std.supermajority"
+            );
+        }
+        let (state, people) = split_votes(66, 34);
+        assert!(
+            !approves(&policy, &state, &people),
+            "66 of 100 must be denied under policy.std.supermajority"
+        );
+    }
+
+    #[test]
+    fn std_supermajority_denies_a_single_voter() {
+        // quorum is `count: 2`, enforced because require_vote_quorum is true.
+        let policy = std_supermajority_policy();
+        let (state, people) = split_votes(1, 0);
+        assert!(!approves(&policy, &state, &people));
+    }
+
+    #[test]
+    fn std_unanimous_approves_when_every_participant_approves() {
+        let policy = std_unanimous_policy();
+        let people = participants();
+        let refs: Vec<(&str, &str, &str)> = people
+            .iter()
+            .map(|p| ("p1", p.as_str(), "APPROVE"))
+            .collect();
+        let state = make_state_with_votes(refs);
+        assert!(approves(&policy, &state, &people));
+    }
+
+    #[test]
+    fn std_unanimous_is_blocked_by_a_silent_declared_participant() {
+        // §4.1: stricter than "all decisive votes approve" — a declared
+        // participant who has not voted blocks the commitment.
+        let policy = std_unanimous_policy();
+        let people = participants();
+        let state = make_state_with_votes(vec![
+            ("p1", people[0].as_str(), "APPROVE"),
+            ("p1", people[1].as_str(), "APPROVE"),
+        ]);
+        assert!(!approves(&policy, &state, &people));
+    }
+
+    #[test]
+    fn std_unanimous_is_blocked_by_an_abstaining_participant() {
+        let policy = std_unanimous_policy();
+        let people = participants();
+        let state = make_state_with_votes(vec![
+            ("p1", people[0].as_str(), "APPROVE"),
+            ("p1", people[1].as_str(), "APPROVE"),
+            ("p1", people[2].as_str(), "ABSTAIN"),
+        ]);
+        assert!(!approves(&policy, &state, &people));
+    }
+
+    // ── §4.1 clauses the profiles depend on ─────────────────────────
+
+    #[test]
+    fn voting_quorum_is_inert_without_require_vote_quorum() {
+        // §4.1: `voting.quorum` states the bar but gates nothing on its own.
+        let policy = make_policy(serde_json::json!({
+            "voting": {
+                "algorithm": "majority",
+                "threshold": 0.5,
+                "quorum": { "type": "count", "value": 99 }
+            },
+            "commitment": { "require_vote_quorum": false }
+        }));
+        let (state, people) = split_votes(1, 0);
+        assert!(
+            approves(&policy, &state, &people),
+            "an unmet quorum must not gate a commitment on its own"
+        );
+    }
+
+    #[test]
+    fn no_decisive_votes_blocks_a_positive_commitment_only_under_require_vote_quorum() {
+        // §4.1 "No decisive votes".
+        let permissive = make_policy(serde_json::json!({
+            "voting": { "algorithm": "unanimous" },
+            "commitment": { "require_vote_quorum": false }
+        }));
+        let empty = make_state_with_votes(vec![]);
+        assert!(
+            approves(&permissive, &empty, &participants()),
+            "without require_vote_quorum an unvoted positive commitment is not blocked"
+        );
+
+        let binding = make_policy(serde_json::json!({
+            "voting": { "algorithm": "unanimous" },
+            "commitment": { "require_vote_quorum": true }
+        }));
+        assert!(!approves(&binding, &empty, &participants()));
+    }
+
+    #[test]
+    fn no_decisive_votes_always_blocks_a_negative_commitment() {
+        // §4.1: a decline must be backed by at least one explicit reject.
+        for require_quorum in [false, true] {
+            let policy = make_policy(serde_json::json!({
+                "voting": { "algorithm": "majority", "threshold": 0.5 },
+                "commitment": { "require_vote_quorum": require_quorum }
+            }));
+            let empty = make_state_with_votes(vec![]);
+            assert!(
+                matches!(
+                    evaluate_decision_commitment_outcome(&policy, &empty, &participants(), false),
+                    PolicyDecision::Deny { .. }
+                ),
+                "a decline with no votes must be denied (require_vote_quorum={require_quorum})"
+            );
+        }
+    }
+
+    #[test]
+    fn plurality_fails_on_a_tie_and_ignores_threshold() {
+        // §4.1: plurality is "more approve than reject"; a tie fails.
+        let policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "plurality", "threshold": 0.01 }
+        }));
+        let (tied, tied_people) = split_votes(1, 1);
+        assert!(!approves(&policy, &tied, &tied_people));
+        let (won, won_people) = split_votes(2, 1);
+        assert!(approves(&policy, &won, &won_people));
+    }
 }
