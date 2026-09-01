@@ -37,6 +37,19 @@
       "expect": "accept"
     },
     {
+      "_comment": "RFC-MACP-0007 Section 5 rule 2 (:78): Objection MUST reference an existing proposal_id.",
+      "sender": "agent://b",
+      "message_type": "Objection",
+      "payload_type": "macp.modes.decision.v1.ObjectionPayload",
+      "payload": {
+        "proposal_id": "p-does-not-exist",
+        "reason": "cannot evaluate an objection against a proposal that was never submitted",
+        "severity": "high"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
       "sender": "agent://a",
       "message_type": "Commitment",
       "payload_type": "macp.v1.CommitmentPayload",
@@ -63,6 +76,19 @@
         "reason": "good"
       },
       "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0007 Section 5 rule 3: a second, distinct Vote from a sender who already cast one for the same proposal_id MUST be rejected; the first accepted Vote stands.",
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "REJECT",
+        "reason": "changed my mind after re-reading the proposal"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
     },
     {
       "sender": "agent://b",

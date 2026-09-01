@@ -39,11 +39,65 @@
       },
       "expect": "reject",
       "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "sender": "agent://seller",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.proposal.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "title": "offer",
+        "summary": "terms",
+        "details": [],
+        "tags": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://buyer",
+      "message_type": "CounterProposal",
+      "payload_type": "macp.modes.proposal.v1.CounterProposalPayload",
+      "payload": {
+        "proposal_id": "p2",
+        "supersedes_proposal_id": "p1",
+        "title": "counter",
+        "summary": "revised terms"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0008 Section 2.1 (:32): a CounterProposal mints a new proposal_id, and only the sender of that CounterProposal may withdraw it -- the original proposer of a superseded proposal has no withdrawal authority over the counter-proposal.",
+      "sender": "agent://seller",
+      "message_type": "Withdraw",
+      "payload_type": "macp.modes.proposal.v1.WithdrawPayload",
+      "payload": {
+        "proposal_id": "p2",
+        "reason": "seller did not author this counter-proposal"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "sender": "agent://buyer",
+      "message_type": "Withdraw",
+      "payload_type": "macp.modes.proposal.v1.WithdrawPayload",
+      "payload": {
+        "proposal_id": "p2",
+        "reason": "withdrawing my own counter-proposal"
+      },
+      "expect": "accept"
     }
   ],
   "expected_final_state": "Open",
   "expect_resolution_present": false,
   "expected_mode_state": {
-    "phase": "Negotiating"
+    "phase": "Negotiating",
+    "proposals": {
+      "p2": {
+        "proposal_id": "p2",
+        "proposer": "agent://buyer",
+        "disposition": "Withdrawn"
+      }
+    }
   }
 }
