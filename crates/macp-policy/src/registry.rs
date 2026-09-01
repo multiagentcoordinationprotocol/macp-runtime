@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use tokio::sync::broadcast;
 
-use super::defaults::{default_policy, DEFAULT_POLICY_ID};
+use super::defaults::{
+    canonical_std_policy, default_policy, std_policies, DEFAULT_POLICY_ID, STD_POLICY_PREFIX,
+};
 use macp_core::policy::rules::{
     CommitmentRules, DecisionPolicyRules, HandoffPolicyRules, ProposalPolicyRules,
     QuorumPolicyRules, TaskPolicyRules,
@@ -19,11 +21,18 @@ pub struct PolicyRegistry {
 }
 
 impl PolicyRegistry {
-    /// Create a new policy registry pre-loaded with the default policy.
+    /// Create a new policy registry pre-loaded with the built-in policies:
+    /// the required `policy.default` (RFC-MACP-0012 §5.1) and the three
+    /// reserved governance profiles of §5.2. Pre-registration bypasses
+    /// [`Self::register`] deliberately — the reserved-namespace guard there
+    /// exists to keep callers out of `policy.std.`, not the runtime itself.
     pub fn new() -> Self {
         let mut entries = HashMap::new();
         let default = default_policy();
         entries.insert(default.policy_id.clone(), default);
+        for profile in std_policies() {
+            entries.insert(profile.policy_id.clone(), profile);
+        }
 
         let (change_tx, _) = broadcast::channel(16);
         Self {
@@ -37,6 +46,8 @@ impl PolicyRegistry {
     /// Returns an error if:
     /// - The policy_id is empty
     /// - The policy_id is the reserved default policy
+    /// - The policy_id is in the reserved `policy.std.` namespace and the
+    ///   descriptor is not the canonical RFC-MACP-0012 §5.2 definition
     /// - A policy with this id already exists
     /// - The schema_version is 0
     pub fn register(&self, definition: PolicyDefinition) -> Result<(), String> {
@@ -59,6 +70,7 @@ impl PolicyRegistry {
     ///
     /// Returns an error if:
     /// - The policy is the reserved default policy
+    /// - The policy is a pre-registered `policy.std.` profile
     /// - The policy does not exist
     pub fn unregister(&self, policy_id: &str) -> Result<(), String> {
         if policy_id == DEFAULT_POLICY_ID {
@@ -66,6 +78,16 @@ impl PolicyRegistry {
         }
 
         let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        // RFC-MACP-0012 §7: a pre-registered `policy.std.` policy MUST NOT be
+        // unregistered. Anything present under the prefix was pre-registered —
+        // `register` refuses every other route into the namespace — so mere
+        // presence is the test. An absent one still reports "not found".
+        if policy_id.starts_with(STD_POLICY_PREFIX) && guard.contains_key(policy_id) {
+            return Err(format!(
+                "cannot unregister the built-in reserved policy '{}' (RFC-MACP-0012 §2.2)",
+                policy_id
+            ));
+        }
         if guard.remove(policy_id).is_none() {
             return Err(format!("policy '{}' not found", policy_id));
         }
@@ -164,11 +186,66 @@ impl PolicyRegistry {
         if !definition.rules.is_object() {
             return Err("rules must be a JSON object".into());
         }
+        Self::validate_reserved_namespace(definition)?;
         // Validate that rules deserialize into the mode-specific schema.
         Self::validate_rules_for_mode(&definition.mode, &definition.rules)?;
         // Validate conditional constraints (RFC-MACP-0012).
         Self::validate_conditional_constraints(&definition.mode, &definition.rules)?;
         Ok(())
+    }
+
+    /// Enforce the reserved `policy.std.` namespace (RFC-MACP-0012 §2.2).
+    ///
+    /// A `policy_id` under the prefix may only be registered when the
+    /// descriptor *is* the canonical §5.2 definition for that identifier;
+    /// unassigned identifiers under the prefix are refused outright. This runs
+    /// on every caller-supplied registration, so it covers both
+    /// `RegisterPolicy` and the `MACP_POLICIES_DIR` loading path (which funnels
+    /// through [`Self::register`]).
+    ///
+    /// The rejection message leads with `INVALID_POLICY_DEFINITION` because
+    /// `RegisterPolicyResponse` carries no structured error code — only `ok`
+    /// and a message — so the code the RFC mandates has to travel in the text.
+    fn validate_reserved_namespace(definition: &PolicyDefinition) -> Result<(), String> {
+        if !definition.policy_id.starts_with(STD_POLICY_PREFIX) {
+            return Ok(());
+        }
+        let Some(canonical) = canonical_std_policy(&definition.policy_id) else {
+            return Err(format!(
+                "INVALID_POLICY_DEFINITION: policy_id '{}' is in the reserved '{}' namespace \
+                 but is not a governance profile assigned by RFC-MACP-0012 §5.2",
+                definition.policy_id, STD_POLICY_PREFIX
+            ));
+        };
+        if !Self::resolves_to_same_rules(definition, &canonical) {
+            return Err(format!(
+                "INVALID_POLICY_DEFINITION: policy_id '{}' is reserved by RFC-MACP-0012 §2.2; \
+                 a registration under it must be the canonical §5.2 definition verbatim",
+                definition.policy_id
+            ));
+        }
+        Ok(())
+    }
+
+    /// Semantic equality for a reserved-namespace descriptor: `mode` and
+    /// `schema_version` must match, and every rule parameter — whether spelled
+    /// out or left to its schema default — must resolve to the canonical value.
+    /// Comparing the *parsed* rules (not the raw JSON) is what makes the
+    /// "spelled out or defaulted" clause of §2.2 hold.
+    fn resolves_to_same_rules(candidate: &PolicyDefinition, canonical: &PolicyDefinition) -> bool {
+        if candidate.mode != canonical.mode || candidate.schema_version != canonical.schema_version
+        {
+            return false;
+        }
+        let resolve = |rules: &serde_json::Value| {
+            serde_json::from_value::<DecisionPolicyRules>(rules.clone())
+                .ok()
+                .and_then(|parsed| serde_json::to_value(parsed).ok())
+        };
+        match (resolve(&candidate.rules), resolve(&canonical.rules)) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
     }
 
     /// Validate that policy rules match the expected schema for the target mode.
@@ -243,6 +320,7 @@ impl Default for PolicyRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::defaults::{std_majority_policy, std_unanimous_policy};
 
     fn test_policy(id: &str) -> PolicyDefinition {
         PolicyDefinition {
@@ -374,7 +452,8 @@ mod tests {
         registry.register(test_policy("policy.a")).unwrap();
         registry.register(test_policy("policy.b")).unwrap();
         let all = registry.list(None);
-        assert_eq!(all.len(), 3); // default + a + b
+        // default + the three §5.2 profiles + a + b
+        assert_eq!(all.len(), 6);
     }
 
     #[test]
@@ -386,11 +465,12 @@ mod tests {
         registry.register(task_policy).unwrap();
 
         let decision_policies = registry.list(Some("macp.mode.decision.v1"));
-        // Should include: default (mode="*") + policy.decision (mode matches)
-        assert_eq!(decision_policies.len(), 2);
+        // default (mode="*") + policy.decision + the three §5.2 profiles
+        assert_eq!(decision_policies.len(), 5);
 
         let task_policies = registry.list(Some("macp.mode.task.v1"));
-        // Should include: default (mode="*") + policy.task (mode matches)
+        // Should include: default (mode="*") + policy.task (mode matches);
+        // the §5.2 profiles are Decision Mode only.
         assert_eq!(task_policies.len(), 2);
     }
 
@@ -401,7 +481,162 @@ mod tests {
         registry.register(test_policy("policy.a")).unwrap();
         let all = registry.list(None);
         let ids: Vec<&str> = all.iter().map(|p| p.policy_id.as_str()).collect();
-        assert_eq!(ids, vec!["policy.a", "policy.default", "policy.z"]);
+        assert_eq!(
+            ids,
+            vec![
+                "policy.a",
+                "policy.default",
+                "policy.std.majority",
+                "policy.std.supermajority",
+                "policy.std.unanimous",
+                "policy.z",
+            ]
+        );
+    }
+
+    // ── Reserved `policy.std.` namespace (RFC-MACP-0012 §2.2, §5.2, §7) ──
+
+    #[test]
+    fn new_registry_pre_registers_the_std_profiles() {
+        let registry = PolicyRegistry::new();
+        for expected in std_policies() {
+            let found = registry
+                .get(&expected.policy_id)
+                .unwrap_or_else(|| panic!("{} not pre-registered", expected.policy_id));
+            assert_eq!(found.mode, expected.mode);
+            assert_eq!(found.schema_version, expected.schema_version);
+            assert_eq!(found.rules, expected.rules);
+        }
+    }
+
+    #[test]
+    fn std_profiles_resolve_by_id() {
+        let registry = PolicyRegistry::new();
+        for expected in std_policies() {
+            let resolved = registry.resolve(&expected.policy_id).unwrap();
+            assert_eq!(resolved.policy_id, expected.policy_id);
+        }
+    }
+
+    #[test]
+    fn register_non_canonical_std_id_fails() {
+        let registry = PolicyRegistry::new();
+        // An assigned identifier, but with rules that are not the canonical ones.
+        let mut policy = test_policy("policy.std.majority");
+        policy.rules = serde_json::json!({
+            "voting": { "algorithm": "plurality" },
+            "commitment": { "require_vote_quorum": false }
+        });
+        let err = registry.register(policy).unwrap_err();
+        assert!(err.starts_with("INVALID_POLICY_DEFINITION"), "error: {err}");
+        assert!(err.contains("canonical"), "error: {err}");
+        // The pre-registered definition is untouched.
+        assert_eq!(
+            registry.get("policy.std.majority").unwrap().rules,
+            std_majority_policy().rules
+        );
+    }
+
+    #[test]
+    fn register_unassigned_std_id_fails_and_does_not_resolve() {
+        let registry = PolicyRegistry::new();
+        let err = registry
+            .register(test_policy("policy.std.nonesuch"))
+            .unwrap_err();
+        assert!(err.starts_with("INVALID_POLICY_DEFINITION"), "error: {err}");
+        assert!(err.contains("policy.std."), "error: {err}");
+        assert!(registry.get("policy.std.nonesuch").is_none());
+        assert!(matches!(
+            registry.resolve("policy.std.nonesuch").unwrap_err(),
+            PolicyError::UnknownPolicy(_)
+        ));
+    }
+
+    #[test]
+    fn register_canonical_std_id_fails_as_a_duplicate() {
+        // The descriptor is canonical, so the namespace guard lets it through;
+        // it is then refused as a plain duplicate of the pre-registered profile.
+        let registry = PolicyRegistry::new();
+        let err = registry.register(std_unanimous_policy()).unwrap_err();
+        assert!(err.contains("already registered"), "error: {err}");
+    }
+
+    #[test]
+    fn register_std_id_with_defaulted_rules_is_semantically_equal() {
+        // §2.2: a parameter left to its schema default counts as resolving to
+        // that default. `policy.std.unanimous` omits `threshold`; spelling it
+        // out at the schema default of 0.5 is the same policy, so the guard
+        // must fall through to the duplicate check rather than reject it.
+        let registry = PolicyRegistry::new();
+        let mut policy = std_unanimous_policy();
+        policy.rules["voting"]["threshold"] = serde_json::json!(0.5);
+        let err = registry.register(policy).unwrap_err();
+        assert!(err.contains("already registered"), "error: {err}");
+    }
+
+    #[test]
+    fn register_std_id_with_wrong_mode_fails() {
+        let registry = PolicyRegistry::new();
+        let mut policy = std_majority_policy();
+        policy.mode = "macp.mode.quorum.v1".into();
+        let err = registry.register(policy).unwrap_err();
+        assert!(err.starts_with("INVALID_POLICY_DEFINITION"), "error: {err}");
+    }
+
+    #[test]
+    fn unregister_std_profile_fails() {
+        let registry = PolicyRegistry::new();
+        for profile in std_policies() {
+            let err = registry.unregister(&profile.policy_id).unwrap_err();
+            assert!(err.contains("reserved"), "error: {err}");
+            assert!(
+                registry.get(&profile.policy_id).is_some(),
+                "{} was removed",
+                profile.policy_id
+            );
+        }
+    }
+
+    #[test]
+    fn unregister_unassigned_std_id_reports_not_found() {
+        let registry = PolicyRegistry::new();
+        let err = registry.unregister("policy.std.nonesuch").unwrap_err();
+        assert!(err.contains("not found"), "error: {err}");
+    }
+
+    #[test]
+    fn unnamespaced_short_ids_remain_available() {
+        // §2.2: `policy.majority` and friends are explicitly NOT reserved.
+        let registry = PolicyRegistry::new();
+        registry.register(test_policy("policy.majority")).unwrap();
+        registry.register(test_policy("policy.stdlib")).unwrap();
+        assert!(registry.get("policy.majority").is_some());
+        assert!(registry.get("policy.stdlib").is_some());
+    }
+
+    #[test]
+    fn policies_dir_cannot_smuggle_in_a_std_id() {
+        // `MACP_POLICIES_DIR` is an "implementation-defined loading path" under
+        // §2.2; it funnels through `register`, so the guard covers it.
+        let dir = std::env::temp_dir().join(format!(
+            "macp-policy-std-guard-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("evil.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&test_policy("policy.std.evil")).unwrap(),
+        )
+        .unwrap();
+
+        let registry = PolicyRegistry::new();
+        let err = registry.load_from_dir(&dir).unwrap_err();
+        assert!(err.contains("INVALID_POLICY_DEFINITION"), "error: {err}");
+        assert!(registry.get("policy.std.evil").is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

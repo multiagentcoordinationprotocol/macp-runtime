@@ -14,7 +14,7 @@ Policies are managed through five gRPC RPCs. Any authenticated sender can perfor
 | `ListPolicies` | List all policies, optionally filtered by target mode |
 | `WatchPolicies` | Stream notifications when the registry changes |
 
-The built-in `policy.default` is always present and cannot be registered or removed.
+The built-in `policy.default` is always present and cannot be registered or removed. The `policy.std.` namespace is reserved the same way -- see [Reserved `policy.std.` profiles](#reserved-policystd-profiles).
 
 ## Registering a policy
 
@@ -47,7 +47,7 @@ Here is a complete example of registering a Decision Mode policy that requires m
 }
 ```
 
-At registration, the runtime validates the rules against the target mode's schema. It enforces structural constraints: a `weighted` voting algorithm requires a non-empty `weights` map, `supermajority` requires a threshold above 0.5, and `designated_role` commitment authority requires a non-empty `designated_roles` list. The `schema_version` must be `1`. Rules that fail to deserialize into the target mode's Rust struct are rejected with `INVALID_POLICY_DEFINITION`.
+At registration, the runtime validates the rules against the target mode's schema. It enforces structural constraints: a `weighted` voting algorithm requires a non-empty `weights` map, `supermajority` requires a threshold above 0.5, and `designated_role` commitment authority requires a non-empty `designated_roles` list. The `schema_version` must be `1`. Rules that fail to deserialize into the target mode's Rust struct are rejected with `INVALID_POLICY_DEFINITION`. A `policy_id` under the reserved `policy.std.` prefix is rejected the same way unless it is the canonical definition (see below).
 
 ## Rule examples by mode
 
@@ -78,6 +78,25 @@ At registration, the runtime validates the rules against the target mode's schem
 ```
 
 Supported voting algorithms: `none`, `majority`, `supermajority`, `unanimous`, `weighted`, `plurality`.
+
+#### Voting algorithm semantics
+
+These are the rules the evaluator actually applies (RFC-MACP-0012 §4.1):
+
+| Algorithm | Bar |
+|-----------|-----|
+| `none` | No voting constraint; the mode's built-in logic applies |
+| `majority` | `approve / decisive >= threshold` (default `0.5`) |
+| `supermajority` | `approve / decisive >= threshold`; the schema requires `threshold > 0.5` |
+| `unanimous` | Every **declared participant** cast an approve vote and no reject exists; `threshold` is not consulted |
+| `weighted` | Weighted approve share `>= threshold`, using `weights` (unlisted voters weigh `1.0`) |
+| `plurality` | More approve than reject; a tie fails; no threshold |
+
+- **Denominator.** For `majority`, `supermajority` and `weighted` the denominator is the *decisive* votes -- those cast as approve or reject. Abstentions are excluded and neither help nor hinder the ratio.
+- **Inclusive comparison.** Every threshold comparison is `ratio >= threshold`, so `majority` at its default `0.5` approves an even split. A rule where a tie fails is `plurality`, not `majority` at `0.5`.
+- **Ratios are binary64.** Comparisons are Rust `f64`. With `threshold: 0.6666666666666666` (the binary64 value nearest two-thirds, and what `2.0 / 3.0` produces) 2-of-3, 4-of-6, 20-of-30 and 67-of-100 pass while 66-of-100 does not.
+- **`voting.quorum` is inert on its own.** It states the participation bar but gates nothing until `commitment.require_vote_quorum` is `true`. A policy that sets `voting.quorum` without it imposes no participation requirement.
+- **No decisive votes.** With any algorithm other than `none`, when no decisive vote has been cast the algorithm produces no result. A *positive* commitment is then blocked only if `commitment.require_vote_quorum` is `true` -- so a policy that means its voting algorithm to be binding must set it. A *negative* commitment is always blocked in this case, because a decline needs at least one explicit reject (RFC-MACP-0007 §6.2).
 
 ### Proposal Mode
 
@@ -149,9 +168,14 @@ The `commitment.authority` rule determines who can send the terminal commitment.
 
 | Error code | When it occurs | gRPC status |
 |-----------|----------------|-------------|
-| `UNKNOWN_POLICY_VERSION` | The `policy_version` in SessionStart is not found in the registry | InvalidArgument |
-| `POLICY_DENIED` | A commitment is rejected because governance rules are not satisfied | PermissionDenied |
-| `INVALID_POLICY_DEFINITION` | A policy fails schema validation at registration time | InvalidArgument |
+| `UNKNOWN_POLICY_VERSION` | The `policy_version` in SessionStart is not found in the registry | FailedPrecondition |
+| `POLICY_DENIED` | A commitment is rejected because governance rules are not satisfied | FailedPrecondition |
+| `INVALID_POLICY_DEFINITION` | A policy fails schema validation at registration time, or claims a reserved `policy.std.` identifier | InvalidArgument |
+
+Two caveats on that status column, both visible in `Self::status_from_error` (`src/server.rs`):
+
+- On the `Send` path these codes travel **in the `Ack`** -- the RPC itself succeeds, and the rejection surfaces as `ack.ok = false` with `ack.error.code` set to the string above. The gRPC status only applies where an error escapes as a `Status`. `POLICY_DENIED` additionally attaches its structured reasons as `macp-error-details-bin` metadata.
+- `RegisterPolicy`/`UnregisterPolicy` report failures in band too (`ok: false` plus an `error` string, since `RegisterPolicyResponse` has no code field), so reserved-namespace rejections carry the literal `INVALID_POLICY_DEFINITION` at the head of that string.
 
 When a commitment is denied, the error includes structured reasons explaining which rules were not met:
 
@@ -178,3 +202,74 @@ The default policy (`policy.default`) is always registered with mode `"*"` and n
 ```
 
 Sessions with an empty `policy_version` automatically resolve to this default. It allows commitment whenever the mode's own built-in rules are satisfied.
+
+## Reserved `policy.std.` profiles
+
+Every identifier beginning with `policy.std.` is reserved for the governance profiles published in RFC-MACP-0012 §5.2. The runtime enforces this in `crates/macp-policy/src/registry.rs`:
+
+- A `policy_id` under the prefix is refused unless the descriptor is the canonical §5.2 definition for that identifier -- same `mode`, same `schema_version`, and rules that *resolve* to the canonical values (a parameter left to its schema default counts as that default). The rejection carries `INVALID_POLICY_DEFINITION`.
+- An identifier under the prefix that the RFC has not assigned -- `policy.std.nonesuch`, say -- is refused outright and does not resolve. A `SessionStart` naming it is rejected with `UNKNOWN_POLICY_VERSION`.
+- A pre-registered `policy.std.` profile cannot be unregistered, the same guard `policy.default` has.
+- Both routes into the registry are covered: the `RegisterPolicy` RPC and the `MACP_POLICIES_DIR` preload, which funnels through the same `register` path. A policies directory containing a `policy.std.` file aborts startup.
+
+Short unnamespaced identifiers such as `policy.majority` are **not** reserved and remain available. Deployments should still use their own namespace (`policy.{org}.{name}`).
+
+This runtime pre-registers all three profiles, so they appear in `ListPolicies` and resolve at `SessionStart`. Provisioning them is optional under §5.2 -- a runtime that ships none of them is still conformant -- but the reservation guarantees that an identifier which *does* resolve resolves to these rules everywhere. All three target `macp.mode.decision.v1` at `schema_version: 1`, and all three set `commitment.require_vote_quorum: true`: without it the voting algorithm would not be binding on an unvoted positive commitment, which would make each profile vacuous in exactly the case it exists to govern.
+
+| Policy ID | Governance bar |
+|-----------|----------------|
+| `policy.std.majority` | At least half of the decisive votes approve (an even split approves) |
+| `policy.std.supermajority` | At least two-thirds of the decisive votes approve, with at least two voters |
+| `policy.std.unanimous` | Every declared participant has approved and no reject was cast |
+
+```json
+{
+  "policy_id": "policy.std.majority",
+  "mode": "macp.mode.decision.v1",
+  "schema_version": 1,
+  "description": "Simple majority — at least half of the decisive votes approve",
+  "rules": {
+    "voting": {
+      "algorithm": "majority",
+      "threshold": 0.5,
+      "quorum": { "type": "count", "value": 1 }
+    },
+    "commitment": { "require_vote_quorum": true }
+  }
+}
+```
+
+```json
+{
+  "policy_id": "policy.std.supermajority",
+  "mode": "macp.mode.decision.v1",
+  "schema_version": 1,
+  "description": "Two-thirds supermajority with a minimum of two voters",
+  "rules": {
+    "voting": {
+      "algorithm": "supermajority",
+      "threshold": 0.6666666666666666,
+      "quorum": { "type": "count", "value": 2 }
+    },
+    "commitment": { "require_vote_quorum": true }
+  }
+}
+```
+
+```json
+{
+  "policy_id": "policy.std.unanimous",
+  "mode": "macp.mode.decision.v1",
+  "schema_version": 1,
+  "description": "Unanimous — every declared participant approves and no reject is cast",
+  "rules": {
+    "voting": {
+      "algorithm": "unanimous",
+      "quorum": { "type": "count", "value": 1 }
+    },
+    "commitment": { "require_vote_quorum": true }
+  }
+}
+```
+
+Note that `policy.std.unanimous` counts *declared participants*, not decisive votes: the session initiator is a declared participant under RFC-MACP-0007 §2, so it must vote too. A participant who abstains or never votes blocks the commitment.
