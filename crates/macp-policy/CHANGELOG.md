@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-policy-v0.7.2...macp-policy-v0.7.3) - 2026-09-01
+
+### Added
+
+- *(policy)* reserve the policy.std. namespace and pre-register the RFC-0012 §5.2 profiles ([#138](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/138))
+
 ## [0.7.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-policy-v0.7.0...macp-policy-v0.7.1) - 2026-08-31
 
 ### Other
