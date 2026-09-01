@@ -225,3 +225,83 @@ All three harnesses run **one test case per fixture *file***, not per message. E
 - **ts #71** — that same guard is per-`task_id`; rule 1 scopes it per-session.
 
 `#59` and `#60` remain open deliberately: #68 fixed the four sites with governing normative rules, and the remainder (`TaskComplete`/`TaskFail` accumulation, `Proposal` `Reject` cardinality) are genuinely ambiguous in the RFCs rather than merely unimplemented.
+
+## Wave 5 outcome — 2026-09-01 (second half)
+
+Closed the last deferred item (spec #90) and, in doing so, found two more instances of the
+measurement trap this document already warns about — both in the *tooling that was supposed
+to be checking the corpus*, not in the corpus itself.
+
+### spec #90 — objection_handling is now pinned
+
+Two fixtures, not the one the issue suggested, because only two of the three
+`critical_objection_action` arms are distinguishable through the fixture schema:
+
+- `decision_critical_objection_veto.json` pins the **default `deny`** arm. Framed so the veto
+  has to override an otherwise-*passing* majority: both cast votes are `APPROVE`, the
+  `majority` algorithm passes, and the positive `Commitment` is still `POLICY_DENIED`. A
+  simpler no-votes transcript would have passed even if the veto stopped working.
+- `decision_critical_objection_finalize_decline.json` pins `finalize_decline` — the only arm
+  producing an outcome the default cannot: the veto blocks the positive commitment but
+  *authorizes* the negative one. `voting.algorithm` is `none` deliberately; under any
+  vote-based algorithm the evaluator's `NoVotes` arm denies a negative commitment outright,
+  which would confound the discriminator with the vote-gated decline already pinned by
+  `decision_negative_outcome.json`.
+
+**`hold` is not pinnable and that is a spec bug, not an omission.** In the reference runtime
+`Hold` appears in exactly two places — the enum and one evaluator arm that pushes to
+`deny_reasons`, the same list `Deny` pushes to. Since `deny_reasons` always wins, both arms
+produce `POLICY_DENIED` with the session left open. RFC-MACP-0012 §4.1 (`:102`) contrasts
+`deny` ("reject the commitment") with `hold` ("leave the session open"), but a rejected
+commitment already leaves the session open — the text implies a distinction the code does not
+make. Filed as spec #94 rather than papering over it with a fixture that would not
+discriminate.
+
+Ordering gotcha worth recording: Decision mode only accepts `Objection` while
+`phase == Evaluation` (`ensure_can_deliberate`), so an Objection placed after any `Vote` is
+rejected with `InvalidPayload`. The first draft of the veto fixture had exactly that bug and
+the runtime caught it. `decision_happy_path.json` orders its Objection before the vote for
+the same reason.
+
+### Trap 3: a vendored fixture the runtime never replayed
+
+The SDK harnesses discover fixtures dynamically; `macp-runtime`'s list is **explicit**
+(`conformance_test!` per fixture). So a fixture synced from the spec without a registration
+entry is silently never replayed — and *every other signal stays green*: it lints, it vendors
+byte-identically, the fixture-oracle job passes. The existing
+`fixtures_conform_to_canonical_format` guard asserts `checked >= 17`, a floor on files **seen**,
+not files **replayed**, so it could never catch this.
+
+`every_fixture_is_registered` now reads its own source and fails naming any unregistered
+fixture. Proven by deleting a registration and confirming the failure names that fixture,
+rather than trusting a guard only ever observed passing.
+
+### Trap 4: CI ran 185 of 718 tests
+
+The root `Cargo.toml` is both a package and the workspace root, so bare `cargo test` resolves
+to the root package alone. Every test command in the `Test` job omitted `--workspace`, so the
+unit tests of all six lower crates had **never run in CI**. Measured on real CI runs, not
+inferred:
+
+| | Tests passed in CI |
+|---|---|
+| before (`cargo test --all-targets`) | **185** |
+| after (`--workspace`) | **718** |
+
+`cargo tarpaulin` had the same gap, so reported coverage described the root package only.
+Nothing caught it indirectly — `clippy --all-targets` proves the crates *compile*, not that
+their tests *pass*.
+
+The sharpest part: `crates/macp-policy` is where the `PolicyEvaluator` lives, so the seven
+RFC-MACP-0012 §4.1 voting-semantics clauses verified during this wave are asserted almost
+entirely by tests CI was not running. Fixed in #141, merged before #138 specifically so that
+#138's new policy suite would actually execute in CI rather than only on a developer machine.
+
+### The pattern across all four traps
+
+Every one had the same shape: **a green signal that was not measuring what it appeared to
+measure.** One test per fixture *file* rather than per message (Wave 2/4); a fixture present
+but unregistered; a test command scoped to one package of seven. In each case the fix was
+cheap and the detection was not — none would have been found by looking at pass/fail counts,
+because the counts were all green and all meaningless. Verify by making the check fail on
+purpose.
