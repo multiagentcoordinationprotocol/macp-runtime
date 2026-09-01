@@ -208,6 +208,14 @@ fn encode_task_payload(msg: &ConformanceMessage) -> Vec<u8> {
             retryable: p["retryable"].as_bool().unwrap_or(false),
         }
         .encode_to_vec(),
+        "TaskUpdate" => macp_runtime::task_pb::TaskUpdatePayload {
+            task_id: p["task_id"].as_str().unwrap_or_default().into(),
+            status: p["status"].as_str().unwrap_or_default().into(),
+            progress: p["progress"].as_f64().unwrap_or_default(),
+            message: p["message"].as_str().unwrap_or_default().into(),
+            partial_output: vec![],
+        }
+        .encode_to_vec(),
         _ => panic!("Unhandled task message: {}", msg.message_type),
     }
 }

@@ -60,6 +60,40 @@
       },
       "expect": "reject",
       "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0011 Section 5 rule 3: a second, distinct ballot from a sender who already cast one for the same request_id MUST be rejected, even when it repeats the same ballot type; the first accepted ballot stands.",
+      "sender": "agent://alice",
+      "message_type": "Approve",
+      "payload_type": "macp.modes.quorum.v1.ApprovePayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "still lgtm, resending"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "sender": "agent://bob",
+      "message_type": "Approve",
+      "payload_type": "macp.modes.quorum.v1.ApprovePayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "agree"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0011 Section 5 rule 3: the per-request_id cap is counted across Approve, Reject, and Abstain combined -- a cross-type second ballot (Reject after an accepted Approve) from the same sender MUST be rejected regardless of the type of either ballot.",
+      "sender": "agent://bob",
+      "message_type": "Reject",
+      "payload_type": "macp.modes.quorum.v1.RejectPayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "actually changed my mind"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
     }
   ],
   "expected_final_state": "Open"

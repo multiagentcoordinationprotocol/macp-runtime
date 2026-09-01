@@ -24,6 +24,18 @@
       "expect": "accept"
     },
     {
+      "_comment": "RFC-MACP-0007 Section 4 (:62-64): Objection is a formal blocking action distinct from a BLOCK Evaluation, with an explicit severity level.",
+      "sender": "agent://b",
+      "message_type": "Objection",
+      "payload_type": "macp.modes.decision.v1.ObjectionPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "reason": "deployment window overlaps a scheduled freeze",
+        "severity": "critical"
+      },
+      "expect": "accept"
+    },
+    {
       "sender": "agent://a",
       "message_type": "Vote",
       "payload_type": "macp.modes.decision.v1.VotePayload",
@@ -67,6 +79,13 @@
         "sender": "agent://orchestrator"
       }
     },
+    "objections": [
+      {
+        "proposal_id": "p1",
+        "severity": "critical",
+        "sender": "agent://b"
+      }
+    ],
     "votes": {
       "p1": {
         "agent://a": {
