@@ -69,6 +69,7 @@ The improvement-plan release (see `CHANGELOG.md` for the complete list):
   - `RegisterPolicy`, `UnregisterPolicy`, `GetPolicy`, `ListPolicies`, `WatchPolicies` RPCs
   - Per-mode rule schemas (voting, objection handling, quorum thresholds, acceptance, assignment, handoff acceptance)
   - Policies evaluated at commitment time; version binding enforced at SessionStart
+  - `policy.default` plus the three reserved `policy.std.` governance profiles (`majority`, `supermajority`, `unanimous`) are pre-registered; the whole `policy.std.` namespace is reserved against registration and unregistration (RFC-MACP-0012 §2.2/§5.2)
 - **Session lifecycle observability**
   - `ListSessions` enumerates current session metadata in bounded pages (`page_size` clamped to a server maximum; pass `next_page_token` back verbatim until it comes back empty)
   - `WatchSessions` streams `Created`/`Resolved`/`Expired` events with a `Created` initial-sync on connect
@@ -374,7 +375,7 @@ MACP_TEST_BINARY=../target/debug/macp-runtime cargo test -- --test-threads=1
 
 The integration suite has three tiers:
 
-- **Tier 1 (Protocol)** — 100 scripted gRPC tests plus 8 JWT bearer auth tests: all modes, error paths, signals, version binding, dedup, suspend/resume, TLS transport, persistence/restart-replay, payload and rate limits, `ListSessions` pagination, concurrent senders, passive subscribe, policy registry and watch streams, mode promotion, and RFC cross-cutting features
+- **Tier 1 (Protocol)** — 116 scripted gRPC tests (including 8 JWT bearer auth tests): all modes, error paths, signals, version binding, dedup, suspend/resume, TLS transport, persistence/restart-replay, payload and rate limits, `ListSessions` pagination, concurrent senders, passive subscribe, policy registry (including the reserved `policy.std.` namespace and the RFC-MACP-0012 §5.2 outcome table) and watch streams, mode promotion, and RFC cross-cutting features
 - **Tier 2 (Rig Tools)** — 5 tests using [Rig](https://rig.rs) agent framework `Tool` implementations for all MACP operations
 - **Tier 3 (E2E)** — 3 tests with real OpenAI GPT-4o-mini agents coordinating through the runtime (requires `OPENAI_API_KEY`)
 
