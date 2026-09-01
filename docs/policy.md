@@ -168,11 +168,14 @@ The `commitment.authority` rule determines who can send the terminal commitment.
 
 | Error code | When it occurs | gRPC status |
 |-----------|----------------|-------------|
-| `UNKNOWN_POLICY_VERSION` | The `policy_version` in SessionStart is not found in the registry | InvalidArgument |
-| `POLICY_DENIED` | A commitment is rejected because governance rules are not satisfied | PermissionDenied |
+| `UNKNOWN_POLICY_VERSION` | The `policy_version` in SessionStart is not found in the registry | FailedPrecondition |
+| `POLICY_DENIED` | A commitment is rejected because governance rules are not satisfied | FailedPrecondition |
 | `INVALID_POLICY_DEFINITION` | A policy fails schema validation at registration time, or claims a reserved `policy.std.` identifier | InvalidArgument |
 
-`RegisterPolicy`/`UnregisterPolicy` report failures in band (`ok: false` plus an `error` string) rather than as a gRPC status, so reserved-namespace rejections carry the literal `INVALID_POLICY_DEFINITION` at the head of that string. The InvalidArgument mapping in the table applies where the code travels as a `MacpError` (for example the `SessionStart` path).
+Two caveats on that status column, both visible in `Self::status_from_error` (`src/server.rs`):
+
+- On the `Send` path these codes travel **in the `Ack`** -- the RPC itself succeeds, and the rejection surfaces as `ack.ok = false` with `ack.error.code` set to the string above. The gRPC status only applies where an error escapes as a `Status`. `POLICY_DENIED` additionally attaches its structured reasons as `macp-error-details-bin` metadata.
+- `RegisterPolicy`/`UnregisterPolicy` report failures in band too (`ok: false` plus an `error` string, since `RegisterPolicyResponse` has no code field), so reserved-namespace rejections carry the literal `INVALID_POLICY_DEFINITION` at the head of that string.
 
 When a commitment is denied, the error includes structured reasons explaining which rules were not met:
 
