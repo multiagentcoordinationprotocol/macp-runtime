@@ -1,0 +1,119 @@
+{
+  "description": "Decision mode: a critical-severity Objection vetoes commitment when objection_handling.critical_severity_vetoes is true, overriding an otherwise-passing approval majority.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "_comment": "RFC-MACP-0012 Section 4.1 (:102): critical_objection_action defaults to 'deny'. Left unset here deliberately so this fixture pins the DEFAULT arm.",
+    "policy_id": "policy.decision.critical-veto",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 2,
+    "description": "Majority vote, initiator-only commitment, with critical-severity objections vetoing commitment.",
+    "rules": {
+      "voting": {
+        "algorithm": "majority"
+      },
+      "objection_handling": {
+        "critical_severity_vetoes": true
+      },
+      "commitment": {
+        "authority": "initiator_only"
+      }
+    }
+  },
+  "policy_version": "policy.decision.critical-veto",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0007 Section 4 (:62-64): Objection carries an explicit severity; only 'critical' feeds the veto path of RFC-MACP-0012 objection_handling. It is placed before any Vote because the Decision mode only accepts Objection while the session is still deliberating -- once a Vote moves the phase on, a further Objection is rejected.",
+      "sender": "agent://b",
+      "message_type": "Objection",
+      "payload_type": "macp.modes.decision.v1.ObjectionPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "reason": "deployment window overlaps a scheduled change freeze",
+        "severity": "critical"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "looks good"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://b",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "no blockers seen yet"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "The veto is decisive: both cast votes APPROVE, so the majority algorithm passes, yet the commitment is denied. That is what distinguishes critical_severity_vetoes=true from the default false -- decision_happy_path.json replays the same Proposal/critical-Objection/APPROVE-Vote shape under policy.default and commits successfully.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.approved",
+        "authority_scope": "test",
+        "reason": "attempt to commit over a standing critical objection",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.critical-veto",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    }
+  ],
+  "expected_final_state": "Open",
+  "expect_resolution_present": false,
+  "expected_mode_state": {
+    "phase": "Voting",
+    "proposals": {
+      "p1": {
+        "proposal_id": "p1",
+        "sender": "agent://orchestrator"
+      }
+    },
+    "votes": {
+      "p1": {
+        "agent://a": {
+          "vote": "APPROVE"
+        },
+        "agent://b": {
+          "vote": "APPROVE"
+        }
+      }
+    }
+  }
+}

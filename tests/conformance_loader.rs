@@ -591,6 +591,52 @@ conformance_test!(
     conformance_multi_round_reject_paths,
     "multi_round_reject_paths.json"
 );
+conformance_test!(
+    conformance_decision_critical_objection_veto,
+    "decision_critical_objection_veto.json"
+);
+conformance_test!(
+    conformance_decision_critical_objection_finalize_decline,
+    "decision_critical_objection_finalize_decline.json"
+);
+
+/// Guard: every vendored fixture must be registered with `conformance_test!`.
+///
+/// Unlike both SDK harnesses, which discover fixtures dynamically, the
+/// registration list above is explicit. A fixture synced from the spec repo
+/// without a matching `conformance_test!` entry is therefore silently never
+/// replayed: it lints clean, it vendors byte-identically, the fixture-oracle
+/// job passes — and it asserts nothing. That failure mode is invisible
+/// precisely because every other signal stays green.
+///
+/// This test reads its own source and fails if any fixture file is missing
+/// from it. `fixtures_conform_to_canonical_format`'s `checked >= 17` is a
+/// floor on files *seen*, not on files *replayed*, so it cannot catch this.
+#[test]
+fn every_fixture_is_registered() {
+    let src = include_str!("conformance_loader.rs");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/conformance");
+    let mut unregistered: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if name == "schema.json" {
+            continue;
+        }
+        if !src.contains(&format!("\"{name}\"")) {
+            unregistered.push(name);
+        }
+    }
+    unregistered.sort();
+    assert!(
+        unregistered.is_empty(),
+        "fixture(s) present in tests/conformance but never registered with \
+         conformance_test!, so they are never replayed: {unregistered:?}"
+    );
+}
 
 /// Structural guard for the conformance-pack format: every fixture must use
 /// canonical fully-qualified protobuf payload names and valid enums, matching
