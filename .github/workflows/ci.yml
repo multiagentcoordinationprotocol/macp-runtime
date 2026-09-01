@@ -169,17 +169,17 @@ jobs:
           repo-token: ${{ github.token }}
 
       - name: Run tests
-        run: cargo test --all-targets
+        run: cargo test --workspace --all-targets
         env:
           MACP_MEMORY_ONLY: "1"
 
       - name: Run conformance tests
-        run: cargo test conformance
+        run: cargo test --workspace conformance
         env:
           MACP_MEMORY_ONLY: "1"
 
       - name: Run policy tests
-        run: cargo test policy
+        run: cargo test --workspace policy
         env:
           MACP_MEMORY_ONLY: "1"
 
@@ -362,7 +362,7 @@ jobs:
       - name: Generate coverage
         # tarpaulin already instruments all targets by default and rejects a
         # second explicit --all-targets, so it is not passed here.
-        run: cargo tarpaulin --out xml
+        run: cargo tarpaulin --workspace --out xml
         env:
           MACP_MEMORY_ONLY: "1"
 
