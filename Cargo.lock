@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "macp-auth"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1161,7 +1161,7 @@ dependencies = [
 
 [[package]]
 name = "macp-core"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "macp-pb",
  "prost",
@@ -1174,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "macp-modes"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "chrono",
  "macp-core",
@@ -1189,7 +1189,7 @@ dependencies = [
 
 [[package]]
 name = "macp-pb"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "macp-proto",
  "prost",
@@ -1199,7 +1199,7 @@ dependencies = [
 
 [[package]]
 name = "macp-policy"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "macp-core",
  "serde",
@@ -1215,7 +1215,7 @@ checksum = "5afe7d6f5650d39d5210a2017008b281c61f7a732f82ef9f6b3a4ae4c63f9876"
 
 [[package]]
 name = "macp-runtime"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1253,7 +1253,7 @@ dependencies = [
 
 [[package]]
 name = "macp-storage"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "async-trait",
  "chrono",
