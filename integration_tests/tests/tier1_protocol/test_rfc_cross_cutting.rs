@@ -5,8 +5,8 @@
 use crate::common;
 use macp_integration_tests::helpers::*;
 use macp_runtime::pb::{
-    CommitmentPayload, Envelope, GetManifestRequest, InitializeRequest, SendRequest, SignalPayload,
-    WatchSignalsRequest,
+    CommitmentPayload, Envelope, GetManifestRequest, InitializeRequest, ProgressPayload,
+    SendRequest, SignalPayload, WatchSignalsRequest,
 };
 use prost::Message;
 use tonic::Request;
@@ -249,6 +249,147 @@ async fn signal_with_non_empty_mode_rejected() {
     eprintln!("─────────────────────────────────────────────────────────────");
 
     assert!(!ack.ok, "Signal with non-empty mode must be rejected");
+}
+
+// ── Progress (RFC-MACP-0001 §6) ─────────────────────────────────────────
+//
+// Unlike Signals, Progress is valid in exactly two shapes: both session_id
+// and mode empty (ambient), or both non-empty (session-scoped). Exactly one
+// empty is a mixed shape and MUST be rejected with INVALID_ENVELOPE.
+
+fn progress_payload(message: &str) -> Vec<u8> {
+    ProgressPayload {
+        progress_token: String::new(),
+        progress: 0.0,
+        total: 0.0,
+        message: message.into(),
+        target_message_id: String::new(),
+    }
+    .encode_to_vec()
+}
+
+#[tokio::test]
+async fn progress_with_empty_session_and_mode_accepted() {
+    // RFC-MACP-0001 §6: ambient Progress — both session_id and mode empty.
+    let mut client = common::grpc_client().await;
+    let mid = new_message_id();
+    let env = Envelope {
+        macp_version: "1.0".into(),
+        mode: String::new(),
+        message_type: "Progress".into(),
+        message_id: mid,
+        session_id: String::new(),
+        sender: String::new(),
+        timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+        payload: progress_payload("ambient progress update"),
+    };
+
+    let ack = send_as(&mut client, "agent://worker", env).await.unwrap();
+
+    assert!(
+        ack.ok,
+        "Progress with empty session_id and mode should be accepted"
+    );
+}
+
+#[tokio::test]
+async fn progress_with_non_empty_session_and_mode_accepted() {
+    // RFC-MACP-0001 §6: session-scoped Progress — both session_id and mode non-empty.
+    let mut client = common::grpc_client().await;
+    let sid = new_session_id();
+    let coord = "agent://coordinator";
+    let worker = "agent://worker";
+
+    send_as(
+        &mut client,
+        coord,
+        envelope(
+            MODE_DECISION,
+            "SessionStart",
+            &new_message_id(),
+            &sid,
+            coord,
+            session_start_payload("decision in progress", &[coord, worker], 30_000),
+        ),
+    )
+    .await
+    .unwrap();
+
+    let env = envelope(
+        MODE_DECISION,
+        "Progress",
+        &new_message_id(),
+        &sid,
+        worker,
+        progress_payload("session-scoped progress update"),
+    );
+
+    let ack = send_as(&mut client, worker, env).await.unwrap();
+
+    assert!(
+        ack.ok,
+        "Progress with non-empty session_id and mode should be accepted"
+    );
+}
+
+#[tokio::test]
+async fn progress_with_session_id_and_empty_mode_rejected() {
+    // RFC-MACP-0001 §6: mixed shape — session_id set, mode empty. MUST be rejected.
+    let mut client = common::grpc_client().await;
+    let mid = new_message_id();
+    let env = Envelope {
+        macp_version: "1.0".into(),
+        mode: String::new(),
+        message_type: "Progress".into(),
+        message_id: mid,
+        session_id: "some-session-id".into(),
+        sender: String::new(),
+        timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+        payload: progress_payload("mixed shape update"),
+    };
+
+    let ack = send_as(&mut client, "agent://worker", env).await.unwrap();
+
+    let err_code = ack
+        .error
+        .as_ref()
+        .map(|e| e.code.as_str())
+        .unwrap_or("(none)");
+    assert!(
+        !ack.ok,
+        "Progress with non-empty session_id and empty mode must be rejected"
+    );
+    assert_eq!(err_code, "INVALID_ENVELOPE");
+}
+
+#[tokio::test]
+async fn progress_with_mode_and_empty_session_id_rejected() {
+    // RFC-MACP-0001 §6: mixed shape — mode set, session_id empty. MUST be rejected.
+    let mut client = common::grpc_client().await;
+    let mid = new_message_id();
+    let env = Envelope {
+        macp_version: "1.0".into(),
+        mode: MODE_DECISION.into(),
+        message_type: "Progress".into(),
+        message_id: mid,
+        session_id: String::new(),
+        sender: String::new(),
+        timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+        payload: progress_payload("mixed shape update"),
+    };
+
+    let ack = send_as(&mut client, "agent://worker", env).await.unwrap();
+
+    let err_code = ack
+        .error
+        .as_ref()
+        .map(|e| e.code.as_str())
+        .unwrap_or("(none)");
+    assert!(
+        !ack.ok,
+        "Progress with non-empty mode and empty session_id must be rejected"
+    );
+    assert_eq!(err_code, "INVALID_ENVELOPE");
 }
 
 #[tokio::test]

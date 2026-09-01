@@ -129,9 +129,13 @@ impl MacpServer {
                 return Err(MacpError::InvalidEnvelope);
             }
         }
-        if env.message_type == "Progress" && env.session_id.is_empty() {
-            // Ambient Progress: mode must also be empty
-            if !env.mode.trim().is_empty() {
+        if env.message_type == "Progress" {
+            // Progress is valid in exactly two shapes: both session_id and mode
+            // empty (ambient), or both non-empty (session-scoped). Exactly one
+            // empty is a mixed shape and must be rejected.
+            let session_id_empty = env.session_id.is_empty();
+            let mode_empty = env.mode.trim().is_empty();
+            if session_id_empty != mode_empty {
                 return Err(MacpError::InvalidEnvelope);
             }
         }
@@ -141,8 +145,6 @@ impl MacpServer {
         if !is_ambient_type && env.mode.trim().is_empty() {
             return Err(MacpError::InvalidEnvelope);
         }
-        // Session-scoped Progress must have non-empty mode (enforced above for non-ambient types,
-        // and ambient Progress with non-empty session_id falls through to here naturally)
         if env.payload.len() > self.security.max_payload_bytes {
             return Err(MacpError::PayloadTooLarge);
         }
