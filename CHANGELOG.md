@@ -6,6 +6,20 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.7.2](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.7.1...macp-runtime-v0.7.2) - 2026-09-01
+
+### Fixed
+
+- *(server)* reject Progress envelopes with exactly one of session_id/mode empty ([#137](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/137))
+
+### Other
+
+- *(deps)* bump criterion in the major-updates group ([#129](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/129))
+- *(deps)* bump tonic-health in the minor-and-patch group ([#128](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/128))
+- *(deps)* bump the actions group with 3 updates ([#130](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/130))
+- *(conformance)* vendor spec PR #89's fixtures, fix TaskUpdate harness gap ([#135](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/135))
+- *(deps)* bump rust in the docker group ([#127](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/127))
+
 ## [0.7.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.7.0...macp-runtime-v0.7.1) - 2026-08-31
 
 ### Other
