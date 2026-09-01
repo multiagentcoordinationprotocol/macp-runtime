@@ -140,16 +140,60 @@ Each is its own PR in its own repo. All three should merge the same day S3 does;
 | Wave | Phase | Repo | Issues | Status |
 |---|---|---|---|---|
 | 0 | Scoping decision + rule 1 hardening | — | #83, #125 | **DONE** — ratified 2026-08-31 |
-| 1 | S1 which-ballot-stands + rule 1 invariant | spec | #83, #125 | **READY** |
-| 1 | S2 message_type mode-scoped | spec | #82 | TODO |
+| 1 | S1 which-ballot-stands + rule 1 invariant | spec | #83, #125 | **MERGED** `cd5ac2b` — #83, #125 closed |
+| 1 | S2 message_type mode-scoped | spec | #82 | PR #86 open, green, 2 verify rounds |
 | 1 | S3 conformance fixtures | spec | #84, #81 | TODO (blocked on S1) |
 | 2 | R1 vendor fixtures | runtime | — | TODO (blocked on S3) |
 | 2 | T2 vendor + teach harness to replay rejects | ts-sdk | — | TODO (blocked on S3) |
 | 2 | P3 vendor + teach harness to replay rejects | py-sdk | #51 | TODO (blocked on S3) |
-| 3 | T1 afterSequence | ts-sdk | #58 | TODO |
-| 3 | P1 execution gate + fix 6 broken examples | py-sdk | #49 | TODO |
-| 3 | P2 doc sweep (5 pages) + QuorumThreshold validation | py-sdk | #50 | TODO |
+| 3 | T1 afterSequence | ts-sdk | #58 | **MERGED** — PR #65, #58 closed |
+| 3 | P1 execution gate + fix 6 broken examples | py-sdk | #49 | **MERGED** — PR #52, #49 closed |
+| 3 | P2 doc sweep (5 pages) + QuorumThreshold validation | py-sdk | #50 | **MERGED** — PR #52, #50 closed |
 | 3 | ~~P4 release 0.8.0~~ | py-sdk | — | **OBSOLETE** — shipped 2026-08-31 |
-| 3 | P5 reclaim the CHANGELOG | py-sdk | — | TODO |
+| 3 | P5 reclaim the CHANGELOG | py-sdk | — | **MERGED** — PR #52 |
 | 4 | T3 fix the 5 sites that have RFC rules | ts-sdk | #59, #60 | TODO |
 | 4 | T4 file spec issues for the 2 ambiguous sites | ts-sdk→spec | #59 | TODO |
+
+
+## Wave 1/3 outcome — 2026-09-01
+
+Merged: spec #85 (`cd5ac2b`), `macp-sdk-typescript` #65, `macp-sdk-python` #52, and this repo's #131.
+Closed: spec #83, runtime #125, TS #58, PY #49, PY #50.
+Open and green, one verify round from merge: spec #86.
+
+**Five issues were filed from findings the planning and verification passes turned up.** Each is the
+same shape the program exists to close — behaviour that is implemented and enforced with nothing
+normative or nothing mechanical behind it:
+
+| Issue | Repo | Finding |
+|---|---|---|
+| #87 | spec | RFC-0001 §6 contemplates only Signals as the empty-`mode` case, but the runtime also accepts ambient `Progress` (`src/server.rs:118-140`). The code comment cites an RFC for the Signal rule and cites nothing for the `Progress` rule directly beneath it. |
+| #88 | spec | `lint_fixtures.py:101`'s initiator carve-out names `CancelSession`, which is never a `message_type` — the entry is dead and `SessionCancel` is uncovered. |
+| #66 | ts-sdk | `Participant.run()` breaks on `!this.running` *after* the adapter counted the envelope. Under replay-from-0 that message returned next run; with the resume cursor it is permanently skipped. #65 is what made a latent bug consequential. |
+
+**What verification caught that execution did not.** Worth recording, because in three of four phases
+the verify gate changed the outcome rather than rubber-stamping it:
+
+- **Spec #86, round 1:** the new normative text listed `CancelSession` among mode-independent
+  *message types*. That is the RPC name; the envelope type is `SessionCancel` (RFC-0001 `:253`,
+  `runtime.rs:817`). A normative sentence about interpreting `message_type` named a value that can
+  never legally appear in `message_type`.
+- **Spec #86, round 2:** the fix completed the Core-type list as exhaustive but omitted `Progress` —
+  which the schema's own body binds to `ProgressPayload` unconditionally, the runtime dispatches in
+  the same match arm as `Signal`, and both SDKs plus the control plane carry in their core maps.
+  **As written, the new MUST NOT would have made four existing implementations non-conforming** — a
+  clarification phase silently becoming a breaking requirement. Caught pre-merge.
+- **TS #65:** the verifier mutation-tested the new tests and proved the off-by-one is caught in both
+  directions against a live runtime (`+1` → first pass times out; `-1` → wrong count), rather than
+  taking the green suite as evidence.
+- **PY #52:** the executor caught a tautology in its *own* draft — the first coverage-parity test
+  computed `RUN = {all examples} − EXCLUDED`, which can never fail. Independently re-proven at merge
+  time: adding an unclassified example fails the gate, reverting one of the six fixes turns its case
+  red. That mattered more than any other check here, because the PR's entire premise is that a
+  compile-only test gave false assurance.
+
+**Still open, unchanged in priority:** spec S3 (the #81 + #84 fixture fan-out) and Wave 2's three
+vendoring PRs — including the harness work in both SDKs, which finding (a) above established is a
+prerequisite rather than a follow-up, since `macp-runtime` is currently the only implementation that
+replays reject-path fixtures at all. Wave 4's five TS projection sites with governing RFC rules are
+likewise untouched.
