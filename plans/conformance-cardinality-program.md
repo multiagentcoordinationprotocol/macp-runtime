@@ -149,18 +149,18 @@ Each is its own PR in its own repo. All three should merge the same day S3 does;
 |---|---|---|---|---|
 | 0 | Scoping decision + rule 1 hardening | — | #83, #125 | **DONE** — ratified 2026-08-31 |
 | 1 | S1 which-ballot-stands + rule 1 invariant | spec | #83, #125 | **MERGED** `cd5ac2b` — #83, #125 closed |
-| 1 | S2 message_type mode-scoped | spec | #82 | PR #86 open, green, 2 verify rounds |
-| 1 | S3 conformance fixtures | spec | #84, #81 | TODO (blocked on S1) |
-| 2 | R1 vendor fixtures | runtime | — | TODO (blocked on S3) |
-| 2 | T2 vendor + teach harness to replay rejects | ts-sdk | — | TODO (blocked on S3) |
-| 2 | P3 vendor + teach harness to replay rejects | py-sdk | #51 | TODO (blocked on S3) |
+| 1 | S2 message_type mode-scoped | spec | #82 | **MERGED** `a1b29a1` — #82 closed |
+| 1 | S3 conformance fixtures | spec | #84, #81 | **MERGED** PR #89 — #81, #84 closed |
+| 2 | R1 vendor fixtures + `TaskUpdate` harness branch | runtime | — | **MERGED** PR #135 |
+| 2 | T2 vendor fixtures | ts-sdk | — | **MERGED** PR #69 — harness needed no change |
+| 2 | P3 vendor fixtures | py-sdk | #51 | **MERGED** PR #54 — #51 closed; harness needed no change |
 | 3 | T1 afterSequence | ts-sdk | #58 | **MERGED** — PR #65, #58 closed |
 | 3 | P1 execution gate + fix 6 broken examples | py-sdk | #49 | **MERGED** — PR #52, #49 closed |
 | 3 | P2 doc sweep (5 pages) + QuorumThreshold validation | py-sdk | #50 | **MERGED** — PR #52, #50 closed |
 | 3 | ~~P4 release 0.8.0~~ | py-sdk | — | **OBSOLETE** — shipped 2026-08-31 |
 | 3 | P5 reclaim the CHANGELOG | py-sdk | — | **MERGED** — PR #52 |
-| 4 | T3 fix the 5 sites that have RFC rules | ts-sdk | #59, #60 | TODO |
-| 4 | T4 file spec issues for the 2 ambiguous sites | ts-sdk→spec | #59 | TODO |
+| 4 | T3 fix the sites that have RFC rules | ts-sdk | #59, #60 | **MERGED** PR #68 — 4 of 5 fixed; #59/#60 stay open |
+| 4 | T4 file follow-ups for the deferred sites | ts-sdk→spec | #59 | **DONE** — spec #90, ts #70, #71 |
 
 
 ## Wave 1/3 outcome — 2026-09-01
@@ -203,3 +203,25 @@ the verify gate changed the outcome rather than rubber-stamping it:
 **Still open:** spec S3 (the #81 + #84 fixture fan-out) and Wave 2's three vendoring PRs. The harness
 work finding (a) originally called a prerequisite **does not exist** — see the correction above; the
 vendoring is mechanical. Wave 4's five TS projection sites with governing RFC rules are in progress.
+
+## Wave 2/4 outcome — 2026-09-01
+
+The fan-out landed as a coordinated set and behaved exactly as Context §1 predicted. Spec PR #89 was held unmerged until all three vendoring PRs were open; on merge, each vendoring PR's fixture guard flipped from red to green on a bare re-run with no further edits, and all three merged within minutes. No repo was left red at any point.
+
+Two predictions in this file were wrong, and both are worth recording because they were wrong in the same direction — assuming a gap where the code already had one covered.
+
+**The SDK harnesses needed no work.** Wave 2 was written as "vendor **+ teach harness to replay rejects**" for both SDKs. Neither needed teaching. `macp-sdk-typescript` already mapped `Objection`, `Withdraw`, and `TaskUpdate` in `src/proto-registry.ts`'s `MODE_MAP`; `macp-sdk-python` derives `PAYLOAD_BUILDERS` from `proto_registry.CORE_MAP`/`MODE_MAP` and already handled all three. Both discover fixtures dynamically, so no per-file wiring existed to add. This is the same error corrected in #134 — see that PR — reappearing one wave later.
+
+**The one real harness gap was in `macp-runtime`, and it was in the test harness only.** `tests/conformance_loader.rs::encode_task_payload()` had no `TaskUpdate` branch, so the new task fixture could not be encoded at all — it panicked with `Unhandled task message: TaskUpdate`. Production `TaskMode` has always handled `TaskUpdate` correctly (`crates/macp-modes/src/mode/task.rs:273-277`, sender-vs-`active_assignee` → `Forbidden`). Fixed in #135 and proven load-bearing by removal.
+
+### A measurement trap worth remembering
+
+All three harnesses run **one test case per fixture *file***, not per message. Every vendoring PR therefore showed an unchanged test count (TS 65, Python 57) while genuinely gaining coverage — `proposal_reject_paths` alone went from 2 messages to 6. A pass/count comparison would have "confirmed" coverage that had not been checked. Each agent instead replayed the new payloads through the real projections directly. Any future corpus change should be verified the same way; the count is not evidence.
+
+### Deferred, with issues filed
+
+- **spec #90** — no fixture anywhere exercises `objection_handling.critical_severity_vetoes` or `critical_objection_action`. Note this is an *unpinned agreement*, not a divergence: `macp-runtime` (`crates/macp-core/src/policy/rules.rs:85-91`) and `macp-sdk-python` (`src/macp_sdk/policy.py:65-73`) declare the same fields with the same defaults today. Nothing holds them there. An earlier review reported this as "opposite defaults"; that was wrong, and the issue says so.
+- **ts #70** — `TaskProjection` now reports the wrong `assignee` after a policy-permitted reassignment. #68 traded one divergence for another: the guard is policy-independent, but RFC-MACP-0009 rule 3c allows reassignment after `TaskReject` when policy permits, and the runtime implements it (`task.rs:257-260` clears `active_assignee`). The default case is far more common, so the trade was the right way round, but the projection needs session-policy input to close the other half.
+- **ts #71** — that same guard is per-`task_id`; rule 1 scopes it per-session.
+
+`#59` and `#60` remain open deliberately: #68 fixed the four sites with governing normative rules, and the remainder (`TaskComplete`/`TaskFail` accumulation, `Proposal` `Reject` cardinality) are genuinely ambiguous in the RFCs rather than merely unimplemented.
