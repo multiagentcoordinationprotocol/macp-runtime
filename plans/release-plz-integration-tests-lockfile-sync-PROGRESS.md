@@ -14,7 +14,7 @@ the substitution is noted. (No phase in this plan is in fact a one-way door.)
 | 0 | Plan + reverify | DONE | FLAWED -> patched (rev 2) | 1 | (uncommitted) |
 | 1 | Sync the lock on the release PR branch | DONE | GAPS -> closed (round 2) | 2 | `a7b6efc` (PR #155) |
 | 2 | Extend the CI lockfile guard | DONE | GAPS -> closed (round 2) | 2+1 | `c9650df` (PR #156) |
-| 3 | Document the invariant, retire the chore | DONE | GAPS -> PASS (round 2) | 2 | branch `docs/integration-tests-lockfile-rule` |
+| 3 | Document the invariant, retire the chore | DONE | GAPS -> PASS (round 2) | 2 | `95ea207` (PR #157) |
 
 ## Repo map
 
@@ -279,7 +279,7 @@ uncommitted) was never disturbed; the worktree was removed and pruned afterwards
 
 **Status: DONE.** Branch `docs/integration-tests-lockfile-rule` (round 1 `32a0fb1`, a fresh
 **Opus** verifier returned **GAPS**, round 2 amended into `6b0e3ca` and returned **PASS**;
-rebased onto Phase 2 as the final commit). Files: `CONTRIBUTING.md`, `docs/testing.md`, and
+rebased onto Phase 2 and merged as `95ea207`, PR #157). Files: `CONTRIBUTING.md`, `docs/testing.md`, and
 this plan. `CLAUDE.md` got the same paragraph as a **local mirror only** — it is gitignored
 (`.gitignore:20`, `git ls-files CLAUDE.md` empty), so that edit is deliberately absent from
 the PR diff. It was not force-added.

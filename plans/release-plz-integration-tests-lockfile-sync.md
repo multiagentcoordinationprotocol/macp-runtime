@@ -274,9 +274,10 @@ release PR via release-plz's own documented "commit files to the release PR" pat
 
 ### Phase 3 — Document the invariant in a *tracked* file
 
-- **Status:** DONE. Divergence from plan: acceptance criterion 1 was **widened** during
-  implementation — review proved the constraint covers a dependency change in *any*
-  workspace crate, not only `integration_tests/Cargo.toml` (see the scope note below).
+- **Status:** DONE (`95ea207`, PR #157, 2 verify rounds). Divergence from plan: acceptance
+  criterion 1 was **widened** during implementation — review proved the constraint covers
+  a dependency change in *any* workspace crate, not only `integration_tests/Cargo.toml`
+  (see the scope note below).
 - **Delivers:** the new contributor constraint and the release-time sync are documented where
   contributors can actually see them, and the standing manual chore is retired.
 - **Depends on:** Phases 1 and 2.
