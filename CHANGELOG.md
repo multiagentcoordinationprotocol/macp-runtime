@@ -6,6 +6,21 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.7.4](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.7.3...macp-runtime-v0.7.4) - 2026-09-06
+
+### Fixed
+
+- *(dependabot)* remove versioning-strategy, invalid for cargo ([#151](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/151))
+- *(ci)* stop dependabot shipping a Cargo.lock the manifest forbids ([#150](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/150))
+
+### Other
+
+- record the two-lockfile rule and the release-PR approval trap ([#157](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/157))
+- guard integration_tests/Cargo.lock against its manifest ([#156](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/156))
+- *(deps)* bump the actions group across 1 directory with 3 updates ([#154](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/154))
+- *(release-plz)* sync integration_tests/Cargo.lock on the release PR ([#155](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/155))
+- *(deps)* bump serde in the minor-and-patch group ([#152](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/152))
+
 ## [0.7.3](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.7.2...macp-runtime-v0.7.3) - 2026-09-01
 
 ### Other
