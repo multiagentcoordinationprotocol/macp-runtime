@@ -74,13 +74,22 @@ jobs:
       # introduced it. `cargo metadata --locked` resolves without building and
       # fails if the lockfile is not exactly what the manifests imply.
       #
-      # Root workspace only, deliberately. `integration_tests/` is a SEPARATE
-      # workspace whose lock pins the seven crates by path: release-plz bumps
-      # their versions and regenerates the root lock, but never that one, so it
-      # is stale by construction between a release and its next regeneration.
-      # Guarding it here would turn every release PR red. It is also never
-      # published, so it carries none of the `cargo publish --locked` hazard
-      # this guard exists for.
+      # This step covers the ROOT workspace only. `integration_tests/` is a
+      # SEPARATE workspace with its own lock, and it IS guarded too -- but by
+      # the `integration` job, not here. Two reasons it lives there: this job
+      # is the MSRV gate and pins RUSTUP_TOOLCHAIN to 1.89.0, while
+      # `integration_tests/Cargo.toml` declares no `rust-version`, so a
+      # dependency raising its MSRV past 1.89 would red the MSRV job for a
+      # reason unrelated to lockfile consistency; and `integration` runs the
+      # current toolchain, already caches that workspace, and is the job that
+      # actually consumes the lock.
+      #
+      # That guard used to be impossible: release-plz bumps the seven crates'
+      # versions and regenerates the root lock but never the integration one,
+      # leaving it stale by construction after every version bump. The
+      # `sync-integration-lock` job in release-plz.yml now regenerates it on
+      # the release PR, so it is no longer stale-by-construction and the guard
+      # is safe to enforce on every PR.
       - name: Verify Cargo.lock is consistent with the manifests
         run: cargo metadata --locked --format-version 1 > /dev/null
 
@@ -499,6 +508,29 @@ jobs:
         with:
           version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ github.token }}
+
+      # Same guard as the root workspace's in the `check` job, for the second
+      # lock: `integration_tests/` is its own workspace, so a stale lock (or
+      # one pinning a version its manifest forbids, issue #140) would
+      # otherwise reach `main` -- nothing else here passes --locked, and cargo
+      # silently repairs a stale lock at build time.
+      #
+      # SCOPE, wider than it looks: `integration_tests/Cargo.lock` records the
+      # full dependency edges of the seven path crates, so adding or removing a
+      # dependency in ANY workspace crate -- `crates/macp-*/Cargo.toml` or the
+      # root `Cargo.toml`, not just `integration_tests/Cargo.toml` -- reds this
+      # job unless the lock is regenerated in the SAME PR. So does changing a
+      # requirement the existing pin no longer satisfies; a requirement change
+      # the pin still satisfies is fine (the two locks legitimately hold
+      # different `serde 1.x` patch versions today). Regenerating is a no-op
+      # when nothing moved, so just run it:
+      #   cargo metadata --manifest-path integration_tests/Cargo.toml --format-version 1 > /dev/null
+      #
+      # Sited in this job rather than the MSRV `check` job because that job
+      # pins toolchain 1.89.0 while this manifest declares no `rust-version`.
+      # Runs before the build so a stale lock fails fast.
+      - name: Verify integration_tests/Cargo.lock is consistent with its manifest
+        run: cargo metadata --locked --manifest-path integration_tests/Cargo.toml --format-version 1 > /dev/null
 
       - name: Build runtime binary
         run: cargo build

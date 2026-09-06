@@ -12,8 +12,8 @@ the substitution is noted. (No phase in this plan is in fact a one-way door.)
 | Phase | Title | Status | Verdict | Rounds | Commit |
 |-------|-------|--------|---------|--------|--------|
 | 0 | Plan + reverify | DONE | FLAWED -> patched (rev 2) | 1 | (uncommitted) |
-| 1 | Sync the lock on the release PR branch | DONE | GAPS -> closed (round 2) | 2 | `d24d7dc` |
-| 2 | Extend the CI lockfile guard | TODO | — | — | — |
+| 1 | Sync the lock on the release PR branch | DONE | GAPS -> closed (round 2) | 2 | `a7b6efc` (PR #155) |
+| 2 | Extend the CI lockfile guard | DONE | GAPS -> closed (round 2) | 2+1 | see Phase 3 |
 | 3 | Document the invariant, retire the chore | TODO | — | — | — |
 
 ## Repo map
@@ -171,3 +171,106 @@ End-to-end with real cargo, simulating release-plz's bump (`[workspace.package] 
   the repo map above), and must not land before this phase, or CI breaks on the release PR.
 - Operator note for the release PR: the sync push moves the head SHA, creating a **second**
   `action_required` run. The job emits a `::notice` naming the SHA that needs approval (S7).
+
+#### Shipped
+
+Pushed `ci/sync-integration-tests-lockfile`, opened **PR #155**, merged on green
+(14/14 required contexts) as **`a7b6efc`** on 2026-09-06. The branch commit was
+`62c76bf` after rebase; the squash-merge commit on `main` is `a7b6efc`, which is the
+durable reference — the pre-squash shas are unreachable.
+
+### Phase 2 — extend the CI lockfile guard
+
+**Status: DONE.** Branch `ci/guard-integration-tests-lockfile` (round 1 shipped `8726392`;
+a fresh **Opus** verifier returned **GAPS**; round 2 amended into `c7ab86f`; rebased onto
+Phase 1 and given a round-3 wording correction). The pre-squash shas are unreachable once
+merged, so the durable reference is the squash commit on `main` — recorded in Phase 3's
+checkpoint, which merges after this one.
+Files touched: `.github/workflows/ci.yml`, `.github/dependabot.yml`, and — folded in at
+push time — this file plus the plan's Phase 1/2 status lines.
+
+#### What shipped
+
+A `cargo metadata --locked --manifest-path integration_tests/Cargo.toml --format-version 1`
+step named "Verify integration_tests/Cargo.lock is consistent with its manifest", added to
+the **`integration`** job (not `check`), sited immediately after protoc install and **before**
+`cargo build`, so a stale lock fails fast rather than after an expensive compile.
+
+The root guard's comment in `check` was rewritten in the same commit. It previously claimed
+the guard was root-only and that guarding the second lock "would turn every release PR red" —
+both false once Phase 1's `sync-integration-lock` job landed. The root guard **step** is
+unchanged.
+
+Round 2 additionally corrected two documentation inaccuracies (below).
+
+#### Round 1 verdict: GAPS — all six acceptance criteria PASSED
+
+The verifier confirmed the workflow change itself is correct and must not be redesigned:
+
+- All **6 acceptance criteria passed**.
+- **Siting in `integration` confirmed correct.** That job is itself a REQUIRED status context
+  on `main` and carries no `if:` condition and no `paths` filter, so the guard runs on every
+  PR and genuinely blocks merge — it is not a weaker position than `check`. The MSRV argument
+  for keeping it out of `check` (that job pins RUSTUP_TOOLCHAIN 1.89.0 while
+  `integration_tests/Cargo.toml` declares no `rust-version`) holds.
+- **Firing test reproduced.** Adding `base64 = "0.22"` to `crates/macp-core/Cargo.toml` made
+  the new step fail with **exit 101**. The guard actually fires.
+
+Every gap returned was **documentation accuracy**, not behaviour:
+
+| ID | Gap | Disposition |
+|----|-----|-------------|
+| 1 | The `ci.yml` root-guard comment (~L87-92) references `sync-integration-lock` in the present tense, which is false until Phase 1's PR #155 lands | **Not fixed by design.** The orchestrator merges #155 first and rebases this branch onto it, at which point the comment is true. Softening the tense would have to be un-done. |
+| 2 | Merge ordering: this branch must not reach `main` before Phase 1 | **Not a code fix.** Handled by the orchestrator sequencing #155 ahead of this PR. |
+| 3 | **The real one.** The new constraint is far wider than any comment or plan text stated. `integration_tests/Cargo.lock` records the seven path crates' full dependency edges, so a dependency change to **ANY** root-workspace crate reds the `integration` job unless that lock is regenerated in the same PR. The shipped comment said "a manifest edit committed without the regenerated lock", which reads as *the integration_tests manifest only* and under-states the rule | **Closed in round 2.** |
+| 4 | `.github/dependabot.yml` misnamed the guarding job. Both cargo blocks ended with "the `cargo metadata --locked` step in ci.yml's Check job fails any PR whose lockfile disagrees with the manifests" — true for the root block, now wrong for `directory: "/integration_tests"`, whose guard lives in `integration` | **Closed in round 2.** |
+
+#### Round 2 — gaps closed
+
+- **Gap 3.** The `integration` job's comment now carries an explicit `SCOPE, wider than it
+  looks:` paragraph stating that adding, removing or changing a dependency in **any**
+  workspace crate — `crates/macp-*/Cargo.toml` or the root `Cargo.toml`, not just
+  `integration_tests/Cargo.toml` — reds this job unless the lock is regenerated in the SAME
+  PR, plus the one-line fix:
+  `cargo metadata --manifest-path integration_tests/Cargo.toml --format-version 1 > /dev/null`
+- **Gap 4.** The `/integration_tests` dependabot block's comment now names the `integration`
+  job and states that Check guards only the root lock. The root (`directory: "/"`) block is
+  untouched — its reference to the Check job is correct.
+- The commit message gained a paragraph recording the wider constraint and the dependabot
+  correction.
+
+#### Pre-merge correction (round 3, orchestrator)
+
+Phase 3's verifier caught that the `SCOPE` comment shipped here over-stated the rule:
+"adding, removing or **changing** a dependency ... leaves that lock stale" is not true of a
+requirement change the existing pin still satisfies. Counter-example in this very tree — the
+root `Cargo.toml` requires `serde = "1"`, the root lock pins `1.0.229`, `integration_tests/
+Cargo.lock` pins `1.0.228`, and `--locked` passes on both. Corrected in `ci.yml` before this
+branch was pushed, so the comment and Phase 3's contributor docs state the same rule.
+`actionlint` re-run: exit 0.
+
+#### Round 2 verification (local)
+
+| Check | Result |
+|-------|--------|
+| `actionlint .github/workflows/ci.yml` | exit **0**, no output |
+| `actionlint -shellcheck=shellcheck .github/workflows/ci.yml` | exit **0**, no output |
+| `python3 -c "import yaml; yaml.safe_load(open('.github/dependabot.yml'))"` | parses; `version: 2`; **no `versioning-strategy` key on any of the four update blocks** (PR #151's fix is intact and was not undone) |
+| Root guard: `RUSTC_WRAPPER="" cargo metadata --locked --format-version 1` | exit **0** |
+| Integration guard: `RUSTC_WRAPPER="" cargo metadata --locked --manifest-path integration_tests/Cargo.toml --format-version 1` | exit **0** |
+
+Round 2 was executed in a throwaway `git worktree` off `ci/guard-integration-tests-lockfile`
+so the main checkout (on `ci/sync-integration-tests-lockfile`, with this PROGRESS file
+uncommitted) was never disturbed; the worktree was removed and pruned afterwards.
+
+#### Carried forward
+
+- **Merge ordering is a hard constraint.** Phase 1's PR #155 (`sync-integration-lock` in
+  `release-plz.yml`) must merge **first**, and this branch must then be rebased onto it.
+  Landing this guard alone would red the next release PR, and would also leave the round-1
+  `ci.yml` comment referencing a job that does not exist.
+- Reverting this guard without also reverting the Phase 1 sync is not a supported rollback:
+  the guard is what keeps that lock's staleness off `main`. Revert both or neither.
+- Phase 3's contributor documentation must state the **wide** rule (any workspace crate's
+  dependency change requires regenerating the second lock), matching the comment shipped here
+  — not the narrower "edit `integration_tests/Cargo.toml`" framing.
