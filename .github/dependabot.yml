@@ -51,8 +51,10 @@ updates:
     #     `major-updates` group below and is a worse trade: a silent gap in
     #     place of a loud, catchable failure.
     # It is caught instead, not prevented: the `cargo metadata --locked` step
-    # in ci.yml's Check job fails any PR whose lockfile disagrees with the
-    # manifests. On such a dependabot PR, update Cargo.toml in the same PR.
+    # in ci.yml's `integration` job -- NOT the Check job, which guards only the
+    # root lock -- fails any PR whose `integration_tests/Cargo.lock` disagrees
+    # with the manifests. On such a dependabot PR, update Cargo.toml in the
+    # same PR.
     schedule:
       interval: monthly
     open-pull-requests-limit: 3

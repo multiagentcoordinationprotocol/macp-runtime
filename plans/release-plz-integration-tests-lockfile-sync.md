@@ -75,18 +75,19 @@ release PR via release-plz's own documented "commit files to the release PR" pat
 
 ### Phase 1 — Sync the lock on the release PR branch
 
-- **Status:** DONE (`d24d7dc`, 2 verify rounds). Divergence from plan: none in design, but the
-  assertion required a correction the plan did not anticipate. Rev 2 specified "no package
-  present in both revisions may change version", implemented first as a `name -> version`
-  dict — which cannot represent a crate present at two versions. This lock has **346 package
-  blocks but only 310 distinct names**, so 36 entries were invisible: it failed *open* on a
-  re-pin of a lower duplicate (`base64 0.22.1 -> 0.22.2` passed) and *closed* on a legitimate
-  removal of a higher one. Now keyed `name -> {version: has_source}` and compared as per-name
-  version **sets**. Also added beyond plan: a sanity floor (>=50 packages + the internal crates
-  must be present, so a truncated lock cannot pass), malformed-block rejection, a positive
-  `cargo metadata --locked` check proving the repair actually worked, a root-`Cargo.lock`
-  dirtiness guard, `timeout-minutes`, and the push target taken from `pr.head_branch` rather
-  than `git rev-parse --abbrev-ref HEAD` (which is only correct for same-repo PRs).
+- **Status:** DONE (`a7b6efc`, PR #155, 2 verify rounds). Divergence from plan: none in
+  design, but the assertion required a correction the plan did not anticipate. Rev 2
+  specified "no package present in both revisions may change version", implemented first
+  as a `name -> version` dict — which cannot represent a crate present at two versions.
+  This lock has **346 package blocks but only 310 distinct names**, so 36 entries were
+  invisible: it failed *open* on a re-pin of a lower duplicate (`base64 0.22.1 -> 0.22.2`
+  passed) and *closed* on a legitimate removal of a higher one. Now keyed `name ->
+  {version: has_source}` and compared as per-name version **sets**. Also added beyond
+  plan: a sanity floor (>=50 packages + the internal crates must be present, so a
+  truncated lock cannot pass), malformed-block rejection, a positive `cargo metadata
+  --locked` check proving the repair actually worked, a root-`Cargo.lock` dirtiness guard,
+  `timeout-minutes`, and the push target taken from `pr.head_branch` rather than `git
+  rev-parse --abbrev-ref HEAD` (which is only correct for same-repo PRs).
 - **Delivers:** a `sync-integration-lock` job in `release-plz.yml` that regenerates
   `integration_tests/Cargo.lock` on the release PR whenever release-plz opens or refreshes it.
 - **Depends on:** nothing. **Must land before or with Phase 2** (see Phase 2).
@@ -215,7 +216,14 @@ release PR via release-plz's own documented "commit files to the release PR" pat
 
 ### Phase 2 — Guard `integration_tests/Cargo.lock` in CI
 
-- **Status:** TODO
+- **Status:** DONE (branch `ci/guard-integration-tests-lockfile`, 2 verify rounds plus a
+  pre-merge wording correction; merge sha recorded by Phase 3). Divergence from plan: the
+  plan scoped the guard narrowly, to a contributor editing `integration_tests/Cargo.toml`.
+  The rule is in fact **wider** — this lock records the seven path crates' full dependency
+  edges, so adding or removing a dependency in *any* workspace crate invalidates it.
+  Proven, not assumed: appending `base64 = "0.22"` to `crates/macp-core/Cargo.toml` makes
+  `cargo metadata --locked --manifest-path integration_tests/Cargo.toml` exit 101. The
+  acceptance criteria and the shipped comment were widened to match.
 - **Delivers:** CI fails any PR whose `integration_tests/Cargo.lock` disagrees with its
   manifest, closing the hole PR #150 had to leave open.
 - **Depends on:** **Phase 1** — and the dependency is hard. Enabling this first reds every
