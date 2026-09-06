@@ -58,7 +58,7 @@ jobs:
           version: "31.x"
           repo-token: ${{ github.token }}
 
-      - uses: MarcoIeni/release-plz-action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
+      - uses: MarcoIeni/release-plz-action@b5543c19b03be9bd48852d20ca89f478b7723260 # v0.5.132
         id: release-plz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
