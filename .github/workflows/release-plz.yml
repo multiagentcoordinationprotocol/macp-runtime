@@ -31,6 +31,12 @@ jobs:
     if: ${{ github.repository_owner == 'multiagentcoordinationprotocol' }}
     outputs:
       releases_created: ${{ steps.release-plz.outputs.releases_created }}
+      # `prs_created` and `pr` feed sync-integration-lock below. `pr` is a JSON
+      # object; when no PR was produced the action emits the literal string `{}`
+      # rather than an empty value, which is why the sync job must guard on
+      # `prs_created` and never on `pr != ''`.
+      prs_created: ${{ steps.release-plz.outputs.prs_created }}
+      pr: ${{ steps.release-plz.outputs.pr }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -66,3 +72,318 @@ jobs:
     if: ${{ needs.release-plz.outputs.releases_created == 'true' }}
     uses: ./.github/workflows/publish.yml
     secrets: inherit
+
+  # `integration_tests/` is a separate cargo workspace (root Cargo.toml:
+  # `exclude = ["integration_tests"]`). It depends on the runtime by path only,
+  # but its Cargo.lock still records the resolved versions of all seven macp-*
+  # crates — and release-plz regenerates the ROOT lock only. So the second lock
+  # goes stale on every version bump until someone regenerates it by hand. This
+  # job does that regeneration on the release PR itself.
+  #
+  # It is a SEPARATE JOB, not a step in `release-plz`, and that is a correctness
+  # requirement rather than tidiness. The action runs `release-pr` and then
+  # `release` in one invocation, so a single run can have prs_created=true AND
+  # releases_created=true. `publish` is gated on `needs: release-plz` plus
+  # `releases_created`; a failing step inside the release-plz job would fail that
+  # job and SKIP publish — producing git tags and a GitHub Release with no
+  # crates.io upload. That is exactly the 0.6.1 incident described at the top of
+  # this file. A separate job cannot gate publish, so a sync failure can never
+  # cost us a release. (`publish` deliberately does NOT list this job in `needs`.)
+  sync-integration-lock:
+    name: sync integration_tests lockfile
+    runs-on: ubuntu-latest
+    # This job holds the workflow's `release-plz-<ref>` concurrency group for as
+    # long as it runs, and that group is what serialises releases. A hung
+    # `cargo metadata` or `gh` call must not sit on it for the 360-minute default.
+    # Real runtime is a couple of minutes (checkout + a metadata-only resolve).
+    timeout-minutes: 15
+    needs: release-plz
+    # Guard on the dedicated boolean. Guarding on `pr != ''` would be wrong: the
+    # action emits `pr={}` (the literal two-character string) on runs that
+    # produced no PR, so that test is true on every release-only run and this job
+    # would fail trying to check out a PR that does not exist.
+    if: ${{ needs.release-plz.outputs.prs_created == 'true' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history + the default persisted credentials: `gh pr checkout`
+          # needs to fetch the PR branch, and the commit below is pushed back
+          # over the same remote.
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pin the same toolchain as the release-plz job so the lockfile is written
+      # by the same cargo that writes the root one. `cargo metadata` does not run
+      # build scripts, so protoc is not needed here.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: "1.96.1"
+
+      # release-plz's own documented "commit files to the release PR" pattern.
+      # Checking out by PR number rather than by branch name keeps this working
+      # even when release-plz closes and reopens the PR on a renamed branch.
+      - name: Check out the release PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ fromJSON(needs.release-plz.outputs.pr).number }}
+        run: |
+          set -euo pipefail
+          gh pr checkout "$PR_NUMBER"
+          git log --oneline -1
+
+      # Deliberately `cargo metadata`, and deliberately NOT cargo's dependency-
+      # update subcommand. Cargo's lock repair here is minimal: it rewrites only
+      # the pins that no longer satisfy the manifests, i.e. the seven macp-*
+      # versions. Asking cargo to update instead would re-resolve every registry
+      # dependency to its newest permitted version, silently sweeping
+      # tonic/tokio/rig-core bumps into a version-bump PR and fighting
+      # dependabot's own /integration_tests entry.
+      #
+      # The root `Cargo.lock` must come out untouched. `integration_tests` is
+      # excluded from the root workspace, so resolving it should not reach the
+      # root lock at all — but "should not" is asserted, not assumed: the commit
+      # step below only stages `integration_tests/Cargo.lock`, so a modified root
+      # lock would otherwise be left dirty and silently dropped.
+      - name: Regenerate integration_tests/Cargo.lock
+        run: |
+          set -euo pipefail
+          cargo metadata --manifest-path integration_tests/Cargo.toml --format-version 1 > /dev/null
+          git --no-pager diff --stat -- integration_tests/Cargo.lock
+
+          if [ -n "$(git status --porcelain -- Cargo.lock)" ]; then
+            echo "ERROR: regenerating integration_tests/Cargo.lock also modified the root Cargo.lock." >&2
+            echo "The root lock is release-plz's to write, and the commit below stages only the" >&2
+            echo "integration_tests lock, so this change would be silently discarded." >&2
+            git --no-pager diff -- Cargo.lock >&2
+            exit 1
+          fi
+
+      # The hazard is a silent re-resolution of THIRD-PARTY pins, not a change in
+      # package count: a legitimate repair can add or remove packages (commit
+      # d3c0d66 did, when macp-core gained sha2). So assert the precise rule —
+      # for any given package NAME, no version may disappear from the lock while
+      # a different version of that same name appears, except for the internal
+      # crates. Whole versions may be added, and whole versions may be removed;
+      # it is the swap that means "cargo re-resolved a pin".
+      #
+      # Name alone is not a key. 25 names in this lock are present at 2-4
+      # versions at once (base64, thiserror, rand, getrandom, four windows-sys,
+      # ...), so a name -> version map loses 36 of the 346 package blocks and
+      # only ever compares the highest version of each duplicated name. That
+      # fails OPEN on a re-pin of a lower duplicate and fails CLOSED on the
+      # legitimate removal of a higher one. The comparison below is therefore
+      # over name -> SET of versions.
+      #
+      # Line 3 of the lock is `version = 4`, the lockfile FORMAT version, which is
+      # neither a package pin nor a violation; the parser below scopes package
+      # versions to [[package]] blocks and reports a format change separately.
+      - name: Assert only internal crate versions moved
+        run: |
+          set -euo pipefail
+          git show HEAD:integration_tests/Cargo.lock > /tmp/old-integration.lock
+          python3 - /tmp/old-integration.lock integration_tests/Cargo.lock <<'PY'
+          import re
+          import sys
+          from collections import defaultdict
+
+          # The seven crates released in lockstep from the root workspace. These
+          # are the only pins release-plz's version bump is allowed to move.
+          INTERNAL = {
+              "macp-pb",
+              "macp-core",
+              "macp-policy",
+              "macp-storage",
+              "macp-auth",
+              "macp-modes",
+              "macp-runtime",
+          }
+
+          # Every package that must exist in a well-formed integration_tests lock:
+          # the seven above plus `macp-integration-tests`, the local workspace
+          # root. A lock missing any of these is truncated, empty, or otherwise
+          # not the file we think we are validating.
+          REQUIRED = INTERNAL | {"macp-integration-tests"}
+
+          # Floor for "this parsed as a real lockfile". The real one holds ~346
+          # package blocks; a header-only or truncated file holds a handful. Set
+          # far below the true count so a genuine dependency prune cannot trip it.
+          MIN_PACKAGES = 50
+
+
+          def parse(path, label):
+              text = open(path, encoding="utf-8").read()
+              head, sep, rest = text.partition("[[package]]")
+              m = re.search(r"^version\s*=\s*(\d+)\s*$", head, re.M)
+              fmt = m.group(1) if m else None
+              # name -> {version: has_source}
+              pkgs = defaultdict(dict)
+              count = 0
+              for i, block in enumerate((sep + rest).split("[[package]]")[1:]):
+                  n = re.search(r'^name\s*=\s*"([^"]+)"', block, re.M)
+                  v = re.search(r'^version\s*=\s*"([^"]+)"', block, re.M)
+                  s = re.search(r'^source\s*=\s*"', block, re.M)
+                  # A [[package]] block without both keys is malformed input, not
+                  # a package that went away. Skipping it would read as a removal,
+                  # and removals are permitted -- so a stripped `version =` line
+                  # would pass silently. Fail instead.
+                  if not n or not v:
+                      print(
+                          f"ERROR: {label}: [[package]] block #{i + 1} is malformed "
+                          f"(name={n and n.group(1)!r}, version={v and v.group(1)!r}).",
+                          file=sys.stderr,
+                      )
+                      sys.exit(1)
+                  pkgs[n.group(1)][v.group(1)] = bool(s)
+                  count += 1
+              return fmt, dict(pkgs), count
+
+
+          def check_sane(pkgs, count, label):
+              if count < MIN_PACKAGES:
+                  print(
+                      f"ERROR: {label} holds only {count} package blocks "
+                      f"(expected at least {MIN_PACKAGES}). Refusing to treat a "
+                      "truncated or empty lockfile as a valid one.",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+              missing = sorted(REQUIRED - set(pkgs))
+              if missing:
+                  print(
+                      f"ERROR: {label} is missing required package(s): "
+                      + ", ".join(missing),
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+
+
+          old_fmt, old, old_count = parse(sys.argv[1], "old lock")
+          new_fmt, new, new_count = parse(sys.argv[2], "new lock")
+          check_sane(old, old_count, "old lock")
+          check_sane(new, new_count, "new lock")
+
+          if old_fmt != new_fmt:
+              # Classified, not ignored: a format bump is a legitimate cargo
+              # rewrite, but it should never pass unremarked.
+              print(f"note: lockfile format version {old_fmt} -> {new_fmt}")
+
+          added = sorted(set(new) - set(old))
+          removed = sorted(set(old) - set(new))
+          if added:
+              print("added packages:   " + ", ".join(added))
+          if removed:
+              print("removed packages: " + ", ".join(removed))
+
+          violations = []
+          for name in sorted(set(new) & set(old)):
+              old_vs, new_vs = set(old[name]), set(new[name])
+              gone = sorted(old_vs - new_vs)
+              arrived = sorted(new_vs - old_vs)
+              if not gone and not arrived:
+                  continue
+              if not gone:
+                  # A new version of an already-present name: an addition.
+                  print(f"added version:    {name} {', '.join(arrived)}")
+                  continue
+              if not arrived:
+                  # A version of a still-present name dropped out: a removal.
+                  print(f"removed version:  {name} {', '.join(gone)}")
+                  continue
+              # Both directions -> a pin moved. This is the violation, and it is
+              # a violation even for a name that legitimately exists at several
+              # versions: one of them was re-resolved.
+              change = f"{name} {', '.join(gone)} -> {', '.join(arrived)}"
+              # Exempt: the seven internal crates, plus any other package that is
+              # source-less (no `source` key) in BOTH revisions, whose version
+              # comes from a manifest in this repo rather than from dependency
+              # resolution. In this lock that clause covers exactly one further
+              # package, `macp-integration-tests 0.0.0`, the local workspace root.
+              # Residual: if a third-party crate were ever `[patch]`ed to a path,
+              # it would become source-less and so silently gain this exemption.
+              osrc = any(old[name].values())
+              nsrc = any(new[name].values())
+              if name in INTERNAL or not (osrc or nsrc):
+                  print(f"internal bump:    {change}")
+                  continue
+              violations.append(change)
+
+          if violations:
+              print(
+                  "ERROR: cargo re-resolved third-party pins in "
+                  "integration_tests/Cargo.lock. Only the internal macp-* crate "
+                  "versions may move during a release bump:",
+                  file=sys.stderr,
+              )
+              for v in violations:
+                  print(f"  - {v}", file=sys.stderr)
+              sys.exit(1)
+
+          print("OK: no third-party pin changed version.")
+          PY
+
+      # The step above proves nothing BAD moved. This one proves the thing we
+      # came here to do actually happened: `--locked` makes cargo refuse to
+      # write the lock, so it fails if the file still does not satisfy the
+      # manifests. A partial repair, or a lock left stale because the earlier
+      # step silently no-op'd, is caught here rather than shipped.
+      - name: Verify the lock now satisfies the manifests
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --manifest-path integration_tests/Cargo.toml --format-version 1 > /dev/null
+          echo "OK: integration_tests/Cargo.lock is up to date with its manifests."
+
+      # No empty commits: on a run where the lock is already correct (a refresh
+      # that did not change the version, or a re-run after this job already
+      # pushed) there is nothing to do.
+      - name: Commit and push the regenerated lock
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ fromJSON(needs.release-plz.outputs.pr).number }}
+          # The PR's head ref, straight from the action's own output. NOT
+          # `git rev-parse --abbrev-ref HEAD`: `gh pr checkout` names the local
+          # branch after the head ref only for same-repo PRs; for a fork it
+          # names it `<owner>-<branch>`, and pushing that name would create a
+          # brand-new branch on origin instead of updating the PR.
+          HEAD_BRANCH: ${{ fromJSON(needs.release-plz.outputs.pr).head_branch }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- integration_tests/Cargo.lock; then
+            echo "integration_tests/Cargo.lock is already in sync; nothing to commit."
+            echo "integration_tests/Cargo.lock was already in sync." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [ -z "$HEAD_BRANCH" ]; then
+            echo "ERROR: release-plz reported no head_branch for PR #$PR_NUMBER." >&2
+            exit 1
+          fi
+
+          # The [bot] suffix is load-bearing, not cosmetic. release-plz inspects
+          # the contributors of the release PR's extra commits; if ANY login does
+          # not end in `[bot]` it CLOSES the PR and opens a new one with a new
+          # number and branch ("closing pr ... to preserve git history"), which
+          # would turn every release into permanent PR churn. Only the all-bot
+          # path takes the force-push-over route that keeps this idempotent.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add integration_tests/Cargo.lock
+          git commit -m "chore: sync integration_tests/Cargo.lock with the release version"
+
+          git push origin "HEAD:refs/heads/$HEAD_BRANCH"
+
+          head_sha="$(git rev-parse HEAD)"
+          # This push creates a SECOND action_required workflow run on the PR, at
+          # a new head SHA. Branch protection evaluates its 12 required contexts
+          # with strict: true at the head SHA, so approving only the earlier run
+          # leaves this head with zero checks and the PR unmergeable. Say loudly
+          # which SHA needs the approval.
+          echo "::notice title=Release PR head moved::Approve the workflow run at $head_sha — the earlier run is now stale."
+          {
+            echo "### integration_tests/Cargo.lock synced"
+            echo
+            echo "Pushed to \`$HEAD_BRANCH\` (PR #$PR_NUMBER)."
+            echo
+            echo "**New head SHA: \`$head_sha\`** — approve the \`action_required\` run at *this* SHA."
+            echo "The run at the previous head no longer counts toward the required checks."
+          } >> "$GITHUB_STEP_SUMMARY"
