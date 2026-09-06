@@ -67,6 +67,23 @@ jobs:
           version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ github.token }}
 
+      # Guards the shape in issue #140: a Cargo.lock that pins a version its
+      # Cargo.toml forbids. No other PR-level job passes --locked, so such a
+      # lockfile stayed green here and only failed later at `cargo publish
+      # --locked` in publish.yml -- i.e. at release time, not on the PR that
+      # introduced it. `cargo metadata --locked` resolves without building and
+      # fails if the lockfile is not exactly what the manifests imply.
+      #
+      # Root workspace only, deliberately. `integration_tests/` is a SEPARATE
+      # workspace whose lock pins the seven crates by path: release-plz bumps
+      # their versions and regenerates the root lock, but never that one, so it
+      # is stale by construction between a release and its next regeneration.
+      # Guarding it here would turn every release PR red. It is also never
+      # published, so it carries none of the `cargo publish --locked` hazard
+      # this guard exists for.
+      - name: Verify Cargo.lock is consistent with the manifests
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
       - name: Cargo check
         run: cargo check --all-targets
 
