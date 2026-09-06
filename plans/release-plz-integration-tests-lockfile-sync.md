@@ -217,7 +217,7 @@ release PR via release-plz's own documented "commit files to the release PR" pat
 ### Phase 2 — Guard `integration_tests/Cargo.lock` in CI
 
 - **Status:** DONE (branch `ci/guard-integration-tests-lockfile`, 2 verify rounds plus a
-  pre-merge wording correction; merge sha recorded by Phase 3). Divergence from plan: the
+  pre-merge wording correction; merged as `c9650df`, PR #156). Divergence from plan: the
   plan scoped the guard narrowly, to a contributor editing `integration_tests/Cargo.toml`.
   The rule is in fact **wider** — this lock records the seven path crates' full dependency
   edges, so adding or removing a dependency in *any* workspace crate invalidates it.
@@ -274,7 +274,9 @@ release PR via release-plz's own documented "commit files to the release PR" pat
 
 ### Phase 3 — Document the invariant in a *tracked* file
 
-- **Status:** TODO
+- **Status:** DONE. Divergence from plan: acceptance criterion 1 was **widened** during
+  implementation — review proved the constraint covers a dependency change in *any*
+  workspace crate, not only `integration_tests/Cargo.toml` (see the scope note below).
 - **Delivers:** the new contributor constraint and the release-time sync are documented where
   contributors can actually see them, and the standing manual chore is retired.
 - **Depends on:** Phases 1 and 2.
@@ -285,13 +287,26 @@ release PR via release-plz's own documented "commit files to the release PR" pat
   describing the release process at all** (`grep -rl release-plz docs/ README.md` → no hits).
 
   So the tracked statement goes in **`CONTRIBUTING.md`**, which already has a `## Pull requests`
-  section describing the CI gate (:59-62) and already mentions `integration_tests` (:22): a
-  contributor who edits `integration_tests/Cargo.toml` must commit the regenerated lock, and
-  the `integration` job fails if they don't. Add the operator-facing note from Phase 1's last
-  edge case — that a release PR will carry **two** `action_required` runs and the one at the
-  **newer head SHA** is the one to approve. `docs/testing.md` (which has an
-  `## Integration test suite` section at :17 and says nothing about lockfiles today) gets the
-  same rule stated where the suite is documented.
+  section describing the CI gate (:59-62) and already mentions `integration_tests` (:22).
+  Add the operator-facing note from Phase 1's last edge case — that a release PR will carry
+  **two** `action_required` runs and the one at the **newer head SHA** is the one to approve.
+  `docs/testing.md` (which has an `## Integration test suite` section at :17 and says nothing
+  about lockfiles today) gets the same rule stated where the suite is documented, cross-linked
+  to `CONTRIBUTING.md` rather than duplicated.
+
+  **Scope correction — the rule is wider than this plan first stated.** Earlier revisions
+  described the new constraint as "a contributor who edits `integration_tests/Cargo.toml` must
+  commit the regenerated lock". That is an under-statement, proven empirically: adding
+  `base64 = "0.22"` to `crates/macp-core/Cargo.toml` alone reds the Phase 2 guard (exit 101).
+  `integration_tests/Cargo.lock` records the **full dependency edges of the seven path
+  crates**, so adding, removing, or changing a dependency in **any** workspace crate —
+  `crates/macp-*/Cargo.toml` **or** the root `Cargo.toml` — requires regenerating it in the
+  same PR. The docs must state that wider rule, name the failing job
+  (`Integration (tier 1 + 2, real gRPC boundary)`), and give the one-line fix:
+
+  ```bash
+  cargo metadata --manifest-path integration_tests/Cargo.toml --format-version 1 > /dev/null
+  ```
 
   `CLAUDE.md` still gets the paragraph as the local mirror, but the phase report must state
   plainly that this edit is **not in the PR diff** because the file is ignored — not skipped.
@@ -304,13 +319,20 @@ release PR via release-plz's own documented "commit files to the release PR" pat
   constraints (the CI failure and the two-runs approval trap), which is why this phase targets
   tracked files rather than only `CLAUDE.md`.
 - **Acceptance criteria:**
-  1. `CONTRIBUTING.md` states that editing `integration_tests/Cargo.toml` requires committing
-     the regenerated lock, and names the CI job that fails otherwise.
+  1. `CONTRIBUTING.md` states the **wide** rule — that a dependency change in *any* workspace
+     crate (`crates/macp-*/Cargo.toml` or the root `Cargo.toml`, not only
+     `integration_tests/Cargo.toml`) requires committing the regenerated
+     `integration_tests/Cargo.lock` — names the CI job that fails otherwise
+     (`Integration (tier 1 + 2, real gRPC boundary)`), and gives the regeneration command.
   2. `CONTRIBUTING.md` (or `docs/testing.md`) explains the two-`action_required`-runs situation
      on release PRs and which to approve.
-  3. `docs/testing.md` carries the lockfile rule in its integration-suite section.
+  3. `docs/testing.md` carries the same wide lockfile rule in its integration-suite section,
+     cross-referencing `CONTRIBUTING.md`.
   4. No claim in any doc contradicts the final `release-plz.yml` / `ci.yml`.
-  5. The phase report states explicitly that the `CLAUDE.md` edit is absent from the PR diff
+  5. The standing manual staleness chore is stated as retired in the live docs. The chore
+     lines in `plans/list-sessions-pagination*.md` are **not** rewritten — they are historical
+     records of completed work.
+  6. The phase report states explicitly that the `CLAUDE.md` edit is absent from the PR diff
      because the file is gitignored.
 - **Tests:** Prose — verified by reading each changed section against the final workflow files.
 - **Docs:** this phase *is* the docs phase.

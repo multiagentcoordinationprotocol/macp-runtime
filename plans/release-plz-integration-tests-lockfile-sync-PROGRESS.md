@@ -13,8 +13,8 @@ the substitution is noted. (No phase in this plan is in fact a one-way door.)
 |-------|-------|--------|---------|--------|--------|
 | 0 | Plan + reverify | DONE | FLAWED -> patched (rev 2) | 1 | (uncommitted) |
 | 1 | Sync the lock on the release PR branch | DONE | GAPS -> closed (round 2) | 2 | `a7b6efc` (PR #155) |
-| 2 | Extend the CI lockfile guard | DONE | GAPS -> closed (round 2) | 2+1 | see Phase 3 |
-| 3 | Document the invariant, retire the chore | TODO | — | — | — |
+| 2 | Extend the CI lockfile guard | DONE | GAPS -> closed (round 2) | 2+1 | `c9650df` (PR #156) |
+| 3 | Document the invariant, retire the chore | DONE | GAPS -> PASS (round 2) | 2 | branch `docs/integration-tests-lockfile-rule` |
 
 ## Repo map
 
@@ -274,3 +274,65 @@ uncommitted) was never disturbed; the worktree was removed and pruned afterwards
 - Phase 3's contributor documentation must state the **wide** rule (any workspace crate's
   dependency change requires regenerating the second lock), matching the comment shipped here
   — not the narrower "edit `integration_tests/Cargo.toml`" framing.
+
+### Phase 3 — document the invariant in a tracked file
+
+**Status: DONE.** Branch `docs/integration-tests-lockfile-rule` (round 1 `32a0fb1`, a fresh
+**Opus** verifier returned **GAPS**, round 2 amended into `6b0e3ca` and returned **PASS**;
+rebased onto Phase 2 as the final commit). Files: `CONTRIBUTING.md`, `docs/testing.md`, and
+this plan. `CLAUDE.md` got the same paragraph as a **local mirror only** — it is gitignored
+(`.gitignore:20`, `git ls-files CLAUDE.md` empty), so that edit is deliberately absent from
+the PR diff. It was not force-added.
+
+#### What shipped
+
+- `CONTRIBUTING.md`: a new `## Lockfiles` section stating the rule and naming both guards by
+  their CI display names, plus an `### Approving a release PR` subsection covering the
+  two-`action_required`-runs trap that Phase 1's sync job creates.
+- `docs/testing.md`: the same rule in the integration-suite section, cross-linked rather
+  than duplicated.
+- The standing "check the lock for staleness before pushing" chore is retired. The
+  historical checklists in `plans/list-sessions-pagination*.md` are left as written —
+  rewriting a finished plan's record would falsify it.
+
+#### Round 1 verdict: GAPS — 1 blocker, 3 should-fix, 3 nits
+
+The blocker was **merge ordering**, not content: all three branches were siblings off
+`b150bea`, and landing Phase 3 first would have put two statements on `main` that were false
+there — that CI guards the second lock, and that the manual chore is retired. Without Phase
+1's sync job the lock is stale by construction after every bump, so the second is actively
+misleading. Handled by sequencing (#155 -> #156 -> this), not by editing the text.
+
+The substantive finds were factual errors in files this phase touched:
+
+| ID | Gap | Disposition |
+|----|-----|-------------|
+| 2 | The plan cited Phase 1 as `d24d7dc`, orphaned by a rebase | Closed — now the squash commit `a7b6efc` (PR #155), which is the reference that survives |
+| 3 | The plan claimed Phase 2 landed at `c7ab86f`, a commit that existed only on an unpushed local branch | Closed — now `c9650df` (PR #156), filled in after that PR merged |
+| 4 | `CONTRIBUTING.md` said `cargo audit` "runs as advisory". It is **blocking** — the `audit` job carries no `continue-on-error` on the job or any of its 4 steps, and `docs/testing.md` already said so | Closed. Pre-existing error, but this phase appended a subsection directly beneath it |
+| 4b | The same paragraph cited `plans/IMPROVEMENT_PLAN.md` and `plans/current/`, neither of which exists — `plans/BUILD_STATUS.md` itself records they were deleted 2026-07-06 | Closed — rewritten to the real `plans/` layout |
+| 5 | Both docs said "adding, removing, or **changing** a dependency" invalidates the lock. Over-broad: a requirement change the existing pin still satisfies does not. This tree proves it — root lock `serde 1.0.229`, integration lock `1.0.228`, same `serde = "1"` requirement, `--locked` passes | Closed in the docs **and** in Phase 2's shipped `ci.yml` comment before that PR was pushed, so the two cannot contradict each other on `main` |
+| 6 | No guidance for a dependabot root-workspace PR, which edits manifests and reds the new guard while dependabot's separate `/integration_tests` PR cannot fix it | Closed |
+| 7 | "Approve the run at the SHA the sync job reports" never said how | Closed — `gh run list --commit <sha>` to find it, Actions UI "Approve and run" to approve. No `gh` approval subcommand was invented; none exists |
+
+#### Round 2 verdict: PASS
+
+All six re-checked and closed, with the verifier re-deriving the facts rather than trusting
+the fixer: `gh run list --help` confirms `--commit` is real; every path newly named in the
+`plans/` paragraph was confirmed to exist; the branch-protection claim ("12 contexts,
+`strict: true`") was confirmed live against the API rather than carried over from an earlier
+assertion in this session. Diff confined to the 3 intended files; fences balanced; the
+`../CONTRIBUTING.md` link resolves.
+
+#### Carried forward
+
+- `.cargo/audit.toml`'s ignore list is currently **empty**, so "ignore list in
+  `.cargo/audit.toml`" names the mechanism, not an active suppression. Matches how `ci.yml`
+  describes itself; flagged because it can read as "we suppress advisories" at a glance.
+- Merging #156 initially failed on "refusing to allow an OAuth App to create or update
+  workflow ... without `workflow` scope" — **not** a CI failure. Dependabot's #154 landed
+  meanwhile and touched three workflow files, leaving #156 `BEHIND`; under `strict: true` the
+  merge tried to update the branch first, and that update pushes workflow files through the
+  API. Resolved by merging `origin/main` into the branch locally and pushing over SSH, which
+  is not subject to the OAuth App restriction. If it recurs on a behind branch:
+  `gh auth refresh -h github.com -s workflow`.

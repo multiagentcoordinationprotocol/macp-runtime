@@ -20,6 +20,24 @@ A separate Rust crate at `integration_tests/` tests the runtime through the real
 
 The crate starts the runtime binary as a subprocess on a free port, connects as a gRPC client, and runs test scenarios against the live server. This ensures that the transport layer, authentication, serialization, and kernel logic all work together correctly.
 
+### Lockfile
+
+Being a separate workspace, `integration_tests/` has its own checked-in
+`integration_tests/Cargo.lock`, and that lock records the full dependency edges of the
+seven `macp-*` path crates. So adding or removing a dependency, or changing a
+requirement the existing pin no longer satisfies, in **any** workspace crate —
+`crates/macp-*/Cargo.toml` or the root `Cargo.toml`, not only
+`integration_tests/Cargo.toml` — leaves it stale, and the
+`Integration (tier 1 + 2, real gRPC boundary)` CI job fails with
+`cargo metadata --locked`. Regenerate it in the same PR:
+
+```bash
+cargo metadata --manifest-path integration_tests/Cargo.toml --format-version 1 > /dev/null
+```
+
+See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full rule, including how release PRs
+keep this lock in step automatically.
+
 ### Test architecture
 
 ```
