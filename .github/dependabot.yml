@@ -5,6 +5,16 @@ updates:
   #   major-updates   -> one PR for review (majors usually need code changes)
   - package-ecosystem: cargo
     directory: "/"
+    # `auto` (the default) means "increase for apps, widen for libraries" --
+    # and this workspace publishes libraries, so dependabot tries to WIDEN.
+    # A Cargo caret requirement like `criterion = "0.5"` cannot be widened to
+    # admit 0.8.2, so dependabot silently degrades to a lockfile-only update
+    # and ships a Cargo.lock the manifest forbids (issue #140, PR #129).
+    # `increase-if-necessary` leaves the requirement alone when it already
+    # admits the new version -- so minor/patch bumps stay manifest-clean and
+    # do not churn the declared floors of seven published crates -- and bumps
+    # it only when the new version would otherwise be unsatisfiable.
+    versioning-strategy: increase-if-necessary
     schedule:
       interval: monthly
     open-pull-requests-limit: 5
@@ -19,6 +29,10 @@ updates:
 
   - package-ecosystem: cargo
     directory: "/integration_tests"
+    # Same rationale as the root workspace above: keep the manifest and this
+    # crate's own Cargo.lock consistent. (Nothing here is published, so the
+    # floor-churn argument does not apply -- consistency is the whole point.)
+    versioning-strategy: increase-if-necessary
     schedule:
       interval: monthly
     open-pull-requests-limit: 3
