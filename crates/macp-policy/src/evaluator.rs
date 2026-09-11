@@ -89,6 +89,10 @@ pub fn evaluate_decision_commitment(
 /// | `Failed`  | denied  | allowed iff the decline guard passes |
 /// | `NoVotes` | `schema_version >= 3`: denied; `<= 2`: denied iff quorum required | denied (no decisive reject can exist) |
 ///
+/// The table governs **vote-authorized** commitments only. An
+/// *objection-authorized* decline skips it entirely — see "Objection-authorized
+/// decline" below.
+///
 /// **Empty decisive tally (`NoVotes`):** which of the two positive-commitment
 /// readings applies is selected by the **policy's own `schema_version`**
 /// (RFC-MACP-0012 §4.1). Under `schema_version >= 3` every algorithm other than
@@ -100,9 +104,11 @@ pub fn evaluate_decision_commitment(
 /// The discriminator is a property of the stored descriptor, never of the
 /// runtime release: two sessions started by the same binary in the same
 /// millisecond, one binding a v1 policy and one a v3 policy, must evaluate
-/// differently. A **decline** is denied on an empty tally at every schema
-/// version — no decisive reject can exist — so only the positive column moves.
-/// `none` is untouched in both directions: it never enters the voting block.
+/// differently. A **vote-authorized decline** is denied on an empty tally at
+/// every schema version — no decisive reject can exist — so only the positive
+/// column moves; an objection-authorized decline (below) never reaches this row
+/// at all. `none` is untouched in both directions: it never enters the voting
+/// block.
 ///
 /// **The weighted electorate (every schema version).** Under `weighted`, the
 /// `voting.weights` map *is* the electorate: a declared participant absent from
@@ -141,6 +147,28 @@ pub fn evaluate_decision_commitment(
 /// guard. The quorum gate (check 3) supplies the additional, opt-in
 /// `require_vote_quorum` condition.
 ///
+/// **Objection-authorized decline (`schema_version >= 2`):** when the policy
+/// sets `objection_handling.critical_objection_action` to `finalize_decline`
+/// and a standing critical objection blocks the positive direction, a decline
+/// is authorized by the recorded `Objection` rather than by the tally.
+/// RFC-MACP-0007 §6.2: such a decline "is not gated by the tri-state above and
+/// is not subject to the decline guard" — the objection is itself the explicit,
+/// attributable dissent the guard exists to require — so it is available at
+/// every tally, the empty one included. Without it a `schema_version >= 3`
+/// session with a non-`none` algorithm, an empty tally and a standing critical
+/// objection could terminate only by expiry, the stuck state
+/// `finalize_decline` exists to resolve. Three bounds. It is one-directional:
+/// a *positive* commitment is still denied by the veto and still evaluated
+/// against the voting block. It is scoped to the action: `deny` and `hold`
+/// stay hard-stops in both directions. And it waives the tri-state and the
+/// reject-floor only — checks 1 (`minimum_confidence`) and 3
+/// (`require_vote_quorum`) are outcome-agnostic and still apply. That last
+/// bound is the fail-closed reading of a §6.2 that names neither: the quorum
+/// condition sits inside its decline-guard sentence, so a wider reading is
+/// arguable and deliberately not taken here. No version check is needed:
+/// `critical_objection_action` is a v2 field and a v1 descriptor that omits it
+/// defaults to `Deny`, which never sets the flag.
+///
 /// **`none` exception:** with `algorithm == "none"` the decision is
 /// initiator-driven and `outcome_positive` is taken at face value (a `none`
 /// decision may legitimately carry no votes); the reject-floor does not apply.
@@ -164,6 +192,10 @@ pub fn evaluate_decision_commitment_outcome(
 
     let mut deny_reasons: Vec<String> = Vec::new();
     let mut allow_reasons: Vec<String> = Vec::new();
+    // Set by check 2 when a standing critical objection authorizes *this*
+    // decline under `critical_objection_action: "finalize_decline"`. It is what
+    // makes check 5 skippable — see RFC-MACP-0007 §6.2 there.
+    let mut objection_authorized_decline = false;
 
     // 1. Check evaluation requirements (minimum confidence threshold).
     // RFC-MACP-0007: REVIEW evaluations are informational only and MUST NOT
@@ -228,6 +260,12 @@ pub fn evaluate_decision_commitment_outcome(
                             "veto blocks a positive commitment: {detail} (critical_objection_action=finalize_decline)"
                         ));
                     } else {
+                        // RFC-MACP-0007 §6.2 "Objection-authorized decline":
+                        // the authorization is the recorded critical
+                        // `Objection`, not the voting result, so check 5 is
+                        // skipped entirely for this direction. Set only here —
+                        // the positive branch above keeps evaluating policy.
+                        objection_authorized_decline = true;
                         allow_reasons.push(format!(
                             "critical-objection veto finalized as a decline: {detail}"
                         ));
@@ -268,7 +306,18 @@ pub fn evaluate_decision_commitment_outcome(
     }
 
     // 5. Map the voting algorithm result to the requested outcome.
-    if rules.voting.algorithm != "none" {
+    //
+    // An objection-authorized decline skips this block whole: RFC-MACP-0007
+    // §6.2 says such a decline "is not gated by the tri-state above and is not
+    // subject to the decline guard", because the recorded critical `Objection`
+    // is itself the explicit, attributable dissent the guard exists to require.
+    // The `none` arm is tested first so the skip cannot swallow the face-value
+    // allow reason — `none` never had a tri-state to be exempted from, and its
+    // reason set must not change.
+    if rules.voting.algorithm == "none" {
+        // `none`: initiator-driven; outcome taken at face value (no reject-floor).
+        allow_reasons.push("voting algorithm is 'none'; no vote threshold required".into());
+    } else if !objection_authorized_decline {
         match check_voting_algorithm(
             &rules.voting.algorithm,
             rules.voting.threshold,
@@ -353,9 +402,6 @@ pub fn evaluate_decision_commitment_outcome(
                 }
             }
         }
-    } else {
-        // `none`: initiator-driven; outcome taken at face value (no reject-floor).
-        allow_reasons.push("voting algorithm is 'none'; no vote threshold required".into());
     }
 
     if deny_reasons.is_empty() {
@@ -2950,6 +2996,138 @@ mod tests {
                 "hold should surface an escalation reason, got: {reasons:?}"
             );
         }
+    }
+
+    // ── RFC-MACP-0007 §6.2 objection-authorized decline ─────────────
+    //
+    // A decline under `critical_objection_action: "finalize_decline"` is
+    // authorized by the recorded critical `Objection`, not by the tally, so it
+    // is gated by neither the voting tri-state nor the decline guard. The four
+    // tests below are mutually load-bearing: each one blocks a wrong
+    // implementation that would satisfy the others.
+
+    /// `finalize_decline` over a real algorithm, with no vote ever cast.
+    fn finalize_decline_policy(schema_version: u32) -> PolicyDefinition {
+        let mut policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 },
+            "objection_handling": {
+                "critical_severity_vetoes": true,
+                "veto_threshold": 1,
+                "critical_objection_action": "finalize_decline"
+            }
+        }));
+        policy.schema_version = schema_version;
+        policy
+    }
+
+    /// One standing critical objection, zero votes — the empty decisive tally.
+    fn objection_only_state() -> DecisionState {
+        let mut state = make_state_with_votes(vec![]);
+        state.objections.push(Objection {
+            proposal_id: "p1".into(),
+            reason: "unresolved data-retention finding".into(),
+            severity: "critical".into(),
+            sender: "agent://compliance".into(),
+        });
+        state
+    }
+
+    #[test]
+    fn a_critical_objection_authorizes_a_decline_on_an_empty_tally() {
+        // Swept over both versions that can express `finalize_decline`: §6.2
+        // says the rule "applies at every schema version that can express
+        // `finalize_decline` (`schema_version >= 2`)". Before this rule the
+        // decline was denied by the NoVotes negative branch — an empty tally
+        // holds no decisive reject — which left a v3 session with a non-`none`
+        // algorithm and a standing critical objection able to terminate only by
+        // expiry, the exact stuck state `finalize_decline` exists to resolve.
+        for schema_version in [2u32, 3] {
+            let policy = finalize_decline_policy(schema_version);
+            let result = decline(&policy, &objection_only_state(), &participants());
+            let PolicyDecision::Allow { reasons } = &result else {
+                panic!(
+                    "a standing critical objection must authorize a decline on an empty \
+                     tally (schema_version={schema_version}), got: {result:?}"
+                );
+            };
+            let joined = reasons.join(" | ");
+            assert!(
+                joined.contains("critical-objection veto finalized as a decline"),
+                "the allow reason must name the veto as the authorization, not the \
+                 tally (schema_version={schema_version}), got: {joined}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_critical_objection_does_not_authorize_a_positive_commitment() {
+        // The flag is set in the negative direction only. This is the half that
+        // keeps the test above from being satisfied by an implementation that
+        // stopped evaluating policy for `finalize_decline` sessions: both the
+        // veto reason *and* the v3 empty-tally reason must still be reported.
+        let policy = finalize_decline_policy(3);
+        let result = evaluate_decision_commitment_outcome(
+            &policy,
+            &objection_only_state(),
+            &participants(),
+            true,
+        );
+        let PolicyDecision::Deny { reasons } = &result else {
+            panic!("a veto must still block a positive commitment, got: {result:?}");
+        };
+        let joined = reasons.join(" | ");
+        assert!(
+            joined.contains("veto blocks a positive commitment"),
+            "the veto denial must survive (critical_objection_action=finalize_decline), \
+             got: {joined}"
+        );
+        assert!(
+            joined.contains("no decisive votes cast"),
+            "the voting block must still run for a positive commitment — the skip is \
+             scoped to the decline direction, got: {joined}"
+        );
+    }
+
+    #[test]
+    fn a_decline_without_a_standing_objection_is_still_vote_gated() {
+        // Same policy, no objection: nothing authorizes the decline, so the
+        // decline guard still denies it. Without this, the first test could be
+        // satisfied by unconditionally allowing declines under
+        // `finalize_decline`.
+        let policy = finalize_decline_policy(3);
+        let result = decline(&policy, &make_state_with_votes(vec![]), &participants());
+        let PolicyDecision::Deny { reasons } = &result else {
+            panic!(
+                "with no standing objection a decline on an empty tally stays \
+                 vote-gated, got: {result:?}"
+            );
+        };
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r == "no votes cast; a decline requires at least one explicit reject vote"),
+            "the denial must come from the decline guard, got: {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn critical_objection_action_deny_is_unaffected() {
+        // §4.1 leaves `deny` (the default) and `hold` as hard-stops in both
+        // directions; only `finalize_decline` authorizes a decline. Pairs with
+        // the untouched `decision_critical_objection_veto.json` fixture.
+        let mut policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 },
+            "objection_handling": { "critical_severity_vetoes": true, "veto_threshold": 1 }
+        }));
+        policy.schema_version = 3;
+        let result = decline(&policy, &objection_only_state(), &participants());
+        let PolicyDecision::Deny { reasons } = &result else {
+            panic!("the default `deny` action must still hard-stop a decline, got: {result:?}");
+        };
+        assert!(
+            reasons.iter().any(|r| r.contains("blocked by")),
+            "the default action keeps its hard-stop reason, got: {reasons:?}"
+        );
     }
 
     // ── RFC-MACP-0012 §5.2 reserved governance profiles ─────────────
