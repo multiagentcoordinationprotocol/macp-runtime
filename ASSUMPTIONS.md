@@ -342,3 +342,54 @@
   (`src/server.rs:165-177`); nothing gates TTL, liveness or authorization on it. Consequence to note
   in the changelog: the target's `message_count` will not include the synthetic accept.
 - **Status:** UNCONFIRMED (2026-09-11)
+
+## Counting granularity of the widened `validate_replay_consistency`
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11a)
+- **Assumed:** the two suspension fields count as two separate mismatches, not one grouped mismatch.
+  The plan is **internally inconsistent** here: its Approach says "three warn-only comparisons"
+  (→ separate) while criterion 2 says "a suspension-state mismatch", singular (→ grouped).
+- **Chose:** the Approach field's wording — three independent `if` blocks, three independent
+  increments, three distinct warn lines, for finer diagnostics. The existing bound-versions
+  comparison is grouped, so this is a departure from the neighbouring style, taken deliberately.
+- **Alternatives:** group `accumulated_suspended_ms` + `suspended_at_ms` into one counted mismatch,
+  matching the bound-versions precedent. The new test asserts exact counts, so switching later costs
+  one test line.
+- **Blast radius if wrong:** none that decides anything. `recovery_replay_mismatches`
+  (`src/main.rs:350`) is a log field plus a metric (`record_replay_mismatch`); nothing branches on
+  the number and no test in `tests/` or `integration_tests/` asserts on it. Grouping changes a
+  reported magnitude, never an outcome.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## `cancel_session` reads a clock solely to stamp its log entry
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11a)
+- **Assumed:** unlike suspend/resume, `cancel_session` has no session-mutation clock its log entry
+  must agree with — `Session::cancel()` takes no timestamp — so the new read exists only to stamp
+  the entry, and one read placed after the terminal-state early return is the right shape.
+- **Chose:** a single `Utc::now()` immediately before the payload build, so a no-op cancel on an
+  already-terminal session does not read the clock at all.
+- **Alternatives:** thread the clock down from `maybe_expire_session`'s existing read (it is called
+  from `cancel_session`, so one read could serve both) — rejected as a wider refactor than 11a
+  authorizes, and it would change the expiry predicate's relationship to its own clock.
+- **Blast radius if wrong:** one extra `Utc::now()` per `CancelSession` RPC. `SessionCancel` replay
+  only sets terminal state (`src/replay.rs:145-147`), reading neither timestamp, so nothing
+  downstream observes the value.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## A real 5 ms sleep in `suspend_resume_entries_share_the_session_mutation_clock`
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11a)
+- **Assumed:** a real sleep is acceptable in a `tests/` integration test to make the banked span
+  non-zero, because the alternative needs a clock-injection seam this phase may not add.
+- **Chose:** `tokio::time::sleep(5ms)` plus `assert!(accumulated_suspended_ms > 0)` so the equality
+  cannot pass vacuously as `0 == 0` — the specific vacuity trap this plan has hit three times.
+- **Alternatives:** no sleep (the equality holds at zero but proves nothing about the arithmetic);
+  `tokio::time::pause()` with a virtual clock — rejected because `suspend_session`/`resume_session`
+  call `chrono::Utc::now()` directly, which tokio's test clock does not virtualize, so it would
+  require a clock-injection seam outside 11a's scope.
+- **Blast radius if wrong:** 5 ms on one test; the file's measured runtime is unchanged at 0.01 s.
+  Worth noting the honest limit of what this test proves: it pins the invariant deterministically,
+  but as a *differential* signal against the pre-fix code it only fires when a millisecond tick
+  lands between the two clock reads — measured at ~0.3-0.5% (1 red in 300 runs), with 800/800
+  passing once fixed. **The injected-clock signature, not the test, is the real guarantee**, and the
+  plan's claim that the test "could only fail on a clock tick" was right in kind but understated:
+  it undersold a signal that does exist, rather than overselling one that does not.
+- **Status:** UNCONFIRMED (2026-09-11)
