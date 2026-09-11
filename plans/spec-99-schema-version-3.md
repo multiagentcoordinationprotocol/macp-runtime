@@ -158,7 +158,41 @@ The evaluator half closes too, differently. `weighted_total == 0.0 => NoVotes` (
 
 ### Phase 3 — the weighted electorate: omission means weight 0, and only decisive rejects authorize a decline
 
-- **Status:** TODO
+- **Status:** DONE — `826bade` (cherry-picked from `994016b`, authored in an isolated worktree;
+  auto-merged cleanly against the `docs/policy.md` fix that landed after its base). Gate **768 passed
+  / 0 failed** (+6 on Phase 2's 762, all six new tests; criterion 6 is a rename at net 0), tier-1
+  119 + 8 JWT + 5 tier-2 at baseline, fmt/clippy/rustdoc clean, both lockfiles byte-unmoved, all seven
+  crates "no semver update required". **Every criterion mutation-checked red, criterion 8 first.**
+  **Plan error — criterion 5 was under-specified in a way that made its stated outcome unreachable.**
+  It says "two ballots of which one is from an unlisted voter: the quorum gate is satisfied (and the
+  commitment is then denied by the empty-tally rule, not by quorum)" — but never says what the
+  **listed** voter casts, and that choice decides the test. Any decisive ballot from the listed voter
+  leaves the decisive tally non-empty, so `check_voting_algorithm` returns `Passed` or `Failed`, the
+  empty-tally rule never fires, and the reason assertion cannot hold. **Only an `ABSTAIN` produces the
+  described state** (two ballots clearing a `count: 2` quorum with zero decisive weight). Implemented
+  that way; the criterion as written admits a reading that cannot pass.
+  **Three mutation-strength limits the executor volunteered against its own work**, rather than
+  reporting a clean sweep:
+  1. **Criterion 2 reddens only under a *combined* mutation** (`unwrap_or(1.0)` **and** a
+     non-weight-aware `count_decisive_rejects`); under either alone it stays green. Consistent with the
+     plan's "paired with item 1" framing, but not independently discriminating for either half.
+  2. **Criterion 6's ballot shape was deliberately changed** from the plan's implied faithful rebase to
+     **two unlisted `REJECT`s**, because under one-APPROVE/one-REJECT the test's `PolicyDecision` half
+     would have been green before *and* after — only the variant assertion would have moved.
+  3. **Criteria 3 and 4 gained an explicit `Passed` precondition.** Their shape lands on exactly
+     `1.0/2.0 = 0.5`, which passes *only* because the ratio comparison is inclusive; one tick either way
+     and both would silently exercise the `Failed` arm instead of the `Passed` arm they exist to cover.
+  **A stale-by-inheritance imprecision in this phase's prose:** it says the negative-total arm "becomes
+  unreachable through registration (Phase 1 refuses negatives)". Registration already refused negatives
+  before Phase 1 — the filter was `< 0.0` — and Phase 1 only added the zero case. Same error as Phase
+  1's own vacuous criterion 4, carried forward into Phase 3's text. The shipped code comments say
+  `exclusiveMinimum: 0` "(it was `minimum: 0` before, which already refused negatives)" so the tree does
+  not repeat it.
+  **A worktree hazard worth knowing:** running tier-1 from a worktree nested under the parent repo
+  requires temporarily giving `integration_tests/Cargo.toml` its own `[workspace]` table, because cargo
+  otherwise walks past the worktree's root manifest to the main checkout's. Verified clean afterwards
+  (both lockfile md5s byte-identical), but an accidentally-committed manifest edit there would silently
+  break the CI lockfile guard.
 - **Delivers:** RFC-MACP-0012 §4.1's electorate rule and RFC-MACP-0007 §6.2's narrowed decline guard, both **at every schema version**. Closes **#148**'s evaluator half.
 - **Depends on:** Phase 1 (which makes an explicit `0` weight unauthorable, so the only remaining route to a weight-`0` voter is omission).
 - **Files:** `crates/macp-policy/src/evaluator.rs` — `compute_weighted_votes` (`:495-517`), specifically the `unwrap_or(1.0)` at `:508`; the `reject_count` binding at `:195`; the `Passed` arm's `allow_decline_over_approval` branch (`:227`); the `weighted_total == 0.0` guard and its comment (`:415-421`); the `weighted_total < 0.0` comment at `:401-408`, which cites `minimum: 0`; `zero_weighted_total_still_returns_no_votes` (`:1188`).
