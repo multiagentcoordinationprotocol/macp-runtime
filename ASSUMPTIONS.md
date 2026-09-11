@@ -140,3 +140,34 @@
 - **Alternatives:** `Option<EffectiveThreshold>` (the plan's second option) — rejected twice over: it widens `macp-core`'s `EffectiveThreshold` exposure into a second crate's public API, and its inner `Inert` variant would be unreachable through this path, i.e. an impossible state the caller must still match. A flat three-variant enum with a `NoRequest` member — rejected because the request-level form then carries a variant it can never return, and because `Option::map` is exactly the composition the two functions have. `Result<u32, Reason>` — rejected: it makes the ordinary "no request yet" case an error, and folds two non-error outcomes into an error channel. Keeping `effective_threshold` private and documenting `decode_mode_state` as the route — rejected: that is the reconstruct-the-internals path the issue asks to remove.
 - **Blast radius if wrong:** Additive only — `cargo semver-checks check-release` on `macp-core`, `macp-modes` and `macp-runtime` is clean (exit 0, no major lints). The cost of being wrong is API churn: narrowing `Result<Option<_>, _>` later, or adding an `ApprovalThreshold` variant, is a breaking change, though `enum_variant_added` and signature lints are majors that `release-plz.toml`'s `semver_check = true` blocks on rather than shipping silently. If a third outcome for the session-level form ever appears, it belongs in a new `Ok` variant, not in a new error.
 - **Status:** UNCONFIRMED (2026-09-11)
+
+## `MACP_POLICY_SCHEMAS_DIR` documented in the operator-facing env table
+- **Plan:** plans/spec-99-schema-version-3.md (Phase 1)
+- **Assumed:** the plan wants this var in `docs/deployment.md`'s table for discoverability, not because
+  operators ever set it. Verified: it is read only by `crates/macp-policy/src/registry.rs`'s test
+  module and by `ci.yml:646` — **the server never reads it** — and it appears in no tracked `.md`.
+- **Chose:** added the row, but led the description with "**Development and CI only; the server never
+  reads it.**", followed by both warnings: it must point at a clean `git archive` export of the spec
+  commit CI reads, never at the sibling working tree (which sits ahead of `main` and produces parity
+  failures that do not exist in CI), and `canonical_schema_dir`
+  (`crates/macp-policy/src/registry.rs:1739-1755`) **panics by design** via `assert!` on a set-but-
+  missing directory.
+- **Alternatives:** omit it (contradicts the plan and leaves it documented nowhere);
+  put it in `CONTRIBUTING.md` instead — arguably the better home, since it is a contributor concern
+  rather than a deployment one, but not what the plan says.
+- **Blast radius if wrong:** docs only. Moving it to `CONTRIBUTING.md` is a two-line change.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## An extra Phase 1 test guarding the mode-guard placement
+- **Plan:** plans/spec-99-schema-version-3.md (Phase 1)
+- **Assumed:** the plan named hoisting the new raw-JSON `weights` check out of the Decision mode
+  guard as the second-likeliest way to break the phase, but its criterion-5 pair cannot detect that
+  hoist — so the risk would have shipped untested.
+- **Chose:** added `register_empty_weights_map_for_another_mode_succeeds` (a Task-mode policy
+  carrying `voting.weights: {}`) beyond the stated criteria. Independently confirmed as the **sole**
+  red when the check is hoisted above the `matches!(mode, "macp.mode.decision.v1" | "*")` guard at
+  `crates/macp-policy/src/registry.rs:437`, while both criterion-5 tests stay green.
+- **Alternatives:** rely on the criterion-5 pair alone — mutation-proven inadequate.
+- **Blast radius if wrong:** one test. The cost of *not* having it is a wildcard-mode policy carrying
+  an empty `weights` map being wrongly refused, for rules the Decision schema does not govern.
+- **Status:** UNCONFIRMED (2026-09-11)
