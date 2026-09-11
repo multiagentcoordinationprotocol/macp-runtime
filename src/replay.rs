@@ -175,11 +175,19 @@ fn replay_entry(
 
 /// Warn-only replay/snapshot divergence check (D7, promoted from
 /// plans/defer/replay_validation.md). The log is authoritative and snapshots
-/// are best-effort, so a mismatch is diagnostic, never fatal — but state or
-/// dedup-count divergence between "what the log replays to" and "what the
-/// snapshot recorded" is exactly the class of bug the determinism guarantees
-/// (RFC-MACP-0003) forbid, so it must be visible. Returns the number of
-/// mismatched fields (0 = consistent).
+/// are best-effort, so a mismatch is diagnostic, never fatal — but divergence
+/// between "what the log replays to" and "what the snapshot recorded" is
+/// exactly the class of bug the determinism guarantees (RFC-MACP-0003) forbid,
+/// so it must be visible. Returns the number of mismatched fields
+/// (0 = consistent).
+///
+/// Compared: `state`, dedup count, `participants`, the bound versions
+/// (mode/configuration/policy, counted as one), `mode_state` (byte equality),
+/// `accumulated_suspended_ms` and `suspended_at_ms`.
+///
+/// Deliberately **warn-only**: making it fatal would turn a benign snapshot
+/// lag (a crash between the log append and the snapshot write) into a startup
+/// outage, even though the log — which is authoritative — is intact.
 pub fn validate_replay_consistency(
     session_id: &str,
     replayed: &Session,
@@ -216,6 +224,39 @@ pub fn validate_replay_consistency(
         tracing::warn!(
             session_id,
             "replay/snapshot bound-version mismatch (mode/configuration/policy)"
+        );
+    }
+    // Opaque per-mode state: compared byte-for-byte, since a mode's own
+    // accept/reject decisions are driven by it and the runtime cannot
+    // interpret it here.
+    if replayed.mode_state != snapshot.mode_state {
+        mismatches += 1;
+        tracing::warn!(
+            session_id,
+            replayed_len = replayed.mode_state.len(),
+            snapshot_len = snapshot.mode_state.len(),
+            "replay/snapshot mode_state mismatch"
+        );
+    }
+    // Suspension state (RFC-MACP-0001 §7.5). `accumulated_suspended_ms` feeds
+    // the TTL deadline and the handoff implicit-accept arithmetic, so a
+    // divergence here is a determinism bug even when `state` still agrees.
+    if replayed.accumulated_suspended_ms != snapshot.accumulated_suspended_ms {
+        mismatches += 1;
+        tracing::warn!(
+            session_id,
+            replayed_accumulated_suspended_ms = replayed.accumulated_suspended_ms,
+            snapshot_accumulated_suspended_ms = snapshot.accumulated_suspended_ms,
+            "replay/snapshot accumulated_suspended_ms mismatch"
+        );
+    }
+    if replayed.suspended_at_ms != snapshot.suspended_at_ms {
+        mismatches += 1;
+        tracing::warn!(
+            session_id,
+            replayed_suspended_at_ms = ?replayed.suspended_at_ms,
+            snapshot_suspended_at_ms = ?snapshot.suspended_at_ms,
+            "replay/snapshot suspended_at_ms mismatch"
         );
     }
     mismatches
@@ -798,6 +839,28 @@ mod tests {
         b.state = SessionState::Resolved;
         b.seen_message_ids.insert("m1".into());
         assert_eq!(validate_replay_consistency("s1", &a, &b), 2);
+
+        // `mode_state` is compared byte-for-byte, on its own.
+        let mut c = a.clone();
+        c.mode_state = vec![7, 7, 7];
+        assert_eq!(validate_replay_consistency("s1", &a, &c), 1);
+
+        // Suspension state is counted per field: a session the log replays to
+        // "resumed after 5s" against a snapshot that recorded "still
+        // suspended, nothing banked" is two mismatches.
+        let mut d = a.clone();
+        d.accumulated_suspended_ms = 5_000;
+        assert_eq!(validate_replay_consistency("s1", &a, &d), 1);
+        d.suspended_at_ms = Some(1_000);
+        assert_eq!(validate_replay_consistency("s1", &a, &d), 2);
+
+        // All five at once, to pin that each comparison contributes exactly
+        // one count and none of them shadow another.
+        let mut e = b.clone();
+        e.mode_state = vec![7, 7, 7];
+        e.accumulated_suspended_ms = 5_000;
+        e.suspended_at_ms = Some(1_000);
+        assert_eq!(validate_replay_consistency("s1", &a, &e), 5);
     }
 
     // ---------------------------------------------------------------------

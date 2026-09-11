@@ -263,16 +263,32 @@ impl Runtime {
         }
     }
 
+    /// Build a runtime-authored (`EntryKind::Internal`) log entry stamped with
+    /// `at_ms`.
+    ///
+    /// The clock is **injected, never read here**, mirroring
+    /// [`Self::make_incoming_entry`]'s `received_at_ms`. Replay reconstructs
+    /// suspension state from these recorded stamps (`SessionSuspend` /
+    /// `SessionResume` in `replay::replay_entry`), so the entry must carry the
+    /// *same* instant the caller used to mutate the live `Session`. When this
+    /// helper read `Utc::now()` itself, `suspend_session` / `resume_session`
+    /// read the clock twice — once for `Session::suspend`/`resume`, once here —
+    /// and a tick landing between the two reads made the live
+    /// `accumulated_suspended_ms` differ from the replayed one by ~1 ms. That
+    /// value gates the handoff implicit-accept decision, so a flip within 1 ms
+    /// of the deadline could make a live-`Resolved` session fail replay
+    /// entirely and be skipped at startup (`src/main.rs`, "failed to replay
+    /// session; skipping"). One clock read per entry removes the whole class.
     fn make_internal_entry(
         message_type: &str,
         payload: &[u8],
         session_id: &str,
         mode: &str,
+        at_ms: i64,
     ) -> LogEntry {
-        let now = Utc::now().timestamp_millis();
         LogEntry {
             message_id: String::new(),
-            received_at_ms: now,
+            received_at_ms: at_ms,
             sender: "_runtime".into(),
             message_type: message_type.into(),
             raw_payload: payload.to_vec(),
@@ -280,7 +296,7 @@ impl Runtime {
             session_id: session_id.into(),
             mode: mode.into(),
             macp_version: "1.0".into(),
-            timestamp_unix_ms: now,
+            timestamp_unix_ms: at_ms,
             bound_mode_version: None,
             semantics_rev: 0,
             bound_max_suspend_ms: None,
@@ -309,7 +325,8 @@ impl Runtime {
         let expires = (session.state == SessionState::Open && now > session.ttl_expiry)
             || (session.state == SessionState::Suspended && session.suspend_cap_exceeded(now));
         if expires {
-            let entry = Self::make_internal_entry("TtlExpired", b"", session_id, &session.mode);
+            let entry =
+                Self::make_internal_entry("TtlExpired", b"", session_id, &session.mode, now);
             self.storage
                 .append_log_entry(session_id, &entry)
                 .await
@@ -809,6 +826,7 @@ impl Runtime {
 
         // RFC-MACP-0001: runtime encodes a proper SessionCancelPayload with
         // `cancelled_by` set to the authenticated sender identity.
+        let now_ms = Utc::now().timestamp_millis();
         let cancel_payload = crate::pb::SessionCancelPayload {
             reason: reason.to_string(),
             cancelled_by: cancelled_by.to_string(),
@@ -818,6 +836,7 @@ impl Runtime {
             &prost::Message::encode_to_vec(&cancel_payload),
             session_id,
             &session.mode,
+            now_ms,
         );
         self.storage
             .append_log_entry(session_id, &cancel_entry)
@@ -877,6 +896,7 @@ impl Runtime {
             &prost::Message::encode_to_vec(&payload),
             session_id,
             &session.mode,
+            now_ms,
         );
         self.storage
             .append_log_entry(session_id, &entry)
@@ -921,6 +941,17 @@ impl Runtime {
         }
 
         let now_ms = chrono::Utc::now().timestamp_millis();
+        // `banked_ms` on the wire payload is **informational only**. Both this
+        // value and the `SessionResume` entry's `received_at_ms` now come from
+        // the single `now_ms` read above, so it is exactly
+        // `resume_entry.received_at_ms - suspend_entry.received_at_ms` — i.e.
+        // equal to the value replay derives by construction. Replay still
+        // ignores it and re-derives the banked duration from the two entry
+        // timestamps (see the `SessionSuspend`/`SessionResume` arms of
+        // `replay::replay_entry`). Keep it that way: starting to consume
+        // `banked_ms` would change how *legacy* logs replay, because entries
+        // written before this change recorded a second, independently-read
+        // clock and their `banked_ms` can disagree with their timestamps.
         let banked_before = session
             .suspended_at_ms
             .map(|at| (now_ms - at).max(0))
@@ -935,6 +966,7 @@ impl Runtime {
             &prost::Message::encode_to_vec(&payload),
             session_id,
             &session.mode,
+            now_ms,
         );
         self.storage
             .append_log_entry(session_id, &entry)
@@ -1103,7 +1135,8 @@ impl Runtime {
             if session.state != SessionState::Open || now <= session.ttl_expiry {
                 continue;
             }
-            let entry = Self::make_internal_entry("TtlExpired", b"", &session_id, &session.mode);
+            let entry =
+                Self::make_internal_entry("TtlExpired", b"", &session_id, &session.mode, now);
             if let Err(e) = self.storage.append_log_entry(&session_id, &entry).await {
                 tracing::warn!(
                     session_id,
