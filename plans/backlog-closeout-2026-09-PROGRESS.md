@@ -382,3 +382,50 @@ mutation-checked rather than trusted.
   by review rather than a red test, with the invariant stated in the surviving test's doc comment; and
   `synced`'s boundedness has no observable signal through the gRPC surface, resting on the
   single-publisher argument plus the exactly-once contract it must not break.
+
+---
+
+## Phase 9 — rev-2 scaffolding (G4) · 2026-09-11 · PASS, 1 verify round
+
+Commit `8e81481` on `feat/handoff-implicit-accept-rev2` (cut from `origin/main` @ `882beeb`), not
+pushed — accumulating toward G4's PR, per the verifier's explicit call. Executor Opus, verifier fresh
+Opus (no Fable at any tier, per the user's standing instruction; this phase is not a one-way door
+anyway — Phase 11 is the one that is, and it gets a fresh Opus too).
+
+Gate: **758 workspace passed / 0 failed** (751 baseline + 7 new), tier-1 119 + 8 JWT + 5 tier-2,
+`fmt`/`clippy -D warnings`/rustdoc clean, both lockfiles byte-unmoved. Three non-additive lines total:
+the const value, the record field, the call site. No existing test changed — the Edge-cases section's
+prediction that none would was correct, and its no-`== 1`-comparison claim was independently
+re-verified (four `semantics_rev` comparisons repo-wide, all `>= 1`).
+
+**Plan error #8 — a Files list that was an inventory presented as a work item.** The plan enumerated
+17 `LogEntry` literal sites to touch. They are a *correct* inventory of where `LogEntry` is
+constructed, and that is exactly why it misled: the new field belongs on `HandoffOfferRecord`, which
+lives inside the serialized `mode_state` blob, so **0 of the 17 needed any edit**. An executor
+following the Files list literally would have gone looking for a change with no reason to exist. This
+is the eighth of nine executed phases to find a real error in my plan.
+
+**A clippy lint made the planned shape inexpressible.** The plan asked for a `>= 2` branch "identical
+to `>= 1`" as the zero-risk scaffold. `clippy::if_same_then_else` under `-D warnings` rejects exactly
+that. The scaffolding became a single `rev2_elapsed_ms` helper returning the rev-1 arithmetic
+verbatim — which is structurally what the plan wanted (a seam Phase 10 edits in one place) and
+strictly better than a duplicated branch, but it is not what the plan said to write.
+
+**A pre-existing failure on a clean tree, and why the gate numbers are trustworthy anyway.**
+`macp-policy::registry::tests::enum_lists_match_the_canonical_schemas` fails on an unmodified
+`origin/main` in this environment: the test reads the sibling spec checkout, which sits on the
+unmerged `fix/issue-98-voting-semantics` branch (`392b961`), and that branch already moved
+`voting.threshold` from `minimum: 0` to `exclusiveMinimum: 0` while our hand-written mirror still
+asserts `minimum == 0`. **CI checks out spec `main`, so CI is green today** — the failure is local,
+not introduced by this phase. It is also a preview: this job reds the moment spec #98 merges, with no
+change on our side. Filed as macp-runtime issue #163, which also records that #98's draft introduces
+policy `schema_version` 3 — unplanned runtime work nobody had scoped. Every gate number above was
+re-run with `MACP_POLICY_SCHEMAS_DIR` pointed at spec `origin/main`'s schemas, so 758/0 is what CI
+will see rather than what this working copy sees.
+
+One expected-but-startling diff the executor was warned about and confirmed benign: adding a
+`#[serde(default)]` field to `HandoffOfferRecord` changes `mode_state` bytes, and
+`tests/conformance/handoff_reject_paths.json:62` carries an `expected_mode_state`. It passes because
+`conformance_loader.rs:516` compares by `assert_json_contains` (subset), not equality.
+
+**Next:** Phase 10 — suspension-correct timing. `rev2_elapsed_ms` is the exact seam it edits.

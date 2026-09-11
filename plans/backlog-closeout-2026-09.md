@@ -510,7 +510,27 @@ external consumer (`zer07labs/seam-runtime`, pinning `macp-policy =0.6.0` and ca
 - **Tests:** as above.
 ### Phase 9 — rev-2 scaffolding, behaviour-neutral (G4)
 
-- **Status:** TODO
+- **Status:** DONE (`8e81481`, branch `feat/handoff-implicit-accept-rev2`, not yet pushed).
+  Gate: 758 workspace tests passed / 0 failed (751 baseline + 7), tier-1 119 + 8 JWT + 5 tier-2,
+  fmt/clippy/rustdoc clean, both lockfiles unmoved.
+  **Divergence 1 — the Files list was wrong as a work item.** It named "17 `LogEntry` literal sites"
+  as files to touch. They are an accurate *inventory* of where `LogEntry` is constructed, but the new
+  field went on `HandoffOfferRecord` (inside `mode_state`), not on `LogEntry` — so **0 of the 17
+  needed an edit**. The phase's actual diff is three non-additive lines: the const value, the record
+  field, and the call site.
+  **Divergence 2 — the planned "`>= 2` branch identical to `>= 1`" is inexpressible.** `clippy -D
+  warnings` rejects two branches with identical bodies (`clippy::if_same_then_else`). The scaffolding
+  is instead a single `rev2_elapsed_ms` helper that currently returns the rev-1 arithmetic verbatim;
+  that function *is* the seam Phase 10 edits, which is what the plan wanted structurally.
+  **Divergence 3 — a pre-existing test fails on a clean tree in this environment.**
+  `macp-policy::registry::tests::enum_lists_match_the_canonical_schemas` reds locally because the
+  sibling spec checkout sits on the unmerged `fix/issue-98-voting-semantics` branch, which already
+  moved `voting.threshold` to `exclusiveMinimum: 0`. CI checks out spec `main`, so CI is green today
+  — but this job reds the moment spec #98 merges. Tracked in macp-runtime issue #163. Every gate
+  number above was therefore re-run with `MACP_POLICY_SCHEMAS_DIR` pointed at spec `origin/main`, so
+  758/0 reflects what CI sees, not what this working copy sees.
+  The Edge-cases prediction held exactly: no test changed, and the no-`== 1`-comparison claim was
+  independently re-verified (four `semantics_rev` comparisons repo-wide, all `>= 1`).
 - **Delivers:** `CURRENT_SEMANTICS_REV = 2` with a `>= 2` branch identical to `>= 1`; the
   suspended-at-offer field on `HandoffOfferRecord`. **Zero behaviour change.**
 - **Depends on:** Phase 8 merged.
