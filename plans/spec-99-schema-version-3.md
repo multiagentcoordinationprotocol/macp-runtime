@@ -182,6 +182,51 @@ The evaluator half closes too, differently. `weighted_total == 0.0 => NoVotes` (
   3. **Criteria 3 and 4 gained an explicit `Passed` precondition.** Their shape lands on exactly
      `1.0/2.0 = 0.5`, which passes *only* because the ratio comparison is inclusive; one tick either way
      and both would silently exercise the `Failed` arm instead of the `Passed` arm they exist to cover.
+  **VERIFICATION RETURNED GAPS — 1 BLOCKER, 2 SHOULD-FIX, 4 NICE-TO-HAVE. Code is correct and
+  spec-conformant; the blocker is in the operator note.** Fixes tracked below and applied after
+  Phase 4 lands (they touch the same `evaluator.rs` region Phase 4 edits).
+  **BLOCKER — the blast radius is incomplete and the doc claims completeness.** Change (c), applying
+  the decline guard in the `Passed` arm, breaks stored-session replay for a shape with **no
+  `weighted` policy and no `weights` map at all**. Measured: `majority` + `threshold: 0.5` +
+  `allow_decline_over_approval: true`, three `APPROVE`s (`Passed`, zero rejects), negative
+  `Commitment` — **`Allow` before, `Deny` after**. That is a fully registerable v2+ policy and a
+  trivially reachable ballot set, so such sessions exist in stored history and fail to replay with
+  the same two symptoms item 6 documents. Therefore `docs/deployment.md`'s "**That is the whole
+  predicate**" and "the exact and complete predicate" are **false**: an operator who runs the audit
+  query, finds no `weighted` policies and concludes they are unaffected **can be wrong** — and under
+  `MACP_STRICT_RECOVERY=1` that is a runtime that refuses to start.
+  **This is a second plan error, and the plan contradicts itself.** Approach item (c) names the
+  all-approve round explicitly ("rather than permitting a decline over an all-approve round"), while
+  the blast-radius paragraph two sections later asserts "two conjuncts … that is the whole
+  predicate". The executor implemented (c) faithfully and carried the plan's incomplete predicate
+  into the doc. The **code** is right: RFC-MACP-0007 §6.2 carried "The guard applies across all three
+  voting results" *before* #99, so this is a pre-existing conformance bug being fixed — which is
+  exactly why §8's bounded exception does not cover it.
+  **Fix:** add a second predicate to `docs/deployment.md` item 6 — any Decision session whose policy
+  sets `commitment.allow_decline_over_approval: true` and whose history contains an accepted negative
+  `Commitment` over a `Passed` round with **zero** rejects — or split change (c) into its own item.
+  **SHOULD-FIX 1 — no test covers change (c)'s non-`weighted` reach.** Criterion 3 covers `Passed` +
+  knob + non-decisive reject only under `weighted`; the pre-existing
+  `decline_allowed_over_passing_vote_with_knob` carries a `REJECT` so it is unaffected. The shape
+  that will actually cost operators sessions is untested, and being non-`weighted` it is not implied
+  by any existing test's setup.
+  **SHOULD-FIX 2 — the new `Passed`-arm deny reason is wrong for non-`weighted` policies.** It reads
+  "a vote cast by a participant outside `voting.weights` is non-decisive" — for a `majority` policy
+  with no `voting.weights` at all, sending the operator to the wrong knob.
+  **NICE-TO-HAVE:** a **third** Phase-1-falsified comment still stands (the "negative fixed, zero
+  deferred" header and its "schema-legal case … deliberately still `NoVotes`" item), while this
+  phase's commit message claims two were corrected "rather than left standing"; the `NoVotes`
+  negative reason still says "explicit" where the others became "decisive"; the `> 0.0` rustdoc
+  justification ("short-circuited to `Failed` regardless") holds only when the *total* is negative,
+  not for e.g. `{a: 1.0, b: -0.5}`; and criterion 2 could be made independently discriminating with a
+  `Failed`-arm precondition.
+  **Confirmed sound by measurement:** criterion 8 genuinely met at both levels (66.7% → `Passed`/
+  `Allow` before, `Failed`/`Deny` after); criterion 6's substitution strictly stronger (the faithful
+  shape leaves its `PolicyDecision` half vacuous); the `Passed` preconditions load-bearing; mutation C
+  reds criterion 3 only and D reds criterion 4 only; quorum stays weight-unaware in both directions;
+  the audit query **is** executable from `ListSessions`/`GetSession`/`GetPolicy` plus `StreamSession`
+  history, though the note names no mechanism. One correction to the executor's own report: criterion
+  3 is **not** on the inclusive knife-edge (its ratio is 1.0/1.0); only criterion 4 is.
   **A stale-by-inheritance imprecision in this phase's prose:** it says the negative-total arm "becomes
   unreachable through registration (Phase 1 refuses negatives)". Registration already refused negatives
   before Phase 1 — the filter was `< 0.0` — and Phase 1 only added the zero case. Same error as Phase
