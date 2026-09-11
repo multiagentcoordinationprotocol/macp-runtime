@@ -64,9 +64,41 @@ The evaluator half closes too, differently. `weighted_total == 0.0 => NoVotes` (
 
 ### Phase 1 — re-mirror the tightened decision-rules schema and invert the two deferral tests
 
-- **Status:** DONE (`fix/spec-99-schema-version-3`)
-- **Delivers:** `enum_lists_match_the_canonical_schemas` green against spec `b59af6a`; `voting.threshold` and `voting.weights` refused at `0`; `majority` held to `threshold >= 0.5`; `weights` held non-empty for every algorithm that declares one. Closes **#149** outright and **#148**'s registration half.
-- **Depends on:** nothing. This is the only phase that can land alone and is the one that unblocks the parity step of `conformance-oracle`.
+- **Status:** DONE — `5bad7a4`. Gate **758 passed / 0 failed**, tier-1 119 + 8 JWT + 5 tier-2,
+  fmt/clippy/rustdoc clean, both lockfiles unmoved and `--locked`-clean, **all seven crates report
+  "no semver update required"** so `DECISIONS.md` D7 is safe. Verified PASS, 0 blockers.
+  **Correction 1 — criterion 4 was VACUOUS.** `{"a": 1.0, "b": -1.0}` was **already refused at
+  `882beeb`** by the pre-existing `weight < 0.0 || weight.is_nan()` filter, and the shape was already
+  covered by `register_negative_voting_weights_name_every_offender_in_order`. `git log -S` dates that
+  filter to **`298c0f4` (#159)** — work done earlier in this same session — so #148's "both register
+  cleanly" was true of the `0.6.0` it measured and stale by `882beeb`. **Both** reproducers were
+  already refused. `register_mixed_sign_weights_fails` is a **regression pin**, not the
+  discriminator, and is commented as such.
+  **Correction 2 — criterion 2's descriptor cannot discriminate.** `{"majority", threshold: 0.0}` is
+  refused by *either* new mirror, so reverting the floor alone leaves it green (mutation-proven).
+  Discharged instead by `register_zero_voting_threshold_fails_for_unanimous_too`, asserting the
+  range-check text on `unanimous` — the vehicle this phase's own edge-case note pointed at.
+  **Criterion 5 was met but insufficient:** its pair does not detect hoisting the new check out of
+  the mode guard. Covered by an added `register_empty_weights_map_for_another_mode_succeeds`, the
+  sole red under that hoist.
+- **Delivers:** `enum_lists_match_the_canonical_schemas` green against spec `b59af6a`; `voting.threshold` and `voting.weights` refused at `0`; `majority` held to `threshold >= 0.5`; `weights` held non-empty for every algorithm that declares one.
+  **Corrected 2026-09-11:** this originally read "Closes #149 outright and #148's registration half",
+  which was wrong on #148 and contradicted this plan's own Design question 3. Phase 1 **completes**
+  #148's registration half by generalizing `< 0` to `<= 0` and adding the empty-map refusal — which
+  is precisely #148's own suggested fix ("reject **non-positive** weights at registration") — but the
+  two descriptors the reporter reproduced were already refused before this phase began. **#149's
+  close-comment needs the caveat this plan already gives #148:** the `0.0 >= 0.0 → Passed` evaluator
+  arm remains reachable by direct `PolicyDefinition` construction, because Phase 1 narrows admission
+  only and touches no evaluator code.
+- **Depends on:** nothing; it is independently shippable (no API change, no dependency change, zero
+  fixtures move, no evaluator code touched).
+  **Corrected 2026-09-11 — this originally claimed it "unblocks the parity step of
+  `conformance-oracle`", and the truth is stronger in the unhelpful direction.** The
+  `Vendored fixtures are byte-identical to canonical` step is the job's **first** (`ci.yml:569`), it
+  ends in `exit $status`, and Actions steps fail fast — so while 12 fixtures are MISSING, **the
+  parity step never executes at all.** Phase 1 therefore produces **zero observable CI change** until
+  Phase 6 vendors them. No single phase can turn `conformance-oracle` green; only the complete PR
+  can. Phase 1 fixes the parity step's *content*, which is real work, but it is not what unblocks CI.
 - **Files:** `crates/macp-policy/src/registry.rs` — `validate_decision_voting` (`:501`), specifically the range test at `:511` and the weight filter at `:522`; the conditional block at `:440-451`; the rustdoc at `:479-500` that currently cites "`0` and `1`, both **inclusive**" and "deferred to spec issue #98"; the parity assertions at `:1659` and `:1664-1667`; the two inverting tests at `:1190` and `:1226`. `integration_tests/tests/tier1_protocol/test_policy_registry.rs:596-672` — move cases 1 and 2 of `register_policy_accepts_schema_legal_boundary_values` into `register_policy_refuses_out_of_schema_values`. `docs/policy.md:60`, `:69`, `:70`. `docs/deployment.md` — a new numbered item in the upgrade-notes section that starts at `:19`.
 - **Approach:** Change four value-domain mirrors to match `decision-rules.schema.json` at `b59af6a`: `threshold` becomes `> 0.0 && <= 1.0`; the weight filter becomes `**weight <= 0.0 || weight.is_nan()` with its message moving from "every weight must be >= 0" to "> 0"; a new `majority && threshold < 0.5` refusal joins the existing `supermajority && threshold <= 0.5` one; and the existing `weighted && weights.is_empty()` refusal at `:440` is widened to any rules object that supplies a `weights` map, since `minProperties: 1` in the schema is unconditional on the algorithm. The parity assertions move from `["minimum"]` to `["exclusiveMinimum"]` for both keywords, and gain one new assertion each for `weights.minProperties == 1` and for the `majority` `allOf` arm's `threshold.minimum == 0.5`, so a future loosening upstream is caught rather than silently absorbed. Rejected: enforcing these in the evaluator instead — #149's reporter argued the case correctly, that a clamp silently rewrites an operator's stated policy while a refusal tells them it was unauthorable, and RFC-MACP-0012 §7 now says in as many words that rule-schema validation is an **admission-time** gate that "never afterwards" revalidates. Also rejected: adding a JSON-Schema evaluator so the mirrors stop being hand-written — that is a dependency change in a workspace crate, which drags `integration_tests/Cargo.lock` regeneration into a PR that otherwise adds no dependency, and the parity test already does the job.
 - **Edge cases & failure modes:** The unconditional `threshold > 0` floor reaches `unanimous` and `plurality`, which never read `threshold` — §4.1 says that is deliberate ("a `threshold` a policy author believed was in force should never be silently ignored"), so do not special-case them. A rules object that **omits** `threshold` is unaffected: `default_threshold()` is `0.5` (`crates/macp-core/src/policy/rules.rs:45`), so all three reserved `policy.std.*` profiles and the built-in `policy.default` register unchanged — verified in the probe, where `defaults.rs`'s profile tests stay green. The `majority >= 0.5` bound is **inclusive** and asymmetric with `supermajority`'s exclusive one; the schema's own `$comment` explains why (`policy.std.majority` sets exactly `0.5` and §2.2 pins it byte-identical on every runtime), so an exclusive bound here would refuse a profile this runtime pre-registers at startup and would abort the process. The widened `weights` non-emptiness check must not fire on a rules object with no `weights` key at all, only on one that supplies an empty map — `VotingRules.weights` defaults to an empty `HashMap`, so discriminate on the raw JSON (`rules.get("voting").and_then(|v| v.get("weights"))`), not on the parsed struct, or every non-weighted policy is refused. This is the single most likely way to break this phase. **Second most likely: hoisting that raw-JSON discriminator out of the mode guard.** `validate_conditional_constraints` applies the entire Decision block only under `if matches!(mode, "macp.mode.decision.v1" | "*")` (`crates/macp-policy/src/registry.rs:437`; the fn opens at `:432`). The new non-emptiness check must sit **inside** that `if`, alongside the existing `weighted && weights.is_empty()` refusal at `:440`. A check written against the raw `rules` value before the guard would refuse a policy registered for another mode that happens to carry a `voting` object with an empty `weights` map — rules the Decision schema does not govern.
