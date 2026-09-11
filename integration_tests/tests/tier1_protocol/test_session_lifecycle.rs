@@ -182,3 +182,94 @@ async fn watch_sessions_emits_created_exactly_once_per_session() {
         "live-created session must appear exactly once"
     );
 }
+
+#[tokio::test]
+async fn watch_sessions_initial_sync_emits_every_session_once() {
+    use macp_runtime::pb::WatchSessionsRequest;
+
+    // The initial sync no longer deep-clones the whole registry into one Vec:
+    // it takes the session-ID list once and materializes one session at a time.
+    // This pins the observable contract of that traversal through the real gRPC
+    // boundary — every session registered before the subscribe appears exactly
+    // once, across enough sessions to span many traversal batches.
+    let mut client = common::grpc_client().await;
+    let agent = "agent://watch-sync-many";
+    let partner = "agent://partner";
+
+    let mut mine: Vec<String> = Vec::new();
+    for i in 0..12 {
+        let sid = new_session_id();
+        let ack = send_as(
+            &mut client,
+            agent,
+            envelope(
+                MODE_DECISION,
+                "SessionStart",
+                &new_message_id(),
+                &sid,
+                agent,
+                session_start_payload(
+                    &format!("watch sync {i}"),
+                    &[agent, partner],
+                    60_000,
+                ),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(ack.ok, "SessionStart {i} failed: {:?}", ack.error);
+        mine.push(sid);
+    }
+
+    let mut request = tonic::Request::new(WatchSessionsRequest {});
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {agent}").parse().expect("valid header"),
+    );
+    let mut stream = client.watch_sessions(request).await.unwrap().into_inner();
+
+    // The shared runtime carries sessions from other tests, so count only ours.
+    let mut created_counts: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    let owned: std::collections::HashSet<&String> = mine.iter().collect();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let next = tokio::time::timeout_at(deadline, stream.message()).await;
+        let Ok(Ok(Some(resp))) = next else { break };
+        if let Some(event) = resp.event {
+            // EventType::Created == 1 in the proto enum.
+            if event.event_type == 1 {
+                if let Some(session) = event.session {
+                    if owned.contains(&session.session_id) {
+                        *created_counts.entry(session.session_id).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        if created_counts.len() == mine.len() {
+            // Drain briefly for a straggling duplicate before asserting.
+            let grace =
+                tokio::time::timeout(std::time::Duration::from_millis(300), stream.message()).await;
+            if let Ok(Ok(Some(resp))) = grace {
+                if let Some(event) = resp.event {
+                    if event.event_type == 1 {
+                        if let Some(session) = event.session {
+                            if owned.contains(&session.session_id) {
+                                *created_counts.entry(session.session_id).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    for sid in &mine {
+        assert_eq!(
+            created_counts.get(sid).copied().unwrap_or(0),
+            1,
+            "session {sid} must appear exactly once in the initial sync"
+        );
+    }
+}

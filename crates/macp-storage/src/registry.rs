@@ -260,6 +260,14 @@ impl SessionRegistry {
         Some(session.clone())
     }
 
+    /// Deep-clones **every** registered session into one `Vec`, and therefore
+    /// holds the whole registry resident for as long as the caller keeps the
+    /// result. Only for one-shot, non-streaming work whose lifetime is its own
+    /// call (the shutdown snapshot in `src/main.rs`). A caller that emits the
+    /// sessions to a client — where the `Vec` stays alive for the duration of a
+    /// client-paced stream, times the number of concurrent streams — must use
+    /// [`SessionRegistry::session_ids`] plus [`SessionRegistry::get_session`]
+    /// instead, which keeps one `Session` resident at a time.
     pub async fn get_all_sessions(&self) -> Vec<Session> {
         let arcs: Vec<SharedSession> = {
             let guard = self.sessions.read().await;
@@ -270,6 +278,31 @@ impl SessionRegistry {
             out.push(arc.lock().await.clone());
         }
         out
+    }
+
+    /// Every registered session ID, in unspecified order.
+    ///
+    /// One synchronous pass under the map read lock, cloning the keys only —
+    /// never a `Session`. This is the entry point for a traversal that wants to
+    /// visit every session without materializing them all at once: take the IDs
+    /// here, then `get_session` them one at a time (see `watch_sync` in
+    /// `macp-runtime`, which uses exactly that shape for the `WatchSessions`
+    /// initial sync).
+    ///
+    /// Unordered on purpose. [`SessionRegistry::session_ids_after`] is the
+    /// ordered form, but it exists to serve *one page per call*: it scans every
+    /// key on every call, keeping a `limit`-sized heap, so driving a full
+    /// traversal through it costs ⌈N/limit⌉ whole-map scans. When the caller
+    /// wants all the IDs and does not care about order, this is one pass.
+    ///
+    /// Like `session_ids_after`, a single call is consistent but the traversal
+    /// that follows is **not** a snapshot: the lock is released on return, so a
+    /// session registered afterwards is absent from the list, and one evicted
+    /// afterwards yields `None` from `get_session`. IDs are create-once, so no
+    /// ID here can be reused by a different session later.
+    pub async fn session_ids(&self) -> Vec<String> {
+        let guard = self.sessions.read().await;
+        guard.keys().cloned().collect()
     }
 
     /// Session IDs strictly greater than `after`, ascending (byte order), at most
@@ -439,6 +472,28 @@ mod tests {
             ids.push(format!("sess-{:016x}-{i:04}", state >> 16));
         }
         ids
+    }
+
+    #[tokio::test]
+    async fn session_ids_returns_every_key_once() {
+        let ids: Vec<String> = ["delta", "alpha", "charlie", "bravo"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let registry = registry_with(&ids).await;
+
+        let mut all = registry.session_ids().await;
+        // Order is unspecified, so sort before comparing — asserting a specific
+        // HashMap iteration order would be asserting an implementation detail.
+        all.sort();
+        assert_eq!(all, vec!["alpha", "bravo", "charlie", "delta"]);
+        // Same set as the ordered primitive with no limit, which is the
+        // property the WatchSessions traversal relies on.
+        let mut paged = registry.session_ids_after(None, usize::MAX).await;
+        paged.sort();
+        assert_eq!(all, paged);
+
+        assert!(SessionRegistry::new().session_ids().await.is_empty());
     }
 
     #[tokio::test]
