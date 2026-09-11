@@ -11,6 +11,50 @@ use macp_core::policy::rules::{
 };
 use macp_core::policy::{PolicyDefinition, PolicyError};
 
+/// Legal values of `voting.algorithm`, mirroring
+/// `schemas/json/policy/decision-rules.schema.json`
+/// (`properties.voting.properties.algorithm.enum`).
+const DECISION_VOTING_ALGORITHMS: [&str; 6] = [
+    "none",
+    "majority",
+    "supermajority",
+    "unanimous",
+    "weighted",
+    "plurality",
+];
+
+/// Legal values of `voting.quorum.type`, mirroring
+/// `schemas/json/policy/decision-rules.schema.json`
+/// (`properties.voting.properties.quorum.properties.type.enum`).
+const DECISION_VOTING_QUORUM_TYPES: [&str; 2] = ["count", "percentage"];
+
+/// Legal values of Quorum mode's `threshold.type`.
+///
+/// `schemas/json/policy/quorum-rules.schema.json`
+/// (`properties.threshold.properties.type.enum`) lists `n_of_m`, `percentage`
+/// and `weighted`. This list departs from it twice, deliberately: `count` is a
+/// documented alias for `n_of_m` in this runtime (spec issue #98 tracks the
+/// schema gap), and `weighted` is refused as unimplemented — see
+/// [`QUORUM_UNIMPLEMENTED_THRESHOLD_TYPES`].
+const QUORUM_THRESHOLD_TYPES: [&str; 3] = ["n_of_m", "percentage", "count"];
+
+/// Quorum `threshold.type` values the canonical schema allows but this runtime
+/// has no implementation for. `threshold.value` is typed `integer`, so a
+/// weighted sum is not expressible; both the mode and the evaluator would
+/// silently treat it as a raw approval count.
+const QUORUM_UNIMPLEMENTED_THRESHOLD_TYPES: [&str; 1] = ["weighted"];
+
+/// The outcome of validating one file during a [`PolicyRegistry::validate_dir`]
+/// pass.
+#[derive(Debug, Clone)]
+pub struct PolicyFileOutcome {
+    /// The file that was validated.
+    pub path: std::path::PathBuf,
+    /// `Ok(policy_id)` if the file would load, `Err(reason)` if it would be
+    /// rejected. The reason is the same text `register` would return.
+    pub result: Result<String, String>,
+}
+
 /// In-memory policy registry for governance policy definitions.
 ///
 /// Mirrors the `ModeRegistry` pattern: uses `RwLock` for entries and
@@ -134,7 +178,6 @@ impl PolicyRegistry {
         policies
     }
 
-    /// Subscribe to policy registry change notifications.
     /// Load policy definitions from a directory of JSON files (RFC-MACP-0012
     /// §9 / `MACP_POLICIES_DIR`). Each `*.json` file holds one
     /// `PolicyDefinition`-shaped document:
@@ -144,14 +187,12 @@ impl PolicyRegistry {
     /// validation, reserved-id and duplicate checks). Returns the number of
     /// policies loaded; any invalid file is an error — a runtime configured
     /// to preload governance policies must not silently start without them.
+    /// It stops at the **first** rejection, which is what makes
+    /// [`Self::validate_dir`] worth having: an operator upgrading into new
+    /// registration constraints needs the whole list, not just the first file
+    /// that trips one.
     pub fn load_from_dir(&self, dir: &std::path::Path) -> Result<usize, String> {
-        let mut entries: Vec<_> = std::fs::read_dir(dir)
-            .map_err(|e| format!("cannot read policies dir {}: {e}", dir.display()))?
-            .filter_map(|r| r.ok().map(|d| d.path()))
-            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
-            .collect();
-        // Deterministic load order regardless of filesystem enumeration.
-        entries.sort();
+        let entries = Self::policy_files_in(dir)?;
 
         let mut loaded = 0;
         for path in entries {
@@ -166,6 +207,48 @@ impl PolicyRegistry {
         Ok(loaded)
     }
 
+    /// Validate every policy file in `dir` **without** loading it into this
+    /// registry, reporting one outcome per file rather than stopping at the
+    /// first rejection. Backs `MACP_POLICIES_DRY_RUN=1`.
+    ///
+    /// Validation runs against a scratch registry, so it reproduces the
+    /// startup path exactly — including duplicate-id detection between two
+    /// files in the same directory and the pre-registered `policy.default` /
+    /// `policy.std.*` entries — while leaving `self` untouched. Only a
+    /// directory that cannot be read at all is an `Err`; every per-file
+    /// problem is an `Err` inside a [`PolicyFileOutcome`].
+    pub fn validate_dir(dir: &std::path::Path) -> Result<Vec<PolicyFileOutcome>, String> {
+        let scratch = Self::new();
+        let mut outcomes = Vec::new();
+        for path in Self::policy_files_in(dir)? {
+            let result = std::fs::read_to_string(&path)
+                .map_err(|e| format!("cannot read file: {e}"))
+                .and_then(|raw| {
+                    serde_json::from_str::<PolicyDefinition>(&raw)
+                        .map_err(|e| format!("not a valid policy document: {e}"))
+                })
+                .and_then(|definition| {
+                    let policy_id = definition.policy_id.clone();
+                    scratch.register(definition).map(|()| policy_id)
+                });
+            outcomes.push(PolicyFileOutcome { path, result });
+        }
+        Ok(outcomes)
+    }
+
+    /// The `*.json` files in `dir`, in a deterministic order regardless of
+    /// filesystem enumeration order.
+    fn policy_files_in(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>, String> {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .map_err(|e| format!("cannot read policies dir {}: {e}", dir.display()))?
+            .filter_map(|r| r.ok().map(|d| d.path()))
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+            .collect();
+        entries.sort();
+        Ok(entries)
+    }
+
+    /// Subscribe to policy registry change notifications.
     pub fn subscribe_changes(&self) -> broadcast::Receiver<()> {
         self.change_tx.subscribe()
     }
@@ -275,6 +358,24 @@ impl PolicyRegistry {
     }
 
     /// Validate conditional constraints that depend on specific field values.
+    ///
+    /// Two families of check live here:
+    ///
+    /// 1. **Value-domain checks that mirror the canonical JSON Schemas**
+    ///    (`schemas/json/policy/*.schema.json` in the spec repo) — enum
+    ///    membership, numeric ranges and numeric types. This runtime carries no
+    ///    JSON-Schema evaluator, so these are hand-written from the schema text
+    ///    and each helper cites the file and keyword it mirrors. Without them
+    ///    an out-of-domain value reaches the evaluator, where it either falls
+    ///    into a fail-open `_` arm or silently changes the governance bar.
+    /// 2. **Conditional (`allOf`/`if`-`then`) constraints** the schemas express
+    ///    structurally.
+    ///
+    /// Every rejection leads with `INVALID_POLICY_DEFINITION` because
+    /// `RegisterPolicyResponse` carries no structured error code — only `ok`
+    /// and a message — so the code has to travel in the text. The same applies
+    /// to the `MACP_POLICIES_DIR` path, which funnels through
+    /// [`Self::register`].
     fn validate_conditional_constraints(
         mode: &str,
         rules: &serde_json::Value,
@@ -282,17 +383,25 @@ impl PolicyRegistry {
         // Decision mode (and wildcard) voting constraints
         if matches!(mode, "macp.mode.decision.v1" | "*") {
             if let Ok(decision) = serde_json::from_value::<DecisionPolicyRules>(rules.clone()) {
+                Self::validate_decision_voting(&decision.voting)?;
                 if decision.voting.algorithm == "weighted" && decision.voting.weights.is_empty() {
                     return Err(
-                        "voting.algorithm 'weighted' requires non-empty voting.weights".into(),
+                        "INVALID_POLICY_DEFINITION: voting.algorithm 'weighted' requires non-empty voting.weights".into(),
                     );
                 }
                 if decision.voting.algorithm == "supermajority" && decision.voting.threshold <= 0.5
                 {
                     return Err(
-                        "voting.algorithm 'supermajority' requires voting.threshold > 0.5".into(),
+                        "INVALID_POLICY_DEFINITION: voting.algorithm 'supermajority' requires voting.threshold > 0.5".into(),
                     );
                 }
+            }
+        }
+
+        // Quorum mode threshold constraints
+        if mode == "macp.mode.quorum.v1" {
+            if let Ok(quorum) = serde_json::from_value::<QuorumPolicyRules>(rules.clone()) {
+                Self::validate_quorum_threshold(&quorum.threshold)?;
             }
         }
 
@@ -301,12 +410,148 @@ impl PolicyRegistry {
             if let Ok(cr) = serde_json::from_value::<CommitmentRules>(commitment.clone()) {
                 if cr.authority == "designated_role" && cr.designated_roles.is_empty() {
                     return Err(
-                        "commitment.authority 'designated_role' requires non-empty commitment.designated_roles".into(),
+                        "INVALID_POLICY_DEFINITION: commitment.authority 'designated_role' requires non-empty commitment.designated_roles".into(),
                     );
                 }
             }
         }
 
+        Ok(())
+    }
+
+    /// Decision-mode `voting` value domains, mirroring
+    /// `schemas/json/policy/decision-rules.schema.json`:
+    ///
+    /// - `properties.voting.properties.algorithm.enum` →
+    ///   [`DECISION_VOTING_ALGORITHMS`]. An unknown algorithm reaches
+    ///   `check_voting_algorithm`'s fail-closed `_` arm, so every commitment in
+    ///   such a session is denied with no way to tell a typo from a policy.
+    /// - `properties.voting.properties.threshold.{minimum,maximum}` — `0` and
+    ///   `1`, both **inclusive**. `0.0` is therefore accepted: it is
+    ///   schema-legal, and whether a degenerate threshold should be legal at
+    ///   all is deferred to spec issue #98.
+    /// - `properties.voting.properties.quorum.properties.type.enum` →
+    ///   [`DECISION_VOTING_QUORUM_TYPES`]. Note the evaluator additionally
+    ///   accepts `n_of_m` here (`evaluator.rs`, `check_quorum`), which the
+    ///   canonical enum does not list; registration refuses it so the drift
+    ///   cannot enter the registry.
+    /// - `properties.voting.properties.quorum.properties.value.minimum` — `0`.
+    ///   The schema types this one as `number`, not `integer`, and sets no
+    ///   `maximum` even for `type: "percentage"`, so neither is enforced.
+    /// - `properties.voting.properties.weights.additionalProperties.minimum` —
+    ///   `0`, **inclusive**. A zero weight is therefore accepted; the
+    ///   all-zero-weights degenerate case is deferred to spec issue #98.
+    fn validate_decision_voting(
+        voting: &macp_core::policy::rules::VotingRules,
+    ) -> Result<(), String> {
+        if !DECISION_VOTING_ALGORITHMS.contains(&voting.algorithm.as_str()) {
+            return Err(format!(
+                "INVALID_POLICY_DEFINITION: voting.algorithm '{}' is not one of: {}",
+                voting.algorithm,
+                DECISION_VOTING_ALGORITHMS.join(", ")
+            ));
+        }
+        if !(0.0..=1.0).contains(&voting.threshold) {
+            return Err(format!(
+                "INVALID_POLICY_DEFINITION: voting.threshold {} is out of range: \
+                 must be between 0.0 and 1.0 inclusive",
+                voting.threshold
+            ));
+        }
+        // Deterministic message: `weights` is a HashMap, so sort the offenders.
+        let mut negative: Vec<&str> = voting
+            .weights
+            .iter()
+            .filter(|(_, weight)| **weight < 0.0 || weight.is_nan())
+            .map(|(participant, _)| participant.as_str())
+            .collect();
+        if !negative.is_empty() {
+            negative.sort_unstable();
+            return Err(format!(
+                "INVALID_POLICY_DEFINITION: voting.weights has negative values for: {} \
+                 — every weight must be >= 0",
+                negative
+                    .iter()
+                    .map(|k| format!("'{k}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !DECISION_VOTING_QUORUM_TYPES.contains(&voting.quorum.quorum_type.as_str()) {
+            return Err(format!(
+                "INVALID_POLICY_DEFINITION: voting.quorum.type '{}' is not one of: {}",
+                voting.quorum.quorum_type,
+                DECISION_VOTING_QUORUM_TYPES.join(", ")
+            ));
+        }
+        if voting.quorum.value < 0.0 || voting.quorum.value.is_nan() {
+            return Err(format!(
+                "INVALID_POLICY_DEFINITION: voting.quorum.value {} is out of range: must be >= 0",
+                voting.quorum.value
+            ));
+        }
+        Ok(())
+    }
+
+    /// Quorum-mode `threshold` value domains, mirroring
+    /// `schemas/json/policy/quorum-rules.schema.json`:
+    ///
+    /// - `properties.threshold.properties.type.enum` — `n_of_m`, `percentage`,
+    ///   `weighted`. Two deliberate departures:
+    ///   - `count` is **accepted** although the canonical enum omits it. This
+    ///     runtime documents it (`docs/policy.md`) and both layers already
+    ///     treat it as an alias for `n_of_m` (`QuorumMode::effective_threshold`
+    ///     and `evaluate_quorum_commitment_outcome`), so refusing it would
+    ///     break documented behaviour. The schema gap is tracked as spec
+    ///     issue #98.
+    ///   - `weighted` is **refused as unimplemented**. Both layers fall into a
+    ///     `_` arm that treats it as a raw approval count, and
+    ///     `threshold.value` is typed `integer`, so a weighted sum is not even
+    ///     expressible — there is no defined semantics to silently apply.
+    /// - `properties.threshold.properties.value.type` — `integer`. The Rust
+    ///   field is `f64`, so this is enforced as a zero fractional part, which
+    ///   is exactly what JSON Schema's `integer` type means (`2.0` is an
+    ///   integer, `0.5` is not).
+    /// - `properties.threshold.properties.value.minimum` — `0`.
+    /// - `allOf[0]`: `then.properties.value.maximum` — `100` when
+    ///   `type` is `percentage`.
+    fn validate_quorum_threshold(
+        threshold: &macp_core::policy::rules::QuorumThreshold,
+    ) -> Result<(), String> {
+        let kind = threshold.threshold_type.as_str();
+        if QUORUM_UNIMPLEMENTED_THRESHOLD_TYPES.contains(&kind) {
+            return Err(format!(
+                "INVALID_POLICY_DEFINITION: threshold.type '{kind}' is not implemented by this \
+                 runtime: threshold.value is typed as an integer, so a weighted sum has no \
+                 defined semantics here — use one of: {}",
+                QUORUM_THRESHOLD_TYPES.join(", ")
+            ));
+        }
+        if !QUORUM_THRESHOLD_TYPES.contains(&kind) {
+            return Err(format!(
+                "INVALID_POLICY_DEFINITION: threshold.type '{kind}' is not one of: {}",
+                QUORUM_THRESHOLD_TYPES.join(", ")
+            ));
+        }
+        if threshold.value.fract() != 0.0 {
+            return Err(format!(
+                "INVALID_POLICY_DEFINITION: threshold.value {} must be an integer",
+                threshold.value
+            ));
+        }
+        if threshold.value < 0.0 {
+            return Err(format!(
+                "INVALID_POLICY_DEFINITION: threshold.value {} is out of range: must be >= 0",
+                threshold.value
+            ));
+        }
+        if kind == "percentage" && threshold.value > 100.0 {
+            return Err(format!(
+                "INVALID_POLICY_DEFINITION: threshold.value {} is out of range: \
+                 must be <= 100 when threshold.type is 'percentage'",
+                threshold.value
+            ));
+        }
         Ok(())
     }
 }
@@ -729,7 +974,9 @@ mod tests {
             mode: "macp.mode.quorum.v1".into(),
             description: "strict quorum".into(),
             rules: serde_json::json!({
-                "threshold": { "type": "percentage", "value": 75.0 },
+                // `threshold.value` is typed `integer` by
+                // quorum-rules.schema.json; this test used to spell it `75.0`.
+                "threshold": { "type": "percentage", "value": 75 },
                 "abstention": { "counts_toward_quorum": false, "interpretation": "neutral" }
             }),
             schema_version: 1,
@@ -799,5 +1046,483 @@ mod tests {
         };
         let err = registry.register(policy).unwrap_err();
         assert!(err.contains("designated_role"), "error: {err}");
+    }
+
+    // ── Schema value domains (schemas/json/policy/*.schema.json) ────────
+
+    fn decision_policy(rules: serde_json::Value) -> PolicyDefinition {
+        PolicyDefinition {
+            policy_id: "policy.test.decision".into(),
+            mode: "macp.mode.decision.v1".into(),
+            description: "decision under test".into(),
+            rules,
+            schema_version: 1,
+        }
+    }
+
+    fn quorum_policy(rules: serde_json::Value) -> PolicyDefinition {
+        PolicyDefinition {
+            policy_id: "policy.test.quorum".into(),
+            mode: "macp.mode.quorum.v1".into(),
+            description: "quorum under test".into(),
+            rules,
+            schema_version: 1,
+        }
+    }
+
+    fn refuse(definition: PolicyDefinition) -> String {
+        let err = PolicyRegistry::new().register(definition).unwrap_err();
+        assert!(
+            err.starts_with("INVALID_POLICY_DEFINITION"),
+            "rejection must carry the error code, got: {err}"
+        );
+        err
+    }
+
+    fn accept(definition: PolicyDefinition) {
+        PolicyRegistry::new().register(definition).unwrap();
+    }
+
+    #[test]
+    fn register_unknown_voting_algorithm_fails() {
+        let err = refuse(decision_policy(
+            serde_json::json!({ "voting": { "algorithm": "majorty" } }),
+        ));
+        assert!(err.contains("voting.algorithm 'majorty'"), "error: {err}");
+        // The legal set is named, so a typo is self-diagnosing.
+        for algorithm in DECISION_VOTING_ALGORITHMS {
+            assert!(err.contains(algorithm), "{algorithm} missing from: {err}");
+        }
+    }
+
+    #[test]
+    fn register_unknown_voting_algorithm_fails_for_wildcard_mode_too() {
+        // `"*"` policies are validated against the Decision schema.
+        let mut policy = decision_policy(serde_json::json!({ "voting": { "algorithm": "nope" } }));
+        policy.mode = "*".into();
+        let err = refuse(policy);
+        assert!(err.contains("voting.algorithm 'nope'"), "error: {err}");
+    }
+
+    #[test]
+    fn register_voting_threshold_above_one_fails() {
+        let err = refuse(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 1.5 }
+        })));
+        assert!(err.contains("voting.threshold"), "error: {err}");
+    }
+
+    #[test]
+    fn register_negative_voting_threshold_fails() {
+        let err = refuse(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": -0.1 }
+        })));
+        assert!(err.contains("voting.threshold"), "error: {err}");
+    }
+
+    #[test]
+    fn register_zero_voting_threshold_succeeds() {
+        // `minimum: 0` is inclusive in decision-rules.schema.json. Whether a
+        // degenerate threshold should be legal at all is spec issue #98, not
+        // this validator's call.
+        accept(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.0 }
+        })));
+    }
+
+    #[test]
+    fn register_unit_voting_threshold_succeeds() {
+        accept(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "weighted", "threshold": 1.0, "weights": { "a": 1.0 } }
+        })));
+    }
+
+    #[test]
+    fn register_negative_voting_weight_fails() {
+        let err = refuse(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "weights": { "a": -1.0 } }
+        })));
+        assert!(err.contains("voting.weights"), "error: {err}");
+        assert!(err.contains("'a'"), "offending key not named: {err}");
+    }
+
+    #[test]
+    fn register_negative_voting_weights_name_every_offender_in_order() {
+        let err = refuse(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "weighted", "weights": { "z": -1.0, "a": -2.0, "m": 3.0 } }
+        })));
+        // `weights` is a HashMap; the message must not depend on iteration order.
+        assert!(err.contains("'a', 'z'"), "error: {err}");
+        assert!(!err.contains("'m'"), "non-offender named: {err}");
+    }
+
+    #[test]
+    fn register_zero_voting_weights_succeed() {
+        // `minimum: 0` is inclusive; the all-zero-weights case is spec #98.
+        accept(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "weighted", "weights": { "a": 0.0, "b": 0.0 } }
+        })));
+    }
+
+    #[test]
+    fn register_voting_quorum_n_of_m_fails() {
+        // `n_of_m` is what `evaluator::check_quorum` accepts here; the
+        // canonical decision schema does not list it. Registration closes the
+        // drift so it cannot enter the registry.
+        let err = refuse(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "quorum": { "type": "n_of_m", "value": 1 } }
+        })));
+        assert!(err.contains("voting.quorum.type 'n_of_m'"), "error: {err}");
+        assert!(err.contains("count, percentage"), "error: {err}");
+    }
+
+    #[test]
+    fn register_negative_voting_quorum_value_fails() {
+        let err = refuse(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "quorum": { "type": "count", "value": -1 } }
+        })));
+        assert!(err.contains("voting.quorum.value"), "error: {err}");
+    }
+
+    #[test]
+    fn register_zero_voting_quorum_value_succeeds() {
+        accept(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "quorum": { "type": "percentage", "value": 0 } }
+        })));
+    }
+
+    #[test]
+    fn register_fractional_quorum_threshold_fails() {
+        let err = refuse(quorum_policy(serde_json::json!({
+            "threshold": { "type": "n_of_m", "value": 0.5 }
+        })));
+        assert!(err.contains("threshold.value"), "error: {err}");
+        assert!(err.contains("integer"), "error: {err}");
+    }
+
+    #[test]
+    fn register_negative_quorum_threshold_value_fails() {
+        let err = refuse(quorum_policy(serde_json::json!({
+            "threshold": { "type": "n_of_m", "value": -1 }
+        })));
+        assert!(err.contains("threshold.value"), "error: {err}");
+    }
+
+    #[test]
+    fn register_quorum_percentage_over_one_hundred_fails() {
+        let err = refuse(quorum_policy(serde_json::json!({
+            "threshold": { "type": "percentage", "value": 101 }
+        })));
+        assert!(err.contains("100"), "error: {err}");
+    }
+
+    #[test]
+    fn register_quorum_percentage_of_one_hundred_succeeds() {
+        accept(quorum_policy(serde_json::json!({
+            "threshold": { "type": "percentage", "value": 100 }
+        })));
+    }
+
+    #[test]
+    fn register_zero_quorum_threshold_value_succeeds() {
+        // `minimum: 0`, inclusive. What a zero threshold *means* is Phase 3's
+        // problem; the schema permits the value.
+        accept(quorum_policy(serde_json::json!({
+            "threshold": { "type": "n_of_m", "value": 0 }
+        })));
+    }
+
+    #[test]
+    fn register_quorum_count_threshold_type_succeeds() {
+        // `count` is absent from the canonical enum but documented here and
+        // treated as an `n_of_m` alias by both the mode and the evaluator.
+        // Refusing it would break documented behaviour — see spec issue #98.
+        accept(quorum_policy(serde_json::json!({
+            "threshold": { "type": "count", "value": 2 }
+        })));
+    }
+
+    #[test]
+    fn register_quorum_weighted_threshold_type_fails_as_unimplemented() {
+        let err = refuse(quorum_policy(serde_json::json!({
+            "threshold": { "type": "weighted", "value": 2 }
+        })));
+        assert!(err.contains("threshold.type 'weighted'"), "error: {err}");
+        assert!(err.contains("not implemented"), "error: {err}");
+    }
+
+    #[test]
+    fn register_unknown_quorum_threshold_type_fails() {
+        let err = refuse(quorum_policy(serde_json::json!({
+            "threshold": { "type": "two_thirds", "value": 2 }
+        })));
+        assert!(err.contains("threshold.type 'two_thirds'"), "error: {err}");
+        assert!(err.contains("n_of_m"), "error: {err}");
+    }
+
+    #[test]
+    fn quorum_threshold_constraints_do_not_apply_to_other_modes() {
+        // A Decision policy has its own `threshold` semantics under `voting`;
+        // a stray top-level `threshold` object is not a quorum threshold.
+        accept(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "majority" },
+            "threshold": { "type": "weighted", "value": 0.5 }
+        })));
+    }
+
+    #[test]
+    fn built_in_policies_survive_every_registration_constraint() {
+        // `PolicyRegistry::new` inserts `policy.default` and the three
+        // `policy.std.*` profiles *directly*, bypassing `register`. A validator
+        // that refused one of them would therefore take the process down at
+        // startup with no wire-level symptom and no other test to catch it.
+        for policy in std::iter::once(default_policy()).chain(std_policies()) {
+            // The id-level guards deliberately refuse these ids from callers;
+            // what must hold is that their *rules* pass every schema check.
+            PolicyRegistry::validate_rules_for_mode(&policy.mode, &policy.rules)
+                .unwrap_or_else(|e| panic!("{} rules refused: {e}", policy.policy_id));
+            PolicyRegistry::validate_conditional_constraints(&policy.mode, &policy.rules)
+                .unwrap_or_else(|e| panic!("{} rules refused: {e}", policy.policy_id));
+        }
+        // The `policy.std.*` profiles must additionally survive the full
+        // registration path, which a client may legitimately re-send.
+        for policy in std_policies() {
+            PolicyRegistry::validate_definition(&policy)
+                .unwrap_or_else(|e| panic!("{} would be refused: {e}", policy.policy_id));
+        }
+    }
+
+    // ── MACP_POLICIES_DIR: fail-closed loading and the dry-run pass ─────
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "macp-policy-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_policy(dir: &std::path::Path, file: &str, definition: &PolicyDefinition) {
+        std::fs::write(
+            dir.join(file),
+            serde_json::to_string_pretty(definition).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn policies_dir_rejects_an_out_of_schema_file() {
+        // `load_from_dir` funnels through `register`, so the new constraints
+        // apply to the startup path — fatally, by design.
+        let dir = temp_dir("dir-refusal");
+        let mut bad = decision_policy(serde_json::json!({ "voting": { "algorithm": "majorty" } }));
+        bad.policy_id = "policy.ops.typo".into();
+        write_policy(&dir, "typo.json", &bad);
+
+        let registry = PolicyRegistry::new();
+        let err = registry.load_from_dir(&dir).unwrap_err();
+        assert!(err.contains("typo.json"), "error: {err}");
+        assert!(err.contains("INVALID_POLICY_DEFINITION"), "error: {err}");
+        assert!(registry.get("policy.ops.typo").is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validate_dir_reports_every_file_by_name() {
+        let dir = temp_dir("dry-run");
+        let mut good = decision_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 }
+        }));
+        good.policy_id = "policy.ops.good".into();
+        write_policy(&dir, "a-good.json", &good);
+
+        let mut bad = quorum_policy(serde_json::json!({
+            "threshold": { "type": "n_of_m", "value": 0.5 }
+        }));
+        bad.policy_id = "policy.ops.bad".into();
+        write_policy(&dir, "b-bad.json", &bad);
+
+        let mut also_good = decision_policy(serde_json::json!({
+            "voting": { "algorithm": "unanimous" }
+        }));
+        also_good.policy_id = "policy.ops.also-good".into();
+        write_policy(&dir, "c-also-good.json", &also_good);
+
+        // Not a policy file at all — must not abort the pass either.
+        std::fs::write(dir.join("d-garbage.json"), "{ not json").unwrap();
+        // Non-JSON files are ignored entirely.
+        std::fs::write(dir.join("README.txt"), "ignored").unwrap();
+
+        let outcomes = PolicyRegistry::validate_dir(&dir).unwrap();
+        let names: Vec<String> = outcomes
+            .iter()
+            .map(|o| o.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        // Deterministic order, and the pass continues past the first rejection.
+        assert_eq!(
+            names,
+            vec![
+                "a-good.json",
+                "b-bad.json",
+                "c-also-good.json",
+                "d-garbage.json"
+            ]
+        );
+        assert_eq!(outcomes[0].result.as_deref(), Ok("policy.ops.good"));
+        let rejection = outcomes[1].result.as_ref().unwrap_err();
+        assert!(rejection.contains("threshold.value"), "{rejection}");
+        assert_eq!(outcomes[2].result.as_deref(), Ok("policy.ops.also-good"));
+        assert!(outcomes[3].result.is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validate_dir_detects_duplicates_without_touching_the_registry() {
+        let dir = temp_dir("dry-run-dup");
+        let mut policy = decision_policy(serde_json::json!({
+            "voting": { "algorithm": "majority" }
+        }));
+        policy.policy_id = "policy.ops.dup".into();
+        write_policy(&dir, "a.json", &policy);
+        write_policy(&dir, "b.json", &policy);
+
+        let outcomes = PolicyRegistry::validate_dir(&dir).unwrap();
+        assert!(outcomes[0].result.is_ok());
+        assert!(
+            outcomes[1]
+                .result
+                .as_ref()
+                .unwrap_err()
+                .contains("already registered"),
+            "{:?}",
+            outcomes[1].result
+        );
+
+        // Validation runs against a scratch registry: nothing was loaded.
+        let registry = PolicyRegistry::new();
+        assert!(registry.get("policy.ops.dup").is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validate_dir_errors_only_when_the_directory_is_unreadable() {
+        let err = PolicyRegistry::validate_dir(std::path::Path::new(
+            "/macp-policy-does-not-exist-anywhere",
+        ))
+        .unwrap_err();
+        assert!(err.contains("cannot read policies dir"), "error: {err}");
+    }
+
+    // ── Parity with the canonical schemas ───────────────────────────────
+
+    /// The canonical policy schemas, if this checkout can see them.
+    ///
+    /// Resolution order: `MACP_POLICY_SCHEMAS_DIR` (set by the
+    /// `conformance-oracle` CI job, which already checks the spec repo out),
+    /// then the sibling spec checkout used in local development. Absent both,
+    /// the parity test prints a warning and passes — it is deliberately **not**
+    /// `#[ignore]`d, because an ignored test runs nowhere, CI included.
+    fn canonical_schema_dir() -> Option<std::path::PathBuf> {
+        if let Ok(dir) = std::env::var("MACP_POLICY_SCHEMAS_DIR") {
+            let path = std::path::PathBuf::from(dir);
+            return path.is_dir().then_some(path);
+        }
+        let sibling = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../multiagentcoordinationprotocol/schemas/json/policy");
+        sibling.is_dir().then_some(sibling)
+    }
+
+    fn schema(dir: &std::path::Path, file: &str) -> serde_json::Value {
+        let raw = std::fs::read_to_string(dir.join(file))
+            .unwrap_or_else(|e| panic!("cannot read canonical schema {file}: {e}"));
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{file} is not valid JSON: {e}"))
+    }
+
+    fn enum_values(node: &serde_json::Value) -> Vec<String> {
+        let mut values: Vec<String> = node
+            .get("enum")
+            .and_then(|e| e.as_array())
+            .unwrap_or_else(|| panic!("no enum at {node}"))
+            .iter()
+            .map(|v| v.as_str().expect("enum entry is a string").to_string())
+            .collect();
+        values.sort();
+        values
+    }
+
+    fn sorted(values: &[&str]) -> Vec<String> {
+        let mut out: Vec<String> = values.iter().map(|s| s.to_string()).collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn enum_lists_match_the_canonical_schemas() {
+        let Some(dir) = canonical_schema_dir() else {
+            println!(
+                "SKIP enum_lists_match_the_canonical_schemas: no canonical schema directory \
+                 (set MACP_POLICY_SCHEMAS_DIR or check the spec repo out beside this one)"
+            );
+            return;
+        };
+
+        let decision = schema(&dir, "decision-rules.schema.json");
+        let voting = &decision["properties"]["voting"]["properties"];
+        assert_eq!(
+            enum_values(&voting["algorithm"]),
+            sorted(&DECISION_VOTING_ALGORITHMS),
+            "voting.algorithm has drifted from decision-rules.schema.json"
+        );
+        assert_eq!(
+            enum_values(&voting["quorum"]["properties"]["type"]),
+            sorted(&DECISION_VOTING_QUORUM_TYPES),
+            "voting.quorum.type has drifted from decision-rules.schema.json"
+        );
+        assert_eq!(voting["threshold"]["minimum"], serde_json::json!(0));
+        assert_eq!(voting["threshold"]["maximum"], serde_json::json!(1));
+        assert_eq!(
+            voting["quorum"]["properties"]["value"]["minimum"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            voting["weights"]["additionalProperties"]["minimum"],
+            serde_json::json!(0)
+        );
+
+        let quorum = schema(&dir, "quorum-rules.schema.json");
+        let threshold = &quorum["properties"]["threshold"];
+        // Two deliberate departures, both documented on the constants:
+        // `count` is accepted as an alias this runtime documents, and
+        // `weighted` is refused as unimplemented. Everything else must match.
+        let mut ours: Vec<String> = QUORUM_THRESHOLD_TYPES
+            .iter()
+            .chain(QUORUM_UNIMPLEMENTED_THRESHOLD_TYPES.iter())
+            .filter(|t| **t != "count")
+            .map(|t| t.to_string())
+            .collect();
+        ours.sort();
+        assert_eq!(
+            enum_values(&threshold["properties"]["type"]),
+            ours,
+            "threshold.type has drifted from quorum-rules.schema.json"
+        );
+        assert_eq!(
+            threshold["properties"]["value"]["type"],
+            serde_json::json!("integer")
+        );
+        assert_eq!(
+            threshold["properties"]["value"]["minimum"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            threshold["allOf"][0]["then"]["properties"]["value"]["maximum"],
+            serde_json::json!(100)
+        );
     }
 }

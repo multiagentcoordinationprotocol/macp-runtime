@@ -47,7 +47,39 @@ Here is a complete example of registering a Decision Mode policy that requires m
 }
 ```
 
-At registration, the runtime validates the rules against the target mode's schema. It enforces structural constraints: a `weighted` voting algorithm requires a non-empty `weights` map, `supermajority` requires a threshold above 0.5, and `designated_role` commitment authority requires a non-empty `designated_roles` list. The `schema_version` must be `1`. Rules that fail to deserialize into the target mode's Rust struct are rejected with `INVALID_POLICY_DEFINITION`. A `policy_id` under the reserved `policy.std.` prefix is rejected the same way unless it is the canonical definition (see below).
+### What registration checks
+
+The runtime does **not** run a JSON-Schema evaluator: it carries no `jsonschema` dependency, and the canonical `schemas/json/policy/*.schema.json` documents live in the spec repository, not here. Registration instead applies three layers of hand-written checks, and only the constraints listed below are enforced. A rule the canonical schema forbids but this list does not name is accepted.
+
+1. **Deserialization.** Rules must parse into the target mode's Rust struct. Every field has a default and unknown fields are ignored, so this catches type errors (a string where a number belongs), not missing or misspelled keys. Extension modes (`ext.*`) and unrecognized mode names accept any JSON object.
+2. **Value domains, mirroring the canonical schemas.** Enum membership and numeric bounds, copied from the schema text and pinned to it by a parity test that runs in CI:
+
+   | Constraint | Rule |
+   |---|---|
+   | `voting.algorithm` | One of `none`, `majority`, `supermajority`, `unanimous`, `weighted`, `plurality` |
+   | `voting.threshold` | Between `0.0` and `1.0`, **both inclusive** |
+   | `voting.weights[*]` | `>= 0`, **inclusive** — a zero weight is legal |
+   | `voting.quorum.type` | One of `count`, `percentage`. `n_of_m` is **not** legal here, though the evaluator would accept it |
+   | `voting.quorum.value` | `>= 0` (a number, not necessarily an integer) |
+   | Quorum `threshold.type` | One of `n_of_m`, `percentage`, `count`. `weighted` is refused as unimplemented — see below |
+   | Quorum `threshold.value` | A non-negative **integer**; additionally `<= 100` when `threshold.type` is `percentage` |
+
+   The inclusive bounds are deliberate: `voting.threshold: 0.0` and an all-zero `voting.weights` map are degenerate but schema-legal, and whether they should be legal at all is an open question upstream rather than something registration decides.
+3. **Conditional constraints.** A `weighted` voting algorithm requires a non-empty `weights` map, `supermajority` requires a threshold above `0.5`, and `designated_role` commitment authority requires a non-empty `designated_roles` list.
+
+`schema_version` must be `1`. Every rejection — including a `policy_id` under the reserved `policy.std.` prefix that is not the canonical definition (see below) — is reported with `INVALID_POLICY_DEFINITION` at the head of the message, because `RegisterPolicyResponse` carries no structured error code.
+
+Both routes into the registry apply the same checks: the `RegisterPolicy` RPC and the `MACP_POLICIES_DIR` preload, which funnels through the same `register` path.
+
+### Validating a policies directory before startup
+
+A `MACP_POLICIES_DIR` file that fails any check aborts startup, and loading stops at the first rejection. To check a directory without starting the server, run the binary with `MACP_POLICIES_DRY_RUN=1`:
+
+```bash
+MACP_POLICIES_DRY_RUN=1 MACP_POLICIES_DIR=/etc/macp/policies macp-runtime
+```
+
+It reports every file by name — `OK` or `REJECTED` with the reason — and exits `0` if the directory would load, `1` otherwise. Nothing is bound, opened, or replayed. Run it before upgrading a runtime whose policies directory predates a release that tightened registration.
 
 ## Rule examples by mode
 
@@ -134,13 +166,17 @@ Acceptance criteria: `all_parties`, `counterparty`, `initiator`.
 
 ```json
 {
-  "threshold": { "threshold_type": "percentage", "value": 66 },
+  "threshold": { "type": "percentage", "value": 66 },
   "abstention": { "counts_toward_quorum": false, "interpretation": "neutral" },
   "commitment": { "authority": "initiator_only" }
 }
 ```
 
-Threshold types: `n_of_m`, `percentage`, `count`. Abstention interpretations: `neutral`, `implicit_reject`, `ignored`.
+The threshold field is spelled `type`, not `threshold_type`: the latter is the Rust field name, and a policy that uses it silently falls back to the default `n_of_m`.
+
+Threshold types: `n_of_m`, `percentage`, and `count` — a documented alias for `n_of_m` that both the mode and the evaluator already treat as one. The canonical schema also lists `weighted`, which **registration refuses**: `threshold.value` is typed as an integer there, so a weighted sum is not expressible, and both layers would silently treat it as a raw approval count. `threshold.value` must be a non-negative integer, and at most `100` for `percentage`.
+
+Abstention interpretations: `neutral`, `implicit_reject`, `ignored`.
 
 ## How evaluation works
 

@@ -126,6 +126,52 @@ fn validate_env_config() -> Vec<String> {
     errors
 }
 
+/// `MACP_POLICIES_DRY_RUN=1`: validate every file in `MACP_POLICIES_DIR`,
+/// report each one by name, and return the process exit code — `0` if the
+/// directory would load, `1` if anything in it would be rejected.
+///
+/// This exists because `load_from_dir` is fatal at startup and stops at the
+/// first rejection: without a validate-only pass, an operator upgrading into
+/// new registration constraints finds out one file at a time, in production.
+/// Output goes to stdout/stderr directly rather than through `tracing`, so no
+/// `RUST_LOG` filter can suppress the report.
+fn policies_dry_run(policies_dir: Option<String>) -> i32 {
+    let Some(dir) = policies_dir else {
+        eprintln!("MACP_POLICIES_DRY_RUN=1 requires MACP_POLICIES_DIR to be set");
+        return 1;
+    };
+    let path = std::path::Path::new(&dir);
+    let outcomes = match PolicyRegistry::validate_dir(path) {
+        Ok(outcomes) => outcomes,
+        Err(e) => {
+            eprintln!("MACP_POLICIES_DIR: {e}");
+            return 1;
+        }
+    };
+
+    let mut rejected = 0usize;
+    for outcome in &outcomes {
+        match &outcome.result {
+            Ok(policy_id) => println!("OK       {} ({policy_id})", outcome.path.display()),
+            Err(reason) => {
+                rejected += 1;
+                println!("REJECTED {}: {reason}", outcome.path.display());
+            }
+        }
+    }
+    println!(
+        "{} policy file(s) checked in {}, {} rejected",
+        outcomes.len(),
+        path.display(),
+        rejected
+    );
+    if rejected > 0 {
+        1
+    } else {
+        0
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -183,6 +229,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config_errors.join("; ")
         )
         .into());
+    }
+
+    // MACP_POLICIES_DRY_RUN=1: validate the policies directory and exit
+    // without binding a port, opening storage, or replaying sessions.
+    if std::env::var("MACP_POLICIES_DRY_RUN").ok().as_deref() == Some("1") {
+        std::process::exit(policies_dry_run(std::env::var("MACP_POLICIES_DIR").ok()));
     }
 
     let addr = std::env::var("MACP_BIND_ADDR")

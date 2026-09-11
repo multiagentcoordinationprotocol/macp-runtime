@@ -43,6 +43,8 @@ Before exposing the runtime to production traffic, ensure these four items are c
 | `MACP_CLEANUP_INTERVAL_SECS` | `60` | Background TTL cleanup interval in seconds |
 | `MACP_SESSION_RETENTION_SECS` | `3600` | How long terminal sessions stay in memory |
 | `MACP_STRICT_RECOVERY` | off | Set to `1` to fail on any recovery error |
+| `MACP_POLICIES_DIR` | -- | Directory of governance policy JSON files preloaded at startup; a file that fails validation aborts startup, and the wire registry becomes read-only |
+| `MACP_POLICIES_DRY_RUN` | off | Set to `1` to validate `MACP_POLICIES_DIR` and exit `0`/`1` without starting the server |
 | `RUST_LOG` | `info` | Log level filter |
 
 ## Storage backends
