@@ -127,6 +127,7 @@ These are the rules the evaluator actually applies (RFC-MACP-0012 §4.1):
 | `plurality` | More approve than reject; a tie fails; no threshold |
 
 - **Denominator.** For `majority`, `supermajority` and `weighted` the denominator is the *decisive* votes -- those cast as approve or reject. Abstentions are excluded and neither help nor hinder the ratio.
+- **A negative weighted total fails the round.** If the weights of the decisive voters sum below zero, `weighted` fails the round outright rather than dividing by a negative denominator, which would invert `ratio >= threshold` and could report a pass on a reject. Registration refuses a negative entry in `voting.weights`, so this is reachable only from a `PolicyDefinition` constructed directly rather than registered. A total of exactly `0.0` is treated as no decisive result, not as a failure -- see the last bullet. The operational consequences of the change, including the one commitment it moves from denied to allowed, are in [Deployment](deployment.md#4-a-negative-weighted-total-now-fails-the-decision-round).
 - **Inclusive comparison.** Every threshold comparison is `ratio >= threshold`, so `majority` at its default `0.5` approves an even split. A rule where a tie fails is `plurality`, not `majority` at `0.5`.
 - **Ratios are binary64.** Comparisons are Rust `f64`. With `threshold: 0.6666666666666666` (the binary64 value nearest two-thirds, and what `2.0 / 3.0` produces) 2-of-3, 4-of-6, 20-of-30 and 67-of-100 pass while 66-of-100 does not.
 - **`voting.quorum` is inert on its own.** It states the participation bar but gates nothing until `commitment.require_vote_quorum` is `true`. A policy that sets `voting.quorum` without it imposes no participation requirement.
@@ -216,7 +217,7 @@ The `commitment.authority` rule determines who can send the terminal commitment.
 |-----------|----------------|-------------|
 | `UNKNOWN_POLICY_VERSION` | The `policy_version` in SessionStart is not found in the registry | FailedPrecondition |
 | `POLICY_DENIED` | A commitment is rejected because governance rules are not satisfied | FailedPrecondition |
-| `INVALID_POLICY_DEFINITION` | A policy fails schema validation at registration time, or claims a reserved `policy.std.` identifier | InvalidArgument |
+| `INVALID_POLICY_DEFINITION` | A policy fails one of the [registration checks](#what-registration-checks), or claims a reserved `policy.std.` identifier | InvalidArgument |
 
 Two caveats on that status column, both visible in `Self::status_from_error` (`src/server.rs`):
 
