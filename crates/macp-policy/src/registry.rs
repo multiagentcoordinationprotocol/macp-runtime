@@ -442,10 +442,40 @@ impl PolicyRegistry {
                         "INVALID_POLICY_DEFINITION: voting.algorithm 'weighted' requires non-empty voting.weights".into(),
                     );
                 }
+                // `weights.minProperties: 1` is unconditional on the algorithm
+                // in decision-rules.schema.json, so a *supplied* empty map is
+                // refused whatever the algorithm. Discriminate on the raw JSON:
+                // `VotingRules.weights` is a `HashMap` that defaults to empty,
+                // so a parsed-struct test could not tell "supplied `{}`" from
+                // "omitted entirely" and would refuse every non-weighted
+                // policy. This check belongs inside the Decision mode guard —
+                // hoisted out, it would police a `voting.weights` map in rules
+                // registered for a mode whose schema does not govern it.
+                if rules
+                    .get("voting")
+                    .and_then(|v| v.get("weights"))
+                    .and_then(|w| w.as_object())
+                    .is_some_and(|w| w.is_empty())
+                {
+                    return Err(
+                        "INVALID_POLICY_DEFINITION: voting.weights must be non-empty when supplied"
+                            .into(),
+                    );
+                }
                 if decision.voting.algorithm == "supermajority" && decision.voting.threshold <= 0.5
                 {
                     return Err(
                         "INVALID_POLICY_DEFINITION: voting.algorithm 'supermajority' requires voting.threshold > 0.5".into(),
+                    );
+                }
+                // Inclusive at 0.5, deliberately asymmetric with the
+                // supermajority arm above: `policy.std.majority` sets exactly
+                // `0.5` and RFC-MACP-0012 §2.2 pins that profile byte-identical
+                // on every runtime, so an exclusive bound here would refuse a
+                // profile this runtime pre-registers at startup.
+                if decision.voting.algorithm == "majority" && decision.voting.threshold < 0.5 {
+                    return Err(
+                        "INVALID_POLICY_DEFINITION: voting.algorithm 'majority' requires voting.threshold >= 0.5".into(),
                     );
                 }
             }
@@ -483,10 +513,15 @@ impl PolicyRegistry {
     ///   [`DECISION_VOTING_ALGORITHMS`]. An unknown algorithm reaches
     ///   `check_voting_algorithm`'s fail-closed `_` arm, so every commitment in
     ///   such a session is denied with no way to tell a typo from a policy.
-    /// - `properties.voting.properties.threshold.{minimum,maximum}` — `0` and
-    ///   `1`, both **inclusive**. `0.0` is therefore accepted: it is
-    ///   schema-legal, and whether a degenerate threshold should be legal at
-    ///   all is deferred to spec issue #98.
+    /// - `properties.voting.properties.threshold.{exclusiveMinimum,maximum}` —
+    ///   `0` **exclusive** and `1` inclusive. Spec #99 settled what used to be
+    ///   deferred to spec issue #98: `threshold: 0.0` made an all-`REJECT`
+    ///   round return `Passed` under both `majority` and `weighted`, so it is
+    ///   now refused. The floor is unconditional and reaches `unanimous` and
+    ///   `plurality`, which never read `threshold` — RFC-MACP-0012 §4.1 makes
+    ///   that deliberate, so a threshold an author believed was in force is
+    ///   never silently ignored. A rules object that *omits* `threshold` is
+    ///   unaffected; `default_threshold()` is `0.5`.
     /// - `properties.voting.properties.quorum.properties.type.enum` →
     ///   [`DECISION_VOTING_QUORUM_TYPES`]. Note the evaluator additionally
     ///   accepts `n_of_m` here (`evaluator.rs`, `check_quorum`), which the
@@ -495,9 +530,15 @@ impl PolicyRegistry {
     /// - `properties.voting.properties.quorum.properties.value.minimum` — `0`.
     ///   The schema types this one as `number`, not `integer`, and sets no
     ///   `maximum` even for `type: "percentage"`, so neither is enforced.
-    /// - `properties.voting.properties.weights.additionalProperties.minimum` —
-    ///   `0`, **inclusive**. A zero weight is therefore accepted; the
-    ///   all-zero-weights degenerate case is deferred to spec issue #98.
+    /// - `properties.voting.properties.weights.additionalProperties.exclusiveMinimum`
+    ///   — `0`. Zero and every negative value are refused. The `weights` map is
+    ///   the weighted electorate, so a legitimately zero-weighted observer is
+    ///   expressed by **omission** from the map, never by an explicit `0`.
+    ///   `exclusiveMinimum: 0` is also what closes issue #148's
+    ///   `{"a": 1.0, "b": -1.0}` at admission time. The companion
+    ///   `properties.voting.properties.weights.minProperties: 1` is enforced in
+    ///   [`Self::validate_conditional_constraints`], where the raw JSON is
+    ///   still available to tell a supplied empty map from an absent one.
     fn validate_decision_voting(
         voting: &macp_core::policy::rules::VotingRules,
     ) -> Result<(), String> {
@@ -508,10 +549,10 @@ impl PolicyRegistry {
                 DECISION_VOTING_ALGORITHMS.join(", ")
             ));
         }
-        if !(0.0..=1.0).contains(&voting.threshold) {
+        if !(voting.threshold > 0.0 && voting.threshold <= 1.0) {
             return Err(format!(
                 "INVALID_POLICY_DEFINITION: voting.threshold {} is out of range: \
-                 must be between 0.0 and 1.0 inclusive",
+                 must be greater than 0.0 and at most 1.0",
                 voting.threshold
             ));
         }
@@ -519,14 +560,14 @@ impl PolicyRegistry {
         let mut negative: Vec<&str> = voting
             .weights
             .iter()
-            .filter(|(_, weight)| **weight < 0.0 || weight.is_nan())
+            .filter(|(_, weight)| **weight <= 0.0 || weight.is_nan())
             .map(|(participant, _)| participant.as_str())
             .collect();
         if !negative.is_empty() {
             negative.sort_unstable();
             return Err(format!(
-                "INVALID_POLICY_DEFINITION: voting.weights has negative values for: {} \
-                 — every weight must be >= 0",
+                "INVALID_POLICY_DEFINITION: voting.weights has non-positive values for: {} \
+                 — every weight must be > 0",
                 negative
                     .iter()
                     .map(|k| format!("'{k}'"))
@@ -1187,12 +1228,54 @@ mod tests {
     }
 
     #[test]
-    fn register_zero_voting_threshold_succeeds() {
-        // `minimum: 0` is inclusive in decision-rules.schema.json. Whether a
-        // degenerate threshold should be legal at all is spec issue #98, not
-        // this validator's call.
-        accept(decision_policy(serde_json::json!({
+    fn register_zero_voting_threshold_fails() {
+        // Inverted by spec #99: `threshold` moved from `minimum: 0` to
+        // `exclusiveMinimum: 0` in decision-rules.schema.json, because
+        // `threshold: 0.0` made an all-`REJECT` round return `Passed` under
+        // both `majority` and `weighted` (spec issue #98 item 2, now settled).
+        let err = refuse(decision_policy(serde_json::json!({
             "voting": { "algorithm": "majority", "threshold": 0.0 }
+        })));
+        assert!(err.contains("INVALID_POLICY_DEFINITION"), "error: {err}");
+        assert!(err.contains("voting.threshold"), "error: {err}");
+    }
+
+    #[test]
+    fn register_zero_voting_threshold_fails_for_unanimous_too() {
+        // The `exclusiveMinimum: 0` floor is **unconditional** and reaches
+        // `unanimous` and `plurality`, which never read `threshold` —
+        // RFC-MACP-0012 §4.1 makes that deliberate so a threshold an author
+        // believed was in force is never silently ignored. This case is what
+        // pins the floor itself: under `majority` the sibling test above is
+        // also satisfied by the `threshold >= 0.5` arm, so it cannot tell the
+        // two mirrors apart.
+        let err = refuse(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "unanimous", "threshold": 0.0 }
+        })));
+        assert!(err.contains("INVALID_POLICY_DEFINITION"), "error: {err}");
+        assert!(
+            err.contains("must be greater than 0.0"),
+            "the range check must be what refuses this, got: {err}"
+        );
+    }
+
+    #[test]
+    fn register_majority_threshold_below_half_fails() {
+        let err = refuse(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.4 }
+        })));
+        assert!(err.contains("INVALID_POLICY_DEFINITION"), "error: {err}");
+        assert!(err.contains("voting.threshold"), "error: {err}");
+        assert!(err.contains("majority"), "error: {err}");
+    }
+
+    #[test]
+    fn register_majority_threshold_at_half_succeeds() {
+        // The majority floor is **inclusive**, deliberately asymmetric with
+        // supermajority's exclusive one: `policy.std.majority` sets exactly
+        // `0.5` and RFC-MACP-0012 §2.2 pins it byte-identical on every runtime.
+        accept(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 }
         })));
     }
 
@@ -1223,11 +1306,73 @@ mod tests {
     }
 
     #[test]
-    fn register_zero_voting_weights_succeed() {
-        // `minimum: 0` is inclusive; the all-zero-weights case is spec #98.
-        accept(decision_policy(serde_json::json!({
+    fn register_zero_voting_weights_fail() {
+        // Inverted by spec #99: `weights.additionalProperties` moved from
+        // `minimum: 0` to `exclusiveMinimum: 0`. An all-zero map yielded "no
+        // votes" on a *complete* ballot set (spec issue #98 item 3); a
+        // legitimately zero-weighted observer is expressed by omission from
+        // the map, not by an explicit `0`, so nothing is lost.
+        let err = refuse(decision_policy(serde_json::json!({
             "voting": { "algorithm": "weighted", "weights": { "a": 0.0, "b": 0.0 } }
         })));
+        assert!(err.contains("INVALID_POLICY_DEFINITION"), "error: {err}");
+        // `weights` is a HashMap; the message must not depend on iteration order.
+        assert!(err.contains("'a', 'b'"), "error: {err}");
+    }
+
+    #[test]
+    fn register_mixed_sign_weights_fails() {
+        // The exact descriptor from issue #148. `exclusiveMinimum: 0` excludes
+        // every negative value a fortiori, so the case is unauthorable: it can
+        // neither be registered nor preloaded from `MACP_POLICIES_DIR`.
+        //
+        // Honest note on what this pins: the negative half was **already**
+        // refused before spec #99, by the old `weight < 0.0` filter — this test
+        // passes against the pre-#99 mirror unchanged. It is a regression pin
+        // naming the reported descriptor, not the test that closes the issue.
+        // What #99 newly forbids is the **zero** half, which
+        // `register_zero_voting_weights_fail` and
+        // `register_empty_weights_map_fails` are the discriminating tests for.
+        let err = refuse(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "weighted", "weights": { "a": 1.0, "b": -1.0 } }
+        })));
+        assert!(err.contains("INVALID_POLICY_DEFINITION"), "error: {err}");
+        assert!(err.contains("'b'"), "offending key not named: {err}");
+        assert!(!err.contains("'a'"), "non-offender named: {err}");
+    }
+
+    #[test]
+    fn register_empty_weights_map_fails() {
+        // `weights.minProperties: 1` is unconditional on the algorithm, so a
+        // supplied empty map is refused even under `majority`.
+        let err = refuse(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "weights": {} }
+        })));
+        assert!(err.contains("INVALID_POLICY_DEFINITION"), "error: {err}");
+        assert!(err.contains("voting.weights"), "error: {err}");
+    }
+
+    #[test]
+    fn register_absent_weights_map_succeeds() {
+        // The other half of the pair: `VotingRules.weights` is a `HashMap` that
+        // defaults to empty, so a non-empty check written against the parsed
+        // struct would refuse *every* non-weighted policy. This test is what
+        // keeps that regression out.
+        accept(decision_policy(serde_json::json!({
+            "voting": { "algorithm": "majority" }
+        })));
+    }
+
+    #[test]
+    fn register_empty_weights_map_for_another_mode_succeeds() {
+        // The `weights` non-emptiness mirror lives inside the Decision mode
+        // guard. Hoisted out, it would refuse rules registered for a mode whose
+        // schema does not govern `voting.weights` at all.
+        let mut policy = decision_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "weights": {} }
+        }));
+        policy.mode = "macp.mode.task.v1".to_string();
+        accept(policy);
     }
 
     #[test]
@@ -1656,15 +1801,45 @@ mod tests {
             sorted(&DECISION_VOTING_QUORUM_TYPES),
             "voting.quorum.type has drifted from decision-rules.schema.json"
         );
-        assert_eq!(voting["threshold"]["minimum"], serde_json::json!(0));
+        assert_eq!(
+            voting["threshold"]["exclusiveMinimum"],
+            serde_json::json!(0),
+            "voting.threshold's lower bound has drifted from decision-rules.schema.json"
+        );
         assert_eq!(voting["threshold"]["maximum"], serde_json::json!(1));
         assert_eq!(
             voting["quorum"]["properties"]["value"]["minimum"],
             serde_json::json!(0)
         );
         assert_eq!(
-            voting["weights"]["additionalProperties"]["minimum"],
-            serde_json::json!(0)
+            voting["weights"]["additionalProperties"]["exclusiveMinimum"],
+            serde_json::json!(0),
+            "voting.weights' lower bound has drifted from decision-rules.schema.json"
+        );
+        // `minProperties` and the `majority` `allOf` arm are mirrored too, so a
+        // future loosening upstream is caught here rather than silently
+        // absorbed. The parity test can only pin keywords somebody thought to
+        // mirror; #99 added both of these and the previous assertion set would
+        // have noticed neither.
+        assert_eq!(
+            voting["weights"]["minProperties"],
+            serde_json::json!(1),
+            "voting.weights.minProperties has drifted from decision-rules.schema.json"
+        );
+        let majority_arm = decision["allOf"]
+            .as_array()
+            .expect("decision-rules.schema.json has an allOf array")
+            .iter()
+            .find(|arm| {
+                arm["if"]["properties"]["voting"]["properties"]["algorithm"]["const"]
+                    == serde_json::json!("majority")
+            })
+            .expect("decision-rules.schema.json has an allOf arm keyed on algorithm 'majority'");
+        assert_eq!(
+            majority_arm["then"]["properties"]["voting"]["properties"]["threshold"]["minimum"],
+            serde_json::json!(0.5),
+            "the majority threshold floor has drifted from decision-rules.schema.json; \
+             note it is deliberately inclusive, unlike supermajority's exclusive 0.5"
         );
 
         let quorum = schema(&dir, "quorum-rules.schema.json");

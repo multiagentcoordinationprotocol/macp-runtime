@@ -618,6 +618,19 @@ async fn register_policy_refuses_out_of_schema_values() {
             serde_json::json!({ "voting": { "quorum": { "type": "n_of_m", "value": 1 } } }),
             "voting.quorum.type",
         ),
+        // Spec #99 moved both of these from `minimum: 0` to
+        // `exclusiveMinimum: 0`; they were accepted as schema-legal boundary
+        // values until this release.
+        (
+            "macp.mode.decision.v1",
+            serde_json::json!({ "voting": { "algorithm": "majority", "threshold": 0.0 } }),
+            "voting.threshold",
+        ),
+        (
+            "macp.mode.decision.v1",
+            serde_json::json!({ "voting": { "algorithm": "weighted", "weights": { "a": 0.0, "b": 0.0 } } }),
+            "voting.weights",
+        ),
         (
             "macp.mode.quorum.v1",
             serde_json::json!({ "threshold": { "type": "n_of_m", "value": 0.5 } }),
@@ -646,17 +659,13 @@ async fn register_policy_refuses_out_of_schema_values() {
 
 #[tokio::test]
 async fn register_policy_accepts_schema_legal_boundary_values() {
-    // Degenerate but schema-legal: `minimum` is inclusive in every case, and
-    // `count` is a documented alias for the quorum `n_of_m` threshold type.
+    // Degenerate but schema-legal: `minimum` is inclusive in both remaining
+    // cases, and `count` is a documented alias for the quorum `n_of_m`
+    // threshold type. The two Decision cases that used to live here —
+    // `threshold: 0.0` and an all-zero `weights` map — moved to
+    // `register_policy_refuses_out_of_schema_values` when spec #99 made both
+    // bounds exclusive.
     let cases: Vec<(&str, serde_json::Value)> = vec![
-        (
-            "macp.mode.decision.v1",
-            serde_json::json!({ "voting": { "algorithm": "majority", "threshold": 0.0 } }),
-        ),
-        (
-            "macp.mode.decision.v1",
-            serde_json::json!({ "voting": { "algorithm": "weighted", "weights": { "a": 0.0, "b": 0.0 } } }),
-        ),
         (
             "macp.mode.quorum.v1",
             serde_json::json!({ "threshold": { "type": "count", "value": 2 } }),
