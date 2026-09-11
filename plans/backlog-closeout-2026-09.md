@@ -596,6 +596,22 @@ external consumer (`zer07labs/seam-runtime`, pinning `macp-policy =0.6.0` and ca
 - **Depends on:** Phase 10.
 - **Files:** `crates/macp-modes/src/mode/handoff.rs`, `src/runtime.rs`, `src/replay.rs`,
   `src/server.rs`.
+- **Added 2026-09-11, carried in from Phase 10's verification (both in `follow_ons.md` as items 10
+  and 11):**
+  1. **Thread `now_ms` into `make_internal_entry`.** `suspend_session` (`runtime.rs:870`) and
+     `resume_session` (`:923`) each read `Utc::now()` for the session mutation while
+     `make_internal_entry` (`:272`) reads it again for the log entry, so live
+     `accumulated_suspended_ms` and the replayed value can differ by ~1 ms. Since Phase 10 that
+     value gates an accept/reject decision: a flip within 1 ms of the deadline makes a
+     live-`Resolved` session fail replay, and `main.rs:385` then **skips the session entirely** —
+     it vanishes on restart. One-line fix, mirroring `make_incoming_entry(env, accepted_at)`
+     (`:247`). Phase 11 already touches `runtime.rs`, and Phase 11 makes this value gate a
+     *synthesized log entry* rather than only a decision, so it belongs here.
+  2. **Close `validate_replay_consistency`'s blind spot** (`replay.rs:172-215`) — it compares
+     state, dedup count, participants and bound versions, but neither `mode_state` nor
+     `accumulated_suspended_ms`, so the divergence item 1 describes is invisible. This phase's
+     own Edge-cases section already said "consider closing that hole in this phase"; Phase 10
+     turned it from theoretical into a concrete reachable path, so treat it as in scope.
 - **Approach:** **this is a new mechanism, not an extension of one.** All five callers of
   `make_internal_entry` (`runtime.rs:312,816,875,933,1106`) are `EntryKind::Internal`,
   `sender: "_runtime"`, `message_id: String::new()`, not mode-dispatched on replay, not published to
@@ -699,15 +715,35 @@ external consumer (`zer07labs/seam-runtime`, pinning `macp-policy =0.6.0` and ca
   4. `MACP_CLEANUP_INTERVAL_SECS` is documented in all three tracked env tables.
 - **Tests:** a sweep test on a scratch port (50123), killing only the PID started.
 
-### Phase 13 — G4 docs and close-out
+### Phase 13 — G4 docs, API hygiene and close-out
 
 - **Status:** TODO
-- **Delivers:** docs, changelog, `follow_ons.md` item 1 closed, release cut.
+- **Delivers:** docs, changelog, `follow_ons.md` item 1 closed, `#[non_exhaustive]` on the
+  mode-state records, release cut **as 0.8.0**.
 - **Depends on:** Phase 12.
-- **Files:** `docs/modes.md`, `docs/API.md`, `plans/defer/follow_ons.md`, `CLAUDE.md` (local only).
-- **Acceptance criteria:** the wire-visible change is stated in the changelog as a deliberate
-  semantics change gated on `semantics_rev = 2`, not as a bugfix; `follow_ons.md:10-20` item 1 is
-  marked done.
+- **Files:** `docs/modes.md`, `docs/API.md`, `plans/defer/follow_ons.md`,
+  `crates/macp-modes/src/mode/handoff.rs`, `crates/macp-modes/src/mode/quorum.rs`,
+  `CLAUDE.md` (local only).
+- **Added 2026-09-11 — the release is 0.8.0, not 0.7.6, and this phase owns the API change that
+  forces it.** `RUSTC_WRAPPER="" cargo semver-checks check-release --workspace` fails with
+  `constructible_struct_adds_field` on `HandoffOfferRecord.suspended_ms_at_offer`
+  (`handoff.rs:49`), added by Phase 9. `release-plz.toml` sets `semver_check = true`, so this
+  **blocks the release PR**, and the single `version_group` moves all seven crates. There is no
+  route back to 0.7.x: `#[non_exhaustive]`, privatising the struct or its fields, and relocating
+  the state are all equally breaking, and Phase 11 adds another field to the same struct. Per
+  `DECISIONS.md` D7 the break is spent on `#[non_exhaustive]` for the handoff and quorum
+  mode-state records, matching the pattern `Session` (`session.rs:64`), `MacpError`
+  (`error.rs:5`), `ModeResponse` (`mode.rs:11`) and `PolicyFileOutcome`
+  (`macp-policy/src/registry.rs:67`) already follow — the mode-state records are the exception.
+  **Keep it as its own commit** so Phase 11's behaviour change stays bisectable from the API
+  change.
+- **Acceptance criteria:**
+  1. the wire-visible change is stated in the changelog as a deliberate semantics change gated on
+     `semantics_rev = 2`, not as a bugfix;
+  2. `follow_ons.md` item 1 is marked done;
+  3. `cargo semver-checks check-release --workspace` reports the bump as major **deliberately**,
+     and the changelog names the exhaustive-construction break for external callers;
+  4. `follow_ons.md` item 12's note survives — after this phase, mode-state fields are additive.
 
 ### Phase 14 — tracked-file hygiene (G5, rides G2's PR)
 
