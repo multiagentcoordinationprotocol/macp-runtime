@@ -1,7 +1,7 @@
 use macp_core::decision::{DecisionState, Vote};
 use macp_core::policy::rules::{
-    CriticalObjectionAction, DecisionPolicyRules, HandoffPolicyRules, ProposalPolicyRules,
-    QuorumPolicyRules, TaskPolicyRules,
+    CriticalObjectionAction, DecisionPolicyRules, EffectiveThreshold, HandoffPolicyRules,
+    ProposalPolicyRules, QuorumPolicyRules, TaskPolicyRules,
 };
 use macp_core::policy::{PolicyDecision, PolicyDefinition};
 use std::collections::BTreeMap;
@@ -667,10 +667,16 @@ pub fn evaluate_quorum_commitment(
 ///
 /// Checks:
 /// - `threshold`: for a **positive** commitment, approvals must meet the
-///   effective threshold (count/n_of_m: `value` approvals; percentage:
-///   `value`% of declared participants). A **negative** (decline) commitment
+///   effective threshold, resolved by
+///   [`QuorumThreshold::effective`](macp_core::policy::rules::QuorumThreshold::effective)
+///   — the one implementation `QuorumMode::effective_threshold` also calls, so
+///   a policy cannot mean two different bars in the two layers. It ceils and
+///   floors at 1, and reports `weighted`/unrecognised types as unsatisfiable
+///   rather than as a raw approval count. A **negative** (decline) commitment
 ///   is the legitimate terminal when approval is not reached — the threshold
-///   does not gate it.
+///   does not gate it (RFC-MACP-0011 §4b). Note the mode adds a gate this
+///   evaluator cannot: it refuses the decline when *no ballot has been cast*,
+///   which needs ballot counts this signature does not carry.
 /// - `abstention.interpretation`: `implicit_reject` is reported for
 ///   transparency (the effective rejection count) but does not gate.
 pub fn evaluate_quorum_commitment_outcome(
@@ -692,31 +698,48 @@ pub fn evaluate_quorum_commitment_outcome(
     let mut deny_reasons: Vec<String> = Vec::new();
     let mut allow_reasons: Vec<String> = Vec::new();
 
-    // Approval threshold (RFC-0012 §4.2) — mirrors the mode's own
-    // `effective_threshold` interpretation so the same field never carries two
-    // meanings across layers.
-    if rules.threshold.value > 0.0 {
-        let required: usize = match rules.threshold.threshold_type.as_str() {
-            "percentage" => {
-                // Percentage of declared participants, ceiling. Guard the
-                // zero-participant case (legacy shim callers) — treat as unmet.
-                if total_participants == 0 {
-                    usize::MAX
-                } else {
-                    ((rules.threshold.value / 100.0) * total_participants as f64).ceil() as usize
-                }
+    // Approval threshold (RFC-0012 §4.2). Resolved by
+    // `QuorumThreshold::effective`, which is the single implementation of this
+    // rule — `QuorumMode::effective_threshold` calls the same function, so the
+    // two layers cannot drift apart again. They did: this arm ceiled a
+    // fractional `value` while the mode truncated it (issue #145), and the
+    // comment that used to sit here asserted a parity that did not exist.
+    match rules.threshold.effective(total_participants) {
+        // No bar configured. NOTE: the mode's fallback here is the
+        // ApprovalRequest's `required_approvals`, while this evaluator applies
+        // no bar at all — a residual divergence outside the scope of the
+        // rounding fix, recorded in `ASSUMPTIONS.md`.
+        EffectiveThreshold::Inert => {}
+        EffectiveThreshold::Approvals(required) => {
+            let required = required as usize;
+            if outcome_positive && approve_count < required {
+                deny_reasons.push(format!(
+                    "approval threshold not met: {} of {} required approvals ({} {})",
+                    approve_count, required, rules.threshold.value, rules.threshold.threshold_type
+                ));
+            } else if !outcome_positive {
+                allow_reasons
+                    .push("negative outcome: approval threshold does not gate a decline".into());
             }
-            // "count" / "n_of_m" (and unknown types conservatively)
-            _ => rules.threshold.value.ceil() as usize,
-        };
-        if outcome_positive && approve_count < required {
-            deny_reasons.push(format!(
-                "approval threshold not met: {} of {} required approvals ({} {})",
-                approve_count, required, rules.threshold.value, rules.threshold.threshold_type
-            ));
-        } else if !outcome_positive {
-            allow_reasons
-                .push("negative outcome: approval threshold does not gate a decline".into());
+        }
+        EffectiveThreshold::Unsatisfiable => {
+            // Fail closed: an unimplemented or unrecognised `threshold.type`
+            // (or a percentage over an empty participant set) must not be
+            // silently reinterpreted as a raw approval count, which is what
+            // the old `_` arm did. A decline stays allowed for the same reason
+            // it is allowed under a met-able bar — RFC-MACP-0011 §4b makes an
+            // unreachable threshold the legitimate trigger for a negative
+            // commitment.
+            if outcome_positive {
+                deny_reasons.push(format!(
+                    "approval threshold '{}' cannot be satisfied by this runtime \
+                     ({} participants): no positive commitment is possible",
+                    rules.threshold.threshold_type, total_participants
+                ));
+            } else {
+                allow_reasons
+                    .push("negative outcome: approval threshold does not gate a decline".into());
+            }
         }
     }
 

@@ -44,6 +44,18 @@ const QUORUM_THRESHOLD_TYPES: [&str; 3] = ["n_of_m", "percentage", "count"];
 /// silently treat it as a raw approval count.
 const QUORUM_UNIMPLEMENTED_THRESHOLD_TYPES: [&str; 1] = ["weighted"];
 
+/// Every standards-track mode a policy may target, which is exactly the set a
+/// `mode: "*"` policy targets: `Runtime::handle_session_start` binds a wildcard
+/// to any mode's session. Registration therefore holds a wildcard to all of
+/// their schemas and all of their conditional constraints, not just Decision's.
+const STANDARDS_TRACK_POLICY_MODES: [&str; 5] = [
+    "macp.mode.decision.v1",
+    "macp.mode.proposal.v1",
+    "macp.mode.task.v1",
+    "macp.mode.handoff.v1",
+    "macp.mode.quorum.v1",
+];
+
 /// The outcome of validating one file during a [`PolicyRegistry::validate_dir`]
 /// pass.
 ///
@@ -353,11 +365,27 @@ impl PolicyRegistry {
 
     /// Validate that policy rules match the expected schema for the target mode.
     ///
-    /// Wildcard (`"*"`) policies are validated against the Decision schema (superset).
+    /// A wildcard (`"*"`) policy is validated against **every** standards-track
+    /// mode's schema, because `Runtime::handle_session_start` binds it to every
+    /// mode's sessions (`policy.mode != "*" && policy.mode != mode_name` is the
+    /// whole mismatch test) and each mode's evaluator then re-parses these same
+    /// rules through its own struct. Validating it against Decision alone —
+    /// which this did, calling Decision a "superset" it is not — let a quorum
+    /// `threshold` through with no check of any kind: `DecisionPolicyRules` has
+    /// no such field and no `deny_unknown_fields`, so the object was silently
+    /// dropped here, `validate_conditional_constraints` skipped its quorum
+    /// block on the exact-mode test, and `QuorumMode::effective_threshold` then
+    /// read a value nothing had validated.
+    ///
     /// Unknown modes are allowed (extension modes may have custom rules).
     fn validate_rules_for_mode(mode: &str, rules: &serde_json::Value) -> Result<(), String> {
         let result = match mode {
-            "macp.mode.decision.v1" | "*" => {
+            "*" => {
+                return STANDARDS_TRACK_POLICY_MODES
+                    .iter()
+                    .try_for_each(|m| Self::validate_rules_for_mode(m, rules));
+            }
+            "macp.mode.decision.v1" => {
                 serde_json::from_value::<DecisionPolicyRules>(rules.clone()).map(|_| ())
             }
             "macp.mode.proposal.v1" => {
@@ -423,8 +451,12 @@ impl PolicyRegistry {
             }
         }
 
-        // Quorum mode threshold constraints
-        if mode == "macp.mode.quorum.v1" {
+        // Quorum mode threshold constraints — and the wildcard, which binds to
+        // quorum sessions too. The exact-mode test this used to carry was a
+        // hole straight through every quorum check below: a `mode: "*"` policy
+        // reached `QuorumMode::effective_threshold` carrying a `threshold` that
+        // no layer had validated.
+        if matches!(mode, "macp.mode.quorum.v1" | "*") {
             if let Ok(quorum) = serde_json::from_value::<QuorumPolicyRules>(rules.clone()) {
                 Self::validate_quorum_threshold(&quorum.threshold)?;
             }
@@ -1295,42 +1327,60 @@ mod tests {
     }
 
     #[test]
-    fn quorum_threshold_constraints_do_not_apply_to_wildcard_policies() {
-        // KNOWN DEFERRED FAIL-OPEN — resolution belongs to **Phase 3** of
-        // plans/backlog-closeout-2026-09.md, which unifies the two threshold
-        // interpretations. Pinned here, deliberately not fixed.
-        //
-        // A `mode: "*"` policy is validated against `DecisionPolicyRules`,
-        // which has no top-level `threshold` field and no
-        // `deny_unknown_fields`, so the object below is silently dropped.
-        // `validate_conditional_constraints` gates the quorum checks on an
-        // exact `mode == "macp.mode.quorum.v1"` match, so they never run
-        // either. `Runtime::handle_session_start` then binds a `"*"` policy to
-        // a quorum session (`policy.mode != "*"` is the only mismatch test),
-        // and `QuorumMode::effective_threshold` re-parses these same rules as
-        // `QuorumPolicyRules` — reading a `threshold` that no layer validated.
-        //
-        // The same payload under `mode: "macp.mode.quorum.v1"` is refused by
-        // `register_quorum_weighted_threshold_type_fails_as_unimplemented`.
-        //
-        // Closing this is not a pure tightening: it requires deciding whether
-        // a `"*"` policy must validate against *every* mode schema, which
-        // could refuse policies that register today. Hence Phase 3.
-        let wildcard = PolicyDefinition {
+    fn quorum_threshold_constraints_apply_to_wildcard_policies() {
+        // Was `quorum_threshold_constraints_do_not_apply_to_wildcard_policies`,
+        // pinning a deferred fail-open. Phase 3 closed it: a `mode: "*"` policy
+        // binds to a quorum session (`Runtime::handle_session_start` only tests
+        // `policy.mode != "*" && policy.mode != mode_name`) and
+        // `QuorumMode::effective_threshold` re-parses these rules as
+        // `QuorumPolicyRules`, so the wildcard must clear the quorum domain as
+        // well as Decision's. Both halves of the old hole are asserted below:
+        // `validate_rules_for_mode` now checks a wildcard against every
+        // standards-track schema, and `validate_conditional_constraints` runs
+        // its quorum block for `"*"`.
+        let wildcard = |rules| PolicyDefinition {
             policy_id: "policy.test.wildcard".into(),
             mode: "*".into(),
-            description: "wildcard carrying an unvalidated quorum threshold".into(),
-            rules: serde_json::json!({
-                "voting": { "algorithm": "majority" },
-                "threshold": { "type": "weighted", "value": 0.5 }
-            }),
+            description: "wildcard carrying a quorum threshold".into(),
+            rules,
             schema_version: 1,
         };
-        assert!(
-            PolicyRegistry::new().register(wildcard).is_ok(),
-            "the wildcard fail-open is expected to still be open; if this now \
-             fails, Phase 3 closed it and this test should assert the refusal"
-        );
+
+        // The exact payload the old test asserted was accepted.
+        let err = refuse(wildcard(serde_json::json!({
+            "voting": { "algorithm": "majority" },
+            "threshold": { "type": "weighted", "value": 0.5 }
+        })));
+        assert!(err.contains("threshold.type 'weighted'"), "error: {err}");
+
+        // ... and the fractional value from issue #145, which is what made the
+        // hole severe: it reached `effective_threshold` as `0.5 as u32 == 0`.
+        let err = refuse(wildcard(serde_json::json!({
+            "threshold": { "type": "n_of_m", "value": 0.5 }
+        })));
+        assert!(err.contains("threshold.value"), "error: {err}");
+        assert!(err.contains("integer"), "error: {err}");
+
+        // A shape error (not just a value error) is caught too: `threshold` is
+        // silently dropped by `DecisionPolicyRules`, so only the quorum schema
+        // sees this one.
+        let err = refuse(wildcard(serde_json::json!({ "threshold": "majority" })));
+        assert!(err.contains("macp.mode.quorum.v1"), "error: {err}");
+
+        // Decision-shaped wildcards, including the built-in `policy.default`
+        // rules, still register: every other mode's struct ignores the fields
+        // it does not know.
+        accept(wildcard(serde_json::json!({
+            "voting": { "algorithm": "none", "quorum": { "type": "count", "value": 0 } },
+            "objection_handling": { "critical_severity_vetoes": false, "veto_threshold": 1 },
+            "evaluation": { "required_before_voting": false, "minimum_confidence": 0.0 },
+            "commitment": { "authority": "initiator_only", "designated_roles": [], "require_vote_quorum": false }
+        })));
+
+        // And a wildcard carrying a *valid* quorum threshold is accepted.
+        accept(wildcard(serde_json::json!({
+            "threshold": { "type": "percentage", "value": 60 }
+        })));
     }
 
     #[test]

@@ -64,7 +64,7 @@ The runtime does **not** run a JSON-Schema evaluator: it carries no `jsonschema`
    | Quorum `threshold.type` | One of `n_of_m`, `percentage`, `count`. `weighted` is refused as unimplemented — see below |
    | Quorum `threshold.value` | A non-negative **integer**; additionally `<= 100` when `threshold.type` is `percentage` |
 
-   The two Quorum rows apply **only** when `mode` is exactly `"macp.mode.quorum.v1"`. They are **not** applied to a wildcard (`"*"`) policy: a `"*"` policy is validated against the Decision schema, which has no top-level `threshold`, so a `threshold` object inside one is silently ignored at registration — and yet `SessionStart` will bind that policy to a Quorum session, where the mode reads the very `threshold` no layer checked. Give a Quorum policy `mode: "macp.mode.quorum.v1"`, not `"*"`. Closing this gap requires deciding whether a `"*"` policy must satisfy *every* mode schema, which would refuse policies that register today; it is tracked as deferred work and pinned by a test (`quorum_threshold_constraints_do_not_apply_to_wildcard_policies`).
+   A wildcard (`"*"`) policy must satisfy **every** standards-track mode's schema and every mode's constraints above, not just Decision's, because `SessionStart` binds it to every mode's sessions. Until v0.7.5 it was validated against the Decision schema alone, which has no top-level `threshold` — so a Quorum `threshold` inside a `"*"` policy was silently dropped at registration and then read, unchecked, by the Quorum mode. A `"*"` policy carrying an out-of-domain `threshold` is now refused. Fields one mode's schema does not know are still ignored rather than refused, so a Decision-shaped wildcard (including the built-in `policy.default`) registers unchanged.
 
    The inclusive bounds are deliberate: `voting.threshold: 0.0` and an all-zero `voting.weights` map are degenerate but schema-legal, and whether they should be legal at all is an open question upstream rather than something registration decides. `threshold.value` follows JSON Schema's `integer` keyword, which matches any number with a zero fractional part: `75` and `75.0` are both accepted, `75.5` is not.
 3. **Conditional constraints.** A `weighted` voting algorithm requires a non-empty `weights` map, `supermajority` requires a threshold above `0.5`, and `designated_role` commitment authority requires a non-empty `designated_roles` list.
@@ -176,7 +176,15 @@ Acceptance criteria: `all_parties`, `counterparty`, `initiator`.
 
 The threshold field is spelled `type`, not `threshold_type`: the latter is the Rust field name, and a policy that uses it silently falls back to the default `n_of_m`.
 
-Threshold types: `n_of_m`, `percentage`, and `count` — a documented alias for `n_of_m` that both the mode and the evaluator already treat as one. The canonical schema also lists `weighted`, which **registration refuses**: `threshold.value` is typed as an integer there, so a weighted sum is not expressible, and both layers would silently treat it as a raw approval count. `threshold.value` must be a non-negative integer, and at most `100` for `percentage`.
+Threshold types: `n_of_m`, `percentage`, and `count` — a documented alias for `n_of_m` that both the mode and the evaluator already treat as one. The canonical schema also lists `weighted`, which **registration refuses**: `threshold.value` is typed as an integer there, so a weighted sum is not expressible. `threshold.value` must be a non-negative integer, and at most `100` for `percentage`.
+
+How the threshold resolves to an approval bar (RFC-MACP-0011 §6 — a policy threshold *replaces* the ApprovalRequest's `required_approvals`, it does not supplement it):
+
+- `n_of_m` / `count`: `value` approvals. `percentage`: that share of the **declared participants**.
+- Fractional results are **ceiled**, and the bar has a floor of **one approval**. Before v0.7.5 the mode truncated (`0.5` → `0`) while the evaluator ceiled (`0.5` → `1`), so one policy meant two different bars; a bar of `0` was also reached before any ballot was cast, which let a negative commitment seal with zero approvals. Both layers now resolve through one function (`QuorumThreshold::effective`).
+- `value: 0` (the default) leaves the rule **inert**: the ApprovalRequest's own `required_approvals` stands.
+- A bar outside `1..=participants` — including a `weighted` or unrecognised `type`, which resolve to "unsatisfiable" rather than to a raw count — makes the positive outcome impossible, so the **ApprovalRequest is refused** rather than opening a session that can only decline. Registration already refuses those types; this guard covers a policy edited under a running session.
+- A negative commitment needs at least one ballot. RFC-MACP-0011 §4a makes an unreachable threshold the trigger for a decline, but with an empty ballot box "unreachable" only means the bar exceeds the participant pool, which is a misconfiguration rather than a decision.
 
 Abstention interpretations: `neutral`, `implicit_reject`, `ignored`.
 
@@ -190,7 +198,7 @@ Each standard mode has a dedicated evaluator in `crates/macp-policy/src/evaluato
 | `evaluate_proposal_commitment` | Counter-proposal count is within `max_rounds` |
 | `evaluate_task_commitment` | Output is present if `require_output` is set |
 | `evaluate_handoff_commitment` | Always allows (implicit timeout is handled by the mode) |
-| `evaluate_quorum_commitment` | Effective voter count (adjusted for abstention rules) satisfies the threshold |
+| `evaluate_quorum_commitment` | Approval count meets the effective threshold for a positive commitment; a decline is not gated by it. Abstention interpretation is reported, not enforced |
 
 ## Commitment authority
 

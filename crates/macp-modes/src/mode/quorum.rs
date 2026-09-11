@@ -62,24 +62,37 @@ impl QuorumMode {
 
     /// Resolve the effective approval threshold, considering policy overrides.
     ///
-    /// RFC-MACP-0011: "When policy specifies a threshold override, it replaces
-    /// (not supplements) the required_approvals value from ApprovalRequest."
-    fn effective_threshold(session: &Session, request: &ApprovalRequestRecord) -> u32 {
-        if let Some(ref policy) = session.policy_definition {
-            let rules: macp_core::policy::rules::QuorumPolicyRules =
-                serde_json::from_value(policy.rules.clone()).unwrap_or_default();
-            if rules.threshold.value > 0.0 {
-                return match rules.threshold.threshold_type.as_str() {
-                    "percentage" => {
-                        let n = session.participants.len() as f64;
-                        (rules.threshold.value / 100.0 * n).ceil() as u32
-                    }
-                    // "n_of_m" or "count" — use value directly
-                    _ => rules.threshold.value as u32,
-                };
-            }
+    /// RFC-MACP-0011 §6: "When policy specifies a threshold override, it
+    /// replaces (not supplements) the required_approvals value from
+    /// ApprovalRequest."
+    ///
+    /// The policy arithmetic itself lives in
+    /// [`QuorumThreshold::effective`](macp_core::policy::rules::QuorumThreshold::effective)
+    /// — the *same* function `evaluate_quorum_commitment_outcome` calls, so
+    /// one policy can no longer produce two different bars in the two layers
+    /// (issue #145). This wrapper only supplies the mode's fallback for an
+    /// inert rule.
+    ///
+    /// Returns `None` when the bound policy's threshold is **unsatisfiable**
+    /// (`type: "weighted"`, or an unrecognised type): such a session can seal
+    /// no commitment at all. Registration refuses those policies, so `None`
+    /// needs a directly-constructed `PolicyDefinition` to reach.
+    ///
+    /// A rules object that fails to parse falls back to the schema defaults
+    /// (`unwrap_or_default`) and therefore to `required_approvals`, where the
+    /// evaluator instead denies the commitment. That divergence is recorded in
+    /// `ASSUMPTIONS.md` and deliberately left alone here.
+    fn effective_threshold(session: &Session, request: &ApprovalRequestRecord) -> Option<u32> {
+        let Some(ref policy) = session.policy_definition else {
+            return Some(request.required_approvals);
+        };
+        let rules: macp_core::policy::rules::QuorumPolicyRules =
+            serde_json::from_value(policy.rules.clone()).unwrap_or_default();
+        match rules.threshold.effective(session.participants.len()) {
+            macp_core::policy::rules::EffectiveThreshold::Inert => Some(request.required_approvals),
+            macp_core::policy::rules::EffectiveThreshold::Approvals(required) => Some(required),
+            macp_core::policy::rules::EffectiveThreshold::Unsatisfiable => None,
         }
-        request.required_approvals
     }
 
     fn commitment_ready(session: &Session, state: &QuorumState) -> bool {
@@ -87,7 +100,12 @@ impl QuorumMode {
             Some(request) => request,
             None => return false,
         };
-        let required = Self::effective_threshold(session, request);
+        let Some(required) = Self::effective_threshold(session, request) else {
+            // Unsatisfiable threshold: neither outcome may be sealed. Without
+            // this, the unreachable-threshold branch below would fire on it
+            // and turn an unimplementable policy into a binding decline.
+            return false;
+        };
         let approvals = state
             .ballots
             .values()
@@ -96,8 +114,22 @@ impl QuorumMode {
         let total_eligible = session.participants.len() as u32;
         let counted = state.ballots.len() as u32;
         let remaining = total_eligible.saturating_sub(counted);
-        // Commitment is ready if threshold reached OR threshold is mathematically unreachable
-        approvals >= required || approvals + remaining < required
+        // Ready when the threshold is reached, or when it has become
+        // mathematically unreachable (RFC-MACP-0011 §4a, which makes that the
+        // trigger for a negative Commitment).
+        //
+        // `counted > 0` guards the second branch. With no ballot cast,
+        // `approvals + remaining < required` reduces to
+        // `participants.len() < required` — a state reachable only through a
+        // policy threshold larger than the participant pool, which
+        // `on_message`'s ApprovalRequest arm now refuses up front and which
+        // replay could otherwise re-introduce by binding edited policy rules
+        // to an older session. Left ungated, it let the coordinator seal a
+        // binding `quorum.rejected` before anyone voted (issue #145). Every
+        // §4b decline the RFC describes — all-abstain, or abstentions plus
+        // rejections — has at least one ballot behind it, so this refuses no
+        // legitimate decline.
+        approvals >= required || (counted > 0 && approvals + remaining < required)
     }
 }
 
@@ -146,14 +178,44 @@ impl Mode for QuorumMode {
                 {
                     return Err(MacpError::InvalidPayload);
                 }
-                state.request = Some(ApprovalRequestRecord {
+                let record = ApprovalRequestRecord {
                     request_id: payload.request_id,
                     action: payload.action,
                     summary: payload.summary,
                     details: payload.details,
                     required_approvals: payload.required_approvals,
                     requested_by: env.sender.clone(),
-                });
+                };
+                // RFC-MACP-0011 §6 says a policy `threshold` *replaces*
+                // `required_approvals`, so the replacement must satisfy the
+                // same domain the check above just enforced on the field it
+                // replaces: 1..=participants. A bar outside it makes the
+                // positive outcome impossible from the first message, and the
+                // coordinator could then seal a binding negative Commitment
+                // with no ballot cast (issue #145). Refusing here reports the
+                // misconfiguration at once instead of at commitment time, and
+                // keeps a dead session from collecting ballots that can never
+                // matter.
+                match Self::effective_threshold(session, &record) {
+                    Some(required)
+                        if required >= 1 && required <= session.participants.len() as u32 => {}
+                    other => {
+                        tracing::warn!(
+                            session_id = %session.session_id,
+                            policy_id = session
+                                .policy_definition
+                                .as_ref()
+                                .map(|p| p.policy_id.as_str())
+                                .unwrap_or(""),
+                            effective_threshold = ?other,
+                            participants = session.participants.len(),
+                            "quorum policy threshold is outside 1..=participants; \
+                             refusing the ApprovalRequest"
+                        );
+                        return Err(MacpError::InvalidPayload);
+                    }
+                }
+                state.request = Some(record);
                 Ok(ModeResponse::PersistState(Self::encode_state(&state)))
             }
             "Approve" => {
@@ -1326,6 +1388,407 @@ mod tests {
             apply(&mut session, result);
         }
         // Commitment should be ready (0 approvals + 0 remaining < 2 required)
+        let commit = mode
+            .on_message(
+                &session,
+                &env(
+                    "coordinator",
+                    "Commitment",
+                    commitment("quorum.rejected", false),
+                ),
+            )
+            .unwrap();
+        assert!(matches!(commit, ModeResponse::PersistAndResolve { .. }));
+    }
+
+    // ── Threshold rounding parity across mode and evaluator (#145) ──
+
+    fn quorum_policy(rules: serde_json::Value) -> macp_core::policy::PolicyDefinition {
+        macp_core::policy::PolicyDefinition {
+            policy_id: "threshold-parity".into(),
+            mode: "macp.mode.quorum.v1".into(),
+            description: "threshold parity fixture".into(),
+            rules,
+            schema_version: 1,
+        }
+    }
+
+    fn session_with(participants: usize, rules: serde_json::Value) -> Session {
+        let names = ["alice", "bob", "carol", "dave", "erin"];
+        let mut session = Session::builder("s1", "macp.mode.quorum.v1", "coordinator")
+            .ttl_ms(60_000)
+            .participants(
+                names[..participants]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            )
+            .mode_version("1.0.0")
+            .configuration_version("config")
+            .policy_version("policy")
+            .build();
+        session.policy_definition = Some(quorum_policy(rules));
+        session
+    }
+
+    /// The approval bar the **mode** derives, with a request whose own
+    /// `required_approvals` is deliberately unlike any policy answer, so a
+    /// silent fallback to it would show up as a mismatch rather than a pass.
+    fn mode_required(participants: usize, rules: serde_json::Value) -> Option<u32> {
+        let session = session_with(participants, rules);
+        let request = ApprovalRequestRecord {
+            request_id: "r1".into(),
+            action: "deploy.production".into(),
+            summary: "Deploy v2".into(),
+            details: vec![],
+            required_approvals: 99,
+            requested_by: "coordinator".into(),
+        };
+        QuorumMode::effective_threshold(&session, &request)
+    }
+
+    /// The approval bar the **evaluator** derives, recovered from its public
+    /// behaviour: it denies a positive commitment while `approve_count` is
+    /// below the bar and allows it at or above, so the smallest allowed count
+    /// *is* the bar. `None` when no count is ever allowed.
+    fn evaluator_required(participants: usize, rules: serde_json::Value) -> Option<u32> {
+        let policy = quorum_policy(rules);
+        (0u32..=64).find(|approve| {
+            matches!(
+                macp_policy::evaluator::evaluate_quorum_commitment_outcome(
+                    &policy,
+                    *approve as usize,
+                    0,
+                    0,
+                    participants,
+                    true,
+                ),
+                macp_core::policy::PolicyDecision::Allow { .. }
+            )
+        })
+    }
+
+    #[test]
+    fn fractional_threshold_ceils_to_one_in_both_layers() {
+        // Issue #145: the mode truncated (`0.5 as u32 == 0`) while the
+        // evaluator ceiled, and a bar of 0 is met before any ballot is cast.
+        let rules = serde_json::json!({ "threshold": { "type": "n_of_m", "value": 0.5 } });
+        assert_eq!(mode_required(3, rules.clone()), Some(1));
+        assert_eq!(evaluator_required(3, rules), Some(1));
+    }
+
+    #[test]
+    fn threshold_is_floored_at_one_so_a_zero_bar_is_unreachable() {
+        // Every positive value below 1 resolves to 1, in both layers.
+        for value in [0.000_001, 0.1, 0.49, 0.5, 0.99] {
+            let rules = serde_json::json!({ "threshold": { "type": "n_of_m", "value": value } });
+            assert_eq!(mode_required(3, rules.clone()), Some(1), "value {value}");
+            assert_eq!(evaluator_required(3, rules), Some(1), "value {value}");
+        }
+    }
+
+    #[test]
+    fn zero_ballot_decline_is_refused_under_a_fractional_threshold() {
+        // With the old truncation the bar was 0, so `approvals >= required`
+        // held with an empty ballot box and this negative commitment sealed.
+        let mode = QuorumMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = session_with(
+            3,
+            serde_json::json!({ "threshold": { "type": "n_of_m", "value": 0.5 } }),
+        );
+        let result = mode
+            .on_session_start(&session, &env("coordinator", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+        let result = mode
+            .on_message(
+                &session,
+                &env(
+                    "coordinator",
+                    "ApprovalRequest",
+                    make_approval_request("r1", 3),
+                ),
+            )
+            .unwrap();
+        apply(&mut session, result);
+        let err = mode
+            .on_message(
+                &session,
+                &env(
+                    "coordinator",
+                    "Commitment",
+                    commitment("quorum.rejected", false),
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), "InvalidPayload");
+        // Nor does the positive one seal with an empty ballot box.
+        let err = mode
+            .on_message(
+                &session,
+                &env("coordinator", "Commitment", commitment_payload()),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), "InvalidPayload");
+        // One approval meets the ceiled bar, and the session resolves.
+        let result = mode
+            .on_message(
+                &session,
+                &env("alice", "Approve", make_approve("r1", "yes")),
+            )
+            .unwrap();
+        apply(&mut session, result);
+        let commit = mode
+            .on_message(
+                &session,
+                &env("coordinator", "Commitment", commitment_payload()),
+            )
+            .unwrap();
+        assert!(matches!(commit, ModeResponse::PersistAndResolve { .. }));
+    }
+
+    #[test]
+    fn weighted_threshold_is_unsatisfiable_not_a_raw_approval_count() {
+        // `weighted` used to fall through the `_` arm in both layers and be
+        // read as a raw count. `threshold.value` is typed `integer` by the
+        // canonical schema and per-participant quorum weights are not
+        // modelled, so there is nothing to implement — it fails closed.
+        let rules = serde_json::json!({ "threshold": { "type": "weighted", "value": 2 } });
+        assert_eq!(mode_required(3, rules.clone()), None);
+        assert_eq!(evaluator_required(3, rules.clone()), None);
+
+        // An unrecognised type fails closed the same way.
+        let unknown = serde_json::json!({ "threshold": { "type": "two_thirds", "value": 2 } });
+        assert_eq!(mode_required(3, unknown.clone()), None);
+        assert_eq!(evaluator_required(3, unknown), None);
+
+        // End to end: the ApprovalRequest is refused, so no ballot is ever
+        // cast into a session that could not resolve.
+        let mode = QuorumMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = session_with(3, rules);
+        let result = mode
+            .on_session_start(&session, &env("coordinator", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+        let err = mode
+            .on_message(
+                &session,
+                &env(
+                    "coordinator",
+                    "ApprovalRequest",
+                    make_approval_request("r1", 2),
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), "InvalidPayload");
+    }
+
+    #[test]
+    fn mode_and_evaluator_agree_across_the_threshold_matrix() {
+        // RFC-MACP-0011 §7: given the same participants, threshold and
+        // ballots, every implementation must derive the same commitment
+        // eligibility. Both layers now resolve through
+        // `QuorumThreshold::effective`; this asserts the property they are
+        // supposed to have rather than the fact that they share a function.
+        //
+        // `value = 0` is deliberately OUT of the matrix: both layers gate on
+        // `value > 0.0` and diverge *outside* that gate (the mode falls back
+        // to `required_approvals`, the evaluator applies no bar at all). That
+        // residual divergence is recorded in `ASSUMPTIONS.md` and is not what
+        // the ceil+floor fix addresses.
+        let cases: [(&str, [f64; 5]); 3] = [
+            ("n_of_m", [0.5, 1.0, 2.0, 3.0, 5.0]),
+            ("count", [0.5, 1.0, 2.0, 3.0, 5.0]),
+            // Fractional, sub-participant, exact, whole, and over-100.
+            ("percentage", [0.5, 33.0, 50.0, 100.0, 150.0]),
+        ];
+        for (threshold_type, values) in cases {
+            for value in values {
+                for participants in 1..=3usize {
+                    let rules = serde_json::json!({
+                        "threshold": { "type": threshold_type, "value": value }
+                    });
+                    let mode = mode_required(participants, rules.clone());
+                    let evaluator = evaluator_required(participants, rules);
+                    assert_eq!(
+                        mode, evaluator,
+                        "type={threshold_type} value={value} participants={participants}"
+                    );
+                    assert_ne!(
+                        mode,
+                        Some(0),
+                        "type={threshold_type} value={value} participants={participants}: \
+                         a bar of 0 is met before any ballot is cast"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn over_participant_policy_threshold_refuses_the_approval_request() {
+        // RFC-MACP-0011 §6: a policy threshold *replaces* `required_approvals`,
+        // which this arm already constrains to 1..=participants. A replacement
+        // outside that domain makes the positive outcome impossible from the
+        // first message, and `commitment_ready`'s unreachable branch would let
+        // the coordinator seal a binding `quorum.rejected` with no ballot cast.
+        let mode = QuorumMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = session_with(
+            3,
+            serde_json::json!({ "threshold": { "type": "n_of_m", "value": 5 } }),
+        );
+        let result = mode
+            .on_session_start(&session, &env("coordinator", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+        let err = mode
+            .on_message(
+                &session,
+                &env(
+                    "coordinator",
+                    "ApprovalRequest",
+                    make_approval_request("r1", 3),
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), "InvalidPayload");
+        // A threshold exactly at the participant count is still fine.
+        session.policy_definition = Some(quorum_policy(
+            serde_json::json!({ "threshold": { "type": "n_of_m", "value": 3 } }),
+        ));
+        assert!(mode
+            .on_message(
+                &session,
+                &env(
+                    "coordinator",
+                    "ApprovalRequest",
+                    make_approval_request("r1", 3),
+                ),
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn zero_ballot_decline_is_refused_when_policy_rebinds_over_the_participant_pool() {
+        // The belt behind the ApprovalRequest guard: replay re-resolves
+        // `policy_version` against the registry, so a policy edited between
+        // runs can bind a larger threshold to a session whose request was
+        // already accepted. The unreachable-threshold branch must not fire
+        // with an empty ballot box.
+        let mode = QuorumMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = session_with(
+            3,
+            serde_json::json!({ "threshold": { "type": "n_of_m", "value": 3 } }),
+        );
+        let result = mode
+            .on_session_start(&session, &env("coordinator", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+        let result = mode
+            .on_message(
+                &session,
+                &env(
+                    "coordinator",
+                    "ApprovalRequest",
+                    make_approval_request("r1", 3),
+                ),
+            )
+            .unwrap();
+        apply(&mut session, result);
+        // The policy is edited out from under the accepted request.
+        session.policy_definition = Some(quorum_policy(
+            serde_json::json!({ "threshold": { "type": "n_of_m", "value": 5 } }),
+        ));
+        let err = mode
+            .on_message(
+                &session,
+                &env(
+                    "coordinator",
+                    "Commitment",
+                    commitment("quorum.rejected", false),
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), "InvalidPayload");
+    }
+
+    #[test]
+    fn genuine_unreachable_threshold_still_permits_a_negative_commitment() {
+        // RFC-MACP-0011 §4a/§4b: once ballots make the bar unreachable, the
+        // negative Commitment is the legitimate terminal. The zero-ballot gate
+        // must not cost us this — all three participants abstain, which is
+        // §4b's own worked example.
+        let mode = QuorumMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = session_with(
+            3,
+            serde_json::json!({ "threshold": { "type": "n_of_m", "value": 2 } }),
+        );
+        let result = mode
+            .on_session_start(&session, &env("coordinator", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+        let result = mode
+            .on_message(
+                &session,
+                &env(
+                    "coordinator",
+                    "ApprovalRequest",
+                    make_approval_request("r1", 3),
+                ),
+            )
+            .unwrap();
+        apply(&mut session, result);
+        for participant in ["alice", "bob", "carol"] {
+            let result = mode
+                .on_message(
+                    &session,
+                    &env(participant, "Abstain", make_abstain("r1", "no opinion")),
+                )
+                .unwrap();
+            apply(&mut session, result);
+        }
+        let commit = mode
+            .on_message(
+                &session,
+                &env(
+                    "coordinator",
+                    "Commitment",
+                    commitment("quorum.rejected", false),
+                ),
+            )
+            .unwrap();
+        assert!(matches!(commit, ModeResponse::PersistAndResolve { .. }));
+    }
+
+    #[test]
+    fn a_single_ballot_still_unlocks_the_unreachable_branch() {
+        // The gate is "at least one ballot", not "all ballots": one rejection
+        // against a 3-of-3 bar makes the threshold unreachable and the decline
+        // legitimate per §4a.
+        let mode = QuorumMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = session_with(
+            3,
+            serde_json::json!({ "threshold": { "type": "n_of_m", "value": 3 } }),
+        );
+        let result = mode
+            .on_session_start(&session, &env("coordinator", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+        let result = mode
+            .on_message(
+                &session,
+                &env(
+                    "coordinator",
+                    "ApprovalRequest",
+                    make_approval_request("r1", 3),
+                ),
+            )
+            .unwrap();
+        apply(&mut session, result);
+        let result = mode
+            .on_message(&session, &env("alice", "Reject", make_reject("r1", "no")))
+            .unwrap();
+        apply(&mut session, result);
         let commit = mode
             .on_message(
                 &session,
