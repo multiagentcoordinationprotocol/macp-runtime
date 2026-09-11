@@ -59,12 +59,21 @@ the fsync load on the hot path. Needs care with shutdown/crash windows
 snapshot (master §3.2). Dedup is normative — a windowed design needs spec
 coordination first (file upstream before implementing).
 
-## 7. Built-in recommended policies (gated on upstream reservation)
-Master plan §4.2's companion: ship `policy.majority`, `policy.supermajority`,
-and `policy.unanimous` as optional pre-registered built-ins once the spec
-repo reserves the identifiers and pins their canonical rule definitions —
-filed as spec issue #55. Without the reservation, runtime built-ins could
-collide with user registrations of the same names.
+## 7. Built-in recommended policies — **DONE** (2026-09-10)
+Master plan §4.2's companion: ship recommended governance profiles as
+pre-registered built-ins once the spec repo reserves the identifiers and pins
+their canonical rule definitions (filed as spec issue #55).
+
+**Shipped.** The reservation landed as RFC-MACP-0012 §2.2/§5.2, which assigns
+the `policy.std.` prefix rather than the bare `policy.` names this item
+anticipated. `crates/macp-policy/src/defaults.rs` pre-registers
+`policy.std.majority`, `policy.std.supermajority` and `policy.std.unanimous`
+(`STD_POLICY_PREFIX` at `:32`, `canonical_std_policy` at `:127`), and the
+collision risk this item worried about is closed from the other direction
+too: `PolicyRegistry::validate_reserved_namespace` refuses any registration
+under the prefix that is not the canonical definition for that exact
+identifier, and refuses unregistration of the whole namespace. Covered by
+tier-1 policy-registry tests and `std_policies_all_require_vote_quorum`.
 
 ## 8. Small/cosmetic
 - Duplicate-SessionStart ack during a failed start's rollback window can
@@ -72,8 +81,11 @@ collide with user registrations of the same names.
   advisory; self-corrects on retry).
 - Disk-GC sweep loads each stored session per cycle — O(stored sessions)
   I/O; optimize only if session counts grow very large (change-review D6).
-- Tier-1 suite has no suspend/resume RPC coverage (noticed during the
-  max_suspend_ms work; runtime/core level is covered).
+- ~~Tier-1 suite has no suspend/resume RPC coverage (noticed during the
+  max_suspend_ms work; runtime/core level is covered).~~ **DONE** —
+  `integration_tests/tests/tier1_protocol/test_suspend_resume.rs` covers the
+  RPC pair with three tests: `suspend_resume_lifecycle`,
+  `suspend_from_non_initiator_rejected`, `suspend_unknown_session_not_found`.
 - Propose the `rules.audit` block (E3's audit-verbosity vocabulary) upstream
   — currently runtime-specific, harmless to other implementations.
 - Upstream: `abstention.counts_toward_quorum` wording references a

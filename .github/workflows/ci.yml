@@ -628,6 +628,32 @@ jobs:
           MACP_CONFORMANCE_FIXTURES_DIR: ${{ github.workspace }}/spec-repo/schemas/conformance
         run: cargo test --test conformance_loader
 
+      # The policy registry's value-domain validators are hand-written mirrors
+      # of schemas/json/policy/*.schema.json (this runtime carries no
+      # JSON-Schema evaluator). This job is the only one with the spec repo
+      # checked out, so it is where the mirrors are held to the canonical enums
+      # and bounds. The test skips with a printed warning only when neither
+      # MACP_POLICY_SCHEMAS_DIR nor a sibling spec checkout exists, which is
+      # what keeps it green for contributors without one — it is deliberately
+      # not `#[ignore]`d. Here the env var is set, so a missing directory
+      # panics instead of skipping.
+      #
+      # The name is pinned with `--exact` and the run is asserted to have
+      # executed exactly one test: libtest exits 0 when a filter matches
+      # nothing, so a rename would otherwise silently retire this gate.
+      - name: Policy validators match the canonical schemas
+        env:
+          MACP_POLICY_SCHEMAS_DIR: ${{ github.workspace }}/spec-repo/schemas/json/policy
+          TEST_NAME: registry::tests::enum_lists_match_the_canonical_schemas
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP:-/tmp}/policy-parity.log"
+          cargo test -p macp-policy --lib -- --exact "$TEST_NAME" | tee "$log"
+          grep -q '^test result: ok\. 1 passed' "$log" || {
+            echo "::error::'$TEST_NAME' matched no test — was it renamed or moved?"
+            exit 1
+          }
+
   # Build-only Docker gate: proves the published image still builds without
   # pushing anything. The push happens in docker.yml on main/tags. Added after
   # the A-E merge broke the main image build while its (non-required) check

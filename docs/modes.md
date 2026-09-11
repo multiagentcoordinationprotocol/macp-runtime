@@ -59,11 +59,34 @@ The handoff mode manages responsibility transfer through serial offers. Its inte
 
 The quorum mode tracks approval requests and ballots against a threshold. Its internal state records the approval request and a map of ballots (approve, reject, or abstain) keyed by sender.
 
-**Threshold resolution**: The `effective_threshold()` method checks whether a governance policy overrides the `required_approvals` value from the payload. Policy thresholds (percentage or count) replace the payload value entirely rather than supplementing it.
+**Threshold resolution**: A governance policy's `threshold` rule *replaces* the `required_approvals` value from the `ApprovalRequest` payload rather than supplementing it (RFC-MACP-0011 §6). The arithmetic is ceiling-rounded with a floor of one approval, and lives in `QuorumThreshold::effective` (`macp-core`) -- the same function the policy evaluator calls, so the mode and the evaluator cannot derive two different bars from one policy.
 
-**Commitment readiness**: The runtime accepts a commitment when either the approval threshold is met or the threshold becomes mathematically unreachable (remaining possible approvals plus current approvals is still below the threshold).
+**Reading the threshold from outside the runtime**: two public accessors on `QuorumMode` report the bar the runtime itself enforces, so a caller never has to re-derive it from policy rules and participant counts:
 
-**Abstention handling**: When the policy specifies abstention rules, the effective voter count is adjusted accordingly. An abstention with `counts_toward_quorum: false` reduces the denominator for percentage-based thresholds.
+| Accessor | Returns |
+|----------|---------|
+| `QuorumMode::effective_threshold_for_session(&Session)` | `Result<Option<ApprovalThreshold>, MacpError>` |
+| `QuorumMode::effective_threshold(&Session, &ApprovalRequestRecord)` | `ApprovalThreshold` |
+
+The session-level form decodes the accepted request out of `session.mode_state` itself. Each layer of its return type answers exactly one question:
+
+- `Ok(Some(ApprovalThreshold::Approvals(n)))` -- `n` `Approve` ballots seal a positive commitment. Never zero; for a session whose request the mode accepted, never above the participant count. A session with no `threshold` rule (the common case) reports the payload's own `required_approvals` here, already resolved.
+- `Ok(Some(ApprovalThreshold::Unsatisfiable))` -- the bound policy admits no positive commitment at any approval count (`threshold.type: "weighted"`, an unrecognised type, or a `percentage` over an empty participant set). `RegisterPolicy` refuses the first two, so reaching them requires a directly constructed `PolicyDefinition`; the third cannot be caught at registration, which has no participant count, and is blocked by `QuorumMode::on_session_start` rejecting an empty participant set instead. Such a session seals **neither** outcome.
+- `Ok(None)` -- no `ApprovalRequest` has been accepted yet, so there is nothing to resolve. Deliberately distinct from `Unsatisfiable`: "not yet" and "never" are different answers.
+- `Err(MacpError::InvalidModeState)` -- `session.mode_state` is not decodable quorum state, so no answer would be honest.
+
+**Commitment readiness**: the runtime accepts a commitment when the approval threshold is met, or when it has become mathematically unreachable and at least one ballot has been cast -- the latter being RFC-MACP-0011 §4a's trigger for a *negative* commitment:
+
+```text
+approvals >= required || (counted > 0 && approvals + remaining < required)
+                                         // remaining = participants - counted
+```
+
+The `counted > 0` guard stops a coordinator sealing a binding `quorum.rejected` before anyone has voted, which an over-participant policy threshold could otherwise reach. Every decline the RFC describes has at least one ballot behind it.
+
+Because readiness fires on *either* outcome, it is **non-monotonic in the approval count**, and it depends on the whole ballot box rather than the approval count alone. On three participants with `required = 3`: three rejections (zero approvals) are ready, one approval plus two rejections is ready, two approvals with one participant yet to vote is *not* ready, three approvals are ready. Probing readiness to discover the threshold -- by binary search especially -- returns a confident wrong answer; call the accessors above instead.
+
+**Abstention handling**: `abstention.counts_toward_quorum` is **currently inert**. It is parsed into `AbstentionRules` and checked at registration, but no production path reads it: `QuorumThreshold::effective` divides a `percentage` threshold by the raw declared participant count, and Decision mode's `voting.quorum` percentage uses the same unadjusted denominator. An abstention therefore never shrinks a percentage denominator. The one abstention field that is read is `interpretation` -- and `evaluate_quorum_commitment` only *reports* it in the decision reasons rather than gating on it (see [Policy](policy.md#how-evaluation-works)). Separately, and not driven by these rules, Decision mode's *voting ratio* does exclude abstain ballots from its denominator, per RFC-MACP-0004.
 
 ## Built-in Extension: Multi-Round Mode
 

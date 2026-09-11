@@ -258,6 +258,101 @@ fn default_threshold_type() -> String {
     "n_of_m".into()
 }
 
+/// The approval bar a Quorum Mode [`QuorumThreshold`] imposes on one session.
+///
+/// Produced only by [`QuorumThreshold::effective`], which is the **single**
+/// implementation of that rule. It lives in `macp-core` because two crates
+/// need it — `QuorumMode::effective_threshold` in `macp-modes` and
+/// `evaluate_quorum_commitment_outcome` in `macp-policy` — and when they each
+/// carried their own copy they disagreed: the mode truncated a fractional
+/// `value` (`0.5` → `0`) while the evaluator ceiled it (`0.5` → `1`), so one
+/// policy produced two different thresholds. RFC-MACP-0011 §7 forbids exactly
+/// that ("implementations MUST derive the same quorum state and the same
+/// commitment eligibility"). A third caller must call this, not re-derive it.
+///
+/// **Deliberately not `#[non_exhaustive]`**, unlike its neighbours in this
+/// crate ([`crate::error::MacpError`], [`crate::mode::ModeResponse`],
+/// [`crate::mode::MessageContext`], [`crate::session::Session`],
+/// [`super::PolicyDecision`], [`super::CommitmentMode`]). That attribute binds
+/// every crate except the defining one, so here it would force a `_` arm at
+/// exactly the two call sites — `QuorumMode::effective_threshold` in
+/// `macp-modes` and `evaluate_quorum_commitment_outcome` in `macp-policy` —
+/// whose compile-time exhaustiveness *is* the guarantee unifying this rule
+/// buys. A fail-closed `_` arm would be strictly worse for a governance
+/// kernel: a future variant would silently decline instead of failing to
+/// build, which is the same class of silent mis-handling as issue #145. Adding
+/// a variant later is not a silent break either — `enum_variant_added` is a
+/// major `cargo-semver-checks` lint and `release-plz.toml` sets
+/// `semver_check = true`, so it blocks the release PR. The residual cost is
+/// release coordination, not an undetected breakage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectiveThreshold {
+    /// The rule imposes no bar (`value <= 0`, including the schema default),
+    /// so the caller keeps its own default.
+    ///
+    /// The two callers' defaults **differ**, and unifying them is out of scope
+    /// for the rounding fix: the mode falls back to the ApprovalRequest's
+    /// `required_approvals`, while the evaluator applies no threshold check at
+    /// all. See `ASSUMPTIONS.md`, "Quorum `threshold.value = 0`".
+    Inert,
+    /// This many approvals are required to seal a **positive** commitment.
+    /// Never zero: a bar of zero would be met before any ballot was cast.
+    Approvals(u32),
+    /// No number of approvals can satisfy the rule, so the session can seal no
+    /// positive commitment. Returned for `type: "weighted"` (unimplemented
+    /// here — `threshold.value` is typed `integer` by
+    /// `quorum-rules.schema.json`, so a weighted sum is not expressible and
+    /// per-participant quorum weights are not modelled), for any unrecognised
+    /// `type`, and for a `percentage` over an empty participant set.
+    ///
+    /// Registration refuses the first two
+    /// (`PolicyRegistry::validate_quorum_threshold`), so reaching those needs
+    /// a directly-constructed `PolicyDefinition`; the empty-participant-set
+    /// case is not catchable there, since registration has no participant
+    /// count, and `QuorumMode::on_session_start` blocks it instead. It
+    /// fails closed rather than silently reinterpreting the value as a raw
+    /// approval count, which is what the old shared `_` arm did.
+    Unsatisfiable,
+}
+
+impl QuorumThreshold {
+    /// Resolve this threshold against a session with `total_participants`
+    /// declared participants. See [`EffectiveThreshold`] for the contract —
+    /// **both** the mode and the policy evaluator must resolve through here.
+    ///
+    /// Rounding is **ceiling** (`0.5` of a participant is a whole participant,
+    /// and half a vote cannot approve anything), and the result has a floor of
+    /// one approval. That floor is what makes `T = 0` unreachable: at `T = 0`
+    /// a session is "ready to commit" with no ballot cast at all, and a
+    /// negative commitment then seals with zero approvals (issue #145).
+    pub fn effective(&self, total_participants: usize) -> EffectiveThreshold {
+        // `is_sign_negative` would mis-handle NaN and -0.0; comparing against
+        // the ordered predicate keeps NaN, 0.0 and negatives on one path.
+        if self.value.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            return EffectiveThreshold::Inert;
+        }
+        let required: f64 = match self.threshold_type.as_str() {
+            "percentage" => {
+                if total_participants == 0 {
+                    // Unreachable through the mode (`QuorumMode::on_session_start`
+                    // rejects an empty participant set) but reachable through a
+                    // direct evaluator call; a share of nobody is unmeetable.
+                    return EffectiveThreshold::Unsatisfiable;
+                }
+                (self.value / 100.0) * total_participants as f64
+            }
+            // `count` is this runtime's documented alias for `n_of_m`
+            // (`docs/policy.md`); the canonical schema enum omits it and the
+            // gap is tracked as spec issue #98.
+            "n_of_m" | "count" => self.value,
+            _ => return EffectiveThreshold::Unsatisfiable,
+        };
+        // `as u32` saturates on overflow, so an absurd `value` becomes an
+        // unmeetable-but-finite bar rather than wrapping to a small one.
+        EffectiveThreshold::Approvals((required.ceil() as u32).max(1))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AbstentionRules {
     #[serde(default)]
@@ -424,6 +519,59 @@ mod tests {
         assert!(!rules.abstention.counts_toward_quorum);
         assert_eq!(rules.abstention.interpretation, "neutral");
         assert_eq!(rules.commitment.authority, "initiator_only");
+    }
+
+    #[test]
+    fn effective_threshold_ceils_and_floors_at_one() {
+        let t = |kind: &str, value: f64| QuorumThreshold {
+            threshold_type: kind.into(),
+            value,
+        };
+        // Ceiling, not truncation — the divergence behind issue #145.
+        assert_eq!(
+            t("n_of_m", 0.5).effective(3),
+            EffectiveThreshold::Approvals(1)
+        );
+        assert_eq!(
+            t("count", 2.4).effective(3),
+            EffectiveThreshold::Approvals(3)
+        );
+        // Percentage is a share of the declared participants.
+        assert_eq!(
+            t("percentage", 50.0).effective(3),
+            EffectiveThreshold::Approvals(2)
+        );
+        // The floor keeps a bar of 0 unreachable.
+        assert_eq!(
+            t("percentage", 0.5).effective(3),
+            EffectiveThreshold::Approvals(1)
+        );
+        // Non-positive and NaN are inert; the caller keeps its own default.
+        assert_eq!(t("n_of_m", 0.0).effective(3), EffectiveThreshold::Inert);
+        assert_eq!(t("n_of_m", -1.0).effective(3), EffectiveThreshold::Inert);
+        assert_eq!(
+            t("n_of_m", f64::NAN).effective(3),
+            EffectiveThreshold::Inert
+        );
+        // Unimplemented and unknown types fail closed rather than being read
+        // as a raw approval count, and so does a share of nobody.
+        assert_eq!(
+            t("weighted", 2.0).effective(3),
+            EffectiveThreshold::Unsatisfiable
+        );
+        assert_eq!(
+            t("two_thirds", 2.0).effective(3),
+            EffectiveThreshold::Unsatisfiable
+        );
+        assert_eq!(
+            t("percentage", 50.0).effective(0),
+            EffectiveThreshold::Unsatisfiable
+        );
+        // An absurd value saturates instead of wrapping to a small bar.
+        assert_eq!(
+            t("n_of_m", 1e30).effective(3),
+            EffectiveThreshold::Approvals(u32::MAX)
+        );
     }
 
     #[test]

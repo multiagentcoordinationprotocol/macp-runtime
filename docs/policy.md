@@ -47,7 +47,41 @@ Here is a complete example of registering a Decision Mode policy that requires m
 }
 ```
 
-At registration, the runtime validates the rules against the target mode's schema. It enforces structural constraints: a `weighted` voting algorithm requires a non-empty `weights` map, `supermajority` requires a threshold above 0.5, and `designated_role` commitment authority requires a non-empty `designated_roles` list. The `schema_version` must be `1`. Rules that fail to deserialize into the target mode's Rust struct are rejected with `INVALID_POLICY_DEFINITION`. A `policy_id` under the reserved `policy.std.` prefix is rejected the same way unless it is the canonical definition (see below).
+### What registration checks
+
+The runtime does **not** run a JSON-Schema evaluator: it carries no `jsonschema` dependency, and the canonical `schemas/json/policy/*.schema.json` documents live in the spec repository, not here. Registration instead applies three layers of hand-written checks, and only the constraints listed below are enforced. A rule the canonical schema forbids but this list does not name is accepted.
+
+1. **Deserialization.** Rules must parse into the target mode's Rust struct. Every field has a default and unknown fields are ignored, so this catches type errors (a string where a number belongs), not missing or misspelled keys. Extension modes (`ext.*`) and unrecognized mode names accept any JSON object.
+2. **Value domains, mirroring the canonical schemas.** Enum membership and numeric bounds, copied from the schema text and pinned to it by a parity test that runs in CI:
+
+   | Constraint | Rule |
+   |---|---|
+   | `voting.algorithm` | One of `none`, `majority`, `supermajority`, `unanimous`, `weighted`, `plurality` |
+   | `voting.threshold` | Between `0.0` and `1.0`, **both inclusive** |
+   | `voting.weights[*]` | `>= 0`, **inclusive** — a zero weight is legal |
+   | `voting.quorum.type` | One of `count`, `percentage`. `n_of_m` is **not** legal here, though the evaluator would accept it |
+   | `voting.quorum.value` | `>= 0` (a number, not necessarily an integer) |
+   | Quorum `threshold.type` | One of `n_of_m`, `percentage`, `count`. `weighted` is refused as unimplemented — see below |
+   | Quorum `threshold.value` | A non-negative **integer**; additionally `<= 100` when `threshold.type` is `percentage` |
+
+   A wildcard (`"*"`) policy must satisfy **every** standards-track mode's schema and every mode's constraints above, not just Decision's, because `SessionStart` binds it to every mode's sessions. Before this release it was validated against the Decision schema alone, which has no top-level `threshold` — so a Quorum `threshold` inside a `"*"` policy was silently dropped at registration and then read, unchecked, by the Quorum mode. A `"*"` policy carrying an out-of-domain `threshold` is now refused. Fields one mode's schema does not know are still ignored rather than refused, so a Decision-shaped wildcard (including the built-in `policy.default`) registers unchanged.
+
+   The inclusive bounds are deliberate: `voting.threshold: 0.0` and an all-zero `voting.weights` map are degenerate but schema-legal, and whether they should be legal at all is an open question upstream rather than something registration decides. `threshold.value` follows JSON Schema's `integer` keyword, which matches any number with a zero fractional part: `75` and `75.0` are both accepted, `75.5` is not.
+3. **Conditional constraints.** A `weighted` voting algorithm requires a non-empty `weights` map, `supermajority` requires a threshold above `0.5`, and `designated_role` commitment authority requires a non-empty `designated_roles` list.
+
+`schema_version` must be non-zero; only `0` is rejected, and `1` is the only version defined today, so use `1`. Every rejection **of the definition itself** — including a `policy_id` under the reserved `policy.std.` prefix that is not the canonical definition (see below) — is reported with `INVALID_POLICY_DEFINITION` at the head of the message, because `RegisterPolicyResponse` carries no structured error code. A duplicate `policy_id` is the one rejection that carries no such prefix: the descriptor may be entirely valid and the only problem is that the id is taken, so it is a conflict rather than an invalid definition.
+
+Both routes into the registry apply the same checks: the `RegisterPolicy` RPC and the `MACP_POLICIES_DIR` preload, which funnels through the same `register` path. "The same checks" means the same set for a given `mode` — as the Quorum rows above note, which checks run at all still depends on the policy's `mode`.
+
+### Validating a policies directory before startup
+
+A `MACP_POLICIES_DIR` file that fails any check aborts startup, and loading stops at the first rejection. To check a directory without starting the server, run the binary with `MACP_POLICIES_DRY_RUN=1`:
+
+```bash
+MACP_POLICIES_DRY_RUN=1 MACP_POLICIES_DIR=/etc/macp/policies macp-runtime
+```
+
+It reports every file by name — `OK` or `REJECTED` with the reason — and exits `0` if the directory would load, `1` otherwise. Nothing is bound, opened, or replayed. Run it before upgrading a runtime whose policies directory predates a release that tightened registration.
 
 ## Rule examples by mode
 
@@ -93,6 +127,7 @@ These are the rules the evaluator actually applies (RFC-MACP-0012 §4.1):
 | `plurality` | More approve than reject; a tie fails; no threshold |
 
 - **Denominator.** For `majority`, `supermajority` and `weighted` the denominator is the *decisive* votes -- those cast as approve or reject. Abstentions are excluded and neither help nor hinder the ratio.
+- **A negative weighted total fails the round.** If the weights of the decisive voters sum below zero, `weighted` fails the round outright rather than dividing by a negative denominator, which would invert `ratio >= threshold` and could report a pass on a reject. Registration refuses a negative entry in `voting.weights`, so this is reachable only from a `PolicyDefinition` constructed directly rather than registered. A total of exactly `0.0` is treated as no decisive result, not as a failure -- see the last bullet. The operational consequences of the change, including the one commitment it moves from denied to allowed, are in [Deployment](deployment.md#4-a-negative-weighted-total-now-fails-the-decision-round).
 - **Inclusive comparison.** Every threshold comparison is `ratio >= threshold`, so `majority` at its default `0.5` approves an even split. A rule where a tie fails is `plurality`, not `majority` at `0.5`.
 - **Ratios are binary64.** Comparisons are Rust `f64`. With `threshold: 0.6666666666666666` (the binary64 value nearest two-thirds, and what `2.0 / 3.0` produces) 2-of-3, 4-of-6, 20-of-30 and 67-of-100 pass while 66-of-100 does not.
 - **`voting.quorum` is inert on its own.** It states the participation bar but gates nothing until `commitment.require_vote_quorum` is `true`. A policy that sets `voting.quorum` without it imposes no participation requirement.
@@ -134,13 +169,25 @@ Acceptance criteria: `all_parties`, `counterparty`, `initiator`.
 
 ```json
 {
-  "threshold": { "threshold_type": "percentage", "value": 66 },
+  "threshold": { "type": "percentage", "value": 66 },
   "abstention": { "counts_toward_quorum": false, "interpretation": "neutral" },
   "commitment": { "authority": "initiator_only" }
 }
 ```
 
-Threshold types: `n_of_m`, `percentage`, `count`. Abstention interpretations: `neutral`, `implicit_reject`, `ignored`.
+The threshold field is spelled `type`, not `threshold_type`: the latter is the Rust field name, and a policy that uses it silently falls back to the default `n_of_m`.
+
+Threshold types: `n_of_m`, `percentage`, and `count` — a documented alias for `n_of_m` that both the mode and the evaluator already treat as one. The canonical schema also lists `weighted`, which **registration refuses**: `threshold.value` is typed as an integer there, so a weighted sum is not expressible. `threshold.value` must be a non-negative integer, and at most `100` for `percentage`.
+
+How the threshold resolves to an approval bar (RFC-MACP-0011 §6 — a policy threshold *replaces* the ApprovalRequest's `required_approvals`, it does not supplement it):
+
+- `n_of_m` / `count`: `value` approvals. `percentage`: that share of the **declared participants**.
+- Fractional results are **ceiled**, and the bar has a floor of **one approval**. Before this release the mode truncated (`0.5` → `0`) while the evaluator ceiled (`0.5` → `1`), so one policy meant two different bars; a bar of `0` was also reached before any ballot was cast, which let a negative commitment seal with zero approvals. Both layers now resolve through one function (`QuorumThreshold::effective`).
+- `value: 0` (the default) leaves the rule **inert**: the ApprovalRequest's own `required_approvals` stands.
+- A bar outside `1..=participants` — including a `weighted` or unrecognised `type`, which resolve to "unsatisfiable" rather than to a raw count — makes the positive outcome impossible, so the **ApprovalRequest is refused** rather than opening a session that can only decline. Registration already refuses those types; this guard covers a policy edited under a running session.
+- A negative commitment needs at least one ballot. RFC-MACP-0011 §4a makes an unreachable threshold the trigger for a decline, but with an empty ballot box "unreachable" only means the bar exceeds the participant pool, which is a misconfiguration rather than a decision.
+
+Abstention interpretations: `neutral`, `implicit_reject`, `ignored`.
 
 ## How evaluation works
 
@@ -152,7 +199,7 @@ Each standard mode has a dedicated evaluator in `crates/macp-policy/src/evaluato
 | `evaluate_proposal_commitment` | Counter-proposal count is within `max_rounds` |
 | `evaluate_task_commitment` | Output is present if `require_output` is set |
 | `evaluate_handoff_commitment` | Always allows (implicit timeout is handled by the mode) |
-| `evaluate_quorum_commitment` | Effective voter count (adjusted for abstention rules) satisfies the threshold |
+| `evaluate_quorum_commitment` | Approval count meets the effective threshold for a positive commitment; a decline is not gated by it. Abstention interpretation is reported, not enforced |
 
 ## Commitment authority
 
@@ -170,7 +217,7 @@ The `commitment.authority` rule determines who can send the terminal commitment.
 |-----------|----------------|-------------|
 | `UNKNOWN_POLICY_VERSION` | The `policy_version` in SessionStart is not found in the registry | FailedPrecondition |
 | `POLICY_DENIED` | A commitment is rejected because governance rules are not satisfied | FailedPrecondition |
-| `INVALID_POLICY_DEFINITION` | A policy fails schema validation at registration time, or claims a reserved `policy.std.` identifier | InvalidArgument |
+| `INVALID_POLICY_DEFINITION` | A policy fails one of the [registration checks](#what-registration-checks), or claims a reserved `policy.std.` identifier | InvalidArgument |
 
 Two caveats on that status column, both visible in `Self::status_from_error` (`src/server.rs`):
 

@@ -9,6 +9,8 @@
 
 **Issues closed:** #83, #82, #84, #81 here, plus `macp-runtime` #125.
 
+**Status: EXECUTED (all three phases merged).** S1 `cd5ac2b`, S2 `a1b29a1`, S3 spec PR #89, plus Wave 2's three vendoring PRs. The per-phase Status lines below were reconciled to the parent program file on 2026-09-10; `plans/conformance-cardinality-program.md`'s status table is the authoritative record and this file is kept for the reasoning, not the state.
+
 ## Context
 
 Four open issues, all authored against a corpus and RFC set that three implementations already agree on. None of them reports a behavioural bug — every one reports **agreement with nothing normative behind it**. That distinction shapes the whole plan: the deliverable is text and fixtures that make existing consensus enforceable, not a change to what anyone does.
@@ -31,9 +33,9 @@ Additionally, §2.1 (`:34`) restates the same weak "MAY cast at most one ballot"
 
 ### S1 — RFC-MACP-0011 ballot cardinality, request scoping, and the v1 invariant
 
-**Status:** TODO — **blocked on owner ratification of the rule 1 hardening** (parent plan, Open question 3).
+**Status:** **MERGED** — spec `cd5ac2b`; #83 and `macp-runtime` #125 closed. (Was "TODO — blocked on owner ratification of the rule 1 hardening"; the protocol owner **granted** ratification on 2026-08-31, recorded in `plans/conformance-cardinality-program.md`'s Wave 0 section, and the status table there is authoritative.)
 **Delivers:** RFC-MACP-0011 states which ballot stands, scopes ballots to `request_id`, requires ballots to reference the accepted request, and declares the one-`ApprovalRequest` cap permanent for the v1 line. Closes #83; closes `macp-runtime` #125 with a comment linking this PR.
-**Depends on:** the Wave 0 decision (taken) and its ratification (outstanding).
+**Depends on:** the Wave 0 decision (taken) and its ratification (**granted 2026-08-31**).
 **Files:** `rfcs/RFC-MACP-0011-quorum-mode.md` only.
 
 **Approach.** Four edits, all wording, no fixture or schema change — so this PR breaks nothing downstream and can merge independently of S3.
@@ -89,7 +91,7 @@ Additionally, §2.1 (`:34`) restates the same weak "MAY cast at most one ballot"
 
 ### S2 — `message_type` is mode-scoped
 
-**Status:** TODO. Independent of S1 and S3 — may go first, or in parallel.
+**Status:** **MERGED** — spec `a1b29a1`; #82 closed. Was independent of S1 and S3.
 **Delivers:** the specification states that `message_type` is meaningful only relative to `mode`. Closes #82.
 **Depends on:** nothing.
 **Files:** `rfcs/RFC-MACP-0001-core.md`, `schemas/json/macp-envelope.schema.json`.
@@ -119,7 +121,7 @@ Add a normative sentence to RFC-MACP-0001 §6, adjacent to the existing constrai
 
 ### S3 — conformance fixtures: duplicate ballots/votes, and the three unfixtured payloads
 
-**Status:** TODO.
+**Status:** **MERGED** — spec PR #89; #81 and #84 closed. Wave 2's three vendoring PRs (`macp-runtime` #135, `macp-sdk-typescript` #69, `macp-sdk-python` #54) all merged behind it and no repo was left red.
 **Delivers:** reject-path fixtures for duplicate `Vote` and duplicate ballot, and the first-ever fixtures for `ObjectionPayload`, `WithdrawPayload`, and `TaskUpdatePayload`. Closes #84 and #81.
 **Depends on:** **S1** — a fixture pinning "the first accepted ballot stands" must not merge before the sentence it pins exists. #84's content is otherwise independent.
 **Files:** `schemas/conformance/decision_reject_paths.json`, `schemas/conformance/quorum_reject_paths.json`, plus fixtures for the three payload types (extend the existing per-mode files or add new ones — decide from how the harness discovers fixtures, and prefer extending, since three downstream harnesses enumerate this directory).
@@ -159,12 +161,12 @@ Each fixture must contain the *accepted* first vote/ballot as a preceding messag
 
 ## Long-term posture
 
-- **Rule 1's hardening is the one-way door.** Everything else here is additive and reversible. Once published, permitting multi-request quorum inside v1 becomes itself a breaking change; the sanctioned path becomes a new mode identifier. This is recommended deliberately — the ecosystem already depends on it structurally (`macp-runtime`'s `request: Option<ApprovalRequestRecord>` cannot represent two requests at all) — but it should be ratified consciously, not absorbed.
+- **Rule 1's hardening is the one-way door.** Everything else here is additive and reversible. Once published, permitting multi-request quorum inside v1 becomes itself a breaking change; the sanctioned path becomes a new mode identifier. This is recommended deliberately — the ecosystem already depends on it structurally (`macp-runtime`'s `request: Option<ApprovalRequestRecord>` cannot represent two requests at all) — but it should be ratified consciously, not absorbed. (It was: the owner ratified it on 2026-08-31.)
 - **Three vendored copies of one corpus.** S3 pays the coordination cost of that design for the first time in this program. It is the right design for hermetic test runs, but nobody should add a fourth vendoring implementation without a better sync mechanism than three Makefiles and a CI job.
 - **The corpus has no stated coverage policy.** #81 is one instance of a general absence. `Vote` cardinality had fixtures, three implementations, and mechanical guards; `Objection` severity, which can veto a decision outright, had one implementation's unit tests. Closing three specific gaps does not prevent the fourth. Worth a follow-up issue proposing an explicit policy in the README.
 
 ## Open questions
 
-1. **Ratification of the rule 1 hardening.** The only genuine fork. Declaring the one-`ApprovalRequest` cap unrelaxable within v1 forecloses evolving v1 in place toward multi-request quorum. Recommended without hedging, but there is no wording that preserves both options, and it is the protocol owner's call. **S1 does not start until this is answered.**
+1. ~~**Ratification of the rule 1 hardening.**~~ **ANSWERED — granted 2026-08-31.** The owner ratified the hardening, so the one-`ApprovalRequest` cap is a permanent base-v1 invariant and the sanctioned path to multi-request quorum is a new mode identifier. S1 proceeded on that basis and merged as `cd5ac2b`.
 2. **Whether the rule 1 equivalence note belongs inline or as a §5 trailing note.** Pure style; inline is assumed. Not blocking.
 3. **Whether Group B fixtures extend the existing per-mode files or land as new files.** Decide from how the three downstream harnesses enumerate the directory — extending is assumed as lower-risk, since a new filename must be picked up by three separate vendoring mechanisms.

@@ -573,6 +573,106 @@ async fn list_policies_includes_the_std_profiles() {
     );
 }
 
+// ── Schema value domains over the wire (Phase 2) ────────────────────
+
+/// Register `rules` for `mode` and return the (ok, error) pair.
+async fn try_register(agent: &str, mode: &str, rules: serde_json::Value) -> (bool, String) {
+    let mut client = common::grpc_client().await;
+    let policy_id = format!("policy.test.{}", uuid::Uuid::new_v4().as_hyphenated());
+    let resp = client
+        .register_policy(with_sender(
+            agent,
+            RegisterPolicyRequest {
+                policy_descriptor: Some(test_descriptor(&policy_id, mode, rules)),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    (resp.ok, resp.error)
+}
+
+#[tokio::test]
+async fn register_policy_refuses_out_of_schema_values() {
+    // The registration-time value-domain checks mirror the canonical JSON
+    // schemas. `MACP_POLICIES_DIR` and this RPC are mutually exclusive in a
+    // deployed runtime, so the wire path needs its own coverage.
+    let cases: Vec<(&str, serde_json::Value, &str)> = vec![
+        (
+            "macp.mode.decision.v1",
+            serde_json::json!({ "voting": { "algorithm": "majorty" } }),
+            "voting.algorithm",
+        ),
+        (
+            "macp.mode.decision.v1",
+            serde_json::json!({ "voting": { "algorithm": "majority", "threshold": 1.5 } }),
+            "voting.threshold",
+        ),
+        (
+            "macp.mode.decision.v1",
+            serde_json::json!({ "voting": { "algorithm": "majority", "weights": { "a": -1.0 } } }),
+            "voting.weights",
+        ),
+        (
+            "macp.mode.decision.v1",
+            serde_json::json!({ "voting": { "quorum": { "type": "n_of_m", "value": 1 } } }),
+            "voting.quorum.type",
+        ),
+        (
+            "macp.mode.quorum.v1",
+            serde_json::json!({ "threshold": { "type": "n_of_m", "value": 0.5 } }),
+            "threshold.value",
+        ),
+        (
+            "macp.mode.quorum.v1",
+            serde_json::json!({ "threshold": { "type": "weighted", "value": 2 } }),
+            "threshold.type",
+        ),
+    ];
+
+    for (mode, rules, expected) in cases {
+        let (ok, error) = try_register("agent://policy-schema", mode, rules.clone()).await;
+        assert!(!ok, "{rules} should be refused");
+        assert!(
+            error.contains("INVALID_POLICY_DEFINITION"),
+            "error should carry INVALID_POLICY_DEFINITION, got: {error}"
+        );
+        assert!(
+            error.contains(expected),
+            "error should name {expected}, got: {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn register_policy_accepts_schema_legal_boundary_values() {
+    // Degenerate but schema-legal: `minimum` is inclusive in every case, and
+    // `count` is a documented alias for the quorum `n_of_m` threshold type.
+    let cases: Vec<(&str, serde_json::Value)> = vec![
+        (
+            "macp.mode.decision.v1",
+            serde_json::json!({ "voting": { "algorithm": "majority", "threshold": 0.0 } }),
+        ),
+        (
+            "macp.mode.decision.v1",
+            serde_json::json!({ "voting": { "algorithm": "weighted", "weights": { "a": 0.0, "b": 0.0 } } }),
+        ),
+        (
+            "macp.mode.quorum.v1",
+            serde_json::json!({ "threshold": { "type": "count", "value": 2 } }),
+        ),
+        (
+            "macp.mode.quorum.v1",
+            serde_json::json!({ "threshold": { "type": "percentage", "value": 100 } }),
+        ),
+    ];
+
+    for (mode, rules) in cases {
+        let (ok, error) = try_register("agent://policy-schema-ok", mode, rules.clone()).await;
+        assert!(ok, "{rules} should be accepted, got: {error}");
+    }
+}
+
 #[tokio::test]
 async fn register_non_canonical_std_policy_is_rejected() {
     let mut client = common::grpc_client().await;

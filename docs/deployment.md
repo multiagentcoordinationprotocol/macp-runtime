@@ -14,6 +14,54 @@ Before exposing the runtime to production traffic, ensure these four items are c
 
 4. **Bind address** -- Set `MACP_BIND_ADDR` to the desired listen address. The default `127.0.0.1:50051` only accepts local connections.
 
+## Upgrading into registration-time policy validation
+
+This release tightens what the governance policy registry accepts, what the Quorum mode will bind, and how the Decision evaluator treats a negative weighted total. Four changes are operationally visible. Read this section before upgrading any deployment that sets `MACP_POLICIES_DIR`, or that has persisted sessions bound to a policy with a Quorum `threshold` or a `weighted` `voting.algorithm`. `CHANGELOG.md` is generated from commit subjects and does not carry this detail.
+
+### 1. An invalid policy file now refuses startup
+
+Both routes into the registry -- the `RegisterPolicy` RPC and the `MACP_POLICIES_DIR` preload -- gained value-domain and conditional checks; the enforced set is listed in [Policy](policy.md#what-registration-checks). A file an earlier release accepted may now be out of domain: a fractional Quorum `threshold.value`, `threshold.type: "weighted"`, an unknown `voting.algorithm` or `voting.quorum.type`, a `weighted` algorithm with an empty `weights` map, a `supermajority` `threshold` at or below `0.5`, or a wildcard (`"*"`) policy carrying a Quorum `threshold` that was previously validated against the Decision schema alone and therefore never checked. Loading stops at the first rejection and **startup aborts** -- the preload error is propagated, not logged and skipped.
+
+That is deliberate fail-closed behaviour, and it is why `MACP_POLICIES_DRY_RUN=1` exists. **Run the dry run with the new binary before you upgrade:**
+
+```bash
+MACP_POLICIES_DRY_RUN=1 MACP_POLICIES_DIR=/etc/macp/policies macp-runtime
+```
+
+It reports every `*.json` file by name as `OK <path> (<policy_id>)` or `REJECTED <path>: <reason>`, prints a checked/rejected count, and exits `0` if the directory would load or `1` if anything in it would be rejected. It binds no port, opens no storage, and replays nothing, so it needs neither TLS nor `MACP_ALLOW_INSECURE=1`. Its output is written to stdout/stderr directly rather than through `tracing`, so no `RUST_LOG` filter can suppress the report. Two things to know: the startup environment-configuration check still runs ahead of it, so an unrelated malformed variable aborts before the report is produced; and a readable directory containing no `*.json` exits `0` with an explicit `WARNING`, because a mis-pointed `MACP_POLICIES_DIR` otherwise looks identical to a clean run.
+
+### 2. Do not unblock startup by deleting the rejected file
+
+When a policy file blocks startup, the natural fix is to delete it. **Correct the file instead.** Deleting it does let the runtime boot, but persisted sessions bound to that `policy_version` are then replayed with the policy unresolved: replay resolves the version best-effort and leaves `policy_definition` empty when it cannot, and commitment enforcement treats an absent policy definition as "no policy to enforce" and returns early. Every in-flight session governed by the deleted policy therefore loses its governance **silently** -- commitments the policy would have denied are accepted, with no error and no log line tying it back to the deletion. The same applies to `UnregisterPolicy` on a policy that live sessions are still bound to.
+
+Note the interaction with the next item: because an unresolved policy makes the Quorum mode fall back to the `ApprovalRequest`'s own `required_approvals` -- a value the mode already constrains to `1..=participants` -- deleting the policy also makes the replay failure below disappear. The two symptoms clear together, and the reason they clear is that the governance bar is no longer being applied.
+
+### 3. A persisted Quorum session with an out-of-domain policy threshold no longer replays
+
+RFC-MACP-0011 §6 makes a policy `threshold` *replace* the `ApprovalRequest`'s `required_approvals`, but nothing previously held the replacement to the same `1..=participants` domain the runtime enforces on the field it replaces. The Quorum mode now refuses an `ApprovalRequest` whose effective threshold falls outside that domain, and replay dispatches the same code -- so such a session fails to replay. It is skipped with a warning, or is fatal at startup under `MACP_STRICT_RECOVERY=1`.
+
+Detect it from the logs. The mode emits, at `WARN`:
+
+```
+quorum policy threshold is outside 1..=participants; refusing the ApprovalRequest
+  session_id=... policy_id=... effective_threshold=... participants=...
+```
+
+naming the session, the bound policy, the computed threshold and the declared participant count -- everything needed to identify which policy to correct. Recovery follows it with `failed to replay session; skipping` carrying the same `session_id`.
+
+**What it takes to reach this.** Not a legacy *policy* -- an **`ApprovalRequest` this runtime accepted before the guard above existed**. Registration is no substitute for the guard, because registration has no participant count to bound the threshold against: `{"type": "n_of_m", "value": 66}` passes every check in [Policy](policy.md#what-registration-checks) under the **new** binary and still trips the guard on a three-participant session. Two classes of threshold reach it, and they are not equally benign:
+
+- **An out-of-domain numeric threshold** -- `n_of_m` or `count` above the declared participant count. The positive outcome was unreachable from the first message, and before this release `commitment_ready` carried no `counted > 0` guard, so `approvals + remaining < required` held with no ballot cast and the coordinator could seal a binding `quorum.rejected` with **zero** approvals (issue #145). That is the condition RFC-MACP-0011 §4a reads as grounds for a decline, reached without a vote. Such a session really was broken: the only outcome it could ever have sealed was a decline nobody cast a ballot for.
+- **`threshold.type: "weighted"`, or any unrecognised type.** This class **was working, and it stops replaying.** The old shared fallback arm read *any* unrecognised type as a raw approval count (`_ => rules.threshold.value as u32`), so `{"type": "weighted", "value": 2}` on three participants was a perfectly satisfiable bar of two approvals, and sessions under it sealed legitimate *positive* commitments. The type now resolves to `Unsatisfiable`, the `ApprovalRequest` is refused, and the session no longer loads. Do not read the warning as a report of a session that was already dead.
+
+The second class survives the upgrade through a **checkpoint**, not through the registry. A checkpoint serializes the resolved `policy_definition` inline and `try_replay_from_checkpoint` restores it verbatim without consulting the registry, so an old `weighted` definition is still live even though neither `RegisterPolicy` nor the `MACP_POLICIES_DIR` preload would accept it again. A session with no checkpoint re-resolves its `policy_version` against the live registry during full replay, and there a `weighted` policy file aborts startup at item 1 before recovery ever runs.
+
+**Recovery, for both classes: correct the threshold, do not delete the policy.** Restate a `weighted` or unrecognised type as `n_of_m`, keeping the same `value`. `QuorumThreshold::effective` treats `n_of_m` as a raw approval count, which is exactly what the old fallback arm did, so the bar that session enforced is preserved. (If the old `value` was fractional, registration now refuses it; the old arm truncated, so its floor is the faithful integer.) For a numeric threshold above the participant count, bring it into `1..=participants` -- no value reproduces that session's old behaviour, because its old behaviour *was* the zero-approval decline. Then restart: the append-only log is untouched, so the session was not loaded rather than lost, and it replays normally. Deleting the policy also clears the warning, but for the reason item 2 gives -- the governance bar stops being applied at all.
+
+### 4. A negative weighted total now fails the Decision round
+
+A `weighted` round whose cast weights sum below zero fails the round instead of computing a ratio over a negative denominator. In the approve direction this is a tightening: a round that previously reported `Passed` through an inverted `ratio >= threshold` comparison is now denied. In the decline direction it is **not** a tightening -- on that same round a negative commitment moves from denied to allowed, because a decline over `Passed` was refused while a decline over `Failed` is permitted once the universal reject-floor is satisfied. The case is reachable only from a directly-constructed `PolicyDefinition`, since registration already refuses negative weights. A weighted total of exactly zero is unchanged.
+
 ## Environment variables
 
 | Variable | Default | Description |
@@ -43,7 +91,15 @@ Before exposing the runtime to production traffic, ensure these four items are c
 | `MACP_CLEANUP_INTERVAL_SECS` | `60` | Background TTL cleanup interval in seconds |
 | `MACP_SESSION_RETENTION_SECS` | `3600` | How long terminal sessions stay in memory |
 | `MACP_STRICT_RECOVERY` | off | Set to `1` to fail on any recovery error |
+| `MACP_POLICIES_DIR` | -- | Directory of governance policy JSON files preloaded at startup; a file that fails validation aborts startup, and the wire registry becomes read-only |
+| `MACP_POLICIES_DRY_RUN` | off | Set to `1` to validate `MACP_POLICIES_DIR` and exit `0`/`1` without starting the server |
 | `RUST_LOG` | `info` | Log level filter |
+
+### Governance policy files
+
+Validate a policies directory before you roll it out: `MACP_POLICIES_DRY_RUN=1 MACP_POLICIES_DIR=/etc/macp/policies macp-runtime` reports every file by name and exits `0`/`1` without starting the server. See [Policy](policy.md#validating-a-policies-directory-before-startup).
+
+**When a rejected policy file blocks startup, correct the file — do not delete it.** Deleting it lets the runtime boot but silently voids governance for every in-flight session bound to that `policy_version`: the policy resolves to nothing on replay and commitment enforcement then treats the session as having no policy at all. `UnregisterPolicy` on a policy live sessions are still bound to does the same. The full mechanism, and the three other operational changes in this release, are in [Upgrading into registration-time policy validation](#upgrading-into-registration-time-policy-validation).
 
 ## Storage backends
 

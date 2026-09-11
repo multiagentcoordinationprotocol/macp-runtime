@@ -1,7 +1,14 @@
 # Deferred Work
 
-**Last reviewed**: 2026-07-05 (against v0.5.0 — the improvement plan is
-EXECUTED and released; all seven crates at 0.5.0 on crates.io)
+**Last reviewed**: 2026-09-10 (against workspace version 0.7.4). Previously
+reviewed 2026-07-05 against v0.5.0, when the improvement plan was EXECUTED and
+released with all seven crates on crates.io.
+
+Closed since the 2026-07-05 review, and marked in place in `follow_ons.md`:
+item **7** (built-in recommended policies — shipped as the reserved
+`policy.std.` profiles in `crates/macp-policy/src/defaults.rs`) and item 8's
+tier-1 suspend/resume coverage bullet (`integration_tests/tests/tier1_protocol/test_suspend_resume.rs`).
+Items 1–6 and the rest of item 8 remain open and unblocked.
 
 Two kinds of remaining work live here:
 

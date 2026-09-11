@@ -142,6 +142,8 @@ Unless `MACP_MEMORY_ONLY=1` is set, the runtime persists session and log snapsho
 | `MACP_ALLOW_INSECURE` | allow plaintext transport when set to `1` | unset |
 | `MACP_TLS_CERT_PATH` | PEM certificate for TLS | unset |
 | `MACP_TLS_KEY_PATH` | PEM private key for TLS | unset |
+| `MACP_POLICIES_DIR` | directory of governance policy JSON files preloaded at startup; a file that fails validation aborts startup, and the wire registry becomes read-only | unset |
+| `MACP_POLICIES_DRY_RUN` | validate `MACP_POLICIES_DIR` and exit `0`/`1` without starting the server, when set to `1` | unset |
 
 ### Authentication and authorization
 
