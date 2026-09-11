@@ -714,13 +714,19 @@ byte-identity criterion is only achievable if Phase 11 guarantees it:
   `src/runtime.rs:586-591`); the sweep must do the same.
 
 **Test-harness reality check** (so no criterion below repeats the Phase-10 class of error):
-`assert_replay_equivalence` (`tests/conformance_loader.rs:356`) is not merely private to that file
-— it is **dormant**. It is called from exactly one place, gated on `fixture.verify_replay_equivalence`
-(`tests/conformance_loader.rs:519-521`), and **no vendored fixture sets that flag** (the only
-occurrence of the name under `tests/conformance/` is the field declaration in `schema.json`). Nor
-can one be added: the `conformance-oracle` CI job fails on **EXTRA** local fixtures — a vendored
-file with no canonical spec-repo source (`.github/workflows/ci.yml:596-603`) — so adding a fixture
-requires a spec-repo PR first. "Dormant" is the load-bearing statement; "private" understates it.
+`assert_replay_equivalence` (`tests/conformance_loader.rs:356`) is private to that file and called
+from exactly one place, gated on `fixture.verify_replay_equivalence`
+(`tests/conformance_loader.rs:519-521`).
+**Correction, 2026-09-11 — an earlier revision of this paragraph called it "dormant" and that was
+wrong; I verified the opposite directly.** The flag is `#[serde(default = "default_true")]`
+(`tests/conformance_loader.rs:37`, `default_true()` at `:52`), so a fixture that does not mention it
+**enables** the check. The only occurrence of the name under `tests/conformance/` is the field
+declaration in `schema.json`, which means **no fixture disables it and the function therefore runs on
+every one of them** — it is the strictest gate in the repo and it is fully live. The reason a Phase-10
+or Phase-11 criterion still cannot be written against it is narrower and unchanged: **no fixture
+exercises an implicit accept, and none can be added**, because the `conformance-oracle` job fails on
+**EXTRA** local fixtures — a vendored file with no canonical spec-repo source
+(`.github/workflows/ci.yml:596-603`) — so a fixture requires a spec-repo PR first.
 Fixtures also run through the live `Runtime`, which stamps `CURRENT_SEMANTICS_REV` unconditionally,
 so **rev ≤ 1 histories are only expressible in the `src/replay.rs` `LogEntry`-fixture harness**
 (`handoff_entry`/`handoff_history*`, `src/replay.rs:835-927`), never in a live-`Runtime` harness.
@@ -1458,9 +1464,10 @@ this list.
   3. `live_history_replays_byte_identically` (same harness): after criterion 1's flow, run
      `replay_session` over `rt.log_store.get_log(sid)` and assert `state`, `resolution`,
      `mode_state` (byte-equal), and `seen_message_ids` (set-equal) against the live session — the
-     four assertions of `assert_replay_equivalence`, re-implemented locally because that fn is
-     **dormant**, not merely private: no vendored fixture sets `verify_replay_equivalence`
-     (`tests/conformance_loader.rs:519-521`) and none can be added without a spec-repo PR
+     four assertions of `assert_replay_equivalence`, re-implemented locally **not** because that fn
+     is dormant — corrected 2026-09-11, it is `#[serde(default = "default_true")]` and so runs on
+     every fixture — but because it is private to `tests/conformance_loader.rs` **and** no fixture
+     exercises an implicit accept, with none addable without a spec-repo PR
      (`.github/workflows/ci.yml:596-603` fails on EXTRA local fixtures). **The old criterion 3
      ("`assert_replay_equivalence` green") is discharged by intent, not letter — the letter is
      unsatisfiable in this repo, per the Phase-10 finding.**
