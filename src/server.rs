@@ -1386,19 +1386,17 @@ impl MacpRuntimeService for MacpServer {
             // reads and there can be `MACP_MAX_CONCURRENT_STREAMS` of them at
             // once.
             let mut sync = crate::watch_sync::InitialSync::begin(&runtime.registry).await;
-            // Any Created event buffered in the subscribe→sync window would
-            // duplicate a sync entry — session IDs are create-once, so buffered
-            // Created events are deduped against this set.
-            //
-            // It is never cleared or pruned, and that is load-bearing rather
-            // than an oversight: `process_session_start` inserts the session
-            // into the registry BEFORE publishing its Created event, so an ID
-            // the sync already emitted can still have its Created event arrive
-            // arbitrarily later (after the storage append, or not at all on
-            // rollback). There is no point at which "no further duplicate is
-            // possible" becomes true, so the set lives as long as the stream —
-            // one `String` per session observed, freed when the client
-            // disconnects. That growth is documented in `docs/API.md`.
+            // The IDs this sync emits. A Created event buffered in the
+            // subscribe→sync window would duplicate one of them — the session
+            // was already registered when the snapshot was taken, but
+            // `process_session_start` inserts into the registry BEFORE
+            // publishing Created, so that event can still arrive afterwards.
+            // Session IDs are create-once and `runtime.rs` holds the only
+            // `Created` publisher, so one `send` per session start means a
+            // *live* Created can never repeat for an ID already in this set —
+            // membership is read, never extended, past the sync. That keeps the
+            // set bounded by the registry size at subscribe time instead of
+            // growing with every session the stream ever observes.
             let mut synced: std::collections::HashSet<String> =
                 std::collections::HashSet::with_capacity(sync.remaining());
             // Lifecycle events that arrive while the sync is still emitting.
@@ -1467,8 +1465,15 @@ impl MacpRuntimeService for MacpServer {
                 // Skip the buffered duplicate of an initial-sync entry;
                 // non-Created events for synced sessions are new information
                 // and pass through.
+                //
+                // `contains`, not `insert`: a live Created for a session the
+                // sync never saw is emitted as-is and NOT recorded. Recording
+                // it would be the only thing making this set grow with the
+                // stream's lifetime, and it would buy nothing — `runtime.rs`
+                // is the single `Created` publisher and sends once per session
+                // start, so no live Created can repeat.
                 if event_type == session_lifecycle_event::EventType::Created
-                    && !synced.insert(sid.clone())
+                    && synced.contains(&sid)
                 {
                     continue;
                 }
@@ -3462,5 +3467,69 @@ mod tests {
              subscription must be taken in the unary call"
         );
         assert_eq!(second.session.unwrap().session_id, sid);
+    }
+
+    /// Both arms of the `Created` dedup, with the race that makes it necessary
+    /// driven deterministically.
+    ///
+    /// `process_session_start` registers the session BEFORE it publishes
+    /// `Created`, so a session started after the subscribe but before the first
+    /// poll is in the sync snapshot *and* has a `Created` sitting on the bus.
+    /// The sync must emit it once and the buffered copy must be dropped. A
+    /// session started after the sync is not in the snapshot, and its live
+    /// `Created` must pass through — the handler tests membership of the sync
+    /// set with `contains` rather than `insert`, so that pass-through does not
+    /// extend the set; the set stays bounded by the registry size at subscribe
+    /// time. That bound is structural and has no observable signal, so what is
+    /// asserted here is the exactly-once contract it must not break.
+    #[tokio::test]
+    async fn watch_sessions_emits_created_once_for_synced_and_live_sessions() {
+        let (server, _runtime) = make_server();
+        let initiator = "agent://orchestrator";
+        let synced_sid = new_sid();
+
+        let mut stream = server
+            .watch_sessions(watch_sessions_req("agent://observer"))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Registered and published while nothing is polling: this lands in the
+        // subscription AND in the snapshot the first poll takes.
+        start_session(&server, initiator, &synced_sid, vec![initiator.into()]).await;
+
+        let from_sync = next_lifecycle_event(&mut stream).await;
+        assert_eq!(
+            from_sync.event_type,
+            session_lifecycle_event::EventType::Created as i32
+        );
+        assert_eq!(from_sync.session.unwrap().session_id, synced_sid);
+
+        // Started after the sync, so it is absent from the snapshot.
+        let live_sid = new_sid();
+        start_session(&server, initiator, &live_sid, vec![initiator.into()]).await;
+
+        // The next event must be the live session's Created. If the buffered
+        // duplicate leaked through, this is `synced_sid` a second time.
+        let live = next_lifecycle_event(&mut stream).await;
+        assert_eq!(
+            live.event_type,
+            session_lifecycle_event::EventType::Created as i32
+        );
+        assert_eq!(
+            live.session.unwrap().session_id,
+            live_sid,
+            "the sync entry's buffered Created must be suppressed, and the \
+             live session's must not be"
+        );
+
+        // And nothing further: neither Created repeats.
+        use tokio_stream::StreamExt;
+        let extra =
+            tokio::time::timeout(std::time::Duration::from_millis(300), stream.next()).await;
+        assert!(
+            extra.is_err(),
+            "unexpected extra lifecycle event: {extra:?}"
+        );
     }
 }
