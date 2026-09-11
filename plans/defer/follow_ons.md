@@ -92,3 +92,35 @@ tier-1 policy-registry tests and `std_policies_all_require_vote_quorum`.
   participation-quorum concept that schema_version ≤2 no longer has
   (flagged in spec PR #48 for a future schema_version alongside any real
   participation-quorum field).
+
+## 9. `SessionSuspend`/`Resume`/`Cancel` are emitted as `Internal`, not accepted history
+**Confirmed non-conformance, found 2026-09-11 while settling Phase 11 of
+`plans/backlog-closeout-2026-09.md` against the RFC text** — not a
+speculative cleanup.
+
+RFC-MACP-0001 §7.5 puts the runtime-emitted `SessionSuspend`, `SessionResume`
+and `SessionCancel` envelopes **in the session's accepted history**. This
+runtime emits all three through `Runtime::make_internal_entry`
+(`src/runtime.rs:816,875,933`), which writes `EntryKind::Internal`,
+`sender: "_runtime"` and an empty `message_id`. `log_store.rs:128` counts
+accepted ordinals as `Incoming` only, so these entries are not in accepted
+history by this runtime's own definition of the term. They are also not
+mode-dispatched on replay, not published to `StreamSession` subscribers, and
+`replay.rs:162`'s `_ => {}` arm silently ignores `Internal` types it does not
+recognize — so an old binary replaying a newer log diverges with no error.
+
+Why it surfaced now: RFC-MACP-0010 §5.1(2) specifies the handoff synthetic
+accept as "the same construction as runtime-emitted `SessionSuspend`/
+`SessionResume`/`SessionCancel` envelopes (RFC-MACP-0001 §7.5)". Item 1 above
+therefore had to decide `Incoming` vs. `Internal` for the synthetic accept,
+and the RFC's analogy settles it as `Incoming` — which is what makes the
+existing `Internal` treatment of the other three a divergence rather than a
+defensible local choice. Item 1 deliberately scopes itself to the synthetic
+accept and does **not** fix these three; changing them is wire-visible
+(subscribers begin seeing three envelope types they never saw) and changes
+accepted ordinals for every existing session, so it needs its own
+`semantics_rev` gate and its own release note.
+
+Not urgent: nothing is known to depend on the current behaviour, and the
+gap has existed since these envelopes were introduced. Sized as its own
+phase whenever it is picked up, not as a rider on other work.
