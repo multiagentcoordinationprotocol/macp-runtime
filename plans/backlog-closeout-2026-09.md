@@ -601,7 +601,26 @@ external consumer (`zer07labs/seam-runtime`, pinning `macp-policy =0.6.0` and ca
   `sender: "_runtime"`, `message_id: String::new()`, not mode-dispatched on replay, not published to
   subscribers, not counted in accepted ordinals. The synthetic accept is the inverse on all six axes.
   §5.1(2)'s controlling words are "append a synthetic `HandoffAccept` envelope to the session's
-  **accepted history**"; the spec has no opinion on any internal variant. **Correction from the
+  **accepted history**".
+  **Correction, 2026-09-11 — the claim that followed ("the spec has no opinion on any internal
+  variant") is false, and reading the actual RFC text settles this phase's one-way door
+  normatively.** RFC-MACP-0010 §5.1(2) does state an opinion, and states it as an explicit analogy:
+  the synthetic accept is emitted by "**the same construction as runtime-emitted
+  `SessionSuspend`/`SessionResume`/`SessionCancel` envelopes (RFC-MACP-0001 §7.5)**". So the spec
+  names precisely the analogy the first draft dismissed. This **confirms the reverify round's
+  correction and promotes the `Incoming` decision from an Opus inference to a cited normative
+  requirement**: §7.5 puts those envelopes in accepted history, this runtime emits them as
+  `EntryKind::Internal`, `log_store.rs:128` counts accepted ordinals as `Incoming` only — therefore
+  the runtime's current Suspend/Resume/Cancel handling is a **confirmed** non-conformance and the
+  synthetic accept MUST be `Incoming`. The phase verifier should now be asked to *check this reading
+  against the RFC text*, not to re-derive the decision from first principles.
+  Two further things the RFC text confirms, both of which the plan already had right: §5.1(2)'s
+  "SHOULD observe eagerly … MUST observe lazily at the latest when processing the next session-scoped
+  message" makes the Phase 11 (lazy, the MUST) / Phase 12 (eager, the SHOULD) split correctly
+  ordered; and §5.1(1)'s "never from client-supplied envelope timestamps, which are forgeable" is
+  already satisfied at rev >= 1, where `handoff.rs:248-252` records `offered_at_ms` from `clock_ms`
+  rather than `env.timestamp_unix_ms`. Rev 0 still reads the forgeable field — deliberate legacy
+  preservation, not a new defect. **Correction from the
   reverify round:** the first draft argued the `SessionSuspend`/`Resume`/`Cancel` analogy "does not
   carry because in this runtime those are Internal." That inverts the logic — RFC-MACP-0001 §7.5 says
   those envelopes *enter the accepted history*, so this runtime emitting them as `EntryKind::Internal`
