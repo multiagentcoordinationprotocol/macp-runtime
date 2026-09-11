@@ -46,7 +46,13 @@ const QUORUM_UNIMPLEMENTED_THRESHOLD_TYPES: [&str; 1] = ["weighted"];
 
 /// The outcome of validating one file during a [`PolicyRegistry::validate_dir`]
 /// pass.
+///
+/// `#[non_exhaustive]` because this type is only ever *produced* by the
+/// registry and never constructed by callers, so reserving the right to add a
+/// field costs external users nothing — while adding one later to an
+/// exhaustive struct would be a breaking change.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PolicyFileOutcome {
     /// The file that was validated.
     pub path: std::path::PathBuf,
@@ -99,6 +105,14 @@ impl PolicyRegistry {
 
         let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
         if guard.contains_key(&definition.policy_id) {
+            // Deliberately *not* prefixed with `INVALID_POLICY_DEFINITION`.
+            // A taken id is a conflict, not a malformed definition — the
+            // descriptor offered here may be perfectly valid, and it already
+            // cleared `validate_definition` above. RFC-MACP-0012 spends that
+            // code on the definition itself being wrong; stretching it over a
+            // namespace collision would make one code mean two things, and
+            // consumers that branch on the prefix (the control plane maps it
+            // to HTTP 400) would report a 409-shaped failure as a 400.
             return Err(format!(
                 "policy '{}' is already registered",
                 definition.policy_id
@@ -253,21 +267,27 @@ impl PolicyRegistry {
         self.change_tx.subscribe()
     }
 
+    /// Every rejection returned from here (and from the helpers it calls) leads
+    /// with `INVALID_POLICY_DEFINITION`, because `RegisterPolicyResponse`
+    /// carries no structured error code — only `ok` and a message — so the code
+    /// RFC-MACP-0012 mandates has to travel in the text. Downstream consumers
+    /// branch on that prefix (the control plane maps it to HTTP 400), so it is
+    /// wire-visible contract, not decoration.
     fn validate_definition(definition: &PolicyDefinition) -> Result<(), String> {
         if definition.policy_id.trim().is_empty() {
-            return Err("policy_id must not be empty".into());
+            return Err("INVALID_POLICY_DEFINITION: policy_id must not be empty".into());
         }
         if definition.policy_id == DEFAULT_POLICY_ID {
             return Err(format!(
-                "cannot register with reserved policy_id '{}'",
+                "INVALID_POLICY_DEFINITION: cannot register with reserved policy_id '{}'",
                 DEFAULT_POLICY_ID
             ));
         }
         if definition.schema_version == 0 {
-            return Err("schema_version must be > 0".into());
+            return Err("INVALID_POLICY_DEFINITION: schema_version must be > 0".into());
         }
         if !definition.rules.is_object() {
-            return Err("rules must be a JSON object".into());
+            return Err("INVALID_POLICY_DEFINITION: rules must be a JSON object".into());
         }
         Self::validate_reserved_namespace(definition)?;
         // Validate that rules deserialize into the mode-specific schema.
@@ -354,7 +374,12 @@ impl PolicyRegistry {
             }
             _ => return Ok(()), // Extension modes: accept any valid JSON object
         };
-        result.map_err(|e| format!("rules do not match schema for mode '{}': {}", mode, e))
+        result.map_err(|e| {
+            format!(
+                "INVALID_POLICY_DEFINITION: rules do not match schema for mode '{}': {}",
+                mode, e
+            )
+        })
     }
 
     /// Validate conditional constraints that depend on specific field values.
@@ -606,6 +631,15 @@ mod tests {
             .register(test_policy("policy.fraud.strict"))
             .unwrap_err();
         assert!(err.contains("already registered"));
+        // A conflict, not a malformed definition. Every rejection produced by
+        // `validate_definition` leads with `INVALID_POLICY_DEFINITION` (the
+        // `refuse` helper below asserts that on each of them); this one must
+        // not, or consumers branching on the prefix — the control plane maps
+        // it to HTTP 400 — would report a 409-shaped failure as a 400.
+        assert!(
+            !err.starts_with("INVALID_POLICY_DEFINITION"),
+            "a duplicate id is a conflict, not an invalid definition: {err}"
+        );
     }
 
     #[test]
@@ -1261,13 +1295,84 @@ mod tests {
     }
 
     #[test]
-    fn quorum_threshold_constraints_do_not_apply_to_other_modes() {
-        // A Decision policy has its own `threshold` semantics under `voting`;
-        // a stray top-level `threshold` object is not a quorum threshold.
-        accept(decision_policy(serde_json::json!({
-            "voting": { "algorithm": "majority" },
-            "threshold": { "type": "weighted", "value": 0.5 }
+    fn quorum_threshold_constraints_do_not_apply_to_wildcard_policies() {
+        // KNOWN DEFERRED FAIL-OPEN — resolution belongs to **Phase 3** of
+        // plans/backlog-closeout-2026-09.md, which unifies the two threshold
+        // interpretations. Pinned here, deliberately not fixed.
+        //
+        // A `mode: "*"` policy is validated against `DecisionPolicyRules`,
+        // which has no top-level `threshold` field and no
+        // `deny_unknown_fields`, so the object below is silently dropped.
+        // `validate_conditional_constraints` gates the quorum checks on an
+        // exact `mode == "macp.mode.quorum.v1"` match, so they never run
+        // either. `Runtime::handle_session_start` then binds a `"*"` policy to
+        // a quorum session (`policy.mode != "*"` is the only mismatch test),
+        // and `QuorumMode::effective_threshold` re-parses these same rules as
+        // `QuorumPolicyRules` — reading a `threshold` that no layer validated.
+        //
+        // The same payload under `mode: "macp.mode.quorum.v1"` is refused by
+        // `register_quorum_weighted_threshold_type_fails_as_unimplemented`.
+        //
+        // Closing this is not a pure tightening: it requires deciding whether
+        // a `"*"` policy must validate against *every* mode schema, which
+        // could refuse policies that register today. Hence Phase 3.
+        let wildcard = PolicyDefinition {
+            policy_id: "policy.test.wildcard".into(),
+            mode: "*".into(),
+            description: "wildcard carrying an unvalidated quorum threshold".into(),
+            rules: serde_json::json!({
+                "voting": { "algorithm": "majority" },
+                "threshold": { "type": "weighted", "value": 0.5 }
+            }),
+            schema_version: 1,
+        };
+        assert!(
+            PolicyRegistry::new().register(wildcard).is_ok(),
+            "the wildcard fail-open is expected to still be open; if this now \
+             fails, Phase 3 closed it and this test should assert the refusal"
+        );
+    }
+
+    #[test]
+    fn quorum_threshold_value_accepts_an_integral_float() {
+        // The `integer` keyword in JSON Schema 2020-12 matches any number with
+        // a zero fractional part, so `75.0` is a legal `threshold.value` — the
+        // JSON token does not have to be spelled without a decimal point.
+        // Pinned because the rest of the integrality suite only proves that
+        // *fractional* values are refused; a tightening to "the token must be
+        // integral" would otherwise pass every test in this repo.
+        accept(quorum_policy(serde_json::json!({
+            "threshold": { "type": "percentage", "value": 75.0 }
         })));
+    }
+
+    #[test]
+    fn new_registry_contains_every_built_in_policy() {
+        // `PolicyRegistry::new` inserts into the HashMap directly, bypassing
+        // `register`, so no other test proves the built-ins are actually
+        // *present* — only that they would survive validation if they went
+        // through it. A `std_policies()` entry silently dropped on the floor
+        // would leave `RegisterPolicy` free to claim a reserved id.
+        let registry = PolicyRegistry::new();
+        for id in [
+            DEFAULT_POLICY_ID,
+            crate::defaults::STD_MAJORITY_POLICY_ID,
+            crate::defaults::STD_SUPERMAJORITY_POLICY_ID,
+            crate::defaults::STD_UNANIMOUS_POLICY_ID,
+        ] {
+            let policy = registry
+                .get(id)
+                .unwrap_or_else(|| panic!("{id} is missing from a fresh registry"));
+            assert_eq!(policy.policy_id, id);
+            // And it resolves the way `SessionStart` will look it up.
+            assert!(registry.resolve(id).is_ok(), "{id} does not resolve");
+        }
+        assert_eq!(
+            registry.list(None).len(),
+            4,
+            "a fresh registry holds exactly policy.default plus the three \
+             RFC-MACP-0012 §5.2 profiles"
+        );
     }
 
     #[test]
@@ -1425,13 +1530,30 @@ mod tests {
     ///
     /// Resolution order: `MACP_POLICY_SCHEMAS_DIR` (set by the
     /// `conformance-oracle` CI job, which already checks the spec repo out),
-    /// then the sibling spec checkout used in local development. Absent both,
-    /// the parity test prints a warning and passes — it is deliberately **not**
-    /// `#[ignore]`d, because an ignored test runs nowhere, CI included.
+    /// then the sibling spec checkout used in local development.
+    ///
+    /// Setting `MACP_POLICY_SCHEMAS_DIR` is an explicit assertion that the
+    /// canonical schemas are present, so a directory that does not exist there
+    /// **panics** rather than skipping: otherwise a spec-repo reorganisation
+    /// that moves `schemas/json/policy` would turn the parity gate into a
+    /// silent pass in CI, and libtest swallows `println!` for passing tests.
+    /// Only the local-dev sibling-checkout fallback may skip — contributors
+    /// without a spec checkout must still get a green suite, which is also why
+    /// the test is deliberately **not** `#[ignore]`d (an ignored test runs
+    /// nowhere, CI included).
     fn canonical_schema_dir() -> Option<std::path::PathBuf> {
         if let Ok(dir) = std::env::var("MACP_POLICY_SCHEMAS_DIR") {
             let path = std::path::PathBuf::from(dir);
-            return path.is_dir().then_some(path);
+            assert!(
+                path.is_dir(),
+                "MACP_POLICY_SCHEMAS_DIR is set to '{}', which is not a directory. \
+                 Setting it asserts the canonical policy schemas are available; \
+                 refusing to skip the parity check silently. Point it at the spec \
+                 repo's schemas/json/policy, or unset it to fall back to a sibling \
+                 checkout.",
+                path.display()
+            );
+            return Some(path);
         }
         let sibling = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../multiagentcoordinationprotocol/schemas/json/policy");

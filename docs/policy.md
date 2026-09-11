@@ -64,12 +64,14 @@ The runtime does **not** run a JSON-Schema evaluator: it carries no `jsonschema`
    | Quorum `threshold.type` | One of `n_of_m`, `percentage`, `count`. `weighted` is refused as unimplemented — see below |
    | Quorum `threshold.value` | A non-negative **integer**; additionally `<= 100` when `threshold.type` is `percentage` |
 
-   The inclusive bounds are deliberate: `voting.threshold: 0.0` and an all-zero `voting.weights` map are degenerate but schema-legal, and whether they should be legal at all is an open question upstream rather than something registration decides.
+   The two Quorum rows apply **only** when `mode` is exactly `"macp.mode.quorum.v1"`. They are **not** applied to a wildcard (`"*"`) policy: a `"*"` policy is validated against the Decision schema, which has no top-level `threshold`, so a `threshold` object inside one is silently ignored at registration — and yet `SessionStart` will bind that policy to a Quorum session, where the mode reads the very `threshold` no layer checked. Give a Quorum policy `mode: "macp.mode.quorum.v1"`, not `"*"`. Closing this gap requires deciding whether a `"*"` policy must satisfy *every* mode schema, which would refuse policies that register today; it is tracked as deferred work and pinned by a test (`quorum_threshold_constraints_do_not_apply_to_wildcard_policies`).
+
+   The inclusive bounds are deliberate: `voting.threshold: 0.0` and an all-zero `voting.weights` map are degenerate but schema-legal, and whether they should be legal at all is an open question upstream rather than something registration decides. `threshold.value` follows JSON Schema's `integer` keyword, which matches any number with a zero fractional part: `75` and `75.0` are both accepted, `75.5` is not.
 3. **Conditional constraints.** A `weighted` voting algorithm requires a non-empty `weights` map, `supermajority` requires a threshold above `0.5`, and `designated_role` commitment authority requires a non-empty `designated_roles` list.
 
-`schema_version` must be `1`. Every rejection — including a `policy_id` under the reserved `policy.std.` prefix that is not the canonical definition (see below) — is reported with `INVALID_POLICY_DEFINITION` at the head of the message, because `RegisterPolicyResponse` carries no structured error code.
+`schema_version` must be non-zero; only `0` is rejected, and `1` is the only version defined today, so use `1`. Every rejection **of the definition itself** — including a `policy_id` under the reserved `policy.std.` prefix that is not the canonical definition (see below) — is reported with `INVALID_POLICY_DEFINITION` at the head of the message, because `RegisterPolicyResponse` carries no structured error code. A duplicate `policy_id` is the one rejection that carries no such prefix: the descriptor may be entirely valid and the only problem is that the id is taken, so it is a conflict rather than an invalid definition.
 
-Both routes into the registry apply the same checks: the `RegisterPolicy` RPC and the `MACP_POLICIES_DIR` preload, which funnels through the same `register` path.
+Both routes into the registry apply the same checks: the `RegisterPolicy` RPC and the `MACP_POLICIES_DIR` preload, which funnels through the same `register` path. "The same checks" means the same set for a given `mode` — as the Quorum rows above note, which checks run at all still depends on the policy's `mode`.
 
 ### Validating a policies directory before startup
 

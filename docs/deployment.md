@@ -47,6 +47,12 @@ Before exposing the runtime to production traffic, ensure these four items are c
 | `MACP_POLICIES_DRY_RUN` | off | Set to `1` to validate `MACP_POLICIES_DIR` and exit `0`/`1` without starting the server |
 | `RUST_LOG` | `info` | Log level filter |
 
+### Governance policy files
+
+Validate a policies directory before you roll it out: `MACP_POLICIES_DRY_RUN=1 MACP_POLICIES_DIR=/etc/macp/policies macp-runtime` reports every file by name and exits `0`/`1` without starting the server. See [Policy](policy.md#validating-a-policies-directory-before-startup).
+
+**When a rejected policy file blocks startup, correct the file — do not delete it.** Deleting it does let the runtime boot, but persisted sessions bound to that `policy_version` are replayed with the policy unresolved: replay resolves the version best-effort and leaves `policy_definition` empty when it cannot, and commitment enforcement treats an absent policy definition as "no policy to enforce" and returns early. Every in-flight session governed by the deleted policy therefore loses its governance silently — commitments that the policy would have denied are accepted, with no error and no log line tying it back to the deletion. The same applies to `UnregisterPolicy` on a policy that live sessions are still bound to.
+
 ## Storage backends
 
 The runtime supports four storage configurations, selected via `MACP_STORAGE_BACKEND`:

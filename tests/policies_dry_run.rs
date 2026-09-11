@@ -165,6 +165,29 @@ fn dry_run_exits_zero_for_a_directory_that_would_load() {
 }
 
 #[test]
+fn dry_run_warns_but_succeeds_when_the_directory_holds_no_policy_files() {
+    // A readable directory with nothing in it is the shape of a mis-pointed
+    // MACP_POLICIES_DIR. `load_from_dir` would start happily, so dry-run must
+    // exit 0 — but it has to say so out loud rather than leaving a bare `0` in
+    // the summary line as the only signal.
+    let dir = temp_dir("empty");
+    std::fs::write(dir.join("notes.txt"), "not a policy").unwrap();
+
+    let (code, output) = dry_run(&dir);
+    assert_eq!(code, 0, "output: {output}");
+    assert!(
+        output.contains("WARNING: no *.json files found"),
+        "output: {output}"
+    );
+    assert!(
+        output.contains("0 policy file(s) checked"),
+        "output: {output}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn dry_run_over_an_unreadable_directory_is_an_error() {
     let missing = std::env::temp_dir().join("macp-dry-run-absent-directory");
     std::fs::remove_dir_all(&missing).ok();

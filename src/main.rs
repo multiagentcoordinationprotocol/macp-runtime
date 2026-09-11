@@ -165,6 +165,17 @@ fn policies_dry_run(policies_dir: Option<String>) -> i32 {
         path.display(),
         rejected
     );
+    // A readable directory holding no `*.json` is the shape of a mis-pointed
+    // MACP_POLICIES_DIR — exactly what dry-run exists to catch — and a bare
+    // `0` in the summary above is easy to skim past. It is not an error:
+    // `load_from_dir` starts happily on an empty directory, so dry-run must
+    // agree and still exit 0.
+    if outcomes.is_empty() {
+        println!(
+            "WARNING: no *.json files found in {} — startup would load no policies",
+            path.display()
+        );
+    }
     if rejected > 0 {
         1
     } else {

@@ -261,7 +261,11 @@ rpc PromoteMode(PromoteModeRequest) returns (PromoteModeResponse)
 
 ### RegisterPolicy
 
-Registers a governance policy definition. The runtime validates the rules against the target mode's schema and enforces conditional constraints (for example, `weighted` algorithm requires a non-empty `weights` map). The built-in `policy.default` cannot be overwritten.
+Registers a governance policy definition. The built-in `policy.default` cannot be overwritten, and the reserved `policy.std.` namespace only accepts the canonical RFC-MACP-0012 §5.2 definitions.
+
+The runtime does **not** run a JSON-Schema evaluator against the canonical `schemas/json/policy/*.schema.json` documents — it carries no `jsonschema` dependency and those documents live in the spec repository. It applies three layers of hand-written checks instead: the rules must deserialize into the target mode's Rust struct (unknown fields are ignored, so this catches type errors rather than misspelled keys); a named set of value-domain checks mirroring the canonical enums and numeric bounds; and the conditional constraints (for example, `weighted` algorithm requires a non-empty `weights` map). A rule the canonical schema forbids but that list does not name is accepted. Every rejection of the definition itself is reported with `INVALID_POLICY_DEFINITION` at the head of the message, because `RegisterPolicyResponse` carries no structured error code; a duplicate `policy_id` is a conflict rather than an invalid definition and is reported without that prefix.
+
+See [Policy > What registration checks](policy.md#what-registration-checks) for the enforced list.
 
 ```protobuf
 rpc RegisterPolicy(RegisterPolicyRequest) returns (RegisterPolicyResponse)
