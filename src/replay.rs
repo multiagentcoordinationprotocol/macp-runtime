@@ -973,10 +973,15 @@ mod tests {
         assert!(replay_session("s1", &legacy, &registry, Some(&policies)).is_err());
     }
 
-    /// The current revision is behavior-neutral with respect to rev 1: a
-    /// history recorded today replays to exactly the rev-1 outcome, including
-    /// the byte-level `mode_state`. This is what makes bumping
-    /// `CURRENT_SEMANTICS_REV` a no-op release.
+    /// For a history with **no suspension**, the current revision replays to
+    /// exactly the rev-1 outcome, including the byte-level `mode_state`. Rev 2
+    /// is not behavior-neutral in general — it deliberately changed the
+    /// implicit-accept deadline (RFC-MACP-0010 §5.1(1)) — but the only term it
+    /// added is the suspension accrued since the offer, which is zero here. So
+    /// this pins the property that keeps unsuspended legacy histories
+    /// replaying identically. The suspended counterpart, where the revisions
+    /// diverge, is
+    /// `legacy_rev1_handoff_history_with_suspension_still_implicitly_accepts`.
     #[test]
     fn current_rev_handoff_history_replays_identically_to_rev1() {
         let registry = make_registry();
@@ -1072,6 +1077,86 @@ mod tests {
 
         let session = replay_session("s1", &entries, &registry, Some(&policies)).unwrap();
         assert_eq!(session.accumulated_suspended_ms, 250);
+        assert_implicitly_accepted(&session);
+    }
+
+    /// Sibling of [`handoff_history_with_suspension`] carrying **two**
+    /// suspend/resume pairs, so the replayed `accumulated_suspended_ms` is a
+    /// sum of banked pauses rather than a single one. (A sibling rather than a
+    /// second pair spliced into that fixture: its single 250ms pause is
+    /// load-bearing arithmetic for both of its callers.)
+    ///
+    /// Timeline — every stamp is the recorded `received_at_ms`, and the
+    /// timeout is the 100ms `implicit_accept_timeout_ms` from
+    /// [`handoff_policy_registry`]:
+    ///
+    /// ```text
+    /// 1_000  SessionStart + HandoffOffer     unsuspended run:  50ms
+    /// 1_050  SessionSuspend  ┐ banks 250ms
+    /// 1_300  SessionResume   ┘               unsuspended run:  30ms
+    /// 1_330  SessionSuspend  ┐ banks 170ms
+    /// 1_500  SessionResume   ┘               unsuspended run: commit_ms - 1_500
+    /// commit_ms  Commitment
+    /// ```
+    ///
+    /// So `accumulated_suspended_ms == 250 + 170 == 420`, the rev-2
+    /// unsuspended elapsed is `commit_ms - 1_000 - 420` (equivalently
+    /// `80 + (commit_ms - 1_500)`), and rev 1 ignores the pauses entirely at
+    /// `commit_ms - 1_000`. Both resumes also re-run the cumulative cap check
+    /// in `Session::resume` against the running total, not the latest pause.
+    fn handoff_history_with_two_suspensions(semantics_rev: u32, commit_ms: i64) -> Vec<LogEntry> {
+        let mut entries = handoff_history(semantics_rev, commit_ms, commit_ms);
+        let commit = entries.pop().expect("commitment is the last entry");
+        entries.push(internal_entry("SessionSuspend", 1_050));
+        entries.push(internal_entry("SessionResume", 1_300));
+        entries.push(internal_entry("SessionSuspend", 1_330));
+        entries.push(internal_entry("SessionResume", 1_500));
+        entries.push(commit);
+        entries
+    }
+
+    /// Multi-pause differential. Commitment at 1_510: 510ms since the offer,
+    /// of which only 90ms is unsuspended (50 + 30 + 10) against the 100ms
+    /// timeout. Rev 1 counts all 510ms and implicitly accepts; rev 2 counts
+    /// 90ms and does not, so the commitment has no resolved offer to bind and
+    /// replay fails.
+    ///
+    /// This is the determinism claim for a history with *multiple*
+    /// suspend/resume pairs: rev 2 subtracts the accumulated suspension, so
+    /// banking only the most recent pause (170ms) would leave 340ms of
+    /// apparent unsuspended time and wrongly accept — which a single-pair
+    /// fixture cannot distinguish.
+    #[test]
+    fn rev2_handoff_history_subtracts_every_suspension_pair() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+
+        let rev1 = handoff_history_with_two_suspensions(1, 1_510);
+        let session = replay_session("s1", &rev1, &registry, Some(&policies)).unwrap();
+        assert_eq!(session.semantics_rev, 1);
+        assert_eq!(session.accumulated_suspended_ms, 420);
+        assert_implicitly_accepted(&session);
+
+        let rev2 =
+            handoff_history_with_two_suspensions(macp_core::session::CURRENT_SEMANTICS_REV, 1_510);
+        assert!(
+            replay_session("s1", &rev2, &registry, Some(&policies)).is_err(),
+            "rev 2 must subtract both pauses (90ms unsuspended < 100ms timeout)"
+        );
+    }
+
+    /// The rev-2 positive path across two pauses. Commitment at 1_600: 600ms
+    /// since the offer, 180ms of it unsuspended (50 + 30 + 100), which clears
+    /// the 100ms timeout even after both pauses are excluded.
+    #[test]
+    fn rev2_handoff_history_accepts_on_unsuspended_time_across_two_pauses() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+        let entries =
+            handoff_history_with_two_suspensions(macp_core::session::CURRENT_SEMANTICS_REV, 1_600);
+
+        let session = replay_session("s1", &entries, &registry, Some(&policies)).unwrap();
+        assert_eq!(session.accumulated_suspended_ms, 420);
         assert_implicitly_accepted(&session);
     }
 }

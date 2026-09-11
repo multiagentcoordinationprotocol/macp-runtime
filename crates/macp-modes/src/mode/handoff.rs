@@ -99,6 +99,14 @@ impl HandoffMode {
         if session.semantics_rev >= 2 {
             Self::rev2_elapsed_ms(session, offer, now_ms)
         } else {
+            // Deliberately non-saturating, unlike the rev >= 2 arm. Rev 0
+            // reads `env.timestamp_unix_ms`, which the server boundary never
+            // range-checks, so this subtraction can overflow in principle —
+            // but retrofitting saturation here would change rev 0/1 outcomes,
+            // which must be preserved exactly. It also adds nothing to the
+            // attack surface: rev 0 already lets a client forge elapsed time
+            // directly by back-dating the offer envelope, which is the defect
+            // rev 1 fixed and rev 0 intentionally keeps.
             now_ms - offer.offered_at_ms
         }
     }
@@ -117,8 +125,12 @@ impl HandoffMode {
     /// deliberately **no** in-flight `now_ms - suspended_at_ms` term, because
     /// this code only ever runs while the session is `Open`, so every pause
     /// that has occurred is already banked. `Session::resume` is the only
-    /// writer of `accumulated_suspended_ms`, and both paths that reach this
-    /// function refuse to dispatch a message to a non-`Open` session:
+    /// writer that ever *increases* `accumulated_suspended_ms` after
+    /// construction — the other writer, `SessionBuilder`, only sets it at
+    /// construction time from already-banked persisted state (snapshot and
+    /// checkpoint loads go through `From<PersistedSession> for Session`) — and
+    /// both paths that reach this function refuse to dispatch a message to a
+    /// non-`Open` session:
     /// `crate::step::check_preconditions` returns `SessionNotOpen` before the
     /// kernel calls `on_message_at`, and replay skips Incoming entries whose
     /// session is not `Open` (`src/replay.rs`). An in-flight term would

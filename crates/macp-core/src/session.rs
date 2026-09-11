@@ -607,6 +607,28 @@ mod tests {
         assert_eq!(s.ttl_expiry, 10_400);
     }
 
+    /// The cap is cumulative across pauses, not per-pause: two 300ms
+    /// suspensions each fit under a 500ms bound cap on their own, but the
+    /// second resume sees the 600ms total and force-expires. Pins that
+    /// `resume` accumulates `accumulated_suspended_ms` rather than
+    /// overwriting it with the latest pause — the invariant the rev-2 handoff
+    /// deadline reads (`HandoffMode::rev2_elapsed_ms`).
+    #[test]
+    fn bound_cap_counts_suspension_cumulatively_across_pauses() {
+        let mut s = open_session(10_000);
+        s.max_suspend_ms = 500;
+        s.suspend(0).unwrap();
+        s.resume(300).unwrap();
+        assert_eq!(s.accumulated_suspended_ms, 300);
+        assert_eq!(s.ttl_expiry, 10_300);
+        s.suspend(400).unwrap();
+        // 300 + 300 = 600 > the 500ms cap, though neither pause alone is.
+        let err = s.resume(700).unwrap_err();
+        assert!(matches!(err, MacpError::TtlExpired));
+        assert_eq!(s.state, SessionState::Expired);
+        assert_eq!(s.accumulated_suspended_ms, 600);
+    }
+
     #[test]
     fn suspend_cap_exceeded_uses_bound_cap() {
         let mut s = open_session(10_000);
