@@ -42,6 +42,10 @@ pub mod extensions;
 mod pagination;
 pub mod policy_engine;
 pub mod server;
+// Crate-private: the bounded WatchSessions initial-sync traversal and its
+// lifecycle-event buffer are internals of `server.rs`, factored out only so
+// their bounds are testable.
+mod watch_sync;
 
 // Authentication and the request security layer now live in `macp-auth`.
 // Re-exported so `crate::{auth, security}` and downstream

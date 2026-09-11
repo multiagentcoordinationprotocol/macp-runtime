@@ -260,6 +260,14 @@ impl SessionRegistry {
         Some(session.clone())
     }
 
+    /// Deep-clones **every** registered session into one `Vec`, and therefore
+    /// holds the whole registry resident for as long as the caller keeps the
+    /// result. Only for one-shot, non-streaming work whose lifetime is its own
+    /// call (the shutdown snapshot in `src/main.rs`). A caller that emits the
+    /// sessions to a client — where the `Vec` stays alive for the duration of a
+    /// client-paced stream, times the number of concurrent streams — must use
+    /// [`SessionRegistry::shared_sessions`] instead and lock one handle at a
+    /// time, which keeps one `Session` clone resident.
     pub async fn get_all_sessions(&self) -> Vec<Session> {
         let arcs: Vec<SharedSession> = {
             let guard = self.sessions.read().await;
@@ -270,6 +278,37 @@ impl SessionRegistry {
             out.push(arc.lock().await.clone());
         }
         out
+    }
+
+    /// A snapshot of every registered session's shared handle, in unspecified
+    /// order.
+    ///
+    /// One synchronous pass under the map read lock, cloning
+    /// [`SharedSession`] **pointers** only — never a `Session`. This is the
+    /// entry point for a traversal that wants to visit every session without
+    /// materializing them all at once: take the handles here, then lock and
+    /// clone them one at a time (see `watch_sync` in `macp-runtime`, which uses
+    /// exactly that shape for the `WatchSessions` initial sync).
+    ///
+    /// Unlike an ID list, this **is** a true snapshot of the session set: a
+    /// handle keeps its `Session` reachable even after the registry entry is
+    /// removed, so a traversal in progress sees every session that was
+    /// registered when the snapshot was taken, exactly once, whatever happens
+    /// to the map afterwards. Removal is never blocked — eviction takes the
+    /// write lock and removes unconditionally; only the *deallocation* of an
+    /// evicted session waits for the last handle to drop. The cost is one
+    /// pointer per session, against the ~8x larger `String` an ID list would
+    /// clone.
+    ///
+    /// Sessions registered *after* the snapshot are absent from it, and a
+    /// snapshotted session's contents can still change under its mutex — the
+    /// snapshot fixes the set, not the state.
+    ///
+    /// Per the lock-ordering contract above, the map lock is released before
+    /// any session mutex is taken: this returns handles and never locks one.
+    pub async fn shared_sessions(&self) -> Vec<SharedSession> {
+        let guard = self.sessions.read().await;
+        guard.values().map(Arc::clone).collect()
     }
 
     /// Session IDs strictly greater than `after`, ascending (byte order), at most
@@ -439,6 +478,44 @@ mod tests {
             ids.push(format!("sess-{:016x}-{i:04}", state >> 16));
         }
         ids
+    }
+
+    #[tokio::test]
+    async fn shared_sessions_snapshots_every_session_once() {
+        let ids: Vec<String> = ["delta", "alpha", "charlie", "bravo"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let registry = registry_with(&ids).await;
+
+        let handles = registry.shared_sessions().await;
+        assert_eq!(handles.len(), 4);
+        let mut seen = Vec::new();
+        for handle in &handles {
+            seen.push(handle.lock().await.session_id.clone());
+        }
+        // Order is unspecified, so sort before comparing — asserting a specific
+        // HashMap iteration order would be asserting an implementation detail.
+        seen.sort();
+        assert_eq!(seen, vec!["alpha", "bravo", "charlie", "delta"]);
+
+        // The property the WatchSessions traversal relies on: the handles
+        // outlive their registry entries, so a snapshot taken before a removal
+        // still yields every session. Removal itself is not blocked.
+        {
+            let mut guard = registry.sessions.write().await;
+            guard.remove("alpha");
+            guard.remove("bravo");
+        }
+        assert!(registry.get_session("alpha").await.is_none());
+        let mut after = Vec::new();
+        for handle in &handles {
+            after.push(handle.lock().await.session_id.clone());
+        }
+        after.sort();
+        assert_eq!(after, vec!["alpha", "bravo", "charlie", "delta"]);
+
+        assert!(SessionRegistry::new().shared_sessions().await.is_empty());
     }
 
     #[tokio::test]

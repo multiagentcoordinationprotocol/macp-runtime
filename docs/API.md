@@ -157,7 +157,15 @@ Server-streaming RPC for observing session lifecycle transitions across the runt
 rpc WatchSessions(WatchSessionsRequest) returns (stream WatchSessionsResponse)
 ```
 
-On connect, the runtime emits one `Created` event per session currently in the registry (initial sync), then streams live `SessionLifecycleEvent` entries as sessions are `Created`, `Resolved`, or `Expired`. Each event carries `event_type`, the current `SessionMetadata` snapshot, and `observed_at_unix_ms`. The underlying broadcast channel has a bounded capacity -- slow subscribers that fall behind will miss events, so consumers should reconcile with `ListSessions` on reconnect.
+On connect, the runtime emits one `Created` event per session currently in the registry (initial sync), then streams live `SessionLifecycleEvent` entries as sessions are `Created`, `Resolved`, `Expired`, `Suspended`, `Resumed`, or `Cancelled`. Each event carries `event_type`, the current `SessionMetadata` snapshot, and `observed_at_unix_ms`.
+
+**The initial sync is materialized incrementally.** The runtime snapshots the session set once, then loads and emits one session at a time, so a subscriber that reads slowly costs one session's worth of memory rather than a copy of the whole registry. The sync carries every session that was registered when the snapshot was taken, each exactly once, whatever happens to those sessions while it is still emitting -- it is never truncated for length, and a session that reaches a terminal state or is evicted mid-sync is still delivered.
+
+Initial-sync events always carry `session`. A **live** event's `session` is unset if the session had already been evicted from memory when the event reached the subscriber -- terminal sessions are evicted after `MACP_SESSION_RETENTION_SECS` (one hour by default, measured from session start, not from resolution), and their history remains on disk. Reconcile with `ListSessions`/`GetSession` rather than treating the event stream as an authoritative session inventory.
+
+Two bounds apply to a subscriber that cannot keep up. The live lifecycle broadcast channel holds 64 events; a subscriber that falls further behind is terminated with `RESOURCE_EXHAUSTED` rather than silently skipping events. Events that arrive while the initial sync is still emitting are buffered (up to 1024) and delivered immediately after it, which is why an ordinary burst during a slow sync does not end the stream; exceeding that buffer is reported as the same `RESOURCE_EXHAUSTED`. In both cases, reconnect and reconcile with `ListSessions`.
+
+Per-stream state is bounded by the size of the initial sync: the runtime remembers the session IDs that sync emitted, to suppress the duplicate `Created` the live bus would otherwise report for a session that was registered just before the stream subscribed (a session enters the registry before its `Created` event is published, so that event can arrive after the sync has already emitted it). The set does not grow with sessions created later -- their `Created` events cannot repeat -- and it is released when the client disconnects.
 
 ### CancelSession
 

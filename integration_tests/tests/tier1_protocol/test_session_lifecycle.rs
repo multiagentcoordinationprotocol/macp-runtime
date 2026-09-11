@@ -182,3 +182,114 @@ async fn watch_sessions_emits_created_exactly_once_per_session() {
         "live-created session must appear exactly once"
     );
 }
+
+/// Phase 8's regression: the initial sync's observable contract over a
+/// registry large enough to have exercised the old whole-registry deep clone,
+/// on a runtime of this test's own.
+///
+/// Deliberately **not** the shared server from `tests/common`. That one
+/// accumulates sessions from every other test in this binary, so the only
+/// assertion possible against it is "each of mine appears once" — it cannot
+/// assert that the sync emits *nothing else*, which is half of "exactly N
+/// Created events, once each". A private runtime starts with an empty registry
+/// and makes the whole set assertable. (This replaces an earlier 12-session
+/// variant that ran against the shared server for exactly that reason.)
+#[tokio::test]
+async fn watch_sessions_initial_sync_emits_every_session_once_on_a_private_runtime() {
+    use macp_integration_tests::server_manager::ServerManager;
+    use macp_runtime::pb::macp_runtime_service_client::MacpRuntimeServiceClient;
+    use macp_runtime::pb::WatchSessionsRequest;
+
+    const SESSIONS: usize = 60;
+
+    let binary =
+        std::env::var("MACP_TEST_BINARY").unwrap_or_else(|_| "../target/debug/macp-runtime".into());
+    // 60 starts from one sender blows through the 60/minute default, which
+    // would surface as a bogus lifecycle failure. Pin it above the fixture.
+    let manager = ServerManager::start_with_env(
+        &binary,
+        &[("MACP_SESSION_START_LIMIT_PER_MINUTE", "1000")],
+    )
+    .await
+    .expect("private runtime must start");
+    let mut client = MacpRuntimeServiceClient::connect(manager.endpoint.clone())
+        .await
+        .expect("connect to the private runtime");
+
+    let agent = "agent://watch-sync-many";
+    let partner = "agent://partner";
+    let mut expected: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for i in 0..SESSIONS {
+        let sid = new_session_id();
+        let ack = send_as(
+            &mut client,
+            agent,
+            envelope(
+                MODE_DECISION,
+                "SessionStart",
+                &new_message_id(),
+                &sid,
+                agent,
+                session_start_payload(&format!("watch sync {i}"), &[agent, partner], 60_000),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(ack.ok, "SessionStart {i} failed: {:?}", ack.error);
+        expected.insert(sid);
+    }
+
+    let mut request = tonic::Request::new(WatchSessionsRequest {});
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {agent}").parse().expect("valid header"),
+    );
+    let mut stream = client.watch_sessions(request).await.unwrap().into_inner();
+
+    // Every Created event, counted — including any for a session this test did
+    // not create, which on a private runtime would be a bug rather than noise.
+    let mut created_counts: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    while created_counts.len() < SESSIONS {
+        let next = tokio::time::timeout_at(deadline, stream.message()).await;
+        let Ok(Ok(Some(resp))) = next else {
+            panic!(
+                "initial sync stopped after {} of {SESSIONS} sessions",
+                created_counts.len()
+            )
+        };
+        let event = resp.event.expect("lifecycle event present");
+        // EventType::Created == 1 in the proto enum.
+        if event.event_type == 1 {
+            let session = event.session.expect("Created carries metadata");
+            *created_counts.entry(session.session_id).or_insert(0) += 1;
+        }
+    }
+
+    // Drain briefly: a duplicate or a stray extra would arrive right after.
+    while let Ok(Ok(Some(resp))) =
+        tokio::time::timeout(std::time::Duration::from_millis(500), stream.message()).await
+    {
+        if let Some(event) = resp.event {
+            if event.event_type == 1 {
+                if let Some(session) = event.session {
+                    *created_counts.entry(session.session_id).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        created_counts.len(),
+        SESSIONS,
+        "the sync emitted Created for a session this runtime never created"
+    );
+    for sid in &expected {
+        assert_eq!(
+            created_counts.get(sid).copied().unwrap_or(0),
+            1,
+            "session {sid} must appear exactly once in the initial sync"
+        );
+    }
+}

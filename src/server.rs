@@ -1369,38 +1369,84 @@ impl MacpRuntimeService for MacpServer {
             .authenticate_metadata(request.metadata())
             .await
             .map_err(Self::status_from_error)?;
+        // Subscribed HERE, during the unary call — strictly before the generator
+        // below is first polled, which does not happen until the client reads.
+        // An event published in that gap must be buffered by an existing
+        // subscription, not missed; moving this inside the generator
+        // reintroduces exactly that race.
         let mut rx = self.runtime.subscribe_session_lifecycle();
         let runtime = Arc::clone(&self.runtime);
         let stream = async_stream::try_stream! {
-            // Initial sync: emit all current sessions as CREATED events. The
-            // lifecycle bus was subscribed *before* this snapshot (so no event
-            // is missed); any Created event buffered in that window would
-            // duplicate a snapshot entry — session IDs are create-once, so we
-            // dedupe buffered Created events against the synced set below.
-            let sessions = runtime.registry.get_all_sessions().await;
+            // Initial sync: emit all current sessions as CREATED events.
+            //
+            // The traversal snapshots the registry's shared session handles
+            // ONCE and then locks and clones one session at a time (see
+            // `watch_sync`), so peak resident `Session` clones is one rather
+            // than the registry size: this generator is paced by the client's
+            // reads and there can be `MACP_MAX_CONCURRENT_STREAMS` of them at
+            // once.
+            let mut sync = crate::watch_sync::InitialSync::begin(&runtime.registry).await;
+            // The IDs this sync emits. A Created event buffered in the
+            // subscribe→sync window would duplicate one of them — the session
+            // was already registered when the snapshot was taken, but
+            // `process_session_start` inserts into the registry BEFORE
+            // publishing Created, so that event can still arrive afterwards.
+            // Session IDs are create-once and `runtime.rs` holds the only
+            // `Created` publisher, so one `send` per session start means a
+            // *live* Created can never repeat for an ID already in this set —
+            // membership is read, never extended, past the sync. That keeps the
+            // set bounded by the registry size at subscribe time instead of
+            // growing with every session the stream ever observes.
             let mut synced: std::collections::HashSet<String> =
-                std::collections::HashSet::with_capacity(sessions.len());
-            for session in &sessions {
+                std::collections::HashSet::with_capacity(sync.remaining());
+            // Lifecycle events that arrive while the sync is still emitting.
+            // The sync loop cannot `recv().await` (it has its own output to
+            // produce) but must not ignore the bus either: the bus holds 64
+            // events, so a slow sync would otherwise make the first post-sync
+            // `recv()` return `Lagged` and kill the stream. Bounded by
+            // `PENDING_EVENT_LIMIT`; on overflow the client gets the same
+            // `RESOURCE_EXHAUSTED` it gets for bus lag.
+            let mut pending: std::collections::VecDeque<crate::runtime::SessionLifecycleEvent> =
+                std::collections::VecDeque::new();
+            loop {
+                // Drained BEFORE the next session is fetched, so the bus is
+                // relieved once per emitted session rather than once for the
+                // whole sync.
+                if let Err(drain_err) = crate::watch_sync::drain_lifecycle_events(
+                    &mut rx,
+                    &mut pending,
+                    crate::watch_sync::PENDING_EVENT_LIMIT,
+                ) {
+                    Err(Status::resource_exhausted(drain_err.message()))?;
+                    break;
+                }
+                // One session, emitted and dropped before the next is asked
+                // for, which is what keeps residency bounded.
+                let Some(session) = sync.next_session().await else { break };
                 synced.insert(session.session_id.clone());
                 yield WatchSessionsResponse {
                     event: Some(SessionLifecycleEvent {
                         event_type: session_lifecycle_event::EventType::Created.into(),
-                        session: Some(Self::session_to_metadata(session)),
+                        session: Some(Self::session_to_metadata(&session)),
                         observed_at_unix_ms: session.started_at_unix_ms,
                     }),
                 };
             }
-            // Stream lifecycle transitions
+            // Stream lifecycle transitions: first the ones buffered during the
+            // sync (in bus order), then live ones.
             loop {
-                let event = match rx.recv().await {
-                    Ok(event) => event,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        Err(Status::resource_exhausted(format!(
-                            "WatchSessions receiver fell behind by {skipped} events"
-                        )))?;
-                        break;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                let event = match pending.pop_front() {
+                    Some(event) => event,
+                    None => match rx.recv().await {
+                        Ok(event) => event,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            Err(Status::resource_exhausted(format!(
+                                "WatchSessions receiver fell behind by {skipped} events"
+                            )))?;
+                            break;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    },
                 };
                 let (event_type, sid) = match &event {
                     crate::runtime::SessionLifecycleEvent::Created { session_id } =>
@@ -1419,8 +1465,15 @@ impl MacpRuntimeService for MacpServer {
                 // Skip the buffered duplicate of an initial-sync entry;
                 // non-Created events for synced sessions are new information
                 // and pass through.
+                //
+                // `contains`, not `insert`: a live Created for a session the
+                // sync never saw is emitted as-is and NOT recorded. Recording
+                // it would be the only thing making this set grow with the
+                // stream's lifetime, and it would buy nothing — `runtime.rs`
+                // is the single `Created` publisher and sends once per session
+                // start, so no live Created can repeat.
                 if event_type == session_lifecycle_event::EventType::Created
-                    && !synced.insert(sid.clone())
+                    && synced.contains(&sid)
                 {
                     continue;
                 }
@@ -3299,5 +3352,262 @@ mod tests {
             .into_inner();
         assert_eq!(next.sessions.len(), 1);
         assert_ne!(next.sessions[0].session_id, resp.sessions[0].session_id);
+    }
+
+    fn watch_sessions_req(sender: &str) -> Request<WatchSessionsRequest> {
+        let mut req = Request::new(WatchSessionsRequest {});
+        req.metadata_mut()
+            .insert("authorization", format!("Bearer {sender}").parse().unwrap());
+        req
+    }
+
+    /// Read the next event, failing (rather than hanging) if none arrives.
+    async fn next_lifecycle_event(
+        stream: &mut <MacpServer as MacpRuntimeService>::WatchSessionsStream,
+    ) -> crate::pb::SessionLifecycleEvent {
+        use tokio_stream::StreamExt;
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("WatchSessions produced no event within 5s")
+            .expect("stream ended")
+            .expect("stream errored");
+        resp.event.expect("event present")
+    }
+
+    /// Criterion 1 through the handler: N sessions in the registry produce
+    /// exactly N `Created` events, one per session, now that the sync
+    /// materializes them one at a time instead of deep-cloning the registry.
+    #[tokio::test]
+    async fn watch_sessions_initial_sync_emits_each_session_exactly_once() {
+        let (server, runtime) = make_server();
+        let ids = seed_ids(24);
+        seed_sessions(&runtime, &ids).await;
+
+        let mut stream = server
+            .watch_sessions(watch_sessions_req("agent://observer"))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for _ in 0..ids.len() {
+            let event = next_lifecycle_event(&mut stream).await;
+            assert_eq!(
+                event.event_type,
+                session_lifecycle_event::EventType::Created as i32
+            );
+            let session = event.session.expect("initial sync always carries metadata");
+            *counts.entry(session.session_id).or_default() += 1;
+        }
+        assert_eq!(counts.len(), ids.len(), "sync emitted the wrong set");
+        for id in &ids {
+            assert_eq!(
+                counts.get(id).copied(),
+                Some(1),
+                "{id} was not emitted exactly once"
+            );
+        }
+    }
+
+    /// Criterion 4: the lifecycle subscription is taken during the unary call,
+    /// not lazily inside the generator.
+    ///
+    /// The generator is not polled until the client reads, so this drives a
+    /// session terminal *after* the response is returned but *before* the first
+    /// read. The `Cancelled` event is published while nothing is polling the
+    /// stream — it can only be delivered because the subscription already
+    /// existed. Move `subscribe_session_lifecycle()` inside the `try_stream!`
+    /// and the second read here finds nothing and times out.
+    #[tokio::test]
+    async fn watch_sessions_subscribes_before_the_generator_is_polled() {
+        let (server, _runtime) = make_server();
+        let initiator = "agent://orchestrator";
+        let sid = new_sid();
+        start_session(&server, initiator, &sid, vec![initiator.into()]).await;
+
+        let mut stream = server
+            .watch_sessions(watch_sessions_req("agent://observer"))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Nothing has polled the stream yet; this event has only the
+        // subscription taken above to land in.
+        let mut cancel = Request::new(CancelSessionRequest {
+            session_id: sid.clone(),
+            reason: "test".into(),
+        });
+        cancel.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {initiator}").parse().unwrap(),
+        );
+        let ack = server
+            .cancel_session(cancel)
+            .await
+            .unwrap()
+            .into_inner()
+            .ack
+            .unwrap();
+        assert!(ack.ok);
+
+        // The initial sync comes first...
+        let first = next_lifecycle_event(&mut stream).await;
+        assert_eq!(
+            first.event_type,
+            session_lifecycle_event::EventType::Created as i32
+        );
+        assert_eq!(first.session.unwrap().session_id, sid);
+
+        // ...then the event buffered while the generator was still unpolled.
+        let second = next_lifecycle_event(&mut stream).await;
+        assert_eq!(
+            second.event_type,
+            session_lifecycle_event::EventType::Cancelled as i32,
+            "the event published before the first poll was lost — the \
+             subscription must be taken in the unary call"
+        );
+        assert_eq!(second.session.unwrap().session_id, sid);
+    }
+
+    /// Both arms of the `Created` dedup, with the race that makes it necessary
+    /// driven deterministically.
+    ///
+    /// `process_session_start` registers the session BEFORE it publishes
+    /// `Created`, so a session started after the subscribe but before the first
+    /// poll is in the sync snapshot *and* has a `Created` sitting on the bus.
+    /// The sync must emit it once and the buffered copy must be dropped. A
+    /// session started after the sync is not in the snapshot, and its live
+    /// `Created` must pass through — the handler tests membership of the sync
+    /// set with `contains` rather than `insert`, so that pass-through does not
+    /// extend the set; the set stays bounded by the registry size at subscribe
+    /// time. That bound is structural and has no observable signal, so what is
+    /// asserted here is the exactly-once contract it must not break.
+    #[tokio::test]
+    async fn watch_sessions_emits_created_once_for_synced_and_live_sessions() {
+        let (server, _runtime) = make_server();
+        let initiator = "agent://orchestrator";
+        let synced_sid = new_sid();
+
+        let mut stream = server
+            .watch_sessions(watch_sessions_req("agent://observer"))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Registered and published while nothing is polling: this lands in the
+        // subscription AND in the snapshot the first poll takes.
+        start_session(&server, initiator, &synced_sid, vec![initiator.into()]).await;
+
+        let from_sync = next_lifecycle_event(&mut stream).await;
+        assert_eq!(
+            from_sync.event_type,
+            session_lifecycle_event::EventType::Created as i32
+        );
+        assert_eq!(from_sync.session.unwrap().session_id, synced_sid);
+
+        // Started after the sync, so it is absent from the snapshot.
+        let live_sid = new_sid();
+        start_session(&server, initiator, &live_sid, vec![initiator.into()]).await;
+
+        // The next event must be the live session's Created. If the buffered
+        // duplicate leaked through, this is `synced_sid` a second time.
+        let live = next_lifecycle_event(&mut stream).await;
+        assert_eq!(
+            live.event_type,
+            session_lifecycle_event::EventType::Created as i32
+        );
+        assert_eq!(
+            live.session.unwrap().session_id,
+            live_sid,
+            "the sync entry's buffered Created must be suppressed, and the \
+             live session's must not be"
+        );
+
+        // And nothing further: neither Created repeats.
+        use tokio_stream::StreamExt;
+        let extra =
+            tokio::time::timeout(std::time::Duration::from_millis(300), stream.next()).await;
+        assert!(
+            extra.is_err(),
+            "unexpected extra lifecycle event: {extra:?}"
+        );
+    }
+
+    /// Criterion 3 end to end through the real handler, which the unit tests of
+    /// `drain_lifecycle_events` cannot reach: a client that reads slowly while
+    /// lifecycle events arrive throughout a long sync must not be killed with
+    /// `RESOURCE_EXHAUSTED`, and must still see every `Created` exactly once.
+    ///
+    /// The shape matters. The lifecycle bus holds 64 events, and far more than
+    /// that arrive here — but they arrive *interleaved* with the reads, which is
+    /// what a slow consumer actually looks like. The handler drains the bus
+    /// before fetching each session, so the receiver never falls 64 behind.
+    /// Delete that drain (or hoist it out of the loop) and the bus overruns
+    /// mid-sync, the first post-sync `recv()` returns `Lagged`, and this test
+    /// fails on the stream error.
+    #[tokio::test]
+    async fn watch_sessions_survives_a_slow_consumer_during_a_long_sync() {
+        use tokio_stream::StreamExt;
+
+        let (server, runtime) = make_server();
+        let seeded = seed_ids(200);
+        seed_sessions(&runtime, &seeded).await;
+
+        let mut stream = server
+            .watch_sessions(watch_sessions_req("agent://observer"))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        // Reads the next event, failing loudly if the stream errored — that is
+        // the RESOURCE_EXHAUSTED this test exists to rule out.
+        async fn read(
+            stream: &mut <MacpServer as MacpRuntimeService>::WatchSessionsStream,
+            counts: &mut HashMap<String, usize>,
+        ) {
+            let resp = tokio::time::timeout(std::time::Duration::from_secs(10), stream.next())
+                .await
+                .expect("WatchSessions stalled")
+                .expect("stream ended early")
+                .expect("stream must not be terminated (RESOURCE_EXHAUSTED)");
+            let event = resp.event.expect("event present");
+            if event.event_type == session_lifecycle_event::EventType::Created as i32 {
+                let session = event.session.expect("Created always carries metadata");
+                *counts.entry(session.session_id).or_default() += 1;
+            }
+        }
+
+        // One read starts the sync and suspends the generator at its first
+        // yield, with 199 sessions still to emit.
+        read(&mut stream, &mut counts).await;
+
+        // 70 live starts — more than the bus capacity — spread across the sync,
+        // two reads per start so the consumer stays behind the producer without
+        // ever stopping.
+        let initiator = "agent://orchestrator";
+        let mut live = Vec::new();
+        for _ in 0..70 {
+            let sid = new_sid();
+            start_session(&server, initiator, &sid, vec![initiator.into()]).await;
+            live.push(sid);
+            read(&mut stream, &mut counts).await;
+            read(&mut stream, &mut counts).await;
+        }
+
+        // Drain the rest of the sync plus the buffered live events.
+        let expected = seeded.len() + live.len();
+        while counts.len() < expected {
+            read(&mut stream, &mut counts).await;
+        }
+
+        for id in seeded.iter().chain(live.iter()) {
+            assert_eq!(
+                counts.get(id).copied(),
+                Some(1),
+                "{id} was not emitted exactly once"
+            );
+        }
+        assert_eq!(counts.len(), expected, "unexpected extra sessions emitted");
     }
 }
