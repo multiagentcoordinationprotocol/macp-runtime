@@ -87,7 +87,7 @@ so phase 1's build is fully cold. 55Gi free. See the plan's Open question 2.
   (`cargo metadata --manifest-path integration_tests/Cargo.toml --locked`) run locally, exit 0.
   Proven rather than assumed: `benches/replay_bench.rs` compiles against criterion 0.8.2 with zero
   warnings — no bench source edited. Shipping: rides PR #153, CI running at head `c0a2250`.
-- 2026-09-10: **Phase 2 executed** (`7f55ccb`, branch `feat/policy-schema-conformance`, +1126/-15).
+- 2026-09-10: **Phase 2 executed** (`5ee294d`, branch `feat/policy-schema-conformance`, +1126/-15).
   Executor: Opus. Verifier: fresh Opus → **GAPS (0 BLOCKER, 5 SHOULD-FIX, 6 NICE-TO-HAVE)**, round 1.
   Fixer (Opus) dispatched for all 5 SHOULD-FIX + 4 NICE-TO-HAVE. Accumulating toward the G2 PR —
   verifier agreed with the plan's call and gave three reasons, the strongest being that shipping
@@ -134,7 +134,7 @@ so phase 1's build is fully cold. 55Gi free. See the plan's Open question 2.
   `INVALID_POLICY_DEFINITION:` prefix. `macp-control-plane/src/controllers/runtime.controller.ts:120`
   branches on that prefix to return HTTP 400 rather than 200, so those three now surface as 400.
   Almost certainly the intended alignment, but nobody had flagged it.
-- 2026-09-10: **Phase 2 DONE** — round 2 verdict **PASS** at `46de083`. Fixer closed all 5 SHOULD-FIX
+- 2026-09-10: **Phase 2 DONE** — round 2 verdict **PASS** at `11103d0`. Fixer closed all 5 SHOULD-FIX
   + 4 NICE-TO-HAVE; one instruction was reversed mid-flight on my call (see below). Verifier re-ran
   every gate independently: **719 tests passed** across 25 binaries, fmt/clippy clean, both lockfiles
   `--locked` green, tier-1 policy suite 24 passed. All 12 acceptance criteria met.
@@ -163,7 +163,7 @@ so phase 1's build is fully cold. 55Gi free. See the plan's Open question 2.
   was. The original 34-minute stall has one data point; if it recurs it deserves its own issue.
   Consequence for G2: `main` is now `537c079`, branch protection is `strict: true`, so
   `feat/policy-schema-conformance` (cut from `999890e`) must be rebased before its PR can merge.
-- 2026-09-11: **Phase 3 committed** (`23d0ad2`). Executor: Opus. **Verification was done in two parts**
+- 2026-09-11: **Phase 3 committed** (`b6abf39`). Executor: Opus. **Verification was done in two parts**
   because the machine suspended twice, killing the verifier agent mid-run both times (API error, not
   agent failure). Rather than keep respawning long agents into an unstable environment, the
   orchestrator verified the three highest-risk items directly — recorded here so the split is visible:
@@ -199,14 +199,14 @@ so phase 1's build is fully cold. 55Gi free. See the plan's Open question 2.
   Verifier ran `cargo semver-checks check-release` rather than reasoning: **exit 0, purely additive**
   (196 checks pass / 58 skip per crate). Confirmed **Phase 5 was NOT pre-empted** —
   `QuorumMode::effective_threshold` is still private, so Phase 5 still owes all five criteria.
-  Three doc gaps closed in `72c9e2c`: the undocumented `#[non_exhaustive]` omission on
+  Three doc gaps closed in `05ce8ab`: the undocumented `#[non_exhaustive]` omission on
   `EffectiveThreshold` (it departs from six documented precedents in the same crate, so the reason now
   sits in rustdoc plus an ASSUMPTIONS entry), an ASSUMPTIONS miscitation, and two hard-coded "v0.7.5"
   strings in `docs/policy.md` written before release-plz has computed the number.
   Plan file corrected in three places where execution proved it wrong: Phase 3's Files list (too
   narrow — the shared resolver legitimately required `macp-core` and the registry), Phase 3's
   criterion-6 premise, and two stale passages in Phase 5's text.
-- 2026-09-11: **Phase 4 DONE** (`3d73258`). Executor: Opus. Gate: **734 passed / 0 failed**, fmt and
+- 2026-09-11: **Phase 4 DONE** (`248b916`). Executor: Opus. Gate: **734 passed / 0 failed**, fmt and
   clippy clean. Diff purely additive (270 insertions, 0 deletions). All 6 criteria tested; every new
   test mutation-checked (removing `< 0.0` reddens exactly the three negative tests; removing `== 0.0`
   reddens only the zero test; removing the short-circuit reddens the guard test and both protected
@@ -224,7 +224,7 @@ so phase 1's build is fully cold. 55Gi free. See the plan's Open question 2.
   Three ASSUMPTIONS entries appended: the decline-direction trade, plus the two "record, do not fix"
   items (the `supermajority` silent 2/3 substitution, and `unanimous` passing vacuously on an empty
   participant set).
-- 2026-09-11: **Phase 5 DONE** (`e246db5`). Executor: Opus. Gate: **739 passed / 0 failed**, fmt,
+- 2026-09-11: **Phase 5 DONE** (`87e2cf4`). Executor: Opus. Gate: **739 passed / 0 failed**, fmt,
   clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` all clean, both lockfile guards pass.
   `cargo semver-checks check-release -p macp-core -p macp-runtime -p macp-modes`: exit 0, nothing
   flagged. Closes #146 — downstream can delete its mirror.
@@ -238,7 +238,7 @@ so phase 1's build is fully cold. 55Gi free. See the plan's Open question 2.
   `required=3`: ready at 0, ready at 1, **not** ready at 2, ready at 3) — which is precisely why the
   downstream reporter's binary search over `commitment_ready` returned a confident wrong answer and
   they had to use a linear sweep.
-- 2026-09-11: **Phases 6 + 14 DONE** (`0b4bfc5` docs/upgrade path, `072d159` tracked-record
+- 2026-09-11: **Phases 6 + 14 DONE** (`5ea31a7` docs/upgrade path, `282b970` tracked-record
   corrections). Gate: **739 passed / 0 failed** — unchanged, as doc-only work should be. fmt/clippy
   clean. **G2 is code-complete: phases 2, 3, 4, 5, 6, 14.**
   `docs/deployment.md:17-56` now carries "Upgrading into registration-time policy validation", the
@@ -265,3 +265,13 @@ so phase 1's build is fully cold. 55Gi free. See the plan's Open question 2.
   seven crates on crates.io) are unreachable without push/merge. One new gap recorded, out of scope:
   `MACP_POLICY_SCHEMAS_DIR` — which the CI parity test reads to find the spec schemas — is documented
   in no env table, so a contributor cannot run that test locally without reading the test body.
+- 2026-09-11: **Record maintenance — commit SHAs rewritten for the rebase.** Before PR #159 was
+  pushed, `feat/policy-schema-conformance` was rebased onto `537c079` (Phase 1's squash-merge on
+  `main`). Every SHA recorded in this file and in `plans/backlog-closeout-2026-09.md` during
+  execution therefore named a pre-rebase object that is now dangling and would 404 on GitHub after
+  merge — the exact record rot Phase 14 forbids. All eight were rewritten to their post-rebase
+  equivalents, each confirmed by matching commit subject across the rebase:
+  `7f55ccb`→`5ee294d`, `46de083`→`11103d0`, `23d0ad2`→`b6abf39`, `72c9e2c`→`05ce8ab`,
+  `3d73258`→`248b916`, `e246db5`→`87e2cf4`, `0b4bfc5`→`5ea31a7`, `072d159`→`282b970`.
+  `c0a2250` is deliberately left alone: it is Phase 1's commit on the dependabot branch, which
+  merged as `537c079`, and is foreign to this branch for the reason recorded above.

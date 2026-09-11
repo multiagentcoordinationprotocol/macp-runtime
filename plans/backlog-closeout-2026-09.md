@@ -102,7 +102,7 @@ external consumer (`zer07labs/seam-runtime`, pinning `macp-policy =0.6.0` and ca
 
 ### Phase 2 — registration-time schema conformance (G2)
 
-- **Status:** DONE — `7f55ccb` + `46de083` on `feat/policy-schema-conformance`, 2 verify rounds
+- **Status:** DONE — `5ee294d` + `11103d0` on `feat/policy-schema-conformance`, 2 verify rounds
   (GAPS 0-BLOCKER/5-SHOULD-FIX → PASS). Divergences from plan, all recorded in PROGRESS: criterion 9
   was not implementable as written (built-ins bypass `register` entirely, so the stated startup-crash
   hazard does not exist); criterion 11 rested on a false premise (`75.0` IS a legal JSON Schema
@@ -180,7 +180,7 @@ external consumer (`zer07labs/seam-runtime`, pinning `macp-policy =0.6.0` and ca
   reconciled with what is actually accepted.
 ### Phase 3 — unify the quorum threshold, ceil and floor-to-1 (G2)
 
-- **Status:** DONE — `23d0ad2`, 1 verify round (PASS; the critical items were verified by the
+- **Status:** DONE — `b6abf39`, 1 verify round (PASS; the critical items were verified by the
   orchestrator directly after the verifier agent died twice to machine sleep — see PROGRESS).
   **Divergence from plan, and it was an improvement:** the plan said "make the mode's rounding match
   the evaluator's". The executor instead extracted the arithmetic into a single shared resolver
@@ -246,12 +246,12 @@ external consumer (`zer07labs/seam-runtime`, pinning `macp-policy =0.6.0` and ca
 
 ### Phase 4 — the negative-weight evaluator hole (G2)
 
-- **Status:** DONE — `3d73258` (purely additive: 270 insertions, 0 deletions). Phase 3's doc gaps
-  closed alongside in `72c9e2c`. 734 tests passing (729 + 5). Every new test mutation-checked.
+- **Status:** DONE — `248b916` (purely additive: 270 insertions, 0 deletions). Phase 3's doc gaps
+  closed alongside in `05ce8ab`. 734 tests passing (729 + 5). Every new test mutation-checked.
   **The plan's DIAGNOSIS of this phase was wrong in two compounding ways, though the fix it
   prescribed was right** — see the correction block below. Criterion 5's safety rails
   (`evaluator.rs` `all_abstain_returns_no_votes`, `no_decisive_votes_blocks_a_positive_commitment_only_under_require_vote_quorum`)
-  confirmed **byte-identical** to `23d0ad2` by extracting both bodies from the old blob and diffing,
+  confirmed **byte-identical** to `b6abf39` by extracting both bodies from the old blob and diffing,
   and green. Mutation testing independently confirmed criterion 5's premise: removing the
   front-of-dispatch short-circuit reddens the guard test *and* both protected §4.1 tests.
 
@@ -326,7 +326,7 @@ external consumer (`zer07labs/seam-runtime`, pinning `macp-policy =0.6.0` and ca
   states the decline-direction delta explicitly.
 ### Phase 5 — publish the corrected effective threshold (G2)
 
-- **Status:** DONE — `e246db5`. 739 tests passing (734 + 5). `cargo semver-checks check-release` on
+- **Status:** DONE — `87e2cf4`. 739 tests passing (734 + 5). `cargo semver-checks check-release` on
   `macp-core`, `macp-runtime` and `macp-modes`: **exit 0, 196/196 each, "no semver update required"**.
   Every new assertion mutation-checked.
   **Divergence, and the plan's option set was incomplete:** the plan weighed three signatures, all
@@ -384,7 +384,7 @@ external consumer (`zer07labs/seam-runtime`, pinning `macp-policy =0.6.0` and ca
 
 ### Phase 6 — G2 docs, changelog, and release
 
-- **Status:** DONE (code+docs) — `0b4bfc5`. Criteria 2 and 3 (release-PR lockstep, seven crates on
+- **Status:** DONE (code+docs) — `5ea31a7`. Criteria 2 and 3 (release-PR lockstep, seven crates on
   crates.io) are post-merge and tracked in PROGRESS, not here. **Criterion 4 was corrected:** it said
   to close #145/#146/#148, but #148's reported defect 2 is the schema-legal zero-weight case deferred
   to spec #98 — closing it would advertise as fixed the precise scenario reported, so **#148 stays
@@ -656,7 +656,7 @@ external consumer (`zer07labs/seam-runtime`, pinning `macp-policy =0.6.0` and ca
 
 ### Phase 14 — tracked-file hygiene (G5, rides G2's PR)
 
-- **Status:** DONE — `072d159`. Four stale records corrected, each verified against the code first:
+- **Status:** DONE — `282b970`. Four stale records corrected, each verified against the code first:
   `follow_ons.md` items 7 and 8, the ballot-cardinality cross-repo plan's S1/S2/S3 statuses (now
   MERGED with shas), and the py-sdk plan's non-integer-threshold claim (false when written, true only
   as of this plan's Phase 2). `plans/defer/README.md`'s index updated to match.

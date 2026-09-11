@@ -305,8 +305,11 @@ pub enum EffectiveThreshold {
     /// per-participant quorum weights are not modelled), for any unrecognised
     /// `type`, and for a `percentage` over an empty participant set.
     ///
-    /// Registration refuses all three (`PolicyRegistry::validate_quorum_threshold`),
-    /// so reaching this needs a directly-constructed `PolicyDefinition`. It
+    /// Registration refuses the first two
+    /// (`PolicyRegistry::validate_quorum_threshold`), so reaching those needs
+    /// a directly-constructed `PolicyDefinition`; the empty-participant-set
+    /// case is not catchable there, since registration has no participant
+    /// count, and `QuorumMode::on_session_start` blocks it instead. It
     /// fails closed rather than silently reinterpreting the value as a raw
     /// approval count, which is what the old shared `_` arm did.
     Unsatisfiable,

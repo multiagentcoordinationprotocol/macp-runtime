@@ -71,7 +71,7 @@ The quorum mode tracks approval requests and ballots against a threshold. Its in
 The session-level form decodes the accepted request out of `session.mode_state` itself. Each layer of its return type answers exactly one question:
 
 - `Ok(Some(ApprovalThreshold::Approvals(n)))` -- `n` `Approve` ballots seal a positive commitment. Never zero; for a session whose request the mode accepted, never above the participant count. A session with no `threshold` rule (the common case) reports the payload's own `required_approvals` here, already resolved.
-- `Ok(Some(ApprovalThreshold::Unsatisfiable))` -- the bound policy admits no positive commitment at any approval count (`threshold.type: "weighted"`, an unrecognised type, or a `percentage` over an empty participant set). `RegisterPolicy` refuses all three, so this requires a directly constructed `PolicyDefinition`. Such a session seals **neither** outcome.
+- `Ok(Some(ApprovalThreshold::Unsatisfiable))` -- the bound policy admits no positive commitment at any approval count (`threshold.type: "weighted"`, an unrecognised type, or a `percentage` over an empty participant set). `RegisterPolicy` refuses the first two, so reaching them requires a directly constructed `PolicyDefinition`; the third cannot be caught at registration, which has no participant count, and is blocked by `QuorumMode::on_session_start` rejecting an empty participant set instead. Such a session seals **neither** outcome.
 - `Ok(None)` -- no `ApprovalRequest` has been accepted yet, so there is nothing to resolve. Deliberately distinct from `Unsatisfiable`: "not yet" and "never" are different answers.
 - `Err(MacpError::InvalidModeState)` -- `session.mode_state` is not decodable quorum state, so no answer would be honest.
 
@@ -86,7 +86,7 @@ The `counted > 0` guard stops a coordinator sealing a binding `quorum.rejected` 
 
 Because readiness fires on *either* outcome, it is **non-monotonic in the approval count**, and it depends on the whole ballot box rather than the approval count alone. On three participants with `required = 3`: three rejections (zero approvals) are ready, one approval plus two rejections is ready, two approvals with one participant yet to vote is *not* ready, three approvals are ready. Probing readiness to discover the threshold -- by binary search especially -- returns a confident wrong answer; call the accessors above instead.
 
-**Abstention handling**: When the policy specifies abstention rules, the effective voter count is adjusted accordingly. An abstention with `counts_toward_quorum: false` reduces the denominator for percentage-based thresholds.
+**Abstention handling**: `abstention.counts_toward_quorum` is **currently inert**. It is parsed into `AbstentionRules` and checked at registration, but no production path reads it: `QuorumThreshold::effective` divides a `percentage` threshold by the raw declared participant count, and Decision mode's `voting.quorum` percentage uses the same unadjusted denominator. An abstention therefore never shrinks a percentage denominator. The one abstention field that is read is `interpretation` -- and `evaluate_quorum_commitment` only *reports* it in the decision reasons rather than gating on it (see [Policy](policy.md#how-evaluation-works)). Separately, and not driven by these rules, Decision mode's *voting ratio* does exclude abstain ballots from its denominator, per RFC-MACP-0004.
 
 ## Built-in Extension: Multi-Round Mode
 
