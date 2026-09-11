@@ -3532,4 +3532,82 @@ mod tests {
             "unexpected extra lifecycle event: {extra:?}"
         );
     }
+
+    /// Criterion 3 end to end through the real handler, which the unit tests of
+    /// `drain_lifecycle_events` cannot reach: a client that reads slowly while
+    /// lifecycle events arrive throughout a long sync must not be killed with
+    /// `RESOURCE_EXHAUSTED`, and must still see every `Created` exactly once.
+    ///
+    /// The shape matters. The lifecycle bus holds 64 events, and far more than
+    /// that arrive here — but they arrive *interleaved* with the reads, which is
+    /// what a slow consumer actually looks like. The handler drains the bus
+    /// before fetching each session, so the receiver never falls 64 behind.
+    /// Delete that drain (or hoist it out of the loop) and the bus overruns
+    /// mid-sync, the first post-sync `recv()` returns `Lagged`, and this test
+    /// fails on the stream error.
+    #[tokio::test]
+    async fn watch_sessions_survives_a_slow_consumer_during_a_long_sync() {
+        use tokio_stream::StreamExt;
+
+        let (server, runtime) = make_server();
+        let seeded = seed_ids(200);
+        seed_sessions(&runtime, &seeded).await;
+
+        let mut stream = server
+            .watch_sessions(watch_sessions_req("agent://observer"))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        // Reads the next event, failing loudly if the stream errored — that is
+        // the RESOURCE_EXHAUSTED this test exists to rule out.
+        async fn read(
+            stream: &mut <MacpServer as MacpRuntimeService>::WatchSessionsStream,
+            counts: &mut HashMap<String, usize>,
+        ) {
+            let resp = tokio::time::timeout(std::time::Duration::from_secs(10), stream.next())
+                .await
+                .expect("WatchSessions stalled")
+                .expect("stream ended early")
+                .expect("stream must not be terminated (RESOURCE_EXHAUSTED)");
+            let event = resp.event.expect("event present");
+            if event.event_type == session_lifecycle_event::EventType::Created as i32 {
+                let session = event.session.expect("Created always carries metadata");
+                *counts.entry(session.session_id).or_default() += 1;
+            }
+        }
+
+        // One read starts the sync and suspends the generator at its first
+        // yield, with 199 sessions still to emit.
+        read(&mut stream, &mut counts).await;
+
+        // 70 live starts — more than the bus capacity — spread across the sync,
+        // two reads per start so the consumer stays behind the producer without
+        // ever stopping.
+        let initiator = "agent://orchestrator";
+        let mut live = Vec::new();
+        for _ in 0..70 {
+            let sid = new_sid();
+            start_session(&server, initiator, &sid, vec![initiator.into()]).await;
+            live.push(sid);
+            read(&mut stream, &mut counts).await;
+            read(&mut stream, &mut counts).await;
+        }
+
+        // Drain the rest of the sync plus the buffered live events.
+        let expected = seeded.len() + live.len();
+        while counts.len() < expected {
+            read(&mut stream, &mut counts).await;
+        }
+
+        for id in seeded.iter().chain(live.iter()) {
+            assert_eq!(
+                counts.get(id).copied(),
+                Some(1),
+                "{id} was not emitted exactly once"
+            );
+        }
+        assert_eq!(counts.len(), expected, "unexpected extra sessions emitted");
+    }
 }
