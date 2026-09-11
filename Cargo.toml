@@ -112,7 +112,7 @@ macp-proto = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "replay_bench"
