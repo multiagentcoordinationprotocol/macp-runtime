@@ -77,6 +77,17 @@ pub fn evaluate_decision_commitment(
 /// | `Failed`  | denied  | allowed iff the decline guard passes (`reject_count > 0`) |
 /// | `NoVotes` | denied iff quorum required | denied (no explicit reject) |
 ///
+/// **Negative weighted total:** a `weighted` round whose *cast* weights sum
+/// below zero is out-of-schema (`voting.weights[*]` is `minimum: 0`) and
+/// short-circuits to `Failed` before any ratio is computed, so it takes the
+/// `Failed` row above — an approve is denied, and a decline is allowed iff an
+/// explicit reject backs it. It previously reached the ratio, where the
+/// negative denominator inverted `ratio >= threshold` and could report
+/// `Passed`; that made this a *tightening* for an approve (`Passed` →
+/// `Failed`) and, on the same round, a `DENY` → `ALLOW` move for a decline. A
+/// total of exactly **zero** is schema-legal (`minimum: 0` is inclusive) and
+/// reports `NoVotes` — deferred to spec issue #98 item 3.
+///
 /// **Decline guard (universal reject-floor):** a decline backed by the vote
 /// outcome requires at least one *explicit* reject (`reject_count > 0`). A
 /// non-vote must never authorize a finalized adverse decline. The quorum gate
@@ -385,6 +396,26 @@ fn check_voting_algorithm(
         }
         "weighted" => {
             let (weighted_approve, weighted_total) = compute_weighted_votes(votes, weights);
+            // A *negative* total is out-of-schema: `voting.weights`'s
+            // `additionalProperties` is `{"type":"number","minimum":0}`
+            // (`decision-rules.schema.json`), so registration already refuses
+            // it and only a directly-constructed `PolicyDefinition` can get
+            // here. It used to escape the `== 0.0` guard below and reach the
+            // ratio, where a negative denominator *inverts*
+            // `ratio >= threshold`: `{fraud: 1.0, growth: -2.0}` with fraud
+            // REJECTing and growth APPROVing gave `-2.0 / -1.0 = 2.0`, so the
+            // round read as 200% approval and passed. Fail it instead — no
+            // ratio over a negative denominator is meaningful.
+            if weighted_total < 0.0 {
+                return VotingResult::Failed(format!(
+                    "weighted vote failed: the weights of the votes cast sum to {weighted_total:.1}; \
+                     voting.weights values must be >= 0, so no approval ratio is meaningful"
+                ));
+            }
+            // A total of exactly zero is schema-legal (`minimum: 0` is
+            // inclusive) and stays `NoVotes` — deliberately deferred to spec
+            // issue #98 item 3, not an oversight. See
+            // `zero_weighted_total_still_returns_no_votes`.
             if weighted_total == 0.0 {
                 return VotingResult::NoVotes;
             }
@@ -1003,6 +1034,249 @@ mod tests {
         ]);
         let result = evaluate_decision_commitment(&policy, &state, &participants());
         assert!(matches!(result, PolicyDecision::Deny { .. }));
+    }
+
+    // ── Weighted degenerate totals (negative fixed, zero deferred) ──
+    //
+    // Two arithmetic facts these tests turn on, both easy to get wrong:
+    //
+    // 1. `compute_weighted_votes` sums only the *cast* APPROVE/REJECT weights,
+    //    so the sign of the total is set by the weight map, not by which way
+    //    the ballots went. `{a: 1.0, b: -1.0}` with both agents voting sums to
+    //    exactly **0.0** — the schema-legal case that is deliberately still
+    //    `NoVotes`. A negative total needs the negative weight to outweigh the
+    //    positive ones, e.g. `{a: 1.0, b: -2.0}`.
+    // 2. A negative total was **never** reported as `NoVotes`: the guard it
+    //    escaped was `weighted_total == 0.0`, which a negative value does not
+    //    match. It fell straight through to `weighted_approve /
+    //    weighted_total`, and a negative denominator *inverts* the
+    //    `ratio >= threshold` comparison. That is the actual hole: with
+    //    `{fraud: 1.0, growth: -2.0}`, fraud REJECTing and growth APPROVing
+    //    gave `-2.0 / -1.0 = 2.0 >= 0.5` → `Passed`, i.e. a positive
+    //    commitment **allowed** on a reject from the only non-negative voter.
+    //    So the change is a tightening in the approve direction (`Passed` →
+    //    `Failed`) and, for the same round, a `DENY` → `ALLOW` move in the
+    //    decline direction (a decline over `Passed` was refused; over `Failed`
+    //    it is allowed by the reject-floor).
+
+    /// Drive `check_voting_algorithm` directly, so the `VotingResult` variant
+    /// itself is pinned rather than only the `Allow`/`Deny` it maps onto.
+    fn weighted_result(
+        weights: &[(&str, f64)],
+        vote_entries: Vec<(&str, &str, &str)>,
+    ) -> VotingResult {
+        let state = make_state_with_votes(vote_entries);
+        let weights: std::collections::HashMap<String, f64> = weights
+            .iter()
+            .map(|(voter, weight)| ((*voter).to_string(), *weight))
+            .collect();
+        check_voting_algorithm("weighted", 0.5, &weights, &state.votes, &participants())
+    }
+
+    fn negative_weighted_policy() -> PolicyDefinition {
+        make_policy(serde_json::json!({
+            "voting": {
+                "algorithm": "weighted",
+                "threshold": 0.5,
+                // Out-of-schema: `voting.weights[*]` is `minimum: 0`, so
+                // registration refuses this. Only a directly-constructed
+                // `PolicyDefinition` — which is how these tests build one —
+                // can reach the evaluator with it.
+                "weights": {
+                    "agent://fraud": 1.0,
+                    "agent://growth": -2.0
+                }
+            }
+        }))
+    }
+
+    /// The round that exposes the inverted comparison: the only non-negative
+    /// voter REJECTs and the negative-weight voter APPROVEs, so
+    /// `weighted_approve / weighted_total` was `-2.0 / -1.0 = 2.0`.
+    fn inverted_ratio_votes() -> Vec<(&'static str, &'static str, &'static str)> {
+        vec![
+            ("p1", "agent://fraud", "REJECT"),
+            ("p1", "agent://growth", "APPROVE"),
+        ]
+    }
+
+    #[test]
+    fn negative_weighted_total_fails_the_round_instead_of_inverting_the_comparison() {
+        // The hole: a negative denominator flipped `ratio >= threshold`, so
+        // this round read as 200% weighted approval and `Passed` — a positive
+        // commitment allowed over a reject from the only voter whose weight is
+        // in-schema. A negative total admits no meaningful ratio at all.
+        assert!(matches!(
+            weighted_result(
+                &[("agent://fraud", 1.0), ("agent://growth", -2.0)],
+                inverted_ratio_votes(),
+            ),
+            VotingResult::Failed(_)
+        ));
+        let state = make_state_with_votes(inverted_ratio_votes());
+        assert!(
+            matches!(
+                evaluate_decision_commitment(&negative_weighted_policy(), &state, &participants()),
+                PolicyDecision::Deny { .. }
+            ),
+            "a negative weighted total must not seal a positive commitment"
+        );
+
+        // The mirror round — fraud APPROVEs, growth REJECTs — already failed
+        // before this change (`1.0 / -1.0 = -1.0 < 0.5`), but for the wrong
+        // reason. Pin it too, so the arm is `Failed` for every negative total
+        // rather than only for the ones the inverted ratio happened to reject.
+        assert!(matches!(
+            weighted_result(
+                &[("agent://fraud", 1.0), ("agent://growth", -2.0)],
+                vec![
+                    ("p1", "agent://fraud", "APPROVE"),
+                    ("p1", "agent://growth", "REJECT"),
+                ],
+            ),
+            VotingResult::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn negative_weighted_total_allows_a_decline_backed_by_an_explicit_reject() {
+        // The decline-direction delta this change deliberately accepts, and
+        // the reason it is not purely a tightening. On the same round: as
+        // `Passed` the decline was refused ("vote passed the approval
+        // threshold but a decline was requested"); as `Failed` it is allowed,
+        // because the universal reject-floor is satisfied by fraud's explicit
+        // REJECT. The round is genuinely decided and an explicit reject backs
+        // the decline, which is the right outcome — but the direction of
+        // change is DENY -> ALLOW.
+        let state = make_state_with_votes(inverted_ratio_votes());
+        assert!(matches!(
+            decline(&negative_weighted_policy(), &state, &participants()),
+            PolicyDecision::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn negative_weighted_total_still_denies_a_decline_with_no_explicit_reject() {
+        // Same negative total, reached with every ballot an APPROVE, so
+        // `reject_count == 0`. The reject-floor holds: participation that is
+        // merely contradictory must never finalize an adverse decline. The
+        // decline was refused before this change too (`-1.0 / -1.0 = 1.0`
+        // read as `Passed`), so only the `VotingResult` moves here — which is
+        // exactly why the variant is asserted directly and not just the
+        // `PolicyDecision`.
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "APPROVE"),
+            ("p1", "agent://growth", "APPROVE"),
+        ]);
+        assert!(matches!(
+            weighted_result(
+                &[("agent://fraud", 1.0), ("agent://growth", -2.0)],
+                vec![
+                    ("p1", "agent://fraud", "APPROVE"),
+                    ("p1", "agent://growth", "APPROVE"),
+                ],
+            ),
+            VotingResult::Failed(_)
+        ));
+        assert!(matches!(
+            decline(&negative_weighted_policy(), &state, &participants()),
+            PolicyDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn zero_weighted_total_still_returns_no_votes() {
+        // DEFERRED, NOT AN OVERSIGHT. `voting.weights[*]` is `minimum: 0`
+        // *inclusive*, so an all-zero weight map is schema-legal and what it
+        // ought to mean is spec issue #98 item 3. Only the out-of-schema
+        // negative case was changed. This test exists so a later phase cannot
+        // close the deferred case by accident.
+        assert!(matches!(
+            weighted_result(
+                &[("agent://fraud", 0.0), ("agent://growth", 0.0)],
+                vec![
+                    ("p1", "agent://fraud", "APPROVE"),
+                    ("p1", "agent://growth", "REJECT"),
+                ],
+            ),
+            VotingResult::NoVotes
+        ));
+
+        // The sharp end of the same claim: `NoVotes` denies a decline
+        // unconditionally where `Failed` would allow it on the explicit reject
+        // above, so this asserts the deferral is real and not just a variant
+        // name.
+        let policy = make_policy(serde_json::json!({
+            "voting": {
+                "algorithm": "weighted",
+                "threshold": 0.5,
+                "weights": { "agent://fraud": 0.0, "agent://growth": 0.0 }
+            }
+        }));
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "APPROVE"),
+            ("p1", "agent://growth", "REJECT"),
+        ]);
+        assert!(matches!(
+            decline(&policy, &state, &participants()),
+            PolicyDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn non_abstain_short_circuit_precedes_algorithm_dispatch() {
+        // Regression guard for `check_voting_algorithm`'s front-of-dispatch
+        // `non_abstain_total == 0 => NoVotes` return. RFC-MACP-0012 §4.1's
+        // "no decisive votes" contract rests on it, and revisiting it is
+        // blocked on spec issue #98 — so no phase may remove it quietly.
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "ABSTAIN"),
+            ("p1", "agent://growth", "ABSTAIN"),
+            ("p1", "agent://compliance", "ABSTAIN"),
+        ]);
+        let no_weights = std::collections::HashMap::new();
+
+        // An algorithm name nothing recognises: the `_` arm returns
+        // `Failed("unknown voting algorithm ...")`. Seeing `NoVotes` is proof
+        // the return happened *before* the match on `algorithm`, not inside
+        // some arm of it.
+        assert!(
+            matches!(
+                check_voting_algorithm(
+                    "no-such-algorithm",
+                    0.5,
+                    &no_weights,
+                    &state.votes,
+                    &participants()
+                ),
+                VotingResult::NoVotes
+            ),
+            "the zero-non-abstain short-circuit must run in front of algorithm dispatch"
+        );
+
+        // And no dispatched algorithm may be reached with an empty tally —
+        // `unanimous`, for one, would otherwise report `Failed` here.
+        for algorithm in [
+            "majority",
+            "supermajority",
+            "unanimous",
+            "weighted",
+            "plurality",
+        ] {
+            assert!(
+                matches!(
+                    check_voting_algorithm(
+                        algorithm,
+                        0.5,
+                        &no_weights,
+                        &state.votes,
+                        &participants()
+                    ),
+                    VotingResult::NoVotes
+                ),
+                "{algorithm} must not be dispatched with zero non-abstain votes"
+            );
+        }
     }
 
     // ── Voting algorithm: plurality ─────────────────────────────────
