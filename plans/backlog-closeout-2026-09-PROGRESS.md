@@ -429,3 +429,94 @@ One expected-but-startling diff the executor was warned about and confirmed beni
 `conformance_loader.rs:516` compares by `assert_json_contains` (subset), not equality.
 
 **Next:** Phase 10 — suspension-correct timing. `rev2_elapsed_ms` is the exact seam it edits.
+
+---
+
+## Phase 10 — suspension-correct timing (G4) · 2026-09-11 · PASS after 1 gap round
+
+Commits `04d267d` (the change) + `810a0c3` (gap closure) on `feat/handoff-implicit-accept-rev2`,
+not pushed — **accumulating toward G4's single PR, deliberately**. Executor Opus, verifier fresh
+Opus, fixer fresh Opus, closure re-verify fresh Opus. Round 1 = GAPS (1 BLOCKER, 3 SHOULD-FIX,
+4 NICE-TO-HAVE); round 2 = PASS, all four in-scope items closed with no defects introduced.
+
+Gate, independently reproduced by the closure verifier: **766 passed / 0 failed** (758 → 763 → 766),
+tier-1 119 + 8 JWT + 5 tier-2 exactly at baseline, fmt/clippy/rustdoc clean, both lockfiles
+byte-unmoved, no mutation artifacts or stray backups left behind.
+
+### The change
+
+`rev2_elapsed_ms` — the seam Phase 9 left — became
+`(now - offered_at) - max(0, accumulated_suspended - snapshot_at_offer)`, both subtractions
+saturating. The rev `<= 1` arm is byte-identical to before. Verified by hand against a
+two-pause timeline: offer at 1000, pauses banking 250 and 170, commit at 1510 → 90 ms unsuspended
+against a 100 ms timeout, so rev 2 rejects where rev 1's raw 510 ms accepts.
+
+### Plan errors: two, both substantive, both mine
+
+**Error #9 — acceptance criterion 3 was undischargeable as written**, and for a deeper reason than
+the executor found. It required `assert_replay_equivalence` to pass "for a rev-1 history containing
+an implicit accept". That function (`tests/conformance_loader.rs:356`) has exactly one call site
+(`:520`), inside the vendored-fixture loop; no fixture exercises an implicit accept; and
+`tests/conformance/` is vendored and byte-diffed by the `conformance-oracle` job so one cannot be
+added here. The executor found all that. The verifier found the part that actually settles it:
+fixtures run through the live `Runtime`, and `Session::builder` unconditionally stamps
+`CURRENT_SEMANTICS_REV` with no override — so **a rev-1 history is not expressible in that harness
+at all**, implicit accepts aside. The criterion was impossible the moment it was written.
+Discharged by intent instead, through a differential legacy-log fixture on the real
+`replay_session` path (`src/replay.rs:1036,1063`).
+
+**Error #10 — the plan named the wrong guard for its own hard edge case.** It warned that changing
+`outcome_reason` "breaks byte-exact replay of rev-1 histories, which `assert_replay_equivalence`
+compares byte-for-byte." Wrong twice: that function is never reached with an implicit accept, **and**
+the thing that actually pins the string is `assert_implicitly_accepted` (`src/replay.rs:920-927`),
+which the plan never mentions. The verifier's mutation (one trailing space on the string) killed six
+tests and confirmed which guard fires.
+
+**A correction in the plan's favour, worth recording because I had accepted the executor's claim.**
+The executor reported the plan's `handoff.rs:298`/`:302` line cites as stale. The verifier checked
+`882beeb` — the commit the plan was written against — and found line 298 was exactly the raw
+`>= timeout` comparison and line 302 exactly the `outcome_reason` assignment. **Correct when
+written**, displaced later by Phase 9. Normal intra-plan drift, not a drafting error. So the count is
+two, not three.
+
+### The BLOCKER, which was not about Phase 10 at all
+
+`RUSTC_WRAPPER="" cargo semver-checks check-release --workspace` fails with
+`constructible_struct_adds_field` on `HandoffOfferRecord.suspended_ms_at_offer` — **Phase 9's**
+field, recorded nowhere until now. `release-plz.toml` sets `semver_check = true`, so it blocks the
+release PR, and one `version_group` moves all seven crates. I verified it directly rather than
+trusting the report. No route back to 0.7.x exists: `#[non_exhaustive]`, privatising the struct, and
+relocating the state are all equally breaking, and Phase 11 needs another field on the same struct.
+Repo owner's call, logged as `DECISIONS.md` **D7**: take **0.8.0** and spend the break on
+`#[non_exhaustive]`, matching the pattern `Session`, `MacpError`, `ModeResponse` and
+`PolicyFileOutcome` already follow. Lands in Phase 13 as its own commit.
+
+### The finding that grew on inspection
+
+The executor nominated the `make_internal_entry` double-`Utc::now()` skew as a follow-on, calling it
+sub-millisecond and pre-existing. The verifier agreed on magnitude but improved the argument — there
+is no `.await`, no lock acquisition and no I/O between the two reads, and the two errors **cancel**,
+being a difference of identically-shaped windows rather than a sum — then raised the consequence
+sharply: within 1 ms of the deadline a live-`Resolved` session **fails replay entirely**,
+`src/main.rs:385` logs "skipping", and the session silently vanishes on restart. One-line fix.
+Folded into Phase 11 (`follow_ons.md` item 10), which already touches `runtime.rs` and which makes
+this value gate a *synthesized log entry* rather than only an in-memory decision.
+
+### Honest notes on test strength
+
+The multi-suspension coverage added in the gap round is two tests, and **only one is a behavioural
+guard**. The fixer self-reported this and the closure verifier reproduced it: with the state
+assertions stripped and `resume` mutated, `rev2_handoff_history_accepts_on_unsuspended_time_across_two_pauses`
+still **passes** — more unsuspended time only makes an accept more likely — while
+`rev2_handoff_history_subtracts_every_suspension_pair` fails. The load-bearing multi-pause guard is
+the differential one; the other pins fixture state. Recorded so nobody later mistakes which is which.
+
+The requested mutation also could not be written where I asked for it: "subtract the suspension term
+once per session rather than accumulated" has no expression inside `rev2_elapsed_ms`, which reads one
+scalar and subtracts it once. The fixer relocated it to `Session::resume`'s `saturating_add`
+(`= banked`), which is the semantically equivalent single-pair-invisible mutation and in fact
+stronger, since it also breaks the cap check.
+
+**Next:** Phase 11, replanned by Fable at the user's instruction (reversing this run's
+no-Fable-at-any-tier constraint) because it is the one genuine one-way door. Its `Incoming` decision
+is now settled by RFC-MACP-0010 §5.1(2)'s explicit §7.5 analogy rather than by inference.
