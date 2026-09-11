@@ -275,3 +275,64 @@ so phase 1's build is fully cold. 55Gi free. See the plan's Open question 2.
   `3d73258`→`248b916`, `e246db5`→`87e2cf4`, `0b4bfc5`→`5ea31a7`, `072d159`→`282b970`.
   `c0a2250` is deliberately left alone: it is Phase 1's commit on the dependabot branch, which
   merged as `537c079`, and is foreign to this branch for the reason recorded above.
+
+## G2 SHIPPED — 2026-09-11
+
+**PR #159 merged as `298c0f4`.** All 15 CI checks green at `c5ad22d` (state CLEAN). Phases 2, 3, 4, 5,
+6, 14 in one PR, as the release-group table specified. release-plz run `34575179612` in flight on the
+merge commit; the release PR and the crates.io upload follow from it (Phase 6 criteria 2 and 3, which
+were unreachable before merge).
+
+**Issues, handled honestly rather than uniformly:**
+- **#145 closed** — threshold unification, registration refusal, wildcard closure, and the
+  ApprovalRequest domain guard. Comment records that our first planned fix (a decline gate) would
+  have been wrong, and why.
+- **#146 closed** — public accessor shipped; comment explains why the `Result` layer is load-bearing
+  and carries the non-monotonicity counterexample the reporter's linear-sweep note earned.
+- **#148 left OPEN** — deliberate, and an override of the executing agent's recommendation to close.
+  The reporter's own reproduction (`{a: 1.0, b: -1.0}`, both voting) sums to **exactly zero**, the
+  schema-legal case deferred to spec #98 item 3. Closing it would advertise as fixed the precise
+  scenario reported. Both fixed halves are named in the comment, with the residue and its tracker.
+- **#147, #149 left open** — normatively specified / schema-legal, filed upstream as spec #98 items 1
+  and 2. #147's comment corrects the report's "no test covers it" (one does, and the behaviour is
+  pinned in fourteen places); #149's corrects "the registry never inspects threshold at all" (the
+  supermajority bound already existed and is the fix shape to generalize).
+
+**Pre-merge correction worth keeping, because it was my error twice over.** The cumulative gate found
+the "This is not data loss" paragraph I had written into `docs/deployment.md` was wrong in the
+dangerous direction: it scoped the non-replaying state to legacy *policies* (false — registration has
+no participant count, so a policy registered today reaches it), and claimed such sessions "were
+already broken" (false for the `weighted`/unknown-type class, which the old fallback arm read as a raw
+approval count, making it satisfiable and legitimately positive-sealing). The reasoning originated in
+an earlier PROGRESS note of mine and propagated into shipped docs unchallenged.
+Fixing it surfaced something neither the gate nor I had: **on the registry path that state is
+unreachable** — the `MACP_POLICIES_DIR` preload refuses `weighted` and is fatal *before* recovery. The
+path that makes it real is the **checkpoint**: `PersistedSession` stores `policy_definition` inline and
+`try_replay_from_checkpoint` restores it verbatim (its `policy_registry` parameter is literally
+`_policy_registry`, unused), so an old definition outlives a registry that would refuse it today.
+Without that, the warning would have been unreachable for the class the correction exists to defend —
+i.e. the correction would have been wrong in a new way. Also corrected two over-reaches in my own
+framing and found the same false "refuses all three" claim in a third location I had not named.
+
+**Record hygiene:** the branch was rebased onto `537c079` before pushing, so the eight commit SHAs
+recorded during execution became dangling pre-rebase objects that would 404 on GitHub. All eight were
+re-verified by commit subject and rewritten to their post-rebase equivalents (`5ee294d 11103d0
+b6abf39 05ce8ab 248b916 87e2cf4 5ea31a7 282b970`); `c0a2250` is legitimately foreign (dependabot,
+squash-merged as `537c079`).
+
+**Deferred to a follow-up, not lost** — six NICE-TO-HAVEs from the cumulative gate: the evaluator's
+`Unsatisfiable` allow-reason pairing for a negative outcome, the `counted > 0` comment citing a
+justifying path that replay actually forecloses, a `From<EffectiveThreshold> for ApprovalThreshold`
+impl, `docs/policy.md`'s omission of the NaN refusals, `docs/API.md`'s `policy.std.` wording, and the
+nine `UNCONFIRMED` ASSUMPTIONS entries this plan added (base had zero) which `/reconcile` has not yet
+seen. Also still open: `MACP_POLICY_SCHEMAS_DIR` is documented in no env table, so a contributor
+cannot run the CI parity test locally without reading the test body.
+
+**Scorecard on the plan itself: six of six G2 phases found a real error in it.** Two changed the
+shipped design (the shared resolver; Phase 5's `Result` layer). Two were premise errors that would
+have produced the wrong fix (the zero-ballot decline is permitted by RFC-MACP-0011 §4a; the
+weighted-negative defect was an inverted ratio, not "reports no votes"). One found a criterion that
+was literally unimplementable, and one found two acceptance criteria that were **vacuous** — they
+passed against the unfixed code. That last is the fifth recorded instance in this repo of a green
+signal not measuring what it appeared to measure, and it was caught only because new assertions were
+mutation-checked rather than trusted.
