@@ -412,7 +412,17 @@ external consumer (`zer07labs/seam-runtime`, pinning `macp-policy =0.6.0` and ca
 
 ### Phase 7 — bound the `watch_sessions` snapshot (G3)
 
-- **Status:** TODO
+- **Status:** DONE — `a9f284c` + `68fdaed` + `8817799` + `ba6eb41`, 1 verify round (GAPS, no blockers).
+  **Shipped design differs from the plan's, and the plan's was the worse one.** The plan specified an
+  id-list snapshot; the gate showed the `Arc<Mutex<Session>>` handle snapshot is strictly better — it
+  is a TRUE snapshot (so criterion 5's edge case is vacuous, not documented) and the tighter memory
+  bound: ~8 B/session of shared, conditional retention versus ~64-72 B/session paid unconditionally
+  and duplicated between `ids` and `synced`. At 10k sessions × 128 streams, ~10 MB + at most one
+  registry pinned, versus ~92 MB. The orchestrator initially rejected this on the belief that pinning
+  Arcs lets a slow client hold the registry's worth of sessions; both premises were wrong — the Arcs
+  are shared, and eviction removes the map entry unconditionally (only *deallocation* defers).
+  Net simplifying: `watch_sync.rs` 400→331 lines, public surface 5→3 items, the batch abstraction and
+  the anomaly documentation deleted rather than fixed.
 - **Delivers:** the initial sync holds one `Session` resident at a time instead of deep-cloning the
   whole registry.
 - **Depends on:** Phase 6 merged. (The plan originally gated this on G2 being *released*; that was a
@@ -471,7 +481,13 @@ external consumer (`zer07labs/seam-runtime`, pinning `macp-policy =0.6.0` and ca
   broadcast path and reads as if it covers the snapshot; amend it.
 ### Phase 8 — G3 close-out (G3)
 
-- **Status:** TODO
+- **Status:** DONE — folded into Phase 7's PR per the verify gate's call (`ba6eb41`). Its env-binding
+  criterion was void (Phase 7's redesign removed the env var it existed to test) and its docs
+  criterion was already delivered, so what remained was the own-server tier-1 test. That test
+  *replaced* Phase 7's weaker shared-server variant rather than joining it: on a shared runtime the
+  only assertable property is "each of mine appears once", which cannot assert the sync emits
+  **nothing else** — the other half of the criterion. A private runtime starts empty, so
+  `created_counts.len() == 60` now fails on a foreign or duplicated `Created`.
 - **Delivers:** G3's docs and its regression coverage.
 - **Depends on:** Phase 7.
 - **Files:** `docs/API.md`, `integration_tests/tests/tier1_protocol/`.

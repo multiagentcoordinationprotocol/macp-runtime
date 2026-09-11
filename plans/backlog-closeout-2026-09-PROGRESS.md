@@ -336,3 +336,49 @@ was literally unimplementable, and one found two acceptance criteria that were *
 passed against the unfixed code. That last is the fifth recorded instance in this repo of a green
 signal not measuring what it appeared to measure, and it was caught only because new assertions were
 mutation-checked rather than trusted.
+
+## G3 — phases 7 + 8
+
+- 2026-09-11: **Phase 7 executed** (`a9f284c`), verified → GAPS (0 BLOCKER, 3 SHOULD-FIX,
+  2 NICE-TO-HAVE), closed in `68fdaed` + `8817799` + `ba6eb41`. **Phase 8 folded in** per the gate.
+  Gate: **751 workspace** (from 750), **119 tier-1 + 8 JWT + 5 tier-2**, fmt/clippy/rustdoc clean,
+  both lockfiles unmoved. Net source 389 insertions / 269 deletions — this round *removed* code.
+
+  **The orchestrator was overruled, correctly.** The executor proposed the Arc-handle snapshot and
+  flagged it as strictly better; I rejected it, reasoning that pinning Arcs would let a slow client
+  hold the full registry's worth of `Session` allocations. Both premises were wrong, and the gate
+  demonstrated it with numbers: `SharedSession = Arc<Mutex<Session>>`, so 128 streams share one
+  allocation per session and retention is bounded by **registry size, not 128×N**; and both eviction
+  paths `remove()` unconditionally under the write lock, so pinning never blocks eviction — only
+  deallocation defers to the last Arc drop. Meanwhile the id design paid ~64-72 B/session
+  **unconditionally and twice** (`ids` and `synced` holding the same strings) against the Arc's ~8 B
+  conditional on mid-stream eviction. The design I rejected was both the tighter bound and the
+  simpler one, and taking it made criterion 5's edge case vacuous — deleting the anomaly handling,
+  its test, the batch abstraction, and the doc paragraph rather than fixing them.
+
+  **The plan was right where the executor said it was wrong.** Its report argued "bound `synced` or
+  document the growth" was a false choice and only documenting was possible, citing the real
+  insert-before-publish ordering (`runtime.rs:512` vs `:593`). That ordering only forbids *pruning*.
+  There is exactly **one** publisher of `Created` in the tree, so a live `Created` can never repeat —
+  making the live-path `synced.insert` dead weight and the sole cause of the growth. `insert` →
+  `contains` bounds it with no pruning; the gate ran it green against the exactly-once tier-1 test the
+  executor predicted it would break, and the executor then retracted both claims in writing.
+
+  **A doc error that inverted the risk**, and a second instance of it: the anomaly paragraph named
+  `MACP_SESSION_DISK_RETENTION_SECS` (default **0, disabled**) where the mechanism is
+  `MACP_SESSION_RETENTION_SECS` (default **3600**), so it read as "cannot happen in a default
+  deployment" when the 1-hour eviction was exactly the live path. Fixing it surfaced that
+  `docs/deployment.md` was **missing the disk var entirely** — same shape, second file. Both now state
+  both vars, both defaults, and that the age is measured from session **start**, not resolution.
+
+  **Test-shape correction worth keeping:** the gate proposed proving the interleaved drain by bursting
+  70 events while nothing polls. That would have tested the bus, not the drain — a burst of 70 into a
+  64-capacity bus lags the receiver before any drain can run. The shipped test interleaves events with
+  reads; mutation-checked red (`fell behind by 6 events` = 70 − 64).
+
+  **Three honest costs of the Arc design, recorded rather than glossed:** `remaining()` survives only
+  as an allocation hint for `synced`'s `with_capacity`; the residency bound is now a *type-level*
+  property (no `Session` field on `InitialSync`) so a future refactor reintroducing one would be caught
+  by review rather than a red test, with the invariant stated in the surviving test's doc comment; and
+  `synced`'s boundedness has no observable signal through the gRPC surface, resting on the
+  single-publisher argument plus the exactly-once contract it must not break.
