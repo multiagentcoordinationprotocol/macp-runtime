@@ -83,34 +83,64 @@ impl HandoffMode {
     /// Elapsed time an outstanding offer's `implicit_accept_timeout_ms` is
     /// measured against, selected by the session's semantics revision.
     ///
-    /// Rev <= 1 keeps the raw difference verbatim, so legacy histories replay
-    /// to the outcome they were accepted with. Rev >= 2 has its own branch
-    /// because the suspension-corrected deadline of RFC-MACP-0010 §5.1(1)
-    /// lands there; see [`Self::rev2_elapsed_ms`], which is deliberately
-    /// identical to the legacy arithmetic in this revision of the code.
+    /// Rev <= 1 keeps the raw difference verbatim — suspended time included —
+    /// so legacy histories replay to the outcome they were accepted with, even
+    /// though that outcome violates RFC-MACP-0010 §5.1(1). The correction is
+    /// deliberately gated rather than applied to every revision: a history is
+    /// only replayable under the semantics it was accepted with, and
+    /// retroactively un-accepting an offer a rev-1 session already committed on
+    /// would make the log unreplayable. Rev >= 2 gets the corrected deadline;
+    /// see [`Self::rev2_elapsed_ms`].
     fn implicit_accept_elapsed_ms(
         session: &Session,
         offer: &HandoffOfferRecord,
         now_ms: i64,
     ) -> i64 {
         if session.semantics_rev >= 2 {
-            Self::rev2_elapsed_ms(offer, now_ms)
+            Self::rev2_elapsed_ms(session, offer, now_ms)
         } else {
             now_ms - offer.offered_at_ms
         }
     }
 
-    /// The rev >= 2 elapsed computation.
+    /// The rev >= 2 elapsed computation: time since the offer, minus the time
+    /// the session spent `Suspended` within that window (RFC-MACP-0010
+    /// §5.1(1) — a suspended session must not tick toward the implicit-accept
+    /// deadline).
     ///
-    /// Today this is the raw difference — byte-for-byte the same outcome as
-    /// rev 1 — so introducing the revision changes nothing observable. The
-    /// suspension-correction term
-    /// (`session.accumulated_suspended_ms - offer.suspended_ms_at_offer`,
-    /// RFC-MACP-0010 §5.1(1)) is subtracted here by the change that takes the
-    /// revision live; keeping that a separate commit keeps any regression
-    /// bisectable.
-    fn rev2_elapsed_ms(offer: &HandoffOfferRecord, now_ms: i64) -> i64 {
-        now_ms - offer.offered_at_ms
+    /// Both terms are on the recorded timeline — `offered_at_ms` is the
+    /// acceptance clock, and `accumulated_suspended_ms` is banked from the
+    /// recorded `received_at_ms` of the suspend/resume entries — so the result
+    /// is replay-deterministic.
+    ///
+    /// `accumulated_suspended_ms` alone is complete here: there is
+    /// deliberately **no** in-flight `now_ms - suspended_at_ms` term, because
+    /// this code only ever runs while the session is `Open`, so every pause
+    /// that has occurred is already banked. `Session::resume` is the only
+    /// writer of `accumulated_suspended_ms`, and both paths that reach this
+    /// function refuse to dispatch a message to a non-`Open` session:
+    /// `crate::step::check_preconditions` returns `SessionNotOpen` before the
+    /// kernel calls `on_message_at`, and replay skips Incoming entries whose
+    /// session is not `Open` (`src/replay.rs`). An in-flight term would
+    /// therefore be untestable dead code — see `Session::suspend_cap_exceeded`
+    /// for the shape it must take if a *future* caller can observe a suspended
+    /// session (e.g. an eager sweep running outside the message path).
+    ///
+    /// Arithmetic is saturating and the suspension term is floored at zero.
+    /// The floor cannot trigger from runtime-written state — the snapshot is
+    /// taken from the same monotonically non-decreasing counter this reads —
+    /// but if corrupted or hand-edited persisted state ever made the term
+    /// negative, adding it back would *inflate* elapsed time and implicitly
+    /// accept an offer the target never accepted. Flooring degrades to the
+    /// rev-1 arithmetic instead, which is the conservative direction.
+    fn rev2_elapsed_ms(session: &Session, offer: &HandoffOfferRecord, now_ms: i64) -> i64 {
+        let suspended_since_offer = session
+            .accumulated_suspended_ms
+            .saturating_sub(offer.suspended_ms_at_offer)
+            .max(0);
+        now_ms
+            .saturating_sub(offer.offered_at_ms)
+            .saturating_sub(suspended_since_offer)
     }
 
     fn commitment_ready(state: &HandoffState) -> bool {
@@ -1468,61 +1498,208 @@ mod tests {
         );
     }
 
-    /// Revision 2 is behavior-neutral scaffolding: with identical inputs —
-    /// including a suspension accrued after the offer, the case the
-    /// suspension-corrected deadline will eventually change — rev 1 and rev 2
-    /// reach the same outcome. When the correction goes live this test is the
-    /// canary: its suspended half is expected to diverge then, and only then.
-    #[test]
-    fn rev2_implicit_accept_is_identical_to_rev1_today() {
+    /// The offer time both revision tests anchor on.
+    const OFFER_TIME_MS: i64 = 1_000;
+
+    /// Drive one `offer -> [suspend/resume] -> Commitment` sequence under a
+    /// chosen semantics revision and report whether the commitment resolved
+    /// the session. Under [`auto_accept_policy`] the target never accepts
+    /// explicitly, so `Ok(true)` can only mean the offer was implicitly
+    /// accepted; `Err("InvalidPayload")` is the no-accepted-offer rejection.
+    ///
+    /// Both envelope timestamps are pinned to the acceptance clocks so the two
+    /// clocks agree — that isolates the suspension term as the only thing the
+    /// revision can change, and lets rev 0 (envelope clock) be driven here
+    /// too.
+    ///
+    /// The pause runs through the real `Session::suspend`/`resume` pair, so
+    /// `accumulated_suspended_ms` is banked exactly the way the kernel
+    /// (`RuntimeCore::resume_session`) and replay (`replay_entry`'s
+    /// `SessionResume` arm) bank it.
+    fn implicit_accept_outcome(
+        rev: u32,
+        suspended_after_offer_ms: i64,
+        commit_at: i64,
+    ) -> Result<bool, String> {
         let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
-        let offer_time = 1_000i64;
+        let mut session = base_session();
+        session.semantics_rev = rev;
+        session.policy_definition = Some(auto_accept_policy());
+        let result = mode
+            .on_session_start(&session, &env("owner", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
 
-        // (rev, suspended-after-offer ms) -> outcome
-        let outcome = |rev: u32, suspended_after_offer_ms: i64, commit_at: i64| {
-            let mut session = base_session();
-            session.semantics_rev = rev;
-            session.policy_definition = Some(auto_accept_policy());
-            let result = mode
-                .on_session_start(&session, &env("owner", "SessionStart", vec![]))
+        let mut offer_env = env("owner", "HandoffOffer", make_offer("h1", "target"));
+        offer_env.timestamp_unix_ms = OFFER_TIME_MS;
+        let offer_ctx = macp_core::mode::MessageContext::new(OFFER_TIME_MS);
+        let result = mode
+            .on_message_at(&session, &offer_env, &offer_ctx)
+            .unwrap();
+        apply(&mut session, result);
+
+        // The pause happens between the offer and the commitment. Messages are
+        // refused while suspended (`crate::step::check_preconditions`), so by
+        // the time the commitment is processed the pause is always banked and
+        // `suspended_at_ms` is back to `None`.
+        if suspended_after_offer_ms > 0 {
+            session.suspend(OFFER_TIME_MS).unwrap();
+            session
+                .resume(OFFER_TIME_MS + suspended_after_offer_ms)
                 .unwrap();
-            apply(&mut session, result);
+            assert_eq!(session.accumulated_suspended_ms, suspended_after_offer_ms);
+            assert_eq!(session.suspended_at_ms, None);
+        }
 
-            let offer_ctx = macp_core::mode::MessageContext::new(offer_time);
-            let result = mode
-                .on_message_at(
-                    &session,
-                    &env("owner", "HandoffOffer", make_offer("h1", "target")),
-                    &offer_ctx,
-                )
-                .unwrap();
-            apply(&mut session, result);
-            // The pause happens between the offer and the commitment.
-            session.accumulated_suspended_ms += suspended_after_offer_ms;
+        let mut commit_env = env("owner", "Commitment", commitment_payload());
+        commit_env.timestamp_unix_ms = commit_at;
+        let ctx = macp_core::mode::MessageContext::new(commit_at);
+        mode.on_message_at(&session, &commit_env, &ctx)
+            .map(|r| matches!(r, ModeResponse::PersistAndResolve { .. }))
+            .map_err(|e| e.to_string())
+    }
 
-            let commit_env = env("owner", "Commitment", commitment_payload());
-            let ctx = macp_core::mode::MessageContext::new(commit_at);
-            mode.on_message_at(&session, &commit_env, &ctx)
-                .map(|r| matches!(r, ModeResponse::PersistAndResolve { .. }))
-                .map_err(|e| e.to_string())
-        };
+    /// RFC-MACP-0010 §5.1(1): time the session spends `Suspended` must not
+    /// count toward `implicit_accept_timeout_ms`. Rev 2 honors that; revs 0
+    /// and 1 kept counting it and MUST keep counting it, or histories they
+    /// already resolved stop replaying.
+    ///
+    /// The offer is outstanding for 300ms, 250ms of it suspended: 50ms of live
+    /// time against the policy's 100ms timeout.
+    #[test]
+    fn rev2_stops_counting_suspended_time_toward_implicit_accept() {
+        let commit_at = OFFER_TIME_MS + 300;
+        assert_eq!(
+            implicit_accept_outcome(2, 250, commit_at),
+            Err("InvalidPayload".into()),
+            "rev 2: 50ms of unsuspended time must not implicitly accept"
+        );
+        assert_eq!(
+            implicit_accept_outcome(1, 250, commit_at),
+            Ok(true),
+            "rev 1 must keep the legacy arithmetic exactly (suspended time counts)"
+        );
+        assert_eq!(
+            implicit_accept_outcome(0, 250, commit_at),
+            Ok(true),
+            "rev 0 must keep the legacy arithmetic exactly (suspended time counts)"
+        );
+    }
 
-        for (suspended, commit_at) in [
-            (0i64, offer_time + 200), // fires under both
-            (0, offer_time + 50),     // fires under neither
-            (500, offer_time + 200),  // the case the correction will change
-            (500, offer_time + 50),
+    /// The correction changes *only* the suspended case: with no suspension
+    /// every revision agrees, and a suspension that still leaves the timeout
+    /// cleared on live time alone accepts under rev 2 as well — including
+    /// exactly at the boundary, since the comparison stays `>=`.
+    #[test]
+    fn rev2_matches_legacy_arithmetic_when_nothing_was_suspended() {
+        for (suspended, commit_at, expected) in [
+            // No suspension at all: identical to rev 1 either side of the timeout.
+            (0i64, OFFER_TIME_MS + 200, Ok(true)),
+            (0, OFFER_TIME_MS + 50, Err("InvalidPayload".to_string())),
+            // 200ms suspended out of 300ms: exactly 100ms live == the timeout.
+            (200, OFFER_TIME_MS + 300, Ok(true)),
+            // One millisecond short of the boundary.
+            (201, OFFER_TIME_MS + 300, Err("InvalidPayload".to_string())),
         ] {
             assert_eq!(
-                outcome(1, suspended, commit_at),
-                outcome(2, suspended, commit_at),
-                "rev 1 and rev 2 must agree (suspended={suspended}, commit_at={commit_at})"
+                implicit_accept_outcome(2, suspended, commit_at),
+                expected,
+                "rev 2 (suspended={suspended}, commit_at={commit_at})"
             );
+            if suspended == 0 {
+                assert_eq!(
+                    implicit_accept_outcome(1, suspended, commit_at),
+                    expected,
+                    "rev 1 must agree when nothing was suspended"
+                );
+            }
         }
     }
 
-    /// The scaffolding is wired to the live constant, not to a hard-coded 2:
-    /// a session built today is on the current revision and takes the rev >= 2
+    /// Only suspension accrued *after* the offer is excluded. A session that
+    /// was paused before the offer was ever made has that pause in
+    /// `accumulated_suspended_ms`, and subtracting it would push the deadline
+    /// out for a window the offer did not exist in — which is why the offer
+    /// snapshots the counter.
+    #[test]
+    fn rev2_subtracts_only_suspension_accrued_after_the_offer() {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = base_session();
+        session.policy_definition = Some(auto_accept_policy());
+        // A 5s pause that ended before the offer was made.
+        session.accumulated_suspended_ms = 5_000;
+        let result = mode
+            .on_session_start(&session, &env("owner", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+
+        let offer_ctx = macp_core::mode::MessageContext::new(OFFER_TIME_MS);
+        let result = mode
+            .on_message_at(
+                &session,
+                &env("owner", "HandoffOffer", make_offer("h1", "target")),
+                &offer_ctx,
+            )
+            .unwrap();
+        apply(&mut session, result);
+
+        // 200ms of live time, nothing suspended since the offer: accepts.
+        let commit_env = env("owner", "Commitment", commitment_payload());
+        let ctx = macp_core::mode::MessageContext::new(OFFER_TIME_MS + 200);
+        let commit = mode.on_message_at(&session, &commit_env, &ctx).unwrap();
+        assert!(matches!(commit, ModeResponse::PersistAndResolve { .. }));
+    }
+
+    /// Unit-level guards on the rev-2 arithmetic itself. Neither input is
+    /// reachable from runtime-written state (`accumulated_suspended_ms` only
+    /// ever grows, and the snapshot is taken from that same counter), so these
+    /// pin the behavior for corrupted or hand-edited persisted state: degrade
+    /// to the legacy difference, never inflate elapsed time, never panic.
+    #[test]
+    fn rev2_elapsed_ms_is_saturating_and_floors_the_suspension_term() {
+        let mut session = base_session();
+        let mut offer = HandoffOfferRecord {
+            handoff_id: "h1".into(),
+            target_participant: "target".into(),
+            scope: "support".into(),
+            reason: "escalate".into(),
+            offered_by: "owner".into(),
+            disposition: HandoffDisposition::Offered,
+            accepted_by: None,
+            declined_by: None,
+            outcome_reason: None,
+            offered_at_ms: 1_000,
+            suspended_ms_at_offer: 0,
+        };
+
+        // Baseline: no suspension since the offer -> the raw difference.
+        assert_eq!(HandoffMode::rev2_elapsed_ms(&session, &offer, 1_300), 300);
+
+        // A negative suspension term must NOT be added back (that would
+        // implicitly accept an offer the target never accepted); it floors to
+        // the legacy difference.
+        offer.suspended_ms_at_offer = 5_000;
+        session.accumulated_suspended_ms = 1_000;
+        assert_eq!(HandoffMode::rev2_elapsed_ms(&session, &offer, 1_300), 300);
+
+        // Overflow in either subtraction saturates instead of panicking.
+        offer.suspended_ms_at_offer = 0;
+        session.accumulated_suspended_ms = 0;
+        offer.offered_at_ms = i64::MIN;
+        assert_eq!(
+            HandoffMode::rev2_elapsed_ms(&session, &offer, i64::MAX),
+            i64::MAX
+        );
+        offer.offered_at_ms = 0;
+        session.accumulated_suspended_ms = i64::MAX;
+        assert_eq!(
+            HandoffMode::rev2_elapsed_ms(&session, &offer, i64::MIN),
+            i64::MIN
+        );
+    }
+
+    /// The rev >= 2 branch is wired to the live constant, not to a hard-coded
+    /// 2: a session built today is on the current revision and takes that
     /// branch.
     #[test]
     fn builder_default_session_is_on_current_semantics_rev() {

@@ -1002,4 +1002,76 @@ mod tests {
         assert_eq!(current.mode_state, rev1.mode_state);
         assert_eq!(current.resolution, rev1.resolution);
     }
+
+    /// The same three handoff entries with a suspend/resume pair spliced
+    /// between the offer and the commitment, so the replayed session banks
+    /// `accumulated_suspended_ms` from the recorded internal-entry timestamps
+    /// (RFC-MACP-0001 §7.5 / RFC-MACP-0003 §2).
+    fn handoff_history_with_suspension(
+        semantics_rev: u32,
+        suspend_at_ms: i64,
+        resume_at_ms: i64,
+        commit_ms: i64,
+    ) -> Vec<LogEntry> {
+        // Both commitment clocks agree here: the suspension term, not the
+        // clock choice, is what the revision changes.
+        let mut entries = handoff_history(semantics_rev, commit_ms, commit_ms);
+        let commit = entries.pop().expect("commitment is the last entry");
+        entries.push(internal_entry("SessionSuspend", suspend_at_ms));
+        entries.push(internal_entry("SessionResume", resume_at_ms));
+        entries.push(commit);
+        entries
+    }
+
+    /// Rev-1 history containing an implicit accept that only happened because
+    /// suspended time counted toward the deadline. It must keep replaying to
+    /// that accept: the log is authoritative and the session already resolved
+    /// on it.
+    ///
+    /// Offer at 1_000, suspended 1_050..1_300 (250ms), commitment at 1_300 —
+    /// 300ms elapsed, 50ms of it unsuspended, against a 100ms timeout. So the
+    /// recorded revision alone decides the outcome, which makes this a
+    /// differential proof rather than a smoke test.
+    #[test]
+    fn legacy_rev1_handoff_history_with_suspension_still_implicitly_accepts() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+        let entries = handoff_history_with_suspension(1, 1_050, 1_300, 1_300);
+
+        let session = replay_session("s1", &entries, &registry, Some(&policies)).unwrap();
+        assert_eq!(session.semantics_rev, 1);
+        assert_eq!(session.accumulated_suspended_ms, 250);
+        assert_implicitly_accepted(&session);
+
+        // Under rev 2 the identical entries do NOT implicitly accept
+        // (RFC-MACP-0010 §5.1(1)): only 50ms of unsuspended time elapsed, so
+        // no offer is accepted, the commitment is not ready, and replay fails.
+        let mut rev2 = entries.clone();
+        rev2[0].semantics_rev = macp_core::session::CURRENT_SEMANTICS_REV;
+        assert!(
+            replay_session("s1", &rev2, &registry, Some(&policies)).is_err(),
+            "rev 2 must not reproduce the rev-1 outcome"
+        );
+    }
+
+    /// The rev-2 side of the same fixture: once enough *unsuspended* time has
+    /// elapsed the implicit accept fires through the real replay path.
+    ///
+    /// Offer at 1_000, suspended 1_050..1_300 (250ms), commitment at 1_450 —
+    /// 450ms elapsed, 200ms of it unsuspended, past the 100ms timeout.
+    #[test]
+    fn rev2_handoff_history_implicitly_accepts_on_unsuspended_time() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+        let entries = handoff_history_with_suspension(
+            macp_core::session::CURRENT_SEMANTICS_REV,
+            1_050,
+            1_300,
+            1_450,
+        );
+
+        let session = replay_session("s1", &entries, &registry, Some(&policies)).unwrap();
+        assert_eq!(session.accumulated_suspended_ms, 250);
+        assert_implicitly_accepted(&session);
+    }
 }
