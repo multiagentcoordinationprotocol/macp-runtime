@@ -133,3 +133,48 @@ rather than escalated.
 
 **Summary:** 5 confirmed, 1 changed, 0 deferred. The change (D1) is additive and
 semver-compatible; it must land before #114 publishes 0.7.0.
+
+---
+
+## plans/backlog-closeout-2026-09.md — G4 release shape
+
+### D7 — G4 releases as **0.8.0**, and spends the forced break on `#[non_exhaustive]` → **CONFIRMED (2026-09-11, repo owner's call)**
+
+- **Found:** by the Phase 10 verifier, as a BLOCKER, and confirmed by running
+  `RUSTC_WRAPPER="" cargo semver-checks check-release --workspace` directly:
+
+  ```
+  --- failure constructible_struct_adds_field ---
+    field HandoffOfferRecord.suspended_ms_at_offer
+        crates/macp-modes/src/mode/handoff.rs:49
+  Summary semver requires new major version: 1 major and 0 minor checks failed
+  ```
+
+  `HandoffOfferRecord` is publicly reachable via `macp_modes::mode::handoff` with all-pub
+  fields and no `#[non_exhaustive]`, so Phase 9's added field breaks any external exhaustive
+  struct literal. `release-plz.toml` sets `semver_check = true`, so this **blocks the release
+  PR**; all seven crates share one `version_group`, so it moves the whole family.
+- **Why there is no route back to 0.7.x:** for a `0.x` crate the minor position acts as major,
+  so a major break means **0.8.0**. Every alternative is *also* a major break — adding
+  `#[non_exhaustive]`, making the struct private, or making its fields private. Storing the
+  state elsewhere does not help either: `HandoffState` has the same all-pub shape, and
+  Phase 11's plan requires "a discriminator surviving serde round-trip on every backend",
+  i.e. at least one more field on this same struct. **The break is unavoidable in G4.** The
+  only real question was how to spend it.
+- **Verdict:** take 0.8.0 **and** add `#[non_exhaustive]` to the handoff (and quorum)
+  mode-state records in the same release.
+- **Reasoning:** these records are internal `mode_state` serialization detail that external
+  callers have little reason to construct by literal, and the workspace already establishes
+  the pattern everywhere it matters — `Session` (`macp-core/src/session.rs:64`), `MacpError`
+  (`error.rs:5`), `ModeResponse` (`mode.rs:11`), `PolicyFileOutcome`
+  (`macp-policy/src/registry.rs:67`). The mode-state records are the exception, not the rule.
+  Since a major bump is being spent regardless, spending it once to end the class is strictly
+  better than spending it now on the field alone and again on the next persisted-state field.
+- **Accepted consequence:** external code constructing `HandoffOfferRecord`/`HandoffState`/the
+  quorum records by struct literal breaks at 0.8.0 and must move to whatever constructor is
+  provided. This is a real break, deliberately taken, and belongs in the changelog as such —
+  not as a bugfix.
+- **Where it lands:** the `#[non_exhaustive]` attributes belong in **Phase 13** (the G4
+  release close-out), as their own commit, so the behaviour change in Phase 11 stays
+  bisectable from the API change. Phase 11 may add fields freely in the meantime.
+- **Status:** CONFIRMED (2026-09-11).

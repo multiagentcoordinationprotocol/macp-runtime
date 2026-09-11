@@ -124,3 +124,75 @@ accepted ordinals for every existing session, so it needs its own
 Not urgent: nothing is known to depend on the current behaviour, and the
 gap has existed since these envelopes were introduced. Sized as its own
 phase whenever it is picked up, not as a rider on other work.
+
+## 10. `make_internal_entry`'s second clock read can drop a session at startup
+**Found 2026-09-11 by the Phase 10 verifier of
+`plans/backlog-closeout-2026-09.md`, with the consequence analysis corrected
+upward from the executor's first read.**
+
+`RuntimeCore::suspend_session` (`src/runtime.rs:870`) and `resume_session`
+(`:923`) each take their own `Utc::now()` for the session mutation, while
+`make_internal_entry` (`:272`) takes a **second** `Utc::now()` for the log
+entry. So live `accumulated_suspended_ms` and the value replay reconstructs
+from recorded `received_at_ms` can differ.
+
+**The window is genuinely tiny, and for a better reason than "it's fast":**
+between the two reads there is no `.await`, no lock acquisition and no I/O —
+two `to_string()`s and one `prost::encode_to_vec`, with the session mutex
+already held. It is not widened by fsync latency, lock contention or tokio
+scheduling, only by an OS preemption landing between two adjacent synchronous
+statements. Better still, the two errors **cancel**:
+`replay_banked − live_banked = δ_resume − δ_suspend`, a difference of two
+identically-shaped windows rather than a sum. Realistic bound: **±1 ms** from
+millisecond truncation at a tick boundary.
+
+**But the consequence is worse than a 1 ms deadline shift.** Since Phase 10
+this value feeds an implicit-accept accept/reject decision. If a 1 ms flip
+lands — only when unsuspended elapsed sits within 1 ms of
+`implicit_accept_timeout_ms` — the live session **Resolved** while replay
+yields `InvalidPayload`, so `replay_session` returns `Err`, `src/main.rs:385`
+logs `"failed to replay session; skipping"`, and **the session is never
+inserted into the registry**: it silently vanishes on restart. Under
+`MACP_STRICT_RECOVERY=1` startup aborts instead. `validate_replay_consistency`
+never runs in that arm, and would not catch it anyway — it compares neither
+`mode_state` nor `accumulated_suspended_ms` (see item 11). Probability tiny,
+severity high.
+
+**The fix is one line and kills the class for TTL banking too:** thread the
+already-read `now_ms` into `make_internal_entry` as a parameter, exactly as
+`make_incoming_entry(env, accepted_at)` already does (`runtime.rs:247`, `:540`,
+`:669`). Deferred out of Phase 10 only because Phase 11 already touches
+`runtime.rs`; it should land there.
+
+Related, same code path, much smaller: `SessionResumePayload.banked_ms`
+(`runtime.rs:924-931`) is computed from the live clock, while replay recomputes
+banking from `received_at_ms` (`replay.rs:159-166`) and **ignores the field
+entirely**. The log therefore persists a `banked_ms` that can disagree with the
+value replay derives. Dead and mildly misleading — either consume it on replay
+or document it as informational.
+
+## 11. `validate_replay_consistency` compares neither `mode_state` nor suspension state
+Pre-existing, but its priority rose on 2026-09-11. `src/replay.rs:172-215`
+compares session state, dedup **count**, participants and bound versions — not
+`mode_state`, and not `accumulated_suspended_ms`. A rev-1 session replayed by a
+rev-2 binary can therefore diverge **invisibly** in production.
+
+Phase 11 of `plans/backlog-closeout-2026-09.md` already flags this as
+"consider closing in this phase". What changed is that Phase 10 made
+`mode_state` divergence a *semantics-revision-gated* possibility rather than a
+theoretical one, and item 10 above is a concrete path to it. Worth closing with
+Phase 11 rather than deferring again.
+
+## 12. Mode-state records are exhaustively constructible public API
+Being resolved in G4 as part of the 0.8.0 release — see `DECISIONS.md` D7.
+Recorded here so the general rule survives that one release: **any new field on
+a `pub` mode-state record is a major semver break**, because these structs have
+all-pub fields and (until D7) no `#[non_exhaustive]`. `release-plz.toml` sets
+`semver_check = true`, so this blocks the release PR rather than failing
+quietly, and the single `version_group` moves all seven crates together.
+
+After D7 lands, the handoff and quorum records carry `#[non_exhaustive]` and
+future fields are additive. `macp-storage`'s `PersistedSession` and the
+remaining mode-state records were **not** audited as part of D7 — worth a sweep
+with `cargo semver-checks check-release --workspace` before the next release
+that adds persisted state anywhere.
