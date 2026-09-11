@@ -196,3 +196,27 @@ future fields are additive. `macp-storage`'s `PersistedSession` and the
 remaining mode-state records were **not** audited as part of D7 — worth a sweep
 with `cargo semver-checks check-release --workspace` before the next release
 that adds persisted state anywhere.
+
+## 13. `validate_replay_consistency` still ignores `ttl_expiry` and `resolution`
+Narrowed by Phase 11a of `plans/backlog-closeout-2026-09.md`, which added
+`mode_state`, `accumulated_suspended_ms` and `suspended_at_ms` (closing the
+worst of item 11). Two persisted, load-bearing fields remain uncompared
+(`src/replay.rs:191-262`): `ttl_expiry` and `resolution`
+(`crates/macp-storage/src/registry.rs:20,24`). `resolution` is the session's
+actual outcome bytes, so a live/replay divergence there is invisible today.
+`ttl_expiry` is now largely covered transitively, since it is derived from the
+suspension state that *is* compared.
+
+Also worth a one-line comment where it is cheap: the new `mode_state` byte
+comparison rests on an undocumented invariant — every mode state serializes
+through `serde_json` over `BTreeMap`s (`crates/macp-modes/src/mode/util.rs:162-164`;
+decision/handoff/quorum/proposal/multi_round all verified), so key order is
+deterministic. A future `HashMap`-backed mode state would emit spurious
+warnings. Warn-only, so harmless, but the invariant should be stated at
+`src/replay.rs:229-231` rather than rediscovered.
+
+Minor doc staleness from the same change: `docs/change-review-phases-a-e.md:504,513`
+enumerates the compared fields as "(state, dedup count, participants, bound
+versions)" and claims "diverged state+dedup → 2". Both are now incomplete. That
+file is a point-in-time change-review record rather than a living spec, so
+leaving it is defensible; a "widened in Phase 11a" note is the tidy option.

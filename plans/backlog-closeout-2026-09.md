@@ -743,7 +743,43 @@ this list.
 
 #### Phase 11a — replay-determinism prep: one clock per internal entry, wider consistency check
 
-- **Status:** TODO
+- **Status:** DONE — `2f6cb10`. Gate **767 passed / 0 failed** (766 + 1), tier-1 at baseline,
+  fmt/clippy/rustdoc clean, no lockfile movement, no new semver break (only Phase 9's known
+  `macp-modes` one). Verified PASS, 3 NICE-TO-HAVEs, 0 blockers. Both criteria genuinely met, with
+  independent pinning of the three new comparisons confirmed by two complementary mutations
+  (deleting only the suspension pair reds at `src/replay.rs:832`; deleting only `mode_state` reds at
+  `:834`).
+  **Plan-text quality — a first, but not quite "no error".** Every factual citation was exact: the
+  five call sites and their clock reads, `make_incoming_entry`, `validate_replay_consistency`,
+  `banked_ms`, the replay ignore-site, `main.rs`'s skip, and the pre-existing test. On the class of
+  error the previous ten phases contained — mis-cited lines and misstated code facts — **11a's text
+  is genuinely clean, the first in this plan.** But it carries one internal inconsistency: the
+  Approach asks for "three warn-only comparisons" while criterion 2 says it "counts a `mode_state`
+  mismatch and **a** suspension-state mismatch" (singular), and the new test asserts exact counts —
+  so it forced an executor judgment call. Consequence nil: `recovery_replay_mismatches`
+  (`src/main.rs:312,350,411,418`) is only ever consulted as zero-vs-nonzero.
+  **Correction to the phase's own honest note, in the stricter direction.** The plan predicted the
+  new test could not fail pre-fix; the executor reported it could, at ~0.3-0.5%. The verifier applied
+  the realistic regression (a call site reverting to its own inline clock read) and ran it **1200
+  times with 0 reds** — it could not reproduce that rate at all. So the test is **not** a differential
+  detector for the bug. What it *is* — measured, not assumed — is a deterministic tripwire for gross
+  regression (stamping the resume entry `now_ms + 50` reds every run), and the only test in the tree
+  that pins live-equals-replayed for suspend/resume through the real `Runtime`: its right-hand side is
+  literally replay's own derivation (`src/replay.rs:151-165`). Keep it; do not cite it as evidence of
+  the old bug.
+  **This phase fixes more than the plan claimed, and the extra part predates Phase 10.**
+  `Session::resume` force-expires past `effective_max_suspend_ms`
+  (`crates/macp-core/src/session.rs:191-194`), and replay calls it as `let _ = session.resume(at)`
+  (`src/replay.rs:165`) — **swallowing the `Err`.** So before 11a a ±1 ms skew straddling the
+  `MAX_SUSPEND_MS` boundary made a session load as `Expired` while live was `Open`: **silent state
+  divergence, not the skip the commit message describes**, and arguably worse. Same for the ±1 ms on
+  replayed `ttl_expiry`. Both are latent on `main` today, independent of Phase 10's implicit-accept
+  gating, which gives 11a standalone correctness value — **call it out in G4's PR and changelog as a
+  latent-bug fix, not as prep.**
+  **Shippability:** independently shippable (private fn, no API change, no `semantics_rev` touch, no
+  handoff dependency — it would cherry-pick onto `main` and pass). Kept in G4 anyway: no PR can go
+  green until the spec-#99 mirror fix lands, so splitting buys a separate CI cycle rather than an
+  earlier merge.
 - **Delivers:** follow-ons 10 and 11, verbatim: the double-`Utc::now()` skew class is dead, and
   `validate_replay_consistency` sees `mode_state` and suspension state. No new semantics.
 - **Depends on:** Phase 10 (committed: `04d267d` + `810a0c3`).
