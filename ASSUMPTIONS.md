@@ -223,3 +223,122 @@
   added or the sweep must skip suspended sessions entirely. RFC-MACP-0010 §5.1(1) arguably implies
   the latter is correct. The doc comment says so at the site so the constraint travels with the code.
 - **Status:** UNCONFIRMED (2026-09-11)
+
+## Synthetic accept stands even when the triggering message is later rejected
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11e)
+- **Assumed:** appending the synthetic `HandoffAccept` to accepted history while the message that
+  *triggered* its observation is then rejected does not violate the freeze-profile invariant
+  "rejected messages must not mutate accepted history or dedup state" (`CONTRIBUTING.md:41-44`,
+  tracked; `CLAUDE.md:74`, gitignored).
+- **Chose:** proceed, on three grounds established by an independent Opus reverify rather than by
+  assertion. (1) **In-tree precedent:** `Precheck::Expired` (`src/runtime.rs:641-651`) already
+  appends a durable `TtlExpired` entry, mutates `session.state`, saves the snapshot (`:649`), and
+  *then* returns `Err` — a rejected message already causes a runtime-observation append plus a state
+  mutation, shipped and blessed. The genuine delta is only that this observation lands in **accepted
+  history** (`EntryKind::Incoming`, consuming an accepted ordinal per `log_store.rs:125-134`) and is
+  **published to `StreamSession`**. (2) **The obvious alternative is non-conformant:** restricting
+  synthesis to accepted triggers inverts RFC-MACP-0010 §5.1(4) — a late explicit `HandoffAccept`
+  would be validated against an unaccepted offer and accepted, with the synthetic never emitted,
+  while §5.1(2) requires the synthetic before evaluating *any* subsequent message against the
+  offer's acceptance state. (3) **The dedup half is preserved exactly and no test needs weakening** —
+  verified against `runtime.rs:1347`, `step.rs:282`, `coordination_library.rs:113` and
+  `runtime.rs:1874`, all of which are in-memory-only and never observe the log.
+- **Alternatives:** synthesize only for accepted triggers (rejected — non-conformant, above);
+  defer synthesis to the eager sweep only (rejected — §5.1(2) makes lazy the MUST and eager the
+  SHOULD).
+- **Blast radius if wrong:** a client submitting a malformed message observes accepted history
+  change as a side effect, and so does every `StreamSession` subscriber. The rejection class is
+  **wide**, not an edge case: a late explicit accept, an unknown `handoff_id`, a mismatched
+  `mode_version`, a duplicate offer. Mitigations required by the plan: `CONTRIBUTING.md` must be
+  amended in the same PR to name the carve-out, and an acceptance criterion asserts the rejected
+  trigger consumes **no** dedup slot and can be retried successfully.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## Persisted suspension intervals, with a cycle cap, rather than a derived deadline
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b)
+- **Assumed:** the synthetic accept's timestamp must be the *exact* deadline, computed by an interval
+  walk. RFC-MACP-0010 §5.1(3) states the walk itself — "offer acceptance time + timeout + suspended
+  time **within the window**" — so the naive `offered_at + timeout + banked_at_observation` is wrong
+  whenever a suspend/resume pair lands *after* the true deadline but *before* observation. That is
+  reachable: suspend/resume are RPCs (`src/runtime.rs:851`, `:905`), not session-scoped messages, so
+  `step::check_preconditions`' non-`Open` rejection does not gate them. No existing state can express
+  the walk, because the checkpoint fast path replays only `&log_entries[idx + 1..]` (`replay.rs:77`)
+  and so cannot see pre-checkpoint pauses.
+- **Chose:** a persisted interval list on `Session`/`PersistedSession`, recorded in `resume()`,
+  rebuilt free by replay, plus a new `SessionBuilder::suspension_intervals` setter (required because
+  `Session` is `#[non_exhaustive]` and `macp-storage` restores fields through the builder,
+  `registry.rs:97-138`) — **and a `MAX_SUSPENSION_CYCLES` count cap enforced in `Session::resume`,
+  gated `semantics_rev >= 2`.**
+- **Alternatives:** unbounded list (rejected — see blast radius); log scan (rejected —
+  checkpoint-blind); per-offer incremental deadline (rejected, and the reverify confirmed the
+  rejection sound: `resume_session` and replay's `SessionResume` arm both mutate the session without
+  mode dispatch, so it needs a new `Mode::on_resume` seam wired in live and replay lockstep plus a
+  new `mode_state` writer on a non-message event); naive formula (rejected — forecloses Phase 12's
+  byte-identity permanently).
+- **Blast radius if wrong:** the cap exists because the unbounded version is an **amplification
+  class, not noise**. `SuspendSession`/`ResumeSession` are entirely un-rate-limited
+  (`src/server.rs:983-1006`, `:1045-1066` — auth and authority only, unlike `send` at `:249-251`);
+  `MAX_SUSPEND_MS` bounds accumulated **duration** only (`session.rs:183-198`), so N one-millisecond
+  cycles accrue ~0 against a 7-day budget and no cycle counter exists; and each cycle already writes
+  two full `PersistedSession` snapshots (`storage/file.rs:61-66`, `to_vec_pretty`), so an in-snapshot
+  vec turns constant-size writes into O(N), i.e. **O(N²) total bytes, triggerable by the session's
+  own initiator.** A cap that force-expires corrupts nothing — it is the posture `Session::resume`
+  already takes at `session.rs:191-194`. Note 11b therefore **cannot** claim "zero behaviour change".
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## The `implicit` payload flag as discriminator, guarded by a mode-trait boundary hook
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11c/11d)
+- **Assumed:** because replay re-dispatches the `Incoming` synthetic entry into the handoff mode —
+  which must therefore *accept* well-formed implicit accepts at rev ≥ 2 — the payload's own
+  `implicit` flag can serve as the provenance discriminator, made trustworthy by a defaulted
+  `Mode::validate_client_envelope` hook that rejects client-submitted ones at rev ≥ 2. No persisted
+  `LogEntry` discriminator is added.
+- **Chose:** the hook. The reverify judged this **correct and decisive** on downgrade posture:
+  `src/replay.rs`'s `_ => {}` arm makes an *unrecognized persisted discriminator* replay as a
+  **silent no-op**, whereas an old binary meeting an unexpected `implicit: true` fails **loudly**
+  through `replay_entry`'s `?`. Self-describing data loses here precisely because the reader is the
+  thing that is stale.
+- **Alternatives:** a persisted `EntryKind`/`LogEntry` discriminator with a forked replay arm
+  (rejected — silent-no-op downgrade, above); `EntryKind::Internal` (foreclosed by RFC-MACP-0010
+  §5.1(2), which requires accepted history by "the same construction as" the §7.5 envelopes).
+- **Blast radius if wrong:** smaller than first framed. The reverify established that a bypassed
+  hook grants **no authority** — the accept arm still requires `env.sender ==
+  offer.target_participant`, and `authorize_sender` already gates senders, so a forger must already
+  *be* the target, who could accept explicitly anyway. **The `implicit` flag is a provenance label,
+  not a capability.** The real residual: `step::validate_message` is **not** on the runtime's own
+  path (`process_message` calls `authorize_sender` and `on_message_at` directly), so the canonical
+  durable-consumer example bypasses the hook by construction with no compile-time forcing. Both live
+  entry points are covered (`Send` → `server.rs:868`, `StreamSession` → `:449`), and replay only
+  re-reads entries that already passed the hook, so the guarantee holds for *this* runtime. The
+  rustdoc hazard must therefore use the runtime itself as the worked example, not "a library
+  consumer".
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## Retiring the interim implicit-accept path fail-loud rather than fail-open
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11e)
+- **Assumed:** gating the interim in-commitment-handler check to `semantics_rev < 2` is safe, so a
+  rev-2 history lacking the synthetic entry **fails replay** rather than silently resolving.
+- **Chose:** fail loud. Safe *only* because phases 10–13 ship as one PR and one release, so no rev-2
+  histories exist in the wild — every session on published 0.7.5 is rev 1. This is also why Phase 10
+  was judged not independently shippable: releasing it alone would publish a `semantics_rev = 2`
+  whose meaning Phase 11 then changes, leaving one revision number with two meanings.
+- **Alternatives:** keep the interim live at rev 2 as a fallback (rejected — two code paths could
+  resolve the same session differently, and the fallback would mask a missing synthetic entry, which
+  is the one thing replay must not hide).
+- **Blast radius if wrong:** if any rev-2 history escapes before 11e lands, it becomes unreplayable —
+  `replay_session` errors and `src/main.rs:386-391` skips the session entirely. Bounded by the
+  single-release constraint, which must therefore be honoured.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## The synthetic commit deliberately skips `record_participant_activity`
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11e)
+- **Assumed:** the target performed no activity, so the synthetic accept should not count as theirs.
+- **Chose:** skip it, mirroring replay exactly — verified: `replay_entry` (`src/replay.rs:92-137`)
+  never calls it for any entry kind, so skipping makes the synthetic entry's live and replay
+  behaviour identical.
+- **Alternatives:** record it (rejected — live and replay would then diverge, which is the failure
+  class 11a exists to close).
+- **Blast radius if wrong:** the sole consumer is informational — `SessionMetadata.participant_activity`
+  (`src/server.rs:165-177`); nothing gates TTL, liveness or authorization on it. Consequence to note
+  in the changelog: the target's `message_count` will not include the synthetic accept.
+- **Status:** UNCONFIRMED (2026-09-11)
