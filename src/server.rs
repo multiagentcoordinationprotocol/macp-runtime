@@ -1379,16 +1379,13 @@ impl MacpRuntimeService for MacpServer {
         let stream = async_stream::try_stream! {
             // Initial sync: emit all current sessions as CREATED events.
             //
-            // The traversal takes the registry's session-ID list ONCE and then
-            // materializes one session at a time (see `watch_sync`), so peak
-            // resident `Session` clones is the batch size rather than the
-            // registry size: this generator is paced by the client's reads and
-            // there can be `MACP_MAX_CONCURRENT_STREAMS` of them at once.
-            let mut sync = crate::watch_sync::InitialSync::begin(
-                &runtime.registry,
-                crate::watch_sync::INITIAL_SYNC_BATCH,
-            )
-            .await;
+            // The traversal snapshots the registry's shared session handles
+            // ONCE and then locks and clones one session at a time (see
+            // `watch_sync`), so peak resident `Session` clones is one rather
+            // than the registry size: this generator is paced by the client's
+            // reads and there can be `MACP_MAX_CONCURRENT_STREAMS` of them at
+            // once.
+            let mut sync = crate::watch_sync::InitialSync::begin(&runtime.registry).await;
             // Any Created event buffered in the subscribe→sync window would
             // duplicate a sync entry — session IDs are create-once, so buffered
             // Created events are deduped against this set.
@@ -1413,7 +1410,10 @@ impl MacpRuntimeService for MacpServer {
             // `RESOURCE_EXHAUSTED` it gets for bus lag.
             let mut pending: std::collections::VecDeque<crate::runtime::SessionLifecycleEvent> =
                 std::collections::VecDeque::new();
-            while !sync.is_exhausted() {
+            loop {
+                // Drained BEFORE the next session is fetched, so the bus is
+                // relieved once per emitted session rather than once for the
+                // whole sync.
                 if let Err(drain_err) = crate::watch_sync::drain_lifecycle_events(
                     &mut rx,
                     &mut pending,
@@ -1422,18 +1422,17 @@ impl MacpRuntimeService for MacpServer {
                     Err(Status::resource_exhausted(drain_err.message()))?;
                     break;
                 }
-                // The batch is consumed and dropped before the next one is
-                // requested, which is what keeps residency bounded.
-                for session in sync.next_batch(&runtime.registry).await {
-                    synced.insert(session.session_id.clone());
-                    yield WatchSessionsResponse {
-                        event: Some(SessionLifecycleEvent {
-                            event_type: session_lifecycle_event::EventType::Created.into(),
-                            session: Some(Self::session_to_metadata(&session)),
-                            observed_at_unix_ms: session.started_at_unix_ms,
-                        }),
-                    };
-                }
+                // One session, emitted and dropped before the next is asked
+                // for, which is what keeps residency bounded.
+                let Some(session) = sync.next_session().await else { break };
+                synced.insert(session.session_id.clone());
+                yield WatchSessionsResponse {
+                    event: Some(SessionLifecycleEvent {
+                        event_type: session_lifecycle_event::EventType::Created.into(),
+                        session: Some(Self::session_to_metadata(&session)),
+                        observed_at_unix_ms: session.started_at_unix_ms,
+                    }),
+                };
             }
             // Stream lifecycle transitions: first the ones buffered during the
             // sync (in bus order), then live ones.
