@@ -269,6 +269,22 @@ fn default_threshold_type() -> String {
 /// policy produced two different thresholds. RFC-MACP-0011 §7 forbids exactly
 /// that ("implementations MUST derive the same quorum state and the same
 /// commitment eligibility"). A third caller must call this, not re-derive it.
+///
+/// **Deliberately not `#[non_exhaustive]`**, unlike its neighbours in this
+/// crate ([`crate::error::MacpError`], [`crate::mode::ModeResponse`],
+/// [`crate::mode::MessageContext`], [`crate::session::Session`],
+/// [`super::PolicyDecision`], [`super::CommitmentMode`]). That attribute binds
+/// every crate except the defining one, so here it would force a `_` arm at
+/// exactly the two call sites — `QuorumMode::effective_threshold` in
+/// `macp-modes` and `evaluate_quorum_commitment_outcome` in `macp-policy` —
+/// whose compile-time exhaustiveness *is* the guarantee unifying this rule
+/// buys. A fail-closed `_` arm would be strictly worse for a governance
+/// kernel: a future variant would silently decline instead of failing to
+/// build, which is the same class of silent mis-handling as issue #145. Adding
+/// a variant later is not a silent break either — `enum_variant_added` is a
+/// major `cargo-semver-checks` lint and `release-plz.toml` sets
+/// `semver_check = true`, so it blocks the release PR. The residual cost is
+/// release coordination, not an undetected breakage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectiveThreshold {
     /// The rule imposes no bar (`value <= 0`, including the schema default),
