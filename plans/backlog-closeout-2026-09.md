@@ -567,7 +567,30 @@ external consumer (`zer07labs/seam-runtime`, pinning `macp-policy =0.6.0` and ca
 
 ### Phase 10 — suspension-correct timing, still lazy-only (G4)
 
-- **Status:** TODO
+- **Status:** DONE — `04d267d` (change) + `810a0c3` (gap closure), branch
+  `feat/handoff-implicit-accept-rev2`, not pushed; accumulating toward G4's single PR.
+  Gate: **766 passed / 0 failed**, tier-1 119 + 8 JWT + 5 tier-2, fmt/clippy/rustdoc clean, both
+  lockfiles byte-unmoved. Verified round 1 = GAPS, round 2 = PASS (766/0 independently reproduced).
+  **Two plan errors, both in my own acceptance criteria.** Criterion 3 was **undischargeable**:
+  `assert_replay_equivalence` (`tests/conformance_loader.rs:356`) has one call site (`:520`) inside
+  the vendored-fixture loop, no fixture exercises an implicit accept, `tests/conformance/` is
+  byte-diffed by CI — and decisively, fixtures run through the live `Runtime` where
+  `Session::builder` unconditionally stamps `CURRENT_SEMANTICS_REV`, so **a rev-1 history is not
+  expressible in that harness at all**. Discharged by intent instead via a differential legacy-log
+  fixture on the real `replay_session` path (`src/replay.rs:1036,1063`). Criterion 5 named the
+  **wrong guard** for this phase's own hard edge case: `outcome_reason` is pinned by
+  `assert_implicitly_accepted` (`src/replay.rs:920-927`), which the plan never mentions, not by
+  `assert_replay_equivalence`. A mutation adding one trailing space to the string killed six tests
+  and confirmed which guard fires.
+  **A correction in the plan's favour:** the executor reported the `:298`/`:302` cites as stale;
+  they were **correct at `882beeb`**, the commit the plan was written against, and were displaced by
+  Phase 9. Intra-plan drift, not a drafting error.
+  **Scope beyond the Files list:** `crates/macp-core/src/session.rs` (the rev-2 doc bullet, falsified
+  by this change) and `src/replay.rs` (the criterion-3 substitute) — two files, both justified in
+  `ASSUMPTIONS.md`.
+  **Of the two multi-suspension tests added in the gap round, only one is a behavioural guard** —
+  `rev2_handoff_history_subtracts_every_suspension_pair`. The other passes under mutation because
+  more unsuspended time only makes an accept *more* likely; it pins fixture state, not behaviour.
 - **Delivers:** the implicit-accept deadline stops counting suspended time. **This fixes a live
   defect, not just a gap in the new feature.**
 - **Depends on:** Phase 9.
@@ -589,105 +612,489 @@ external consumer (`zer07labs/seam-runtime`, pinning `macp-policy =0.6.0` and ca
   3. `assert_replay_equivalence` passes for a rev-1 history containing an implicit accept.
 - **Tests:** a suspend-past-timeout-then-resume case at rev 2 and at rev 1, asserting opposite outcomes.
 
-### Phase 11 — synthesize the accept into accepted history (G4)
+### Phase 11 — synthesize the accept into accepted history (G4) · replanned 2026-09-11 as 11a–11f
+
+**The one-way door, settled and verified against the RFC text (2026-09-11, second independent
+read).** RFC-MACP-0010 §5.1(2) (`../multiagentcoordinationprotocol/rfcs/RFC-MACP-0010-handoff-mode.md`)
+says the runtime "MUST append a synthetic `HandoffAccept` envelope to the session's **accepted
+history** — before evaluating any subsequent message against the offer's acceptance state, and in
+particular before any `Commitment` evaluation", and that "because the synthetic accept is an accepted
+history entry, replay simply replays it: the timer itself is outside the replay boundary, its
+recorded product is inside — the same construction as runtime-emitted
+`SessionSuspend`/`SessionResume`/`SessionCancel` envelopes (RFC-MACP-0001 §7.5)". In this runtime
+accepted history *means* `EntryKind::Incoming` — `log_store.rs:128` filters accepted ordinals to
+`Incoming` only — so the synthetic accept is an **ordinary `Incoming` entry**: `Incoming` is
+CONFIRMED, the §7.5 `Internal` treatment of the three lifecycle envelopes stays a recorded
+non-conformance (follow-on 9), out of scope here.
+
+**The shape of the mechanism (the decisions that are hard to reverse), fixed up front:**
+
+1. **The entry is an ordinary `Incoming` `LogEntry` — no schema change, no discriminator field.**
+   The replay re-dispatch trap ("replay re-dispatches an `Incoming` entry into the mode, which
+   rejects `implicit: true`") is resolved by moving the client-rejection to the **client boundary**,
+   not by marking the entry: `HandoffAcceptPayload.implicit == true` (already in `raw_payload`,
+   already serde/prost round-tripped on every backend) *is* the discriminator, and it is trustworthy
+   because at rev ≥ 2 no client-originated envelope carrying it (or squatting its `message_id`
+   namespace) can ever be accepted (11c). Replay then dispatches the synthetic entry through the
+   normal `mode.on_message_at` path (`replay.rs:85-140`) with zero replay-code changes, and the
+   rev-2 mode accepts a *well-formed* implicit accept (11d). RFC §5.1(3)'s own wording supports the
+   boundary placement: "clients MUST NOT submit it **via `Send`**". The rejected alternative — a
+   `LogEntry` discriminator field + a special replay arm — forks live/replay dispatch, adds a
+   persisted field, and makes an old binary's replay of a new log diverge *silently* (`replay.rs:167`
+   `_ => {}`); under the chosen design an old (pre-11) binary replaying a rev-2 log fails **loudly**
+   (its mode rejects `implicit: true` → `replay_session` `Err` → skip/strict-abort), which is the
+   correct downgrade posture.
+2. **Envelope constants** (each a MUST from §5.1(3) except where noted): `sender` = the offer's
+   `target_participant`; `accepted_by` = the target; `message_id` = `implicit-accept:<handoff_id>`;
+   `implicit` = `true`; `payload.reason` = `"implicit accept (timeout)"` (local choice — keeps
+   `outcome_reason` byte-identical with the rev ≤ 1 interim string at `handoff.rs:398`, so
+   `assert_implicitly_accepted` (`src/replay.rs:920-927`) survives fixture migration);
+   `macp_version` = `"1.0"`; `mode` = session mode; `timestamp_unix_ms` = `received_at_ms` = **the
+   computed deadline D** (§5.1(3) SHOULD, adopted as local MUST).
+3. **D is the interval-walk deadline, not the naive formula.** `D = the earliest T with
+   (T − offered_at) − suspended_in[offered_at, T] ≥ timeout`. The naive
+   `offered_at + timeout + banked_since_offer(at observation)` is **wrong whenever a suspend/resume
+   pair lands after the true deadline but before observation** — reachable in the lazy path
+   (suspend/resume are RPCs, not session-scoped messages, so they can occur between D and the next
+   message) — and it is observation-time-dependent, which forecloses Phase 12's byte-identity
+   criterion permanently (the timestamp is baked into persisted history; fixing it later is another
+   `semantics_rev`). The walk needs the pause boundaries, which no current state carries:
+   `Session` has only the scalar (`session.rs:81-86`) and the checkpoint fast path
+   (`replay.rs:36-84`) replays only post-checkpoint entries, so a log scan for the
+   `SessionSuspend`/`SessionResume` entries is blind behind a checkpoint. Hence 11b: `Session`
+   records completed suspension intervals, persisted via `PersistedSession`, rebuilt on replay for
+   free because `replay.rs:151-166` already calls `session.suspend/resume` with recorded times.
+4. **The decision "is the deadline elapsed?" stays the Phase-10 scalar** (`rev2_elapsed_ms`,
+   `handoff.rs:148`) — it is exact for the decision (elapsed(T) ≥ timeout ⇔ T ≥ D, since every
+   banked pause since the offer lies in [offer, T]); only the *timestamp* needs the walk.
+5. **Emission is kernel work, mode-informed.** Two new **defaulted** `Mode` trait methods
+   (semver-minor): `validate_client_envelope` (11c — reject forged `implicit` and the reserved
+   `message_id` namespace, live client path only) and `due_synthetic_envelope` (11d — "given this
+   session and clock, this envelope must enter history first"). The kernel (`process_message`,
+   `runtime.rs:612`) wires them in 11e: synthesize → dispatch through the mode → durable append →
+   commit → publish under the session mutex → then process the triggering message. Replay never
+   calls either hook — the synthetic entry is data.
+6. **At most one synthetic accept per session, ever**: RFC-0010 §5(5) — once an offer is accepted no
+   further offers may be issued, so `Option<Envelope>`, not a queue.
+
+**What Phase 12 (eager sweep) may assume once 11a–11f land** — pinned here because Phase 12's
+byte-identity criterion is only achievable if Phase 11 guarantees it:
+
+- The synthetic entry is a **pure function of the log prefix up to D** (offer record, bound policy
+  timeout, suspension intervals with start < D). Nothing in it depends on observation time.
+- Emission is **idempotent and mutex-serialized**: the deterministic `message_id` is in
+  `seen_message_ids` after emission, the due-check returns `None` once disposition ≠ `Offered`, and
+  both live emitters run under the session mutex — a sweep and a racing lazy trigger cannot
+  double-append.
+- The emission subroutine is factored as one `Runtime` method (11e:
+  `synthesize_due_accept(&self, session_id, &mut Session, now_ms)`) that does
+  due-check → dispatch → append → commit → publish; Phase 12's sweep calls exactly it.
+- The sweep **MUST skip non-`Open` sessions** (same filter as `runtime.rs:1103`). This resolves
+  `ASSUMPTIONS.md`'s "in-flight suspension term" entry in the skip direction: the interval walk uses
+  completed pairs only, an in-progress pause is not in the vec, and a suspended session ticks no
+  unsuspended time anyway. Phase 12 must not add an in-flight term.
+- Publication uses `publish_accepted_envelope` while holding the session mutex (the FIFO premise at
+  `runtime.rs:586-590`); the sweep must do the same.
+
+**Test-harness reality check** (so no criterion below repeats the Phase-10 class of error):
+`assert_replay_equivalence` (`tests/conformance_loader.rs:356`) is private to that file and called
+only from the vendored-fixture loop (`:520`); `tests/conformance/` is vendored and byte-diffed by
+CI, so **no fixture can be added**; fixtures run through the live `Runtime`, which stamps
+`CURRENT_SEMANTICS_REV` unconditionally, so **rev ≤ 1 histories are only expressible in the
+`src/replay.rs` `LogEntry`-fixture harness** (`handoff_entry`/`handoff_history*`, `:835-930`), never
+in a live-`Runtime` harness. Live rev-2 flows are expressible in-process (the
+`tests/stream_integration.rs:13` `make_runtime` pattern: `Runtime::new` + `rt.process` +
+`rt.suspend_session`/`resume_session` + `rt.log_store.get_log` + `replay_session`), and over the
+wire in tier-1. Every criterion below names its harness from this list.
+
+---
+
+#### Phase 11a — replay-determinism prep: one clock per internal entry, wider consistency check
 
 - **Status:** TODO
-- **Delivers:** the real RFC-MACP-0010 §5.1 behaviour, lazily.
-- **Depends on:** Phase 10.
-- **Files:** `crates/macp-modes/src/mode/handoff.rs`, `src/runtime.rs`, `src/replay.rs`,
-  `src/server.rs`.
-- **Added 2026-09-11, carried in from Phase 10's verification (both in `follow_ons.md` as items 10
-  and 11):**
-  1. **Thread `now_ms` into `make_internal_entry`.** `suspend_session` (`runtime.rs:870`) and
-     `resume_session` (`:923`) each read `Utc::now()` for the session mutation while
-     `make_internal_entry` (`:272`) reads it again for the log entry, so live
-     `accumulated_suspended_ms` and the replayed value can differ by ~1 ms. Since Phase 10 that
-     value gates an accept/reject decision: a flip within 1 ms of the deadline makes a
-     live-`Resolved` session fail replay, and `main.rs:385` then **skips the session entirely** —
-     it vanishes on restart. One-line fix, mirroring `make_incoming_entry(env, accepted_at)`
-     (`:247`). Phase 11 already touches `runtime.rs`, and Phase 11 makes this value gate a
-     *synthesized log entry* rather than only a decision, so it belongs here.
-  2. **Close `validate_replay_consistency`'s blind spot** (`replay.rs:172-215`) — it compares
-     state, dedup count, participants and bound versions, but neither `mode_state` nor
-     `accumulated_suspended_ms`, so the divergence item 1 describes is invisible. This phase's
-     own Edge-cases section already said "consider closing that hole in this phase"; Phase 10
-     turned it from theoretical into a concrete reachable path, so treat it as in scope.
-- **Approach:** **this is a new mechanism, not an extension of one.** All five callers of
-  `make_internal_entry` (`runtime.rs:312,816,875,933,1106`) are `EntryKind::Internal`,
-  `sender: "_runtime"`, `message_id: String::new()`, not mode-dispatched on replay, not published to
-  subscribers, not counted in accepted ordinals. The synthetic accept is the inverse on all six axes.
-  §5.1(2)'s controlling words are "append a synthetic `HandoffAccept` envelope to the session's
-  **accepted history**".
-  **Correction, 2026-09-11 — the claim that followed ("the spec has no opinion on any internal
-  variant") is false, and reading the actual RFC text settles this phase's one-way door
-  normatively.** RFC-MACP-0010 §5.1(2) does state an opinion, and states it as an explicit analogy:
-  the synthetic accept is emitted by "**the same construction as runtime-emitted
-  `SessionSuspend`/`SessionResume`/`SessionCancel` envelopes (RFC-MACP-0001 §7.5)**". So the spec
-  names precisely the analogy the first draft dismissed. This **confirms the reverify round's
-  correction and promotes the `Incoming` decision from an Opus inference to a cited normative
-  requirement**: §7.5 puts those envelopes in accepted history, this runtime emits them as
-  `EntryKind::Internal`, `log_store.rs:128` counts accepted ordinals as `Incoming` only — therefore
-  the runtime's current Suspend/Resume/Cancel handling is a **confirmed** non-conformance and the
-  synthetic accept MUST be `Incoming`. The phase verifier should now be asked to *check this reading
-  against the RFC text*, not to re-derive the decision from first principles.
-  Two further things the RFC text confirms, both of which the plan already had right: §5.1(2)'s
-  "SHOULD observe eagerly … MUST observe lazily at the latest when processing the next session-scoped
-  message" makes the Phase 11 (lazy, the MUST) / Phase 12 (eager, the SHOULD) split correctly
-  ordered; and §5.1(1)'s "never from client-supplied envelope timestamps, which are forgeable" is
-  already satisfied at rev >= 1, where `handoff.rs:248-252` records `offered_at_ms` from `clock_ms`
-  rather than `env.timestamp_unix_ms`. Rev 0 still reads the forgeable field — deliberate legacy
-  preservation, not a new defect. **Correction from the
-  reverify round:** the first draft argued the `SessionSuspend`/`Resume`/`Cancel` analogy "does not
-  carry because in this runtime those are Internal." That inverts the logic — RFC-MACP-0001 §7.5 says
-  those envelopes *enter the accepted history*, so this runtime emitting them as `EntryKind::Internal`
-  (`log_store.rs:128` filters accepted ordinals to `Incoming` only) is a **pre-existing
-  non-conformance**, not a constraint the new work must respect. The conclusion (`Incoming`) still
-  holds — because in this runtime accepted history *means* `Incoming` — but it rests on that fact, not
-  on the analogy. **Resolving Incoming vs. Internal is the single most important decision in this
-  phase** and must be settled by the phase's Opus verifier before code lands. The §7.5 gap goes on the
-  follow-on list, not into this phase.
-  **The envelope timestamp is the computed deadline, not the observation time.** RFC-MACP-0010
-  §5.1(3) says **SHOULD**, not MUST — the first draft of this plan mis-cited it. We adopt it as a
-  *local* MUST anyway, on its own engineering merit, which is load-bearing: with the deadline, eager and lazy emission produce
-  byte-identical entries and the entry is a pure function of prior log content. Set both
-  `timestamp_unix_ms` and `received_at_ms` to the deadline.
-- **Edge cases & failure modes:**
-  - **`message_id` squatting.** `server.rs:118` is the only `message_id` validation (non-empty). A
-    client cannot get `implicit: true` through (`handoff.rs:240`), but it **can** send a valid
-    `HandoffContext` (allowed at any disposition, `handoff.rs:210-231`) with
-    `message_id = "implicit-accept:<handoff_id>"`. That consumes the dedup slot, the runtime's later
-    synthesized id is a duplicate, the accept never enters history, and **the session can never
-    commit.** Reserve the prefix at `server.rs:118`, rev-gated.
-  - If the entry is `Incoming`, replay re-dispatches it into `handoff.rs:233-242`, which **rejects
-    `implicit: true`**. A discriminator surviving serde round-trip on every backend is mandatory.
-  - `EntryKind::Internal` entries are never mode-dispatched on replay and `replay.rs:162`'s `_ => {}`
-    **silently ignores unknown Internal types** — an old binary replaying a new log diverges with no
-    error.
-  - `publish_accepted_envelope` (`runtime.rs:229-233`) has two callers, both with the client's `env`.
-    A synthetic entry needs explicit plumbing, **called while holding the session mutex** — see the
-    FIFO comment at `runtime.rs:586-590`; StreamSession's subscribe-window dedupe
-    (`server.rs:560-562,600,629-634,694`) keys on `message_id` and depends on publish order equalling
-    acceptance order.
-  - `validate_replay_consistency` (`replay.rs:172-215`) compares state, dedup **count**, participants
-    and bound versions — **not `mode_state`**. A rev-1 session replayed by a rev-2 binary can diverge
-    invisibly in production. Consider closing that hole in this phase.
+- **Delivers:** follow-ons 10 and 11, verbatim: the double-`Utc::now()` skew class is dead, and
+  `validate_replay_consistency` sees `mode_state` and suspension state. No new semantics.
+- **Depends on:** Phase 10 (committed: `04d267d` + `810a0c3`).
+- **Files:** `src/runtime.rs`, `src/replay.rs`.
+- **Approach:** Add an `at_ms: i64` parameter to `make_internal_entry` (`runtime.rs:266`), mirroring
+  `make_incoming_entry(env, received_at_ms)` (`:247`), and pass the caller's already-read clock at
+  all five call sites: `maybe_expire_session` (`:312`, has `now` at `:305`), `cancel_session`
+  (`:816`, currently reads **no** clock — add one read), `suspend_session` (`:875`, has `now_ms`),
+  `resume_session` (`:933`, has `now_ms`), `cleanup_expired_sessions` (`:1106`, has `now`). This
+  kills the class where live `accumulated_suspended_ms` and the replayed value differ by ~1 ms —
+  which since Phase 10 gates an accept/reject decision, so a flip within 1 ms of the deadline made
+  a live-`Resolved` session fail replay and vanish at `src/main.rs:385` ("failed to replay session;
+  skipping"). Then widen `validate_replay_consistency` (`replay.rs:183-222`) with three warn-only
+  comparisons: `mode_state` (byte equality), `accumulated_suspended_ms`, `suspended_at_ms`. Rejected
+  alternative: leaving the widening to 11e — 11b–11e's own replay tests want the wider check as a
+  tripwire, so it goes first.
+- **Edge cases & failure modes:** `SessionResumePayload.banked_ms` (`runtime.rs:924-931`) remains
+  live-clock-derived and ignored by replay (`replay.rs:151-166`) — after this change it equals the
+  replay-derived value by construction; document it as informational in a comment, do not start
+  consuming it (that would change replay of legacy logs). The consistency check stays **warn-only**
+  (log is authoritative, snapshots best-effort — `replay.rs:176-181`); making it fatal would turn a
+  benign snapshot lag into an outage.
 - **Acceptance criteria:**
-  1. After the deadline, the next session-scoped message causes a `HandoffAccept` with
-     `implicit: true`, `sender == target_participant`, `accepted_by == target`, and
-     `message_id == "implicit-accept:<handoff_id>"` to appear in accepted history **before** the
-     triggering message is evaluated.
-  2. `timestamp_unix_ms == received_at_ms == the computed deadline`, not the observation time.
-  3. Replaying that history reproduces the entry byte-identically —
-     `assert_replay_equivalence` green, including set-exact `seen_message_ids`.
-  4. A client that pre-sends `message_id = "implicit-accept:h1"` is refused, and the session still
+  1. `make_internal_entry` takes the clock as a parameter and no caller lets it read `Utc::now()`
+     itself — discharged by the signature (compile-time) plus a new runtime-level test
+     `suspend_resume_entries_share_the_session_mutation_clock` (live-`Runtime` harness, new file
+     `tests/handoff_implicit_accept_live.rs` or extend `tests/integration_mode_lifecycle.rs`):
+     suspend then resume, read the two log entries, assert
+     `session.accumulated_suspended_ms == resume_entry.received_at_ms − suspend_entry.received_at_ms`
+     exactly. (Honest note: pre-fix this could only fail on a clock tick between the two reads, so
+     it pins the invariant rather than differentially proving the bug; the signature is the real
+     guarantee.)
+  2. `validate_replay_consistency` counts a `mode_state` mismatch and a suspension-state mismatch —
+     discharged by extending `replay_consistency_flags_state_and_dedup_divergence`
+     (`src/replay.rs:788`), which builds both `Session`s directly (fields are `pub`; writable today).
+- **Tests:** the two above; full workspace gate
+  (`RUSTC_WRAPPER="" MACP_POLICY_SCHEMAS_DIR=<spec origin/main schemas> cargo test --workspace --all-targets`)
+  stays 766+/0.
+- **Docs:** rustdoc on `make_internal_entry` (why the clock is injected) and on the `banked_ms`
+  field's informational status.
+
+#### Phase 11b — suspension intervals on the session + the deadline function (pure model)
+
+- **Status:** TODO
+- **Delivers:** the state and arithmetic 11d needs for D. **Zero behavior change** — nothing reads
+  the new field or function outside tests.
+- **Depends on:** 11a.
+- **Files:** `crates/macp-core/src/session.rs`, `crates/macp-storage/src/registry.rs`,
+  `src/replay.rs` (tests only).
+- **Approach:** Add `pub suspension_intervals: Vec<(i64, i64)>` (completed `(suspended_at,
+  resumed_at)` pairs, session-timeline ms) to `Session` — additive-safe: `Session` is
+  `#[non_exhaustive]` (`session.rs:64`). `Session::resume` (`session.rs:183`) pushes
+  `(suspended_at, now_ms)` unconditionally before the cap check (the Phase-9 precedent:
+  record everywhere, read only under rev ≥ 2 — `handoff.rs:49` comment). Recording in `resume`
+  means **replay reconstructs the vec with zero replay-code changes**, because `replay.rs:151-166`
+  already drives `session.suspend/resume` from recorded `received_at_ms` — and 11a just made those
+  equal the live mutation clock exactly. Persist it: `suspension_intervals` on `PersistedSession`
+  (`registry.rs:15-53`, `#[serde(default)]`) and in both `From` impls, so the checkpoint fast path
+  (`replay.rs:36-84`), snapshot loads, and disk GC survivors all carry it. Add
+  `Session::unsuspended_deadline(&self, from_ms: i64, duration_ms: i64) -> i64`: walk pairs with
+  `start >= from_ms` in order — `cur = from_ms; remaining = duration_ms;` for each pair `(s, e)`:
+  if `s − cur >= remaining` return `cur + remaining`, else `remaining −= s − cur; cur = e`; finally
+  `cur + remaining`. Pure, saturating, no clock. Rejected alternatives, on the record: (a) scanning
+  the log for suspend/resume entries at emission time — blind behind a checkpoint (the fast path
+  replays only post-checkpoint entries) and puts log I/O inside the mode decision; (b) an
+  incrementally-maintained per-offer deadline field — requires mutating `mode_state` on resume,
+  which is not mode-dispatched, so it needs a new dispatch path in both live and replay code in
+  lockstep (strictly more machinery than one vec); (c) no intervals, naive D0 — forecloses Phase 12
+  and bakes observation-dependent timestamps into permanent history (see the header).
+- **Edge cases & failure modes:** a pause can never straddle `from_ms` (offers are accepted only
+  while `Open`); a pair with `s` exactly at the returned deadline does not extend it (the offer's
+  unsuspended time already hit the timeout at that instant); an in-progress suspension is
+  deliberately **not** in the vec (completed pairs only — the lazy path runs only on `Open`
+  sessions, and Phase 12 skips suspended ones; `debug_assert!(session.suspended_at_ms.is_none())`
+  at the 11d call site). Growth is one 16-byte pair per suspend/resume cycle — each cycle already
+  writes two log entries and a snapshot, so the marginal cost is noise; unbounded in principle,
+  documented, not capped (a cap would silently corrupt D). `cancel()` while suspended records no
+  pair — terminal, nothing will read it. Legacy snapshots/checkpoints deserialize an empty vec —
+  correct for every rev ≤ 1 session (nothing reads it) and for rev-2 sessions no such artifact can
+  predate this code (rev 2 has never been released; Phases 10–13 ship as one PR).
+  **Semver:** the `Session` field is additive (non-exhaustive); the `PersistedSession` field is a
+  `constructible_struct_adds_field` **major** — already spent by D7's 0.8.0 decision, which
+  anticipated "at least one more field" in Phase 11 (it guessed `HandoffOfferRecord`; it lands on
+  `PersistedSession` instead, and `HandoffOfferRecord` gains **nothing** — record that when Phase 13
+  runs `cargo semver-checks`).
+- **Acceptance criteria:** (all in named tests, all writable today)
+  1. `unsuspended_deadline` unit matrix in `macp-core`: no pauses; one pause fully before the
+     deadline (extends by its width); one pause starting after the raw deadline (**does not**
+     extend); the boundary pause (`s == returned deadline`); two pauses; pause predating `from_ms`
+     (ignored) — `session.rs` unit tests.
+  2. Replay rebuilds the vec: a `LogEntry` fixture with two suspend/resume pairs
+     (`handoff_history_with_two_suspensions`, `src/replay.rs:1107`) replays to
+     `suspension_intervals == [(1_050, 1_300), (1_330, 1_500)]` — `src/replay.rs` test harness.
+  3. Checkpoint round-trip: extend `replay_from_checkpoint_restores_state` (`src/replay.rs:565`) or
+     a sibling so a checkpoint written after a pause restores the vec — `src/replay.rs` harness.
+  4. Live/replay agreement: in the live-`Runtime` harness, suspend/resume then compare the live
+     session's vec against `replay_session`'s — and 11a's widened consistency check would flag a
+     divergence here if the vec is later added to it (optional fourth comparison; take it if cheap).
+- **Tests:** as above; workspace gate green.
+- **Docs:** rustdoc on the field (completed pairs only, recorded at every rev, read at rev ≥ 2) and
+  on `unsuspended_deadline` (the walk, with the RFC §5.1(1)/(3) citations).
+
+#### Phase 11c — the client boundary: reject forged implicit accepts and reserve the id namespace
+
+- **Status:** TODO
+- **Delivers:** at rev ≥ 2, no client-originated envelope can carry `implicit: true` or a
+  `message_id` in the `implicit-accept:` namespace — closing the squat DoS **before** any code
+  exists that would trust the namespace. Behavior change is rev-≥ 2-only and additive-restrictive.
+- **Depends on:** 11a (independent of 11b; ordered here so the namespace is reserved before 11d/11e
+  rely on it — landing acceptance-of-implicit before this would open a forgery window in the tree).
+- **Files:** `crates/macp-modes/src/mode/mod.rs`, `crates/macp-modes/src/step.rs`,
+  `crates/macp-modes/src/mode/handoff.rs`, `src/runtime.rs`, plus runtime-level tests.
+- **Approach:** New defaulted trait method
+  `Mode::validate_client_envelope(&self, session: &Session, env: &Envelope) -> Result<(), MacpError>`
+  (default `Ok(())`), documented as: *called on live client-submitted envelopes only — never on
+  replay, never on runtime-synthesized envelopes; library kernels MUST call it on inbound traffic*.
+  `HandoffMode` implements it, **gated to `session.semantics_rev >= 2`** so rev ≤ 1 wire behavior
+  is byte-identical: (a) `message_type == "HandoffAccept"` whose payload decodes with
+  `implicit == true` → `Err(MacpError::InvalidPayload)` (same code the mode returns today at
+  `handoff.rs:335`, so the rev-2 error surface doesn't shift); (b) any `message_id` starting with
+  the new `pub const IMPLICIT_ACCEPT_MESSAGE_ID_PREFIX: &str = "implicit-accept:"` →
+  `Err(MacpError::InvalidEnvelope)`. Call sites: (1) `process_message` (`runtime.rs:612`) after
+  `mode.authorize_sender` (`:659`) and before dispatch — after authorize so rev ≤ 1 error ordering
+  (Forbidden before InvalidPayload) is untouched; (2) `process_session_start` (`runtime.rs:344`)
+  after the session is built and the mode resolved, before the commit-point append — because the
+  squat works through `SessionStart` too (its `message_id` enters `seen_message_ids` at `:559`);
+  (3) `step::validate_message` (`step.rs:66`) between authorize and `on_message`, so library
+  consumers inherit the boundary (replay does not use `step` — verified: `replay_entry` calls
+  `authorize_sender`/`on_message_at` directly, `replay.rs:126-137`; executor must re-confirm no
+  other `validate_message` caller exists on the replay path). **Why the plan's old placement was
+  wrong:** it said "reserve the prefix at `server.rs:118`, rev-gated" — unimplementable as written:
+  `validate_envelope_shape` runs before any registry lookup, so the session's `semantics_rev` (and
+  mode) are unknown there, and a transport-level check would also miss library consumers.
+- **Edge cases & failure modes:**
+  - **The squat is real and wider than one message type** (verified): dedup is per-session
+    (`session.seen_message_ids`), `server.rs:118` checks only non-emptiness, and the offerer can
+    send an accepted `HandoffContext` (any disposition, `handoff.rs:305-328`) — or the initiator a
+    `SessionStart` — carrying `message_id = "implicit-accept:<any future handoff_id>"`. Once
+    accepted, the slot is consumed; after 11e the synthesis would be silently skipped and the
+    session could never commit. Hence: reserve the **prefix**, for **all** message types, at rev ≥ 2,
+    in handoff sessions.
+  - Post-11e, a client re-sending the synthetic's exact `message_id` after emission hits the dedup
+    check **before** the hook (`step::check_preconditions` runs first, `runtime.rs:634`) and gets a
+    `duplicate = true` ack rather than `InvalidEnvelope`. Accepted oddity: it mutates nothing and
+    reordering the hook ahead of dedup would change rev ≤ 1 duplicate semantics.
+  - Scope is handoff sessions only (the hook lives on the mode): a decision-mode client using an
+    `implicit-accept:` id is unaffected — squatting is per-session, so cross-mode reservation buys
+    nothing.
+  - The mode's in-`handle_message` rejection at `handoff.rs:335` **stays untouched in this
+    sub-phase** (belt and suspenders until 11d restructures it).
+- **Acceptance criteria:**
+  1. In the live-`Runtime` harness, at current rev: a `HandoffContext` with
+     `message_id = "implicit-accept:h1"` is rejected with `InvalidEnvelope`, a `SessionStart` with
+     such an id is rejected, and neither consumes a dedup slot (a follow-up valid message with the
+     same id... is itself reserved — assert instead that history and `seen_message_ids` are
+     unchanged). Test `reserved_message_id_namespace_is_rejected_at_rev2`.
+  2. A client `HandoffAccept` with `implicit: true` is rejected at the hook (mode-level unit test
+     calling `validate_client_envelope` directly, plus the runtime-level path) —
+     `client_implicit_accept_rejected_at_the_boundary`.
+  3. Rev ≤ 1 unaffected: a `src/replay.rs` `LogEntry` fixture at `semantics_rev = 1` containing an
+     entry with a reserved-prefix id **still replays** (the hook is not on the replay path), and a
+     mode-level test with `session.semantics_rev = 1` (writable — field is `pub`) shows the hook
+     returns `Ok` — `reserved_namespace_is_rev_gated`.
+  4. `step::validate_message` enforces the hook — a `macp-modes` unit test drives it directly.
+- **Tests:** the four above; workspace gate green; no tier-1 change yet (11f covers the wire).
+- **Docs:** trait-method rustdoc is the contract (library kernels MUST call it); prefix const
+  rustdoc cites RFC-0010 §5.1(3).
+
+#### Phase 11d — the synthesis contract in the mode (wired to nothing yet)
+
+- **Status:** TODO
+- **Delivers:** `HandoffMode` can (a) say when a synthetic accept is due and produce the exact
+  envelope, and (b) accept a well-formed implicit accept arriving through dispatch (live synthesis
+  in 11e, and replay) at rev ≥ 2. **Live behavior unchanged**: the kernel does not call the new
+  hook yet, the interim in-`Commitment` path (`handoff.rs:383-399`) still runs at every rev, and
+  the client path to `implicit: true` is already closed (11c).
+- **Depends on:** 11b (needs `unsuspended_deadline`), 11c (needs the boundary closed before the
+  mode will accept implicit accepts in dispatch).
+- **Files:** `crates/macp-modes/src/mode/mod.rs`, `crates/macp-modes/src/mode/handoff.rs`.
+- **Approach:** Second defaulted trait method
+  `Mode::due_synthetic_envelope(&self, session: &Session, now_ms: i64) -> Option<Envelope>`
+  (default `None`). Handoff implementation: `semantics_rev >= 2` && bound policy has
+  `acceptance.implicit_accept_timeout_ms > 0` (same resolution as `handoff.rs:380-383`,
+  `unwrap_or_default` on parse failure ⇒ 0 ⇒ never due — matches interim) && the single `Offered`
+  offer has `offered_at_ms > 0` && `implicit_accept_elapsed_ms(session, offer, now_ms) >= timeout`
+  (the Phase-10 scalar seam — exact for the decision) → build the envelope with the header's
+  constants and `timestamp_unix_ms = session.unsuspended_deadline(offer.offered_at_ms, timeout)`.
+  `debug_assert!(D <= now_ms)`. Then restructure `handle_message`'s `HandoffAccept` arm
+  (`handoff.rs:333-336`): `if payload.implicit` → at `semantics_rev < 2` reject `InvalidPayload`
+  (today's behavior, preserved verbatim for legacy replay); at rev ≥ 2 **validate strictly and
+  accept**: offer exists, `disposition == Offered`, `env.sender == offer.target_participant`,
+  `payload.accepted_by == offer.target_participant`,
+  `env.message_id == format!("{IMPLICIT_ACCEPT_MESSAGE_ID_PREFIX}{handoff_id}")` — then apply the
+  same mutation as an explicit accept (`disposition = Accepted`, `accepted_by = Some(target)`,
+  `outcome_reason = Some(payload.reason)`). The mode MUST NOT re-verify the deadline arithmetic in
+  this arm: on replay the entry is dispatched with `ctx.accepted_at_ms = received_at_ms = D`, but
+  `accumulated_suspended_ms` at that replay point already includes pauses that occurred **after** D
+  (replayed before the synthetic entry, since suspend/resume entries between D and the trigger sit
+  earlier in the log) — a re-check would compute less unsuspended time than the timeout and
+  wrongly reject a correctly-emitted entry. This is the single most important negative rule in the
+  phase; write it into the arm's comment. (Note the log's `received_at_ms` becomes locally
+  non-monotonic in exactly that case — synthetic-at-D after resume-at-later-than-D. Nothing orders
+  by `received_at_ms`: replay is positional, ordinals are positional (`log_store.rs:126-134`).
+  Document, don't "fix".)
+- **Edge cases & failure modes:** no policy bound / no offer / offer already settled → `None`;
+  session with `offered_at_ms == 0` cannot exist at rev ≥ 2 (rev ≥ 1 records the acceptance clock,
+  `handoff.rs:290`) but keep the guard — it costs nothing and the interim has it; the trait
+  method takes the session **immutably** and allocates only when due (per-message cost at steady
+  state: one `mode_state` decode for handoff sessions with a bound timeout — accepted; a cached
+  flag was rejected as premature). Payload bytes must be a fixed prost encoding — pin them.
+- **Acceptance criteria:** (all `macp-modes` unit tests — hand-called hooks, injected clocks; all
+  writable today)
+  1. `due_synthetic_envelope_emits_at_the_deadline`: not due one ms before, due at/after; envelope
+     field-by-field equals the header's constants; `timestamp_unix_ms` equals the walk deadline —
+     including the killer case: **a pause after the true deadline does not move the timestamp**
+     (pause at D+50 while `now` is D+500 → timestamp still D, where the naive formula says D+pause).
+     This test is the committed replacement for the old plan's "mutation test" — it fails on the
+     observation-time and naive-formula implementations alike.
+  2. `synthetic_payload_bytes_are_pinned`: the prost bytes of the payload equal a literal vector
+     (guards Phase 12 byte-identity and accidental field reordering).
+  3. `implicit_accept_dispatch_accepted_at_rev2`: dispatching the returned envelope through
+     `on_message_at` mutates the offer exactly like the interim did (`assert_implicitly_accepted`
+     shape); rejected when malformed (wrong sender, wrong `accepted_by`, wrong `message_id`, offer
+     already settled) and at `semantics_rev = 1` (field write).
+  4. `client_submitted_implicit_accept_is_rejected` (`handoff.rs:729`) is **restructured, not
+     preserved** — the old Phase-11 criterion 5 ("still passes") is withdrawn as written: under any
+     design in which replay re-dispatches the `Incoming` entry, the mode cannot keep rejecting
+     `implicit: true` unconditionally at rev ≥ 2. It becomes the rev-gated pair in criterion 3 plus
+     11c's boundary tests, which together enforce the same RFC MUST at the layer the RFC names.
+- **Tests:** as above; workspace gate green. The interim path still runs — the Phase-10 rev-2
+  fixtures stay green through this sub-phase by design.
+- **Docs:** trait rustdoc (the kernel contract: dispatch-append-commit-publish before the trigger;
+  never called on replay); the no-re-verification comment in the accept arm.
+
+#### Phase 11e — the cutover: kernel emission, interim retired for rev ≥ 2, fixture migration
+
+- **Status:** TODO
+- **Delivers:** the RFC-MACP-0010 §5.1 behavior, live and lazily. **This is the atomic commit:
+  kernel wiring and the interim's rev-gate move together** — either alone leaves rev-2 sessions
+  with double-application or no implicit accept at all.
+- **Depends on:** 11d.
+- **Files:** `src/runtime.rs`, `crates/macp-modes/src/mode/handoff.rs` (the interim gate),
+  `src/replay.rs` (fixture migration), `crates/macp-core/src/session.rs` (rev-2 doc bullet),
+  new `tests/handoff_implicit_accept_live.rs`, `tests/stream_integration.rs`.
+- **Approach:** Factor a `Runtime` method
+  `async fn synthesize_due_accept(&self, session_id: &str, session: &mut Session, now_ms: i64) -> Result<(), MacpError>`
+  — the seam Phase 12's sweep calls — doing: `mode.due_synthetic_envelope(session, now_ms)`; if
+  `Some(syn)` and `!session.seen_message_ids.contains(&syn.message_id)`:
+  `mode.authorize_sender(session, &syn)` (mirrors replay, which authorizes every `Incoming` entry —
+  the target is a declared participant by offer validation, `handoff.rs:257`), dispatch
+  `mode.on_message_at(session, &syn, &MessageContext::new(syn.timestamp_unix_ms))`, build the entry
+  with `make_incoming_entry(&syn, syn.timestamp_unix_ms)` (so `received_at_ms == timestamp_unix_ms
+  == D`), durable `append_log_entry` (**commit point A** — failure returns `StorageFailed` and
+  nothing has mutated, same discipline as `runtime.rs:669-674`), `log_store.append`, then the
+  commit **without** `step::commit`: insert the id into `seen_message_ids` and
+  `apply_mode_response` only — deliberately **no** `record_participant_activity` (replay never
+  records activity for any entry, `replay.rs:92-137`; crediting the target with "activity" they did
+  not perform would also be a lie), then `metrics.record_message_accepted`, then
+  `publish_accepted_envelope(&syn)` **still under the session mutex**. Wire it into
+  `process_message` after 11c's hook and before the trigger's dispatch (between `runtime.rs:659`
+  and `:663`), reusing the trigger's `accepted_at_ms` clock read. Then gate the interim loop: wrap
+  `handoff.rs:383-399`'s mutation in `if session.semantics_rev < 2` — at rev ≥ 2 an expired-offer
+  `Commitment` on a history **lacking** the synthetic entry now fails `commitment_ready`
+  (`handoff.rs:158`) with `InvalidPayload`. That fail-loud choice is deliberate: leaving the interim
+  active at rev ≥ 2 would let replay of a foreign/buggy rev-2 log (no synthetic entry) silently
+  resolve, hiding exactly the divergence this phase exists to make impossible.
+  "Atomically enough" for the two appends: they are sequential under one session mutex, each with
+  the existing append-is-the-commit-point discipline. The only new intermediate state — synthetic
+  committed, trigger append failed or trigger rejected by mode validation — is a **valid history**:
+  the accept was due regardless of the trigger's fate, the entry is idempotent (dedup by
+  deterministic id + disposition gate), and a crash between the appends replays to the same state.
+  A synthetic-append failure rejects the trigger with `StorageFailed` *before* the trigger consumed
+  a dedup slot — §5.1(2) forbids evaluating the trigger without the accept in history, and this
+  runtime never acknowledges what it could not persist. Note the freeze-profile invariant reads
+  "**rejected messages** must not mutate accepted history" — the synthetic entry is not the
+  rejected message's mutation but the runtime's own observation, which the trigger merely
+  occasioned; state this in the code comment and the changelog.
+- **Edge cases & failure modes:**
+  - **Trigger ordering with prechecks** (all verified against `runtime.rs:634-651`): a duplicate
+    trigger returns early — no synthesis (a duplicate is not "processed"; the next fresh message
+    synthesizes); a TTL-expired trigger expires the session — no synthesis (terminal, no commitment
+    possible); a suspended session rejects every message (`step.rs:58`) — the lazy path can never
+    observe an active suspension (the `ASSUMPTIONS.md` entry, now load-bearing); an
+    unauthorized or 11c-rejected trigger — no synthesis (rejection precedes it).
+  - An explicit `HandoffAccept`/`HandoffDecline` from the target arriving **after** the deadline:
+    synthesis runs first, the explicit message then finds `disposition != Offered` and is rejected
+    `InvalidPayload` — §5.1(4)'s history-order rule, exactly. Before the deadline, the explicit
+    settles the offer and `due_synthetic_envelope` returns `None` forever.
+  - `SuspendSession`/`ResumeSession`/`CancelSession` RPCs are not session-scoped messages and never
+    trigger synthesis; a session can go terminal with an unobserved expired offer — permitted
+    (§5.1(2)'s MUST binds message processing, not termination).
+  - Fixture migration (the exact break-list; anything outside it going red means the design
+    drifted — stop and re-read): `src/replay.rs`
+    `current_rev_handoff_history_replays_identically_to_rev1` (`:986`) — premise dissolves at rev 2;
+    replace with a rev-2 fixture *containing* the synthetic entry and keep a rev-1-only sibling;
+    `rev2_handoff_history_implicitly_accepts_on_unsuspended_time` (`:1068`) and
+    `rev2_handoff_history_accepts_on_unsuspended_time_across_two_pauses` (`:1152`) — insert the
+    synthetic entry (id `implicit-accept:h1`, sender `bob`, `received_at == timestamp == D`,
+    payload from the pinned bytes) before the commitment; the rev-1 arms and
+    `rev2_handoff_history_subtracts_every_suspension_pair` (`:1130`, asserts `Err`) stay green.
+    `crates/macp-modes` `implicit_accept_timeout_fires` (`:1290`),
+    `rev2_matches_legacy_arithmetic_when_nothing_was_suspended` (`:1606`), and any
+    `implicit_accept_outcome` (`:1531`) caller asserting interim acceptance at current rev — pin to
+    `semantics_rev = 1` (explicit field write) or migrate to the hook flow;
+    `rev2_stops_counting_suspended_time_toward_implicit_accept` (`:1582`) asserts rejection — stays.
+  - `seen_message_ids` grows by one for the synthetic — live and replay agree (replay inserts every
+    `Incoming` id, `replay.rs:136`), and 11a's widened consistency check watches the rest.
+  - Accepted ordinals shift by one for sessions with a synthetic accept — wire-visible to passive
+    subscribers, rev-gated by construction (only rev-2 sessions emit); 11f asserts the contiguous
+    sequence.
+- **Acceptance criteria:** (harness named per item)
+  1. `lazy_synthesis_enters_history_before_the_trigger` (live-`Runtime`, new
+     `tests/handoff_implicit_accept_live.rs`): policy with a short timeout, offer, sleep past it,
+     send `Commitment` → resolved; the log contains the synthetic `Incoming` entry **immediately
+     before** the commitment entry with `sender == target`, `implicit == true`,
+     `accepted_by == target`, `message_id == "implicit-accept:h1"`.
+  2. `synthetic_timestamp_is_the_deadline_not_observation_time` (same harness): trigger sent well
+     after the deadline; assert `entry.timestamp_unix_ms == entry.received_at_ms == D` computed
+     from the offer entry's `received_at_ms + timeout` (no suspension variant), strict equality —
+     and a suspended variant using `rt.suspend_session`/`resume_session` where D reflects only the
+     pause that precedes it.
+  3. `live_history_replays_byte_identically` (same harness): after criterion 1's flow, run
+     `replay_session` over `rt.log_store.get_log(sid)` and assert `state`, `resolution`,
+     `mode_state` (byte-equal), and `seen_message_ids` (set-equal) against the live session — the
+     four assertions of `assert_replay_equivalence`, re-implemented locally because that fn is
+     private to `tests/conformance_loader.rs` and its fixture loop cannot be extended (vendored,
+     CI-byte-diffed). **The old criterion 3 ("`assert_replay_equivalence` green") is discharged by
+     intent, not letter — the letter is unsatisfiable in this repo, per the Phase-10 finding.**
+  4. `non_commitment_message_triggers_synthesis` (same harness): a post-deadline `HandoffContext`
+     — not a `Commitment` — causes emission (§5.1(2) binds every session-scoped message; the old
+     interim only fired on `Commitment`).
+  5. `late_explicit_accept_loses_to_history_order` (same harness): explicit accept after the
+     deadline → rejected, offer stands implicitly accepted (§5.1(4)).
+  6. `squatter_cannot_block_synthesis` (same harness): pre-send the reserved id (rejected per 11c),
+     then the deadline flow — session still commits (the old criterion 4, now dischargeable).
+  7. `rev2_commitment_without_synthetic_entry_fails_replay` (`src/replay.rs` harness): a rev-2
+     history with an expired offer and a commitment but **no** synthetic entry replays to `Err`
+     (the fail-loud gate), while the same entries at `semantics_rev = 1` still resolve (interim
+     preserved for legacy).
+  8. `stream_subscribers_see_the_synthetic_envelope_in_order`
+     (`tests/stream_integration.rs` pattern): subscribe via the stream bus, run the flow, assert
+     the synthetic envelope arrives between the pre-deadline message and the commitment.
+- **Tests:** the eight above plus the migrated fixtures; full workspace gate green
+  (`RUSTC_WRAPPER=""`, `MACP_POLICY_SCHEMAS_DIR` pointed at spec `origin/main` — issue #163).
+- **Docs:** rewrite the rev-2 bullet in `session.rs:18-35` (it currently describes Phase 10's
+  arithmetic only; it must now describe the synthetic entry — the only place revisions are
+  documented, per the Phase-10 precedent); rustdoc on `synthesize_due_accept` naming Phase 12 as
+  its second caller. Tracked-file prose docs land in Phase 13.
+
+#### Phase 11f — wire-level proof: tier-1 coverage
+
+- **Status:** TODO
+- **Delivers:** the behavior proven through the real gRPC boundary, in the suite CI runs on every
+  PR.
+- **Depends on:** 11e.
+- **Files:** `integration_tests/tests/tier1_protocol/` (new `test_handoff_implicit_accept.rs` +
+  `mod.rs` registration). **No dependency changes**, so `integration_tests/Cargo.lock` must stay
+  byte-unmoved — its CI guard is `cargo metadata --locked`.
+- **Approach:** Follow the established tier-1 patterns: `RegisterPolicy` with
+  `acceptance.implicit_accept_timeout_ms` (pattern: `test_policy_registry.rs`), handoff session
+  bound to it, `SuspendSession`/`ResumeSession` (pattern: `test_suspend_resume.rs`), passive
+  subscribe (pattern: `test_passive_subscribe.rs`). Run on scratch port 50123, kill only the
+  spawned PID.
+- **Edge cases:** wall-clock timing over a real socket — use a timeout comfortably above scheduler
+  noise (≥ 500 ms) and sleep with margin; the deadline-timestamp equality assertions stay in the
+  in-process tests (11e) where the offer's acceptance clock is readable — tier-1 asserts
+  **presence, shape, and order**, not millisecond equality.
+- **Acceptance criteria:** four named tier-1 tests, all writable in the existing harness:
+  1. `implicit_accept_resolves_after_timeout`: offer, wait, `Send` commitment → OK; `GetSession`
+     shows `Resolved`.
+  2. `synthetic_envelope_appears_on_stream_in_order`: passive subscribe replays the synthetic
+     envelope between offer(/context) and commitment with contiguous sequence numbers (the
+     ordinal-shift check).
+  3. `client_implicit_and_reserved_ids_rejected_on_the_wire`: `HandoffAccept` with
+     `implicit: true` and a `HandoffContext` with a reserved id both rejected; session then
      commits normally.
-  5. A client-submitted accept with `implicit: true` is still rejected (`handoff.rs:653` still passes).
-  6. An explicit accept or decline landing before the deadline settles the offer and the synthetic
-     accept is never emitted (§5.1(4)).
-  7. StreamSession subscribers observe the synthetic envelope in acceptance order.
-- **Tests:** all seven criteria, each as a named test; plus a replay round-trip over a history
-  containing one synthetic accept; plus a mutation test proving criterion 3 fails if the timestamp is
-  set to observation time.
+  4. `suspended_time_does_not_tick_on_the_wire`: suspend across the timeout, resume, commit
+     promptly → rejected (`InvalidPayload`), proving the deadline excluded the pause end-to-end.
+- **Tests:** tier-1 run per `docs/testing.md`
+  (`MACP_TEST_BINARY=../target/debug/macp-runtime cargo test -- --test-threads=1`), count moves
+  from 119 to 123; tiers 2/3 untouched.
+- **Docs:** none here (Phase 13 owns `docs/modes.md`/`docs/API.md`/changelog and closes follow-on
+  1; `CLAUDE.md` is gitignored — say so in the PR description when its local copy is touched).
 
 ### Phase 12 — eager sweep (G4)
 
