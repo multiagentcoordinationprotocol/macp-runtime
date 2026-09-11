@@ -33,6 +33,20 @@ pub struct HandoffOfferRecord {
     pub outcome_reason: Option<String>,
     #[serde(default)]
     pub offered_at_ms: i64,
+    /// `Session::accumulated_suspended_ms` as it stood when the offer was
+    /// recorded — a snapshot, never a live read.
+    ///
+    /// RFC-MACP-0010 §5.1(1): time the session spends `Suspended` must not
+    /// count toward the implicit-accept deadline, and the suspension accrued
+    /// *since this offer* is `session.accumulated_suspended_ms` minus this
+    /// value. Both terms are on the recorded timeline (suspend/resume replay
+    /// from the log), so the subtraction is replay-deterministic.
+    ///
+    /// Legacy `mode_state` recorded before this field existed deserializes as
+    /// `0` (serde default), which is also the value for an offer made on a
+    /// session that had never been suspended.
+    #[serde(default)]
+    pub suspended_ms_at_offer: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +78,39 @@ impl HandoffMode {
 
     fn decode_state(data: &[u8]) -> Result<HandoffState, MacpError> {
         crate::mode::util::decode_mode_state(data)
+    }
+
+    /// Elapsed time an outstanding offer's `implicit_accept_timeout_ms` is
+    /// measured against, selected by the session's semantics revision.
+    ///
+    /// Rev <= 1 keeps the raw difference verbatim, so legacy histories replay
+    /// to the outcome they were accepted with. Rev >= 2 has its own branch
+    /// because the suspension-corrected deadline of RFC-MACP-0010 §5.1(1)
+    /// lands there; see [`Self::rev2_elapsed_ms`], which is deliberately
+    /// identical to the legacy arithmetic in this revision of the code.
+    fn implicit_accept_elapsed_ms(
+        session: &Session,
+        offer: &HandoffOfferRecord,
+        now_ms: i64,
+    ) -> i64 {
+        if session.semantics_rev >= 2 {
+            Self::rev2_elapsed_ms(offer, now_ms)
+        } else {
+            now_ms - offer.offered_at_ms
+        }
+    }
+
+    /// The rev >= 2 elapsed computation.
+    ///
+    /// Today this is the raw difference — byte-for-byte the same outcome as
+    /// rev 1 — so introducing the revision changes nothing observable. The
+    /// suspension-correction term
+    /// (`session.accumulated_suspended_ms - offer.suspended_ms_at_offer`,
+    /// RFC-MACP-0010 §5.1(1)) is subtracted here by the change that takes the
+    /// revision live; keeping that a separate commit keeps any regression
+    /// bisectable.
+    fn rev2_elapsed_ms(offer: &HandoffOfferRecord, now_ms: i64) -> i64 {
+        now_ms - offer.offered_at_ms
     }
 
     fn commitment_ready(state: &HandoffState) -> bool {
@@ -203,6 +250,12 @@ impl HandoffMode {
                         } else {
                             env.timestamp_unix_ms
                         },
+                        // Recorded unconditionally (it is read only under the
+                        // rev >= 2 branch of `implicit_accept_elapsed_ms`, so
+                        // recording it on every session is behavior-neutral
+                        // and keeps the field trustworthy wherever it is
+                        // later consulted).
+                        suspended_ms_at_offer: session.accumulated_suspended_ms,
                     },
                 );
                 Ok(ModeResponse::PersistState(Self::encode_state(&state)))
@@ -295,7 +348,8 @@ impl HandoffMode {
                         for offer in state.offers.values_mut() {
                             if offer.disposition == HandoffDisposition::Offered
                                 && offer.offered_at_ms > 0
-                                && (now_ms - offer.offered_at_ms) >= timeout
+                                && Self::implicit_accept_elapsed_ms(session, offer, now_ms)
+                                    >= timeout
                             {
                                 offer.disposition = HandoffDisposition::Accepted;
                                 offer.accepted_by = Some(offer.target_participant.clone());
@@ -1339,5 +1393,145 @@ mod tests {
         let ctx = macp_core::mode::MessageContext::new(now + 200);
         let commit = mode.on_message_at(&session, &commit_env, &ctx).unwrap();
         assert!(matches!(commit, ModeResponse::PersistAndResolve { .. }));
+    }
+
+    /// The offer snapshots the session's cumulative suspension so the rev >= 2
+    /// deadline can later subtract only the suspension accrued *after* the
+    /// offer. Snapshot, not a live read.
+    #[test]
+    fn offer_records_suspension_snapshot() {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = base_session();
+        // The session was already suspended once before the offer landed.
+        session.accumulated_suspended_ms = 5_000;
+        let result = mode
+            .on_session_start(&session, &env("owner", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+
+        let ctx = macp_core::mode::MessageContext::new(1_000);
+        let result = mode
+            .on_message_at(
+                &session,
+                &env("owner", "HandoffOffer", make_offer("h1", "target")),
+                &ctx,
+            )
+            .unwrap();
+        apply(&mut session, result);
+
+        let state: HandoffState = serde_json::from_slice(&session.mode_state).unwrap();
+        assert_eq!(state.offers["h1"].suspended_ms_at_offer, 5_000);
+    }
+
+    /// Legacy-state fixture: `mode_state` written before the snapshot field
+    /// existed must still decode (serde default) and must still reach the
+    /// outcome it was accepted with — the implicit-accept timeout fires off
+    /// the recorded `offered_at_ms` exactly as before.
+    #[test]
+    fn legacy_offer_mode_state_without_suspension_snapshot_replays_unchanged() {
+        let legacy_state = serde_json::json!({
+            "offers": {
+                "h1": {
+                    "handoff_id": "h1",
+                    "target_participant": "target",
+                    "scope": "support",
+                    "reason": "escalate",
+                    "offered_by": "owner",
+                    "disposition": "Offered",
+                    "accepted_by": null,
+                    "declined_by": null,
+                    "outcome_reason": null,
+                    "offered_at_ms": 1000
+                }
+            },
+            "contexts": {}
+        });
+        let decoded: HandoffState = serde_json::from_value(legacy_state.clone()).unwrap();
+        assert_eq!(decoded.offers["h1"].suspended_ms_at_offer, 0);
+        assert_eq!(decoded.offers["h1"].offered_at_ms, 1000);
+
+        // And it still drives the original outcome: 200ms of elapsed
+        // acceptance time past a 100ms timeout implicitly accepts, so the
+        // commitment resolves.
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = base_session();
+        session.policy_definition = Some(auto_accept_policy());
+        session.mode_state = serde_json::to_vec(&legacy_state).unwrap();
+        let commit_env = env("owner", "Commitment", commitment_payload());
+        let ctx = macp_core::mode::MessageContext::new(1_200);
+        let commit = mode.on_message_at(&session, &commit_env, &ctx).unwrap();
+        apply(&mut session, commit);
+        let state: HandoffState = serde_json::from_slice(&session.mode_state).unwrap();
+        assert_eq!(
+            state.offers["h1"].outcome_reason.as_deref(),
+            Some("implicit accept (timeout)")
+        );
+    }
+
+    /// Revision 2 is behavior-neutral scaffolding: with identical inputs —
+    /// including a suspension accrued after the offer, the case the
+    /// suspension-corrected deadline will eventually change — rev 1 and rev 2
+    /// reach the same outcome. When the correction goes live this test is the
+    /// canary: its suspended half is expected to diverge then, and only then.
+    #[test]
+    fn rev2_implicit_accept_is_identical_to_rev1_today() {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let offer_time = 1_000i64;
+
+        // (rev, suspended-after-offer ms) -> outcome
+        let outcome = |rev: u32, suspended_after_offer_ms: i64, commit_at: i64| {
+            let mut session = base_session();
+            session.semantics_rev = rev;
+            session.policy_definition = Some(auto_accept_policy());
+            let result = mode
+                .on_session_start(&session, &env("owner", "SessionStart", vec![]))
+                .unwrap();
+            apply(&mut session, result);
+
+            let offer_ctx = macp_core::mode::MessageContext::new(offer_time);
+            let result = mode
+                .on_message_at(
+                    &session,
+                    &env("owner", "HandoffOffer", make_offer("h1", "target")),
+                    &offer_ctx,
+                )
+                .unwrap();
+            apply(&mut session, result);
+            // The pause happens between the offer and the commitment.
+            session.accumulated_suspended_ms += suspended_after_offer_ms;
+
+            let commit_env = env("owner", "Commitment", commitment_payload());
+            let ctx = macp_core::mode::MessageContext::new(commit_at);
+            mode.on_message_at(&session, &commit_env, &ctx)
+                .map(|r| matches!(r, ModeResponse::PersistAndResolve { .. }))
+                .map_err(|e| e.to_string())
+        };
+
+        for (suspended, commit_at) in [
+            (0i64, offer_time + 200), // fires under both
+            (0, offer_time + 50),     // fires under neither
+            (500, offer_time + 200),  // the case the correction will change
+            (500, offer_time + 50),
+        ] {
+            assert_eq!(
+                outcome(1, suspended, commit_at),
+                outcome(2, suspended, commit_at),
+                "rev 1 and rev 2 must agree (suspended={suspended}, commit_at={commit_at})"
+            );
+        }
+    }
+
+    /// The scaffolding is wired to the live constant, not to a hard-coded 2:
+    /// a session built today is on the current revision and takes the rev >= 2
+    /// branch.
+    #[test]
+    fn builder_default_session_is_on_current_semantics_rev() {
+        assert_eq!(
+            base_session().semantics_rev,
+            macp_core::session::CURRENT_SEMANTICS_REV
+        );
+        // Compile-time: the rev >= 2 branch is reachable for new sessions at
+        // all only while the constant stays there.
+        const _: () = assert!(macp_core::session::CURRENT_SEMANTICS_REV >= 2);
     }
 }

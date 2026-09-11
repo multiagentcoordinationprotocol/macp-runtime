@@ -799,4 +799,207 @@ mod tests {
         b.seen_message_ids.insert("m1".into());
         assert_eq!(validate_replay_consistency("s1", &a, &b), 2);
     }
+
+    // ---------------------------------------------------------------------
+    // Legacy-log fixtures for `Session::semantics_rev` (CONTRIBUTING.md
+    // ground rule: a change to persisted-history semantics ships a fixture
+    // proving old logs still replay under their original semantics).
+    //
+    // All three fixtures below are the *same* three handoff entries; only the
+    // revision recorded on the SessionStart entry differs. The entries carry
+    // deliberately disagreeing envelope and acceptance timestamps, so the
+    // recorded revision alone decides whether the implicit-accept timeout
+    // fires — which makes each fixture a differential proof, not just a
+    // "replay does not crash" smoke test.
+    // ---------------------------------------------------------------------
+
+    const HANDOFF_TIMEOUT_MS: i64 = 100;
+
+    fn handoff_policy_registry() -> PolicyRegistry {
+        let registry = PolicyRegistry::new();
+        registry
+            .register(macp_core::policy::PolicyDefinition {
+                policy_id: "handoff-auto-accept".into(),
+                mode: "macp.mode.handoff.v1".into(),
+                description: "implicit accept after 100ms".into(),
+                rules: serde_json::json!({
+                    "acceptance": { "implicit_accept_timeout_ms": HANDOFF_TIMEOUT_MS },
+                    "commitment": { "authority": "initiator_only" }
+                }),
+                schema_version: 1,
+            })
+            .unwrap();
+        registry
+    }
+
+    fn handoff_entry(
+        message_id: &str,
+        message_type: &str,
+        payload: Vec<u8>,
+        envelope_ms: i64,
+        received_ms: i64,
+    ) -> LogEntry {
+        LogEntry {
+            message_id: message_id.into(),
+            received_at_ms: received_ms,
+            sender: "alice".into(),
+            message_type: message_type.into(),
+            raw_payload: payload,
+            entry_kind: EntryKind::Incoming,
+            session_id: "s1".into(),
+            mode: "macp.mode.handoff.v1".into(),
+            macp_version: "1.0".into(),
+            timestamp_unix_ms: envelope_ms,
+            bound_mode_version: None,
+            semantics_rev: 0,
+            bound_max_suspend_ms: None,
+            compacted_incoming_ordinals: 0,
+        }
+    }
+
+    /// SessionStart + HandoffOffer + Commitment, with the offer/commitment
+    /// clocks supplied by the caller so a fixture can make the two clocks
+    /// disagree.
+    fn handoff_history(
+        semantics_rev: u32,
+        commit_envelope_ms: i64,
+        commit_received_ms: i64,
+    ) -> Vec<LogEntry> {
+        let start_payload = SessionStartPayload {
+            intent: "escalate".into(),
+            participants: vec!["alice".into(), "bob".into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            policy_version: "handoff-auto-accept".into(),
+            ttl_ms: 60_000,
+            context_id: String::new(),
+            extensions: std::collections::HashMap::new(),
+            roots: vec![],
+            max_suspend_ms: 0,
+        }
+        .encode_to_vec();
+        let offer = crate::handoff_pb::HandoffOfferPayload {
+            handoff_id: "h1".into(),
+            target_participant: "bob".into(),
+            scope: "support".into(),
+            reason: "escalate".into(),
+        }
+        .encode_to_vec();
+        let commitment = CommitmentPayload {
+            commitment_id: "c1".into(),
+            action: "handoff.accepted".into(),
+            authority_scope: "support".into(),
+            reason: "bound".into(),
+            mode_version: "1.0.0".into(),
+            policy_version: "handoff-auto-accept".into(),
+            configuration_version: "cfg-1".into(),
+            outcome_positive: true,
+            supersedes: None,
+        }
+        .encode_to_vec();
+
+        let mut start = handoff_entry("m1", "SessionStart", start_payload, 1_000, 1_000);
+        start.semantics_rev = semantics_rev;
+        vec![
+            start,
+            // Offer: both clocks agree at 1_000, so only the commitment's
+            // clock choice can move the outcome.
+            handoff_entry("m2", "HandoffOffer", offer, 1_000, 1_000),
+            handoff_entry(
+                "m3",
+                "Commitment",
+                commitment,
+                commit_envelope_ms,
+                commit_received_ms,
+            ),
+        ]
+    }
+
+    /// The outcome a fixture was originally accepted with: the offer is
+    /// implicitly accepted and the commitment resolves the session.
+    fn assert_implicitly_accepted(session: &Session) {
+        assert_eq!(session.state, SessionState::Resolved);
+        let state: serde_json::Value = serde_json::from_slice(&session.mode_state).unwrap();
+        let offer = &state["offers"]["h1"];
+        assert_eq!(offer["disposition"], "Accepted");
+        assert_eq!(offer["accepted_by"], "bob");
+        assert_eq!(offer["outcome_reason"], "implicit accept (timeout)");
+    }
+
+    /// Legacy (rev 0) history: the implicit-accept timeout was measured
+    /// against the client envelope timestamp. These entries only clear the
+    /// timeout on that clock (envelope: 300ms elapsed; acceptance: 50ms), so a
+    /// replay that resolves is a replay that used the legacy clock.
+    #[test]
+    fn legacy_rev0_handoff_history_replays_under_envelope_clock() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+        let entries = handoff_history(0, 1_300, 1_050);
+
+        let session = replay_session("s1", &entries, &registry, Some(&policies)).unwrap();
+        assert_eq!(session.semantics_rev, 0);
+        assert_implicitly_accepted(&session);
+
+        // Differential proof: the identical entries under any newer revision
+        // do NOT implicitly accept (50ms of acceptance time < 100ms), so the
+        // commitment is not ready and replay fails. Only the recorded
+        // revision keeps this history replayable.
+        for rev in [1, macp_core::session::CURRENT_SEMANTICS_REV] {
+            let mut newer = entries.clone();
+            newer[0].semantics_rev = rev;
+            assert!(
+                replay_session("s1", &newer, &registry, Some(&policies)).is_err(),
+                "rev {rev} must not reproduce the rev-0 outcome"
+            );
+        }
+    }
+
+    /// Rev-1 history: the timeout was measured against the runtime acceptance
+    /// clock. Mirror image of the rev-0 fixture — these entries only clear the
+    /// timeout on `received_at_ms` (acceptance: 300ms; envelope: 50ms).
+    #[test]
+    fn legacy_rev1_handoff_history_replays_under_acceptance_clock() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+        let entries = handoff_history(1, 1_050, 1_300);
+
+        let session = replay_session("s1", &entries, &registry, Some(&policies)).unwrap();
+        assert_eq!(session.semantics_rev, 1);
+        assert_implicitly_accepted(&session);
+
+        // Under the legacy clock the same entries do not reach the timeout.
+        let mut legacy = entries.clone();
+        legacy[0].semantics_rev = 0;
+        assert!(replay_session("s1", &legacy, &registry, Some(&policies)).is_err());
+    }
+
+    /// The current revision is behavior-neutral with respect to rev 1: a
+    /// history recorded today replays to exactly the rev-1 outcome, including
+    /// the byte-level `mode_state`. This is what makes bumping
+    /// `CURRENT_SEMANTICS_REV` a no-op release.
+    #[test]
+    fn current_rev_handoff_history_replays_identically_to_rev1() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+
+        let rev1 = replay_session(
+            "s1",
+            &handoff_history(1, 1_050, 1_300),
+            &registry,
+            Some(&policies),
+        )
+        .unwrap();
+        let current = replay_session(
+            "s1",
+            &handoff_history(macp_core::session::CURRENT_SEMANTICS_REV, 1_050, 1_300),
+            &registry,
+            Some(&policies),
+        )
+        .unwrap();
+
+        assert_implicitly_accepted(&current);
+        assert_eq!(current.state, rev1.state);
+        assert_eq!(current.mode_state, rev1.mode_state);
+        assert_eq!(current.resolution, rev1.resolution);
+    }
 }

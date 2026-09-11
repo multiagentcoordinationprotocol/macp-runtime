@@ -25,7 +25,14 @@ pub const MAX_SUSPEND_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 ///   envelope timestamp.
 /// - 1 — Handoff implicit-accept times against the runtime acceptance clock
 ///   (`MessageContext::accepted_at_ms`).
-pub const CURRENT_SEMANTICS_REV: u32 = 1;
+/// - 2 — reserved for the suspension-corrected Handoff implicit-accept
+///   deadline (RFC-MACP-0010 §5.1): the offer record now snapshots
+///   `accumulated_suspended_ms` at offer time and the timeout arithmetic has
+///   its own `>= 2` branch. That branch is currently **identical** to
+///   revision 1 — nothing observable differs between revisions 1 and 2 today.
+///   The revision and the snapshot ship ahead of the semantics change so the
+///   behavior change is a separate, bisectable commit.
+pub const CURRENT_SEMANTICS_REV: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SessionState {

@@ -140,3 +140,31 @@
 - **Alternatives:** `Option<EffectiveThreshold>` (the plan's second option) — rejected twice over: it widens `macp-core`'s `EffectiveThreshold` exposure into a second crate's public API, and its inner `Inert` variant would be unreachable through this path, i.e. an impossible state the caller must still match. A flat three-variant enum with a `NoRequest` member — rejected because the request-level form then carries a variant it can never return, and because `Option::map` is exactly the composition the two functions have. `Result<u32, Reason>` — rejected: it makes the ordinary "no request yet" case an error, and folds two non-error outcomes into an error channel. Keeping `effective_threshold` private and documenting `decode_mode_state` as the route — rejected: that is the reconstruct-the-internals path the issue asks to remove.
 - **Blast radius if wrong:** Additive only — `cargo semver-checks check-release` on `macp-core`, `macp-modes` and `macp-runtime` is clean (exit 0, no major lints). The cost of being wrong is API churn: narrowing `Result<Option<_>, _>` later, or adding an `ApprovalThreshold` variant, is a breaking change, though `enum_variant_added` and signature lints are majors that `release-plz.toml`'s `semver_check = true` blocks on rather than shipping silently. If a third outcome for the session-level form ever appears, it belongs in a new `Ok` variant, not in a new error.
 - **Status:** UNCONFIRMED (2026-09-11)
+
+## The rev-2 scaffolding branch cannot be *literally* identical to the rev-1 branch
+- **Plan:** `plans/backlog-closeout-2026-09.md` (Phase 9, "a `>= 2` branch identical to `>= 1`")
+- **Assumed:** The phase is specified as adding a `session.semantics_rev >= 2` branch whose body is
+  identical to the existing one, so that the behavior change is a separate commit. Written literally
+  — `if rev >= 2 { now - offered_at } else { now - offered_at }` — that is a `clippy::if_same_then_else`
+  error under the repo's `-D warnings` gate, so the instruction is not directly expressible. (The
+  same gate's `clippy::assertions_on_constants` also refuses `assert!(CURRENT_SEMANTICS_REV >= 2)`
+  in a test.)
+- **Chose:** Put the rev gate in a named function, `HandoffMode::implicit_accept_elapsed_ms`, whose
+  `>= 2` arm delegates to a second named function, `rev2_elapsed_ms`, that today returns the same raw
+  difference the `<= 1` arm computes inline. Syntactically distinct, so clippy is satisfied; the
+  seam is a single small function the suspension-correction term is subtracted inside, which is a
+  smaller diff than an inline branch would be. The constant check became
+  `const _: () = assert!(..)`, i.e. a compile-time assertion rather than a runtime one.
+  `HandoffOfferRecord.suspended_ms_at_offer` is recorded on **every** offer, not only rev >= 2 ones:
+  the field is serialized regardless of value (so rev-gating would not preserve the old
+  `mode_state` bytes anyway) and it is read only under the rev >= 2 arm, so recording it everywhere
+  is behavior-neutral and keeps the value trustworthy wherever it is later consulted.
+- **Alternatives:** `#[allow(clippy::if_same_then_else)]` on an inline identical branch (honest about
+  the intent, but parks a suppression in a hot path and the next editor has to decide whether it is
+  still needed); a rev-2 arm that subtracts an explicitly-zero named term (same lint, one indirection
+  later); or skipping the branch entirely and landing it with the semantics change (rejected — that
+  is exactly the un-bisectable bundle this phase exists to avoid).
+- **Blast radius if wrong:** None observable. Both functions are private, the arithmetic is identical
+  on every input, and three replay fixtures plus a rev-1-vs-rev-2 differential test pin that
+  equivalence; the cost of being wrong is one extra function to inline later.
+- **Status:** UNCONFIRMED (2026-09-11)
