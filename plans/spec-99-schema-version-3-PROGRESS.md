@@ -138,3 +138,57 @@ Two other environment facts worth carrying forward:
   `canonical_schema_dir` falls back to the sibling checkout, which sits 4 commits ahead of spec
   `main`, and the parity test fails with a phantom `threshold.type has drifted` that does not exist
   in CI.
+
+---
+
+## Hand-offs from Phase 2's verification — items no phase's Files line owns
+
+Phase 2 verified **PASS** on code (762/0, seven mutations red, all six criteria genuinely met). The
+verifier found one false claim and four orphaned items. The false claim is fixed; the orphans need a
+home.
+
+**Fixed immediately** — `docs/policy.md`'s claim that the three reserved profiles diverge between
+`schema_version` 1 and 3 "where an empty decisive tally nonetheless clears the participation floor".
+**False.** The verifier probed the shipped code against the real canonical definitions and got
+`Deny` under both readings for all three profiles, differing only in reason string: the legacy arm
+denies whenever `require_vote_quorum` is set, regardless of whether abstentions cleared the floor,
+and all three set it. The plan never asked for that sentence — Phase 2's Docs mandate was only that
+the profiles stay at v1 and that the flag's remaining contribution is the participation floor, both
+of which the paragraph states correctly. Rewritten.
+
+**Root cause is upstream and deserves a spec issue.** RFC-MACP-0012 §5.2 contradicts §4.1's legacy
+arm as the corpus itself pins it: `schemas/conformance/decision_legacy_require_vote_quorum.json`
+expects `reject` / `POLICY_DENIED` for a positive commitment on an empty tally at `schema_version: 2`
+with `require_vote_quorum: true` — the runtime's reading — which leaves §5.2's claimed v1/v3
+divergence with no possible instance. **No runtime change is warranted; we are conformant with the
+fixture.**
+
+**Four stale `minimum: 0` citations, not three.** Phase 1 moved `voting.weights[*]` to
+`exclusiveMinimum: 0`, killing the "all-zero weight map is schema-legal" premise. Wrong in the tree
+right now at `crates/macp-policy/src/evaluator.rs:466-469` (the `== 0.0` guard comment), `:1240-1244`
+(the test comment), `:451` (the `< 0.0` comment) — **all three owned by Phase 3** — and at **`:1132`**
+(the `negative_weighted_policy()` helper comment), which **no phase owns**, and which Phase 3's
+criterion 7 arguably forbids touching by requiring the `negative_weighted_total_*` tests stay
+"unmodified". Phase 3 should fix `:1132`'s comment and say so, since a comment is not a test
+assertion.
+
+**An orphaned user-visible string.** `crates/macp-policy/src/evaluator.rs:463`'s deny text
+"voting.weights values must be **>= 0**" is stale post-Phase-1 (`> 0` now). It reaches
+`POLICY_DENIED`, is reachable only from a directly-constructed `PolicyDefinition`, and no phase's
+Files line names it — Phase 3 names the *comment* above it but not the string. Phase 3 should take it.
+
+**A SHOULD no phase captured.** RFC-MACP-0012 §4.1 asks implementations to warn when a newly
+registered `schema_version <= 2` policy declares a non-`none` algorithm without
+`require_vote_quorum: true`. Not implemented, not documented, not in any phase. It is a SHOULD, so
+deferring is legitimate — recorded here rather than lost.
+
+**A forward dependency for Phase 4.** `docs/policy.md`'s new bullet "a decline on an empty tally is
+denied at every schema version" becomes **wrong** once Phase 4 lands the objection-authorized
+decline, because §4.1 exempts `finalize_decline` from *both* arms. Phase 4 must revisit that bullet
+and the `NoVotes`/decline cell of the rustdoc outcome table.
+
+**One correction to my own brief:** I cited `DECISIONS.md` **D7** to the Phase 2 executor and
+verifier. D7 does not exist on this branch — it was written on G4's branch
+(`feat/handoff-implicit-accept-rev2`), and `DECISIONS.md` here carries D1-D6. The 0.8.0 decision it
+records is real but belongs to the other branch; nothing on this branch collides with it, and all
+seven crates report "no semver update required" here.
