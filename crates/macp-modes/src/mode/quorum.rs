@@ -42,6 +42,51 @@ pub struct QuorumState {
     pub ballots: BTreeMap<String, BallotRecord>,
 }
 
+/// The approval bar an accepted `ApprovalRequest` must clear, as the mode
+/// resolves it against the session's bound policy.
+///
+/// Returned by [`QuorumMode::effective_threshold`] and, wrapped, by
+/// [`QuorumMode::effective_threshold_for_session`]. Both variants are
+/// reachable; "this session has no `ApprovalRequest` yet" is *not* a variant
+/// here — that question is answered by the `Option` the session-level
+/// accessor returns, so the two cannot be confused.
+///
+/// The policy's own inert case (`threshold.value <= 0`, which includes the
+/// schema default and therefore every session with no `threshold` rule at
+/// all) is **not** a variant either: the mode's documented fallback for it is
+/// the `ApprovalRequest`'s own `required_approvals`, so it arrives here
+/// already resolved as `Approvals(required_approvals)`. Surfacing
+/// [`macp_core::policy::rules::EffectiveThreshold::Inert`] instead would hand
+/// the fallback rule back to the caller, which is the re-implementation this
+/// accessor exists to delete (issue #146).
+///
+/// **Deliberately not `#[non_exhaustive]`**, matching
+/// [`macp_core::policy::rules::EffectiveThreshold`] and for the same reason:
+/// a `_` arm in a caller would silently reinterpret a future variant as one
+/// of these, and silently mis-handling a governance bar is the defect class
+/// issue #145 was. Adding a variant is a major `cargo-semver-checks` lint
+/// (`enum_variant_added`) and `release-plz.toml` sets `semver_check = true`,
+/// so it blocks the release PR rather than slipping out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalThreshold {
+    /// This many `Approve` ballots seal a **positive** commitment.
+    ///
+    /// Never zero, and for a session whose `ApprovalRequest` the mode
+    /// accepted, never above the declared participant count: `on_message`
+    /// constrains both the payload field and any policy replacement for it to
+    /// `1..=participants`.
+    Approvals(u32),
+    /// The bound policy admits no positive commitment at any approval count.
+    ///
+    /// Reached by `threshold.type: "weighted"` (not implemented here), an
+    /// unrecognised type, or a `percentage` over an empty participant set —
+    /// see [`macp_core::policy::rules::EffectiveThreshold::Unsatisfiable`].
+    /// `RegisterPolicy` refuses all three, so a session can only carry such a
+    /// policy if the `PolicyDefinition` was constructed directly. The mode
+    /// seals **neither** outcome on such a session, positive or negative.
+    Unsatisfiable,
+}
+
 pub struct QuorumMode {
     evaluator: std::sync::Arc<dyn macp_core::policy::PolicyEvaluator>,
 }
@@ -60,39 +105,110 @@ impl QuorumMode {
         crate::mode::util::decode_mode_state(data)
     }
 
-    /// Resolve the effective approval threshold, considering policy overrides.
+    /// Resolve the effective approval threshold for one `ApprovalRequest`,
+    /// applying any policy override bound to the session.
     ///
     /// RFC-MACP-0011 §6: "When policy specifies a threshold override, it
     /// replaces (not supplements) the required_approvals value from
     /// ApprovalRequest."
     ///
-    /// The policy arithmetic itself lives in
-    /// [`QuorumThreshold::effective`](macp_core::policy::rules::QuorumThreshold::effective)
-    /// — the *same* function `evaluate_quorum_commitment_outcome` calls, so
-    /// one policy can no longer produce two different bars in the two layers
-    /// (issue #145). This wrapper only supplies the mode's fallback for an
-    /// inert rule.
+    /// This is the bar the runtime itself enforces — the same call the
+    /// mode's own `commitment_ready` makes — so a caller that needs the number
+    /// should read it from here rather than re-deriving it (issue #146). The
+    /// arithmetic lives one layer down in
+    /// [`QuorumThreshold::effective`](macp_core::policy::rules::QuorumThreshold::effective),
+    /// the *same* function `evaluate_quorum_commitment_outcome` calls, so one
+    /// policy cannot produce two different bars in the two layers (issue
+    /// #145). This function adds only the mode's fallback for an inert rule:
+    /// `request.required_approvals`.
     ///
-    /// Returns `None` when the bound policy's threshold is **unsatisfiable**
-    /// (`type: "weighted"`, or an unrecognised type): such a session can seal
-    /// no commitment at all. Registration refuses those policies, so `None`
-    /// needs a directly-constructed `PolicyDefinition` to reach.
+    /// Prefer [`Self::effective_threshold_for_session`] when you hold a
+    /// [`Session`] rather than a decoded [`ApprovalRequestRecord`]; it is the
+    /// same rule with the state decoding done for you. **Read the
+    /// non-monotonicity warning there before probing readiness by
+    /// experiment.**
     ///
     /// A rules object that fails to parse falls back to the schema defaults
     /// (`unwrap_or_default`) and therefore to `required_approvals`, where the
     /// evaluator instead denies the commitment. That divergence is recorded in
     /// `ASSUMPTIONS.md` and deliberately left alone here.
-    fn effective_threshold(session: &Session, request: &ApprovalRequestRecord) -> Option<u32> {
+    pub fn effective_threshold(
+        session: &Session,
+        request: &ApprovalRequestRecord,
+    ) -> ApprovalThreshold {
         let Some(ref policy) = session.policy_definition else {
-            return Some(request.required_approvals);
+            return ApprovalThreshold::Approvals(request.required_approvals);
         };
         let rules: macp_core::policy::rules::QuorumPolicyRules =
             serde_json::from_value(policy.rules.clone()).unwrap_or_default();
         match rules.threshold.effective(session.participants.len()) {
-            macp_core::policy::rules::EffectiveThreshold::Inert => Some(request.required_approvals),
-            macp_core::policy::rules::EffectiveThreshold::Approvals(required) => Some(required),
-            macp_core::policy::rules::EffectiveThreshold::Unsatisfiable => None,
+            macp_core::policy::rules::EffectiveThreshold::Inert => {
+                ApprovalThreshold::Approvals(request.required_approvals)
+            }
+            macp_core::policy::rules::EffectiveThreshold::Approvals(required) => {
+                ApprovalThreshold::Approvals(required)
+            }
+            macp_core::policy::rules::EffectiveThreshold::Unsatisfiable => {
+                ApprovalThreshold::Unsatisfiable
+            }
         }
+    }
+
+    /// Resolve the effective approval threshold for a quorum **session**,
+    /// reading the accepted `ApprovalRequest` out of `session.mode_state`.
+    ///
+    /// This is the public entry point for "how many approvals does this
+    /// session need?" (issue #146). Each layer of the return type answers one
+    /// question, and the three answers must not be conflated:
+    ///
+    /// | Return | Meaning |
+    /// |--------|---------|
+    /// | `Ok(Some(`[`ApprovalThreshold::Approvals`]`(n)))` | `n` approvals seal a positive commitment |
+    /// | `Ok(Some(`[`ApprovalThreshold::Unsatisfiable`]`))` | the bound policy can never be satisfied; no outcome will seal |
+    /// | `Ok(None)` | no `ApprovalRequest` has been accepted yet — there is nothing to resolve |
+    /// | `Err(`[`MacpError::InvalidModeState`]`)` | `session.mode_state` is not decodable quorum state, so no answer would be honest |
+    ///
+    /// The `Err` arm also covers a session belonging to a different mode:
+    /// `QuorumState`'s fields are not `#[serde(default)]`, so another mode's
+    /// state (or a bare `{}`) fails to decode rather than reporting a
+    /// confident "no request".
+    ///
+    /// A session with no `threshold` policy rule — the common case — yields
+    /// `Ok(Some(Approvals(required_approvals)))`, the value from the
+    /// `ApprovalRequest` payload.
+    ///
+    /// # Do not probe commitment readiness to find this number
+    ///
+    /// The mode's internal `commitment_ready` predicate is **non-monotonic**
+    /// in the approval count. It fires when the bar is met *or* when it has become
+    /// mathematically unreachable, which is RFC-MACP-0011 §4a's trigger for a
+    /// *negative* commitment:
+    ///
+    /// ```text
+    /// approvals >= required || (counted > 0 && approvals + remaining < required)
+    /// //                                       ^ remaining = participants - counted
+    /// ```
+    ///
+    /// So readiness is a function of the whole ballot box — how many ballots
+    /// are in and how they split — not of the approval count alone, and it is
+    /// not a step function of that count. On three participants with
+    /// `required = 3`: three rejections (0 approvals) are ready, one approval
+    /// plus two rejections is ready, two approvals and one participant yet to
+    /// vote is **not** ready, three approvals are ready. A binary search over
+    /// readiness therefore returns a confident wrong answer, and even a
+    /// linear sweep measures the decline trigger rather than the bar. Call
+    /// this function instead; it returns the bar itself.
+    pub fn effective_threshold_for_session(
+        session: &Session,
+    ) -> Result<Option<ApprovalThreshold>, MacpError> {
+        if session.mode_state.is_empty() {
+            return Ok(None);
+        }
+        let state = Self::decode_state(&session.mode_state)?;
+        Ok(state
+            .request
+            .as_ref()
+            .map(|request| Self::effective_threshold(session, request)))
     }
 
     fn commitment_ready(session: &Session, state: &QuorumState) -> bool {
@@ -100,7 +216,8 @@ impl QuorumMode {
             Some(request) => request,
             None => return false,
         };
-        let Some(required) = Self::effective_threshold(session, request) else {
+        let ApprovalThreshold::Approvals(required) = Self::effective_threshold(session, request)
+        else {
             // Unsatisfiable threshold: neither outcome may be sealed. Without
             // this, the unreachable-threshold branch below would fire on it
             // and turn an unimplementable policy into a binding decline.
@@ -197,7 +314,7 @@ impl Mode for QuorumMode {
                 // keeps a dead session from collecting ballots that can never
                 // matter.
                 match Self::effective_threshold(session, &record) {
-                    Some(required)
+                    ApprovalThreshold::Approvals(required)
                         if required >= 1 && required <= session.participants.len() as u32 => {}
                     other => {
                         tracing::warn!(
@@ -1431,20 +1548,53 @@ mod tests {
         session
     }
 
-    /// The approval bar the **mode** derives, with a request whose own
-    /// `required_approvals` is deliberately unlike any policy answer, so a
-    /// silent fallback to it would show up as a mismatch rather than a pass.
-    fn mode_required(participants: usize, rules: serde_json::Value) -> Option<u32> {
-        let session = session_with(participants, rules);
-        let request = ApprovalRequestRecord {
+    /// A request whose own `required_approvals` is deliberately unlike any
+    /// policy answer, so a silent fallback to it would show up as a mismatch
+    /// rather than a pass.
+    fn matrix_request() -> ApprovalRequestRecord {
+        ApprovalRequestRecord {
             request_id: "r1".into(),
             action: "deploy.production".into(),
             summary: "Deploy v2".into(),
             details: vec![],
             required_approvals: 99,
             requested_by: "coordinator".into(),
-        };
-        QuorumMode::effective_threshold(&session, &request)
+        }
+    }
+
+    /// Collapse the public [`ApprovalThreshold`] to the `Option<u32>` the
+    /// evaluator probe below speaks, so the two are directly comparable.
+    fn as_option(threshold: ApprovalThreshold) -> Option<u32> {
+        match threshold {
+            ApprovalThreshold::Approvals(required) => Some(required),
+            ApprovalThreshold::Unsatisfiable => None,
+        }
+    }
+
+    /// The approval bar the **mode** derives from a request in hand.
+    fn mode_required(participants: usize, rules: serde_json::Value) -> Option<u32> {
+        let session = session_with(participants, rules);
+        as_option(QuorumMode::effective_threshold(&session, &matrix_request()))
+    }
+
+    /// The same bar read through the **session-level** accessor, which decodes
+    /// the request out of `session.mode_state` itself (issue #146 — this is
+    /// the form a downstream caller reaches). The state is seated directly
+    /// rather than through `on_message` because the matrix deliberately
+    /// includes over-participant thresholds, which the `ApprovalRequest` arm
+    /// refuses; the accessor must still answer for a session that carries one
+    /// (replay can rebind edited policy rules to an accepted request).
+    fn session_required(participants: usize, rules: serde_json::Value) -> Option<u32> {
+        let mut session = session_with(participants, rules);
+        session.mode_state = QuorumMode::encode_state(&QuorumState {
+            request: Some(matrix_request()),
+            ballots: BTreeMap::new(),
+        });
+        as_option(
+            QuorumMode::effective_threshold_for_session(&session)
+                .expect("state seated by encode_state decodes")
+                .expect("a request was seated"),
+        )
     }
 
     /// The approval bar the **evaluator** derives, recovered from its public
@@ -1609,10 +1759,19 @@ mod tests {
                         "threshold": { "type": threshold_type, "value": value }
                     });
                     let mode = mode_required(participants, rules.clone());
+                    let session = session_required(participants, rules.clone());
                     let evaluator = evaluator_required(participants, rules);
                     assert_eq!(
                         mode, evaluator,
                         "type={threshold_type} value={value} participants={participants}"
+                    );
+                    // Issue #146: the public session-level accessor must
+                    // report the same bar the evaluator enforces, not merely
+                    // the same bar the request-level form derives.
+                    assert_eq!(
+                        session, evaluator,
+                        "session-level accessor: type={threshold_type} value={value} \
+                         participants={participants}"
                     );
                     assert_ne!(
                         mode,
@@ -1623,6 +1782,103 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn session_threshold_separates_no_request_from_unsatisfiable() {
+        // Issue #146: the accessor's three answers must stay distinguishable.
+        // Before this phase the inner function returned `Option<u32>` with
+        // `None` meaning "unsatisfiable"; a session-level `Option<u32>` would
+        // have made "no request yet" and "this policy can never be met" the
+        // same value, which is the one thing a caller cannot afford here.
+        let rules = serde_json::json!({ "threshold": { "type": "n_of_m", "value": 2 } });
+
+        // Nothing accepted yet: empty mode_state, and explicitly seated
+        // default state (replay writes the latter at SessionStart).
+        let mut session = session_with(3, rules.clone());
+        assert_eq!(
+            QuorumMode::effective_threshold_for_session(&session).unwrap(),
+            None
+        );
+        session.mode_state = QuorumMode::encode_state(&QuorumState::default());
+        assert_eq!(
+            QuorumMode::effective_threshold_for_session(&session).unwrap(),
+            None
+        );
+
+        // Request accepted under a satisfiable policy: the bar itself.
+        session.mode_state = QuorumMode::encode_state(&QuorumState {
+            request: Some(matrix_request()),
+            ballots: BTreeMap::new(),
+        });
+        assert_eq!(
+            QuorumMode::effective_threshold_for_session(&session).unwrap(),
+            Some(ApprovalThreshold::Approvals(2))
+        );
+
+        // Same seated request under an unsatisfiable policy: a distinct
+        // answer, not the `None` that means "no request".
+        session.policy_definition = Some(quorum_policy(
+            serde_json::json!({ "threshold": { "type": "weighted", "value": 2 } }),
+        ));
+        assert_eq!(
+            QuorumMode::effective_threshold_for_session(&session).unwrap(),
+            Some(ApprovalThreshold::Unsatisfiable)
+        );
+
+        // Undecodable state is a third answer again: no honest bar exists, so
+        // it is not silently reported as "no request".
+        session.mode_state = b"{not-quorum-state".to_vec();
+        assert_eq!(
+            QuorumMode::effective_threshold_for_session(&session)
+                .unwrap_err()
+                .to_string(),
+            "InvalidModeState"
+        );
+    }
+
+    #[test]
+    fn session_threshold_falls_back_to_the_requests_own_required_approvals() {
+        // The common case a caller most needs: no policy override at all
+        // resolves to the ApprovalRequest payload's own value, already
+        // applied, so nothing about the fallback rule is left for the caller
+        // to re-implement (issue #146). Driven through `on_message` so the
+        // state is the one the runtime itself writes.
+        let mode = QuorumMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = base_session();
+        session.policy_definition = None;
+        let result = mode
+            .on_session_start(&session, &env("coordinator", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+        assert_eq!(
+            QuorumMode::effective_threshold_for_session(&session).unwrap(),
+            None
+        );
+        let result = mode
+            .on_message(
+                &session,
+                &env(
+                    "coordinator",
+                    "ApprovalRequest",
+                    make_approval_request("r1", 2),
+                ),
+            )
+            .unwrap();
+        apply(&mut session, result);
+        assert_eq!(
+            QuorumMode::effective_threshold_for_session(&session).unwrap(),
+            Some(ApprovalThreshold::Approvals(2))
+        );
+        // An inert policy rule (`value: 0`, the schema default) is the same
+        // fallback, not a separate outcome the caller has to handle.
+        session.policy_definition = Some(quorum_policy(
+            serde_json::json!({ "threshold": { "type": "n_of_m", "value": 0 } }),
+        ));
+        assert_eq!(
+            QuorumMode::effective_threshold_for_session(&session).unwrap(),
+            Some(ApprovalThreshold::Approvals(2))
+        );
     }
 
     #[test]
