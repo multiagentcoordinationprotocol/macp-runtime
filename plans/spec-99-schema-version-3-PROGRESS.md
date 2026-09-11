@@ -109,3 +109,32 @@ Detached worktree off `882beeb`, all 32 canonical fixtures vendored, 12 register
 
 - 2026-09-11 (reverify pass, fresh Opus): 13 findings applied to the plan and this map. **Blockers:** Phase 3's risk note rewritten — the weighted-electorate reversal flips the **positive** direction too and far more commonly (worked example now in Phase 3 edge cases, Phase 3 docs and Enterprise concerns; the "decline only" third conjunct struck as false for this runtime); Phase 3's replay **failure mode** added (an affected session does not replay — skipped with a `WARN`, or startup refused under `MACP_STRICT_RECOVERY=1`) with a pre-upgrade audit query, plus a new "Replay and recovery" map section; Phase 3's stated reason for not gating replaced (the `decision_weighted_zero_weight_v1.json` argument is false — the loader creates a fresh session at the current `semantics_rev`), with the correction that `docs/deployment.md` §4 shipped **ungated** on a justification that does not transfer; and this map's "`assert_replay_equivalence` is dormant" claim corrected — it defaults `true` and fires for every fixture. **Should-fix:** Phase 5 now mode-scopes rather than flat-removes (`validate_strict_session_start_payload` already takes `mode`), with the repoint trap recorded; a positive-direction Phase 3 test added as criterion 8; Phase 1's raw-JSON `weights` check scoped inside the `:437` mode guard; Design question 1's replay-exactness premise moved to **Open question 6**; a zero-participant `unanimous` unit test added as Phase 5 criterion 6. **Nice-to-have:** the Priority-1 rename now cites `unanimous` vacuous truth first, open question 3 demoted to a standalone issue, Phase 5 docs state the tracked-invariant absence outright, and `MACP_POLICY_SCHEMAS_DIR` gets a `docs/deployment.md` env-table row in Phase 1. Several `file:line` cites corrected — see the rows above.
 - 2026-09-11: Plan written. Base `882beeb`, spec `b59af6a`. No code changed in the repo; all measurement done in a detached worktree under the session scratchpad, removed afterward. Issues **#147**, **#148**, **#149** are closed by Phases 1–3; issue **#163** is superseded (its items 1–3 are Phase 1, its item 4 is Phase 2 but with the opposite resolution to the one it predicted, and its `schema_version` 3 paragraph — the part it flagged as "not yet planned anywhere" — turned out to be the largest item, spanning Phases 2 through 6).
+
+---
+
+## Local environment: a linker break that every remaining phase will hit
+
+Found during Phase 2, unrelated to this repo. The default SDK (`MacOSX27.0.sdk`) is newer than
+`/usr/bin/ld` (ld-1267), so **every link fails**:
+
+```
+tapi error: malformed file ... unknown architecture arm64e.x1-macos
+```
+
+Workaround, required on each cargo invocation alongside `RUSTC_WRAPPER=""`:
+
+```
+SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk
+```
+
+Machine issue, not a repo one — CI is unaffected. Recorded here because a phase that hits it can
+easily read it as a code regression.
+
+Two other environment facts worth carrying forward:
+- Agent bash calls reset cwd, so the spec export needs the **absolute** path
+  `/Users/ajitkoti/code/multiagentcoordinationprotocol/multiagentcoordinationprotocol`, not the
+  relative `../`.
+- `cargo test -p macp-policy` **without** `MACP_POLICY_SCHEMAS_DIR` is not a neutral run:
+  `canonical_schema_dir` falls back to the sibling checkout, which sits 4 commits ahead of spec
+  `main`, and the parity test fails with a phantom `threshold.type has drifted` that does not exist
+  in CI.

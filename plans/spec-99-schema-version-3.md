@@ -116,7 +116,31 @@ The evaluator half closes too, differently. `weighted_total == 0.0 => NoVotes` (
 
 ### Phase 2 — accept `schema_version` 3 and evaluate the empty tally under the policy's declared version
 
-- **Status:** TODO
+- **Status:** DONE — `32b9bc4`. Gate **762 passed / 0 failed** (+4 on Phase 1's 758, all four new
+  tests), tier-1 119 + 8 JWT + 5 tier-2 unchanged, fmt/clippy/rustdoc clean, both lockfiles unmoved
+  and `--locked`-clean, all seven crates "no semver update required".
+  **Six mutations, all red**, including the three that matter: reverting the constant to `&[1,2]` reds
+  criterion 1 **on the deny reason** (`got: unsupported policy schema version: 3`) — the exact
+  mutation a variant-only assertion would have survived, which is the vacuity trap this project has
+  now hit five times; making the v3 arm unconditional reds criterion 2's **`Allow` half**, proving the
+  legacy v1/v2 arm survived; and letting the v3 rule leak into the decline branch reds criterion 6.
+  Deleting the short-circuit — issue #147's own proposal — reds criterion 4 on its own message.
+  **Two things honestly reported as un-reddable rather than papered over.** `>= 3` vs `== 3` is
+  **unobservable**: no test can discriminate them because version 4 is refused at the gate, so the
+  forward-compatible choice is not test-enforced (a separate mutation does pin that 4 stays refused).
+  And criterion 4 cannot go red against a *Phase-2* revert at all, because it pins behaviour that
+  predates the phase — deleting the short-circuit itself is its only discriminating mutation.
+  **Plan error — the Files line misattributes a test to this phase.** It claims "the two re-based
+  tests at `:1188` and `:1227`", but `:1188` is `zero_weighted_total_still_returns_no_votes`, which no
+  part of Phase 2's Approach, Edge cases or Acceptance criteria touches, and which **Phase 3's** Files
+  line claims explicitly (design question 2 has Phase 3 re-basing it onto an *unlisted* voter).
+  Correctly left alone.
+  **Live defect handed to Phase 3:** that test's comment — claiming `voting.weights[*]` is
+  `minimum: 0` *inclusive* so an all-zero weight map is schema-legal, citing spec issue #98 — **went
+  stale the moment Phase 1 landed and is wrong in the tree right now**, as is the same claim in the
+  in-function comment at the `weighted_total == 0.0` guard. Phase 3 owns both.
+  The v3 deny reason is deliberately **not** a superstring of the legacy `"no votes cast"`, so the two
+  arms' assertions cannot pass for each other.
 - **Delivers:** the fail-closed empty-tally rule of RFC-MACP-0012 §4.1 for v3 policies, the legacy fail-open rule preserved verbatim for v1 and v2, and `schema_version: 3` accepted everywhere the runtime accepts 1 and 2. Closes **#147**.
 - **Depends on:** nothing technically; sequenced after Phase 1 so the registration surface is settled before the evaluation surface moves.
 - **Files:** `crates/macp-policy/src/evaluator.rs` — `SUPPORTED_SCHEMA_VERSIONS` (`:12`) and its comment (`:9-11`); the `VotingResult::NoVotes` arm (`:252-263`); the rustdoc outcome table (`:74-90`), whose `NoVotes` row and "deferred to spec issue #98 item 3" paragraph are both now wrong; the two re-based tests at `:1188` and `:1227`; `unsupported_schema_versions_are_denied` (`:2132`).
