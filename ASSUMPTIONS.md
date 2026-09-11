@@ -168,3 +168,58 @@
   on every input, and three replay fixtures plus a rev-1-vs-rev-2 differential test pin that
   equivalence; the cost of being wrong is one extra function to inline later.
 - **Status:** UNCONFIRMED (2026-09-11)
+
+## Discharging Phase 10's acceptance criterion 3 when no conformance fixture exists
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 10)
+- **Assumed:** the criterion's intent is "a rev-1 history containing an implicit accept still replays
+  byte-faithfully", not literally "the function named `assert_replay_equivalence` executes over such
+  a history". The criterion as written is **unsatisfiable**: `assert_replay_equivalence`
+  (`tests/conformance_loader.rs:356`) is called only from the vendored-fixture loop at `:520`, and no
+  fixture in `tests/conformance/` exercises an implicit accept — and `tests/conformance/` is vendored
+  from the spec repo and byte-diffed by the `conformance-oracle` CI job, so one cannot be added here.
+- **Chose:** discharge the intent through the real `replay_session` path instead — a differential
+  legacy-log fixture (`src/replay.rs:1010,1036,1063`) splicing real-shaped `SessionSuspend`/
+  `SessionResume` `Internal` entries around an implicit accept, asserting a rev-1 history still
+  implicitly accepts and the same entries at rev 2 do not. The pre-existing
+  `current_rev_handoff_history_replays_identically_to_rev1` continues to cover byte-level `mode_state`
+  equality for unsuspended histories.
+- **Alternatives:** (a) add a `tests/conformance/` fixture — blocked, vendored and CI-byte-diffed;
+  (b) declare the criterion undischargeable and stop the phase — rejected, the criterion's *intent* is
+  both meaningful and testable, and the third of three plan errors this phase found is a drafting
+  error in my own acceptance criterion, not a gap in the work.
+- **Blast radius if wrong:** test-only. Satisfying the criterion literally requires a fixture PR in
+  the spec repo, which is read + issues only under the current authorization.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## Updating `CURRENT_SEMANTICS_REV`'s rev-2 doc bullet outside Phase 10's Files list
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 10)
+- **Assumed:** leaving Phase 9's now-false wording ("currently identical to revision 1 — nothing
+  observable differs") in `crates/macp-core/src/session.rs:28` is worse than touching one file the
+  phase's Files list does not name. That bullet list is the **only** place semantics revisions are
+  documented, so a stale entry there is the single most misleading place for one.
+- **Chose:** rewrote the rev-2 bullet in the same commit as the behaviour change. No code change in
+  that crate; `cargo doc` clean, no API change.
+- **Alternatives:** defer to Phase 13 (the G4 docs phase) — rejected, because Phase 13's Files list
+  scopes to `docs/` and `CLAUDE.md`, so a slip or a narrow reading there ships a doc that contradicts
+  the code.
+- **Blast radius if wrong:** doc comment only.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## Omitting the in-flight suspension term while the implicit-accept check is lazy-only
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 10)
+- **Assumed:** `session.accumulated_suspended_ms` alone is complete for the lazy path, and an
+  in-flight term (`now_ms - suspended_at_ms` for a currently-suspended session) would be dead code.
+  The reason is `macp_modes::step::check_preconditions` (`crates/macp-modes/src/step.rs:57-58`),
+  which returns `SessionNotOpen` for **any** message when `state != Open` — so by the time
+  `implicit_accept_elapsed_ms` runs, every pause that has occurred is already banked by
+  `Session::resume` (`session.rs:189`). The plan states the formula but never states this reason.
+- **Chose:** omit the term; document the reason at the site and leave a forward pointer to
+  `Session::suspend_cap_exceeded` (`session.rs:213-221`), which is the existing precedent for adding
+  an in-flight term when a caller *can* observe a suspended session.
+- **Alternatives:** add the term now for symmetry — rejected: it is untestable today, and untested
+  arithmetic inside a security-relevant deadline is worse than a documented omission.
+- **Blast radius if wrong:** **Phase 12 (eager sweep) must resolve this.** A sweep running outside
+  the message path *can* observe a suspended session, at which point either the in-flight term is
+  added or the sweep must skip suspended sessions entirely. RFC-MACP-0010 §5.1(1) arguably implies
+  the latter is correct. The doc comment says so at the site so the constraint travels with the code.
+- **Status:** UNCONFIRMED (2026-09-11)
