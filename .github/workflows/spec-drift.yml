@@ -72,11 +72,10 @@ jobs:
       - name: Compare the trees the conformance oracle consumes
         id: diff
         run: |
-          # The single-quoted printf formats below hold literal issue-body markdown
-          # (backticks included). Single quotes are load-bearing: these must NOT be
-          # shell-expanded. shellcheck flags them as SC2016 at info level; the
-          # workflow-lint job is advisory, and a file-wide disable directive does not
-          # reach them through actionlint's wrapper, so the note stands in its place.
+          # The printf formats below emit literal issue-body markdown. They are
+          # double-quoted with escaped backticks rather than single-quoted: the text
+          # must reach the issue body unexpanded either way, but single quotes around a
+          # backtick trip shellcheck's SC2016, and actionlint exits non-zero on it.
           set -uo pipefail
           head_sha=$(git -C spec-head rev-parse HEAD)
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
@@ -110,13 +109,13 @@ jobs:
 
           body=$(mktemp)
           {
-            printf 'The spec repo has moved ahead of the revision `conformance-oracle` is pinned to, and the change touches the trees that job consumes.\n\n'
+            printf "The spec repo has moved ahead of the revision \`conformance-oracle\` is pinned to, and the change touches the trees that job consumes.\n\n"
             printf '| | |\n|---|---|\n'
-            printf '| Pinned (`SPEC_REV` in `ci.yml`) | `%s` |\n' "$PINNED"
-            printf '| Spec default branch | `%s` |\n\n' "$head_sha"
-            printf '### Differences in the mirrored trees\n\n```\n'
+            printf "| Pinned (\`SPEC_REV\` in \`ci.yml\`) | \`%s\` |\n" "$PINNED"
+            printf "| Spec default branch | \`%s\` |\n\n" "$head_sha"
+            printf "### Differences in the mirrored trees\n\n\`\`\`\n"
             cat "$report"
-            printf '```\n\n### Commits since the pin\n\n'
+            printf "\`\`\`\n\n### Commits since the pin\n\n"
             git -C spec-head log --oneline "$PINNED..$head_sha" \
               -- schemas/conformance schemas/json/policy 2>/dev/null | sed 's/^/- /' \
               || printf -- '- (could not enumerate; the pinned commit may not be an ancestor)\n'
