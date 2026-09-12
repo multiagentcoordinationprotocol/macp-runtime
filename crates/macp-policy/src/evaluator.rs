@@ -76,9 +76,13 @@ pub fn evaluate_decision_commitment(
 /// participation).
 ///
 /// Checks:
-/// 1. Evaluation confidence: do evaluations meet `minimum_confidence`? (both outcomes)
+/// 0. Standing critical-objection scan — determines whether this commitment is
+///    an *objection-authorized* decline, which waives checks 1, 3 and 4.
+/// 1. Evaluation confidence: do evaluations meet `minimum_confidence`?
+///    (both outcomes of a vote-authorized commitment)
 /// 2. Objection veto: critical objections, resolved per `critical_objection_action`.
-/// 3. Quorum: have enough participants voted? (both outcomes)
+/// 3. Quorum: have enough participants voted?
+///    (both outcomes of a vote-authorized commitment)
 /// 4. Voting threshold mapped to the requested outcome (see below).
 ///
 /// Voting-result → validity mapping for a real algorithm (`algorithm != "none"`):
@@ -144,8 +148,8 @@ pub fn evaluate_decision_commitment(
 /// from outside the weighted electorate. RFC-MACP-0007 §6.2 states the guard
 /// "applies across all three voting results", so it gates the `Passed` row as
 /// well: `allow_decline_over_approval` waives the approval *result*, not the
-/// guard. The quorum gate (check 3) supplies the additional, opt-in
-/// `require_vote_quorum` condition.
+/// guard. The quorum gate (check 3) supplies the guard's second, opt-in
+/// conjunct, `require_vote_quorum`.
 ///
 /// **Objection-authorized decline (`schema_version >= 2`):** when the policy
 /// sets `objection_handling.critical_objection_action` to `finalize_decline`
@@ -156,27 +160,28 @@ pub fn evaluate_decision_commitment(
 /// attributable dissent the guard exists to require — so it is available at
 /// every tally, the empty one included. Without it a `schema_version >= 3`
 /// session with a non-`none` algorithm, an empty tally and a standing critical
-/// objection could terminate only by expiry, the stuck state
-/// `finalize_decline` exists to resolve. Three bounds. It is one-directional:
-/// a *positive* commitment is still denied by the veto and still evaluated
-/// against the voting block. It is scoped to the action: `deny` and `hold`
-/// stay hard-stops in both directions. And it waives the tri-state and the
-/// reject-floor only — checks 1 (`minimum_confidence`) and 3
-/// (`require_vote_quorum`) are outcome-agnostic and still apply. That last
-/// bound is a **deliberate departure from §6.2's literal wording**, not a
-/// reading of silence: §6.2 defines the decline guard as a conjunction whose
-/// *second conjunct is* the quorum condition ("…and, when
-/// `commitment.require_vote_quorum` is `true`, the voting quorum MUST be
-/// met"), so "not subject to the decline guard" waives the quorum by
-/// construction, and RFC-MACP-0012 §4.1 and its `finalize_decline` parameter
-/// note restate the guard the same way. §6.2 is genuinely silent only about
-/// `minimum_confidence`. Retaining both gates is therefore narrower than the
-/// text, and not merely conservative: it reconstructs the stuck state §6.2
-/// exists to remove, because with `require_vote_quorum: true` and an unmet
-/// floor *neither* direction can commit. It is held here pending spec issue
-/// #117, which asks for the ruling; the "Hazard: `require_vote_quorum`
-/// together with `finalize_decline`" bullet in `docs/policy.md` carries the
-/// operator-facing shape and the reproducer. No version check is needed:
+/// objection could reach no committed outcome at all, ending only by
+/// cancellation or expiry — the stuck state `finalize_decline` exists to
+/// resolve.
+///
+/// The waiver is **whole**, and the governing principle is *authorization
+/// provenance*: a gate on the voting result has nothing to legitimize for an
+/// outcome that derives no authority from it. Spec PR #126 settled this,
+/// closing the question this runtime raised as spec issue #117 — §6.2 now
+/// states the guard's `require_vote_quorum` conjunct is "included" in the
+/// waiver, so "a runtime MUST NOT deny it for an unmet voting quorum", and
+/// that `evaluation.required_before_voting` / `evaluation.minimum_confidence`
+/// "are prerequisites of the same voting pipeline and likewise MUST NOT be
+/// applied". The `evaluation` gate, the `require_vote_quorum` gate and the
+/// voting tri-state are therefore all skipped for this direction (see check 0
+/// for why the determination is hoisted above them). Applying
+/// either waived gate would reconstruct the stuck state: with the gate unmet
+/// and no ballot arriving, *neither* direction could commit.
+///
+/// Two bounds survive. It is one-directional: a *positive* commitment is
+/// still denied by the veto and still evaluated against the `evaluation` and
+/// `require_vote_quorum` gates and the voting block in full. And it is scoped to the action: `deny` and `hold`
+/// stay hard-stops in both directions. No version check is needed:
 /// `critical_objection_action` is a v2 field and a v1 descriptor that omits it
 /// defaults to `Deny`, which never sets the flag.
 ///
@@ -203,43 +208,19 @@ pub fn evaluate_decision_commitment_outcome(
 
     let mut deny_reasons: Vec<String> = Vec::new();
     let mut allow_reasons: Vec<String> = Vec::new();
-    // Set by check 2 when a standing critical objection authorizes *this*
-    // decline under `critical_objection_action: "finalize_decline"`. It is what
-    // makes check 5 skippable — see RFC-MACP-0007 §6.2 there.
-    let mut objection_authorized_decline = false;
 
-    // 1. Check evaluation requirements (minimum confidence threshold).
-    // RFC-MACP-0007: REVIEW evaluations are informational only and MUST NOT
-    // satisfy confidence thresholds or "required before voting" checks. A
-    // decline still needs a qualifying basis, so this gate is outcome-agnostic.
-    let qualifying_evaluations: Vec<_> = state
-        .evaluations
-        .iter()
-        .filter(|e| {
-            let rec = e.recommendation.to_uppercase();
-            rec != "REVIEW"
-        })
-        .collect();
-
-    if rules.evaluation.required_before_voting && rules.evaluation.minimum_confidence > 0.0 {
-        let meets_confidence = qualifying_evaluations
-            .iter()
-            .any(|e| e.confidence >= rules.evaluation.minimum_confidence);
-        if qualifying_evaluations.is_empty() || !meets_confidence {
-            deny_reasons.push(format!(
-                "no qualifying evaluation meets minimum confidence threshold: {:.2}",
-                rules.evaluation.minimum_confidence
-            ));
-        }
-    } else if rules.evaluation.required_before_voting && qualifying_evaluations.is_empty() {
-        deny_reasons.push("evaluations required before voting but none provided (REVIEW evaluations are informational only)".into());
-    }
-
-    // 2. Check critical objections (veto by count of "critical" severity objections).
+    // 0. Scan for a standing critical-objection veto, once.
+    //
     // RFC-MACP-0007 §5: only Objections with severity "critical" trigger veto
-    // logic. How the veto resolves a commitment is operator-controlled via
-    // `critical_objection_action` (default `deny` = historical hard-stop).
-    if rules.objection_handling.critical_severity_vetoes {
+    // logic. The scan is hoisted above every gate because the waiver it
+    // establishes — RFC-MACP-0007 §6.2's "Objection-authorized decline", see
+    // below — has to be known *before* the first gate runs, and because the
+    // single source of truth for "is there a standing veto?" must not be
+    // duplicated. Only the determination moves: every deny/allow reason is
+    // still pushed from the numbered check that owns it, in the original
+    // order, so nothing observable changes for a commitment the waiver does
+    // not cover.
+    let critical_veto: Option<String> = if rules.objection_handling.critical_severity_vetoes {
         let blocking: Vec<&str> = state
             .objections
             .iter()
@@ -247,40 +228,96 @@ pub fn evaluate_decision_commitment_outcome(
             .map(|o| o.sender.as_str())
             .collect();
         if blocking.len() >= rules.objection_handling.veto_threshold as usize {
-            let detail = format!(
+            Some(format!(
                 "{} blocking objection(s) (veto threshold: {}), from: {}",
                 blocking.len(),
                 rules.objection_handling.veto_threshold,
                 blocking.join(", ")
-            );
-            match rules.objection_handling.critical_objection_action {
-                CriticalObjectionAction::Deny => {
-                    deny_reasons.push(format!("blocked by {detail}"));
-                }
-                CriticalObjectionAction::Hold => {
-                    // Deny at the evaluator layer (which leaves the session
-                    // open); the reason marks it as an escalation hold rather
-                    // than a permanent denial.
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // RFC-MACP-0007 §6.2 "Objection-authorized decline": when a standing
+    // critical objection blocks the positive direction under
+    // `critical_objection_action: "finalize_decline"`, *this* negative
+    // commitment's authorization is the recorded `Objection`, not the voting
+    // result. Everything downstream that gates on the voting result or its
+    // prerequisites — the `evaluation` gate below, the `require_vote_quorum`
+    // gate, and the voting tri-state — is therefore waived for it. The flag
+    // is one-directional by construction (`!outcome_positive`): a positive
+    // commitment under the same veto keeps evaluating policy in full. No
+    // schema-version test is needed: `critical_objection_action` is a v2 field
+    // and a v1 descriptor that omits it defaults to `Deny`, which never
+    // reaches this arm.
+    let objection_authorized_decline = critical_veto.is_some()
+        && !outcome_positive
+        && matches!(
+            rules.objection_handling.critical_objection_action,
+            CriticalObjectionAction::FinalizeDecline
+        );
+
+    // 1. Check evaluation requirements (minimum confidence threshold).
+    // RFC-MACP-0007: REVIEW evaluations are informational only and MUST NOT
+    // satisfy confidence thresholds or "required before voting" checks. The
+    // gate is outcome-agnostic for a vote-authorized commitment — a decline
+    // that leans on the tally needs the same qualifying basis as an approve —
+    // but §6.2 rules that `evaluation.required_before_voting` and
+    // `evaluation.minimum_confidence` "are prerequisites of the same voting
+    // pipeline and likewise MUST NOT be applied to an objection-authorized
+    // decline".
+    if !objection_authorized_decline {
+        let qualifying_evaluations: Vec<_> = state
+            .evaluations
+            .iter()
+            .filter(|e| {
+                let rec = e.recommendation.to_uppercase();
+                rec != "REVIEW"
+            })
+            .collect();
+
+        if rules.evaluation.required_before_voting && rules.evaluation.minimum_confidence > 0.0 {
+            let meets_confidence = qualifying_evaluations
+                .iter()
+                .any(|e| e.confidence >= rules.evaluation.minimum_confidence);
+            if qualifying_evaluations.is_empty() || !meets_confidence {
+                deny_reasons.push(format!(
+                    "no qualifying evaluation meets minimum confidence threshold: {:.2}",
+                    rules.evaluation.minimum_confidence
+                ));
+            }
+        } else if rules.evaluation.required_before_voting && qualifying_evaluations.is_empty() {
+            deny_reasons.push("evaluations required before voting but none provided (REVIEW evaluations are informational only)".into());
+        }
+    }
+
+    // 2. Resolve a standing critical-objection veto per `critical_objection_action`
+    //    (default `deny` = historical hard-stop).
+    if let Some(detail) = critical_veto {
+        match rules.objection_handling.critical_objection_action {
+            CriticalObjectionAction::Deny => {
+                deny_reasons.push(format!("blocked by {detail}"));
+            }
+            CriticalObjectionAction::Hold => {
+                // Deny at the evaluator layer (which leaves the session
+                // open); the reason marks it as an escalation hold rather
+                // than a permanent denial.
+                deny_reasons.push(format!(
+                    "held for escalation by {detail} (critical_objection_action=hold)"
+                ));
+            }
+            CriticalObjectionAction::FinalizeDecline => {
+                if outcome_positive {
                     deny_reasons.push(format!(
-                        "held for escalation by {detail} (critical_objection_action=hold)"
+                        "veto blocks a positive commitment: {detail} (critical_objection_action=finalize_decline)"
                     ));
-                }
-                CriticalObjectionAction::FinalizeDecline => {
-                    if outcome_positive {
-                        deny_reasons.push(format!(
-                            "veto blocks a positive commitment: {detail} (critical_objection_action=finalize_decline)"
-                        ));
-                    } else {
-                        // RFC-MACP-0007 §6.2 "Objection-authorized decline":
-                        // the authorization is the recorded critical
-                        // `Objection`, not the voting result, so check 5 is
-                        // skipped entirely for this direction. Set only here —
-                        // the positive branch above keeps evaluating policy.
-                        objection_authorized_decline = true;
-                        allow_reasons.push(format!(
-                            "critical-objection veto finalized as a decline: {detail}"
-                        ));
-                    }
+                } else {
+                    allow_reasons.push(format!(
+                        "critical-objection veto finalized as a decline: {detail}"
+                    ));
                 }
             }
         }
@@ -298,19 +335,22 @@ pub fn evaluate_decision_commitment_outcome(
     let decisive_reject_count =
         count_decisive_rejects(&rules.voting.algorithm, &rules.voting.weights, &state.votes);
 
-    // 4. Check vote quorum (outcome-agnostic — a decline needs the same quorum
-    //    as an approve when `require_vote_quorum` is set). Applying it to an
-    //    *objection-authorized* decline departs from RFC-MACP-0007 §6.2's
-    //    literal wording, where the quorum is the decline guard's second
-    //    conjunct and is waived with the rest of the guard; held pending spec
-    //    issue #117. See the rustdoc above and `docs/policy.md`.
+    // 4. Check vote quorum. Outcome-agnostic for a *vote-authorized*
+    //    commitment — a decline that derives its authority from the tally needs
+    //    the same quorum as an approve when `require_vote_quorum` is set. An
+    //    *objection-authorized* decline is exempt: RFC-MACP-0007 §6.2 (spec
+    //    PR #126, settling this runtime's issue #117) rules that the waiver
+    //    "covers the guard whole, its `require_vote_quorum` conjunct included:
+    //    the quorum condition legitimizes an outcome that derives its authority
+    //    from the voting result, and an objection-authorized decline derives
+    //    none, so a runtime MUST NOT deny it for an unmet voting quorum."
     let quorum_met = check_quorum(
         &rules.voting.quorum.quorum_type,
         rules.voting.quorum.value,
         total_voters,
         participant_count,
     );
-    if rules.commitment.require_vote_quorum && !quorum_met {
+    if rules.commitment.require_vote_quorum && !quorum_met && !objection_authorized_decline {
         deny_reasons.push(format!(
             "vote quorum not met: {} voters of {} participants (quorum: {} {})",
             total_voters,
@@ -3382,6 +3422,184 @@ mod tests {
             !joined.contains("allow_decline_over_approval"),
             "the tri-state must be skipped whole, not routed through the knob: {joined}"
         );
+    }
+
+    // ── RFC-MACP-0007 §6.2, spec PR #126: the waiver covers the guard whole ──
+    //
+    // §6.2 defines the decline guard as a two-conjunct conjunction and waives
+    // "the decline guard" for an objection-authorized decline. Spec PR #126
+    // settled the question this runtime raised as spec issue #117: the waiver
+    // reaches the `commitment.require_vote_quorum` conjunct, and the
+    // `evaluation.*` prerequisites go with it, because all three gate outcomes
+    // deriving authority from the voting result and this decline derives none.
+    // The four tests below are mutually load-bearing: the two waiver tests
+    // would be satisfied by a runtime that dropped the gates outright, and the
+    // two invariant tests are what stops the waiver from leaking.
+
+    /// `finalize_decline` over a real algorithm, with **both** waived gates
+    /// armed and unsatisfiable at zero ballots: a participation floor of 1
+    /// under `require_vote_quorum`, and an evaluation prerequisite with a
+    /// positive `minimum_confidence` that no evaluation meets.
+    fn finalize_decline_policy_with_waived_gates() -> PolicyDefinition {
+        let mut policy = make_policy(serde_json::json!({
+            "voting": {
+                "algorithm": "majority",
+                "threshold": 0.5,
+                "quorum": { "type": "count", "value": 1 }
+            },
+            "evaluation": { "required_before_voting": true, "minimum_confidence": 0.8 },
+            "objection_handling": {
+                "critical_severity_vetoes": true,
+                "veto_threshold": 1,
+                "critical_objection_action": "finalize_decline"
+            },
+            "commitment": { "require_vote_quorum": true }
+        }));
+        policy.schema_version = 3;
+        policy
+    }
+
+    #[test]
+    fn an_objection_authorized_decline_is_not_denied_for_an_unmet_vote_quorum() {
+        // The discriminator `decision_finalize_decline_quorum_waiver.json`
+        // pins. Zero ballots, so the count-1 participation floor is unmet and
+        // `require_vote_quorum` is `true`. §6.2: "a runtime MUST NOT deny it
+        // for an unmet voting quorum."
+        let mut policy = finalize_decline_policy_with_waived_gates();
+        // Isolate the quorum conjunct — the evaluation prerequisite has its own
+        // test below, and leaving it armed here would let this one pass on a
+        // runtime that waived only the evaluation gate.
+        policy.rules["evaluation"] = serde_json::json!({ "required_before_voting": false });
+
+        // Precondition: the gate really is armed and really is unmet.
+        let rules: DecisionPolicyRules = serde_json::from_value(policy.rules.clone()).unwrap();
+        assert!(rules.commitment.require_vote_quorum);
+        assert!(
+            !check_quorum("count", 1.0, 0, participants().len()),
+            "precondition: a count-1 floor must be unmet at zero voters"
+        );
+
+        let result = decline(&policy, &objection_only_state(), &participants());
+        let PolicyDecision::Allow { reasons } = &result else {
+            panic!(
+                "an objection-authorized decline must not be denied for an unmet \
+                 voting quorum (RFC-MACP-0007 §6.2, spec #126), got: {result:?}"
+            );
+        };
+        assert!(
+            reasons
+                .join(" | ")
+                .contains("critical-objection veto finalized as a decline"),
+            "the allow reason must name the veto as the authorization, got: {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn an_objection_authorized_decline_is_not_denied_by_the_evaluation_prerequisites() {
+        // §6.2: `evaluation.required_before_voting` and
+        // `evaluation.minimum_confidence` "are prerequisites of the same voting
+        // pipeline and likewise MUST NOT be applied to an objection-authorized
+        // decline." The state carries no evaluation at all, so both the
+        // confidence arm and the bare `required_before_voting` arm are unmet.
+        let mut policy = finalize_decline_policy_with_waived_gates();
+        // Isolate the evaluation prerequisites from the quorum conjunct above.
+        policy.rules["commitment"] = serde_json::json!({ "require_vote_quorum": false });
+
+        // Precondition: the gate really is armed with a positive threshold.
+        let rules: DecisionPolicyRules = serde_json::from_value(policy.rules.clone()).unwrap();
+        assert!(rules.evaluation.required_before_voting);
+        assert!(rules.evaluation.minimum_confidence > 0.0);
+
+        let state = objection_only_state();
+        assert!(
+            state.evaluations.is_empty(),
+            "precondition: no evaluation can satisfy the threshold"
+        );
+
+        let result = decline(&policy, &state, &participants());
+        let PolicyDecision::Allow { reasons } = &result else {
+            panic!(
+                "an objection-authorized decline must not be denied by the evaluation \
+                 prerequisites (RFC-MACP-0007 §6.2, spec #126), got: {result:?}"
+            );
+        };
+        assert!(
+            reasons
+                .join(" | ")
+                .contains("critical-objection veto finalized as a decline"),
+            "the allow reason must name the veto as the authorization, got: {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn a_vote_authorized_decline_is_still_denied_for_an_unmet_vote_quorum() {
+        // The invariant the waiver must not leak past. Same policy, but no
+        // standing critical objection, so the decline is *vote*-authorized: the
+        // quorum conjunct still applies in full. Two decisive rejects clear the
+        // reject-floor, so the quorum is the only thing left to deny on — which
+        // is what makes this test sensitive to a waiver applied to every
+        // decline rather than only an objection-authorized one.
+        let mut policy = finalize_decline_policy_with_waived_gates();
+        policy.rules["evaluation"] = serde_json::json!({ "required_before_voting": false });
+        policy.rules["voting"]["quorum"] = serde_json::json!({ "type": "count", "value": 3 });
+
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "REJECT"),
+            ("p1", "agent://growth", "REJECT"),
+        ]);
+        assert!(
+            state.objections.is_empty(),
+            "precondition: nothing may objection-authorize this decline"
+        );
+        assert!(
+            count_decisive_rejects("majority", &std::collections::HashMap::new(), &state.votes) > 0,
+            "precondition: the reject-floor must be cleared so quorum is the sole denial"
+        );
+
+        let result = decline(&policy, &state, &participants());
+        let PolicyDecision::Deny { reasons } = &result else {
+            panic!(
+                "a vote-authorized decline is still gated by require_vote_quorum — the \
+                 §6.2 waiver is scoped to an objection-authorized decline, got: {result:?}"
+            );
+        };
+        assert!(
+            reasons.iter().any(|r| r.contains("vote quorum not met")),
+            "the denial must come from the quorum gate, got: {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn a_positive_commitment_under_finalize_decline_still_evaluates_every_gate() {
+        // The other half of the leak guard, and the direction
+        // `decision_finalize_decline_quorum_waiver.json` pins with its `c1`
+        // message. The waiver is one-directional: a *positive* commitment under
+        // the same standing veto keeps evaluating policy in full, so all three
+        // grounds must still be reported — the veto, the unmet quorum and the
+        // unmet evaluation prerequisite — alongside the v3 empty-tally denial.
+        let policy = finalize_decline_policy_with_waived_gates();
+        let result = evaluate_decision_commitment_outcome(
+            &policy,
+            &objection_only_state(),
+            &participants(),
+            true,
+        );
+        let PolicyDecision::Deny { reasons } = &result else {
+            panic!("a positive commitment under a standing veto must be denied, got: {result:?}");
+        };
+        let joined = reasons.join(" | ");
+        for expected in [
+            "veto blocks a positive commitment",
+            "vote quorum not met",
+            "no qualifying evaluation meets minimum confidence threshold",
+            "no decisive votes cast",
+        ] {
+            assert!(
+                joined.contains(expected),
+                "the positive direction must still report {expected:?} — the §6.2 waiver \
+                 is scoped to the decline direction, got: {joined}"
+            );
+        }
     }
 
     // ── RFC-MACP-0012 §5.2 reserved governance profiles ─────────────

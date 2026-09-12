@@ -169,6 +169,14 @@ RFC-MACP-0012 §4.2 promoted the `percentage` ceiling rule into normative text a
 
 The denominator is also pinned: it is the participant count declared at `SessionStart` and does **not** shrink as ballots, abstentions included, are cast. This runtime already read it that way.
 
+### 10. An objection-authorized decline is no longer denied by `require_vote_quorum` or the evaluation gate
+
+RFC-MACP-0007 §6.2 exempts an *objection-authorized* decline -- a negative `Commitment` under `objection_handling.critical_objection_action: "finalize_decline"` with a standing critical `Objection` -- from the voting tri-state and the decline guard. The guard is a two-conjunct conjunction whose second conjunct is `commitment.require_vote_quorum`, and §6.2 did not say whether the waiver reached it. This runtime raised that as spec issue #117 and, pending the ruling, kept the quorum gate and the `evaluation.*` prerequisites applying. Spec PR #126 ruled the waiver covers the guard **whole**: the quorum condition legitimizes an outcome deriving its authority from the voting result, an objection-authorized decline derives none, so a runtime "MUST NOT deny it for an unmet voting quorum", and `evaluation.required_before_voting` / `evaluation.minimum_confidence` "are prerequisites of the same voting pipeline and likewise MUST NOT be applied".
+
+**Who this reaches.** Only sessions bound to a Decision policy that sets `critical_objection_action: "finalize_decline"` *and* at least one of `commitment.require_vote_quorum: true` or `evaluation.required_before_voting: true`, and only once a critical objection is standing. For them a negative `Commitment` that this runtime used to deny with `POLICY_DENIED` is now allowed. Nothing moves from allowed to denied, and the positive direction is untouched -- a positive commitment under the same veto is still denied, and still reports the unmet quorum and evaluation prerequisite among its reasons.
+
+**No stored session's replay changes.** The commitment the old gates denied was *rejected*, and rejected messages never enter accepted history (RFC-MACP-0001 §8.3), so no stored history can contain one. §6.2 states this explicitly for this rule. What changes is live acceptance: a `finalize_decline` session that was previously reachable only by TTL expiry or an initiator `CancelSession` can now record a committed negative outcome, so an operator who was working around the strand -- leaving `require_vote_quorum` `false`, or soliciting a throwaway `ABSTAIN` to clear the participation floor -- can drop the workaround. See [Policy](policy.md#decision-mode) for the full rule and `tests/conformance/decision_finalize_decline_quorum_waiver.json` for the canonical discriminator.
+
 ## Environment variables
 
 | Variable | Default | Description |

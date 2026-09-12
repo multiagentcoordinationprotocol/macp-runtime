@@ -1,0 +1,115 @@
+{
+  "_comment": "Pins the one cell issue #117 found unpinned: whether waiving the decline guard also waives its require_vote_quorum conjunct. RFC-MACP-0007 6.2 defines the guard as a two-conjunct conjunction and then waives 'the decline guard' without saying whether the waiver reaches the quorum half. It does -- the guard is waived whole. Companion to decision_finalize_decline_empty_tally.json, whose only material difference is that it never sets require_vote_quorum, which is precisely why the corpus could not see this disagreement before.",
+  "description": "Decision Mode: an objection-authorized decline is not denied for an unmet voting quorum -- the waiver of the decline guard covers its require_vote_quorum conjunct.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.finalize-decline-quorum-waiver",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Majority vote with a participation floor AND require_vote_quorum, plus a critical-objection veto that finalizes as a decline.",
+    "rules": {
+      "voting": {
+        "algorithm": "majority",
+        "quorum": {
+          "type": "count",
+          "value": 1
+        }
+      },
+      "objection_handling": {
+        "critical_severity_vetoes": true,
+        "critical_objection_action": "finalize_decline"
+      },
+      "commitment": {
+        "authority": "initiator_only",
+        "require_vote_quorum": true
+      }
+    }
+  },
+  "policy_version": "policy.decision.finalize-decline-quorum-waiver",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://b",
+      "message_type": "Objection",
+      "payload_type": "macp.modes.decision.v1.ObjectionPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "reason": "unresolved data-retention finding",
+        "severity": "critical"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Triply blocked, and POLICY_DENIED is the only producible code: the standing critical objection vetoes the positive direction, the schema_version 3 empty-tally rule fails every algorithm other than 'none', and the participation floor of 1 is unmet at zero voters. Mode validation passes -- an accepted Proposal exists and the sender is the authorized initiator -- so every remaining ground is policy-layer, and RFC-MACP-0012 6.4 runs policy governance only after mode validation passes.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.approved",
+        "authority_scope": "test",
+        "reason": "attempt to commit over a standing critical objection with no ballots cast",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.finalize-decline-quorum-waiver",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "_comment": "THE DISCRIMINATOR for issue #117. Zero ballots have been cast, so the participation floor of 1 is UNMET and require_vote_quorum is true. A runtime that keeps the quorum conjunct applying to an objection-authorized decline rejects this message and fails the fixture. It must be accepted: the waiver covers the decline guard whole. The quorum condition legitimizes an outcome deriving its authority from the voting result, and this decline derives none -- its authorization is the recorded critical Objection. The strict reading is not the conservative choice; it reconstructs the stuck state finalize_decline exists to remove, in which no Commitment is acceptable in either direction and no committed outcome can be reached at all.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "outcome_positive": false,
+        "action": "decision.rejected",
+        "authority_scope": "test",
+        "reason": "critical objection finalized as a decline with the voting quorum unmet",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.finalize-decline-quorum-waiver",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.rejected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": false
+  },
+  "expected_mode_state": {
+    "phase": "Committed",
+    "proposals": {
+      "p1": {
+        "proposal_id": "p1",
+        "sender": "agent://orchestrator"
+      }
+    }
+  }
+}
