@@ -163,9 +163,20 @@ pub fn evaluate_decision_commitment(
 /// stay hard-stops in both directions. And it waives the tri-state and the
 /// reject-floor only — checks 1 (`minimum_confidence`) and 3
 /// (`require_vote_quorum`) are outcome-agnostic and still apply. That last
-/// bound is the fail-closed reading of a §6.2 that names neither: the quorum
-/// condition sits inside its decline-guard sentence, so a wider reading is
-/// arguable and deliberately not taken here. No version check is needed:
+/// bound is a **deliberate departure from §6.2's literal wording**, not a
+/// reading of silence: §6.2 defines the decline guard as a conjunction whose
+/// *second conjunct is* the quorum condition ("…and, when
+/// `commitment.require_vote_quorum` is `true`, the voting quorum MUST be
+/// met"), so "not subject to the decline guard" waives the quorum by
+/// construction, and RFC-MACP-0012 §4.1 and its `finalize_decline` parameter
+/// note restate the guard the same way. §6.2 is genuinely silent only about
+/// `minimum_confidence`. Retaining both gates is therefore narrower than the
+/// text, and not merely conservative: it reconstructs the stuck state §6.2
+/// exists to remove, because with `require_vote_quorum: true` and an unmet
+/// floor *neither* direction can commit. It is held here pending spec issue
+/// #117, which asks for the ruling; the "Hazard: `require_vote_quorum`
+/// together with `finalize_decline`" bullet in `docs/policy.md` carries the
+/// operator-facing shape and the reproducer. No version check is needed:
 /// `critical_objection_action` is a v2 field and a v1 descriptor that omits it
 /// defaults to `Deny`, which never sets the flag.
 ///
@@ -288,7 +299,11 @@ pub fn evaluate_decision_commitment_outcome(
         count_decisive_rejects(&rules.voting.algorithm, &rules.voting.weights, &state.votes);
 
     // 4. Check vote quorum (outcome-agnostic — a decline needs the same quorum
-    //    as an approve when `require_vote_quorum` is set).
+    //    as an approve when `require_vote_quorum` is set). Applying it to an
+    //    *objection-authorized* decline departs from RFC-MACP-0007 §6.2's
+    //    literal wording, where the quorum is the decline guard's second
+    //    conjunct and is waived with the rest of the guard; held pending spec
+    //    issue #117. See the rustdoc above and `docs/policy.md`.
     let quorum_met = check_quorum(
         &rules.voting.quorum.quorum_type,
         rules.voting.quorum.value,
@@ -3167,7 +3182,7 @@ mod tests {
     //
     // A decline under `critical_objection_action: "finalize_decline"` is
     // authorized by the recorded critical `Objection`, not by the tally, so it
-    // is gated by neither the voting tri-state nor the decline guard. The four
+    // is gated by neither the voting tri-state nor the decline guard. The five
     // tests below are mutually load-bearing: each one blocks a wrong
     // implementation that would satisfy the others.
 
@@ -3291,6 +3306,81 @@ mod tests {
         assert!(
             reasons.iter().any(|r| r.contains("blocked by")),
             "the default action keeps its hard-stop reason, got: {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn a_critical_objection_authorizes_a_decline_over_a_passing_vote() {
+        // The `Passed` row, with `commitment.allow_decline_over_approval` left
+        // at its **default** `false`. §6.2 waives the tri-state *entirely* for
+        // an objection-authorized decline, so the row that would otherwise be
+        // the hardest `Deny` to move — a vote that passed the approval
+        // threshold, declined without the executive-override knob — allows.
+        //
+        // This is the widest behavioural reach of the rule and the only arm
+        // that flips an operator-visible default: before it, the knob was what
+        // stood between a passing vote and a decline; after it, a standing
+        // critical objection is enough. It is nonetheless replay-safe — a
+        // runtime that formerly denied this *rejected* the message, and
+        // rejected messages never enter accepted history (RFC-MACP-0001 §8.3).
+        //
+        // Neither of the other `finalize_decline` tests reaches it:
+        // `a_critical_objection_authorizes_a_decline_on_an_empty_tally` uses
+        // the empty tally (`NoVotes`), and the older
+        // `critical_objection_finalize_decline_allows_negative_blocks_positive`
+        // uses a two-reject `Failed` tally that the decline guard already
+        // allowed on its own.
+        let policy = finalize_decline_policy(3);
+        let mut state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "APPROVE"),
+            ("p1", "agent://growth", "APPROVE"),
+            ("p1", "agent://compliance", "APPROVE"),
+        ]);
+
+        // Two preconditions, both load-bearing: without them the test could
+        // pass while exercising a different arm entirely.
+        let rules: DecisionPolicyRules = serde_json::from_value(policy.rules.clone()).unwrap();
+        assert!(
+            !rules.commitment.allow_decline_over_approval,
+            "the knob must stay at its default `false` — the point of this test \
+             is that the objection alone authorizes the decline"
+        );
+        assert!(
+            matches!(
+                check_voting_algorithm(
+                    "majority",
+                    0.5,
+                    &std::collections::HashMap::new(),
+                    &state.votes,
+                    &participants(),
+                ),
+                VotingResult::Passed(_)
+            ),
+            "precondition: the round must really be `Passed`"
+        );
+
+        state.objections.push(Objection {
+            proposal_id: "p1".into(),
+            reason: "unresolved data-retention finding".into(),
+            severity: "critical".into(),
+            sender: "agent://compliance".into(),
+        });
+
+        let result = decline(&policy, &state, &participants());
+        let PolicyDecision::Allow { reasons } = &result else {
+            panic!(
+                "a standing critical objection must authorize a decline over a passing \
+                 vote, with `allow_decline_over_approval` at its default: {result:?}"
+            );
+        };
+        let joined = reasons.join(" | ");
+        assert!(
+            joined.contains("critical-objection veto finalized as a decline"),
+            "the allow reason must name the veto as the authorization, got: {joined}"
+        );
+        assert!(
+            !joined.contains("allow_decline_over_approval"),
+            "the tri-state must be skipped whole, not routed through the knob: {joined}"
         );
     }
 
