@@ -343,11 +343,25 @@ pub fn evaluate_decision_commitment_outcome(
                     // with no decisive dissent — an all-approve tally, or one
                     // whose only rejects were cast by participants outside
                     // `voting.weights` and are therefore non-decisive — still
-                    // has nothing to finalize an adverse outcome on. This is
-                    // the arm RFC-MACP-0012 §8's "Bounded exception —
-                    // weight-`0` decisiveness" is about.
+                    // has nothing to finalize an adverse outcome on.
+                    //
+                    // The explanatory clause is algorithm-conditional on
+                    // purpose. RFC-MACP-0012 §8's "Bounded exception —
+                    // weight-`0` decisiveness" is only about the `weighted`
+                    // half of this arm; the arm itself is reached by every
+                    // algorithm, and a `majority` policy has no
+                    // `voting.weights` at all, so naming that key there would
+                    // point the operator at a knob their descriptor does not
+                    // carry.
+                    let detail = if rules.voting.algorithm == "weighted" {
+                        "a REJECT from a participant outside voting.weights is non-decisive, \
+                         and incomplete participation is not a rejection"
+                    } else {
+                        "no REJECT was cast; neither an abstention nor a missing ballot is a \
+                         rejection"
+                    };
                     deny_reasons.push(format!(
-                        "allow_decline_over_approval permits a decline over a passing vote, but no decisive reject backs it (a vote cast by a participant outside voting.weights is non-decisive; incomplete participation is not a rejection): {reason}"
+                        "allow_decline_over_approval permits a decline over a passing vote, but no decisive reject backs it ({detail}): {reason}"
                     ));
                 }
             }
@@ -395,8 +409,14 @@ pub fn evaluate_decision_commitment_outcome(
                         deny_reasons.push("no votes cast".into());
                     }
                 } else {
+                    // "decisive" rather than merely "explicit", to stay
+                    // parallel with the `Passed` and `Failed` arms above and
+                    // with `docs/policy.md`: under `weighted` an explicit
+                    // `REJECT` from a participant outside `voting.weights` is
+                    // not enough, which is exactly how this arm becomes
+                    // reachable on a complete ballot set.
                     deny_reasons.push(
-                        "no votes cast; a decline requires at least one explicit reject vote"
+                        "no votes cast; a decline requires at least one decisive explicit reject vote"
                             .into(),
                     );
                 }
@@ -439,9 +459,17 @@ pub fn evaluate_decision_commitment_outcome(
 /// resulting break in stored-session replay in writing.
 ///
 /// A negative weight (out-of-schema, reachable only from a directly-constructed
-/// `PolicyDefinition`) is non-decisive too: `> 0.0` is the electorate test, and
-/// such a round is short-circuited to `Failed` in
-/// [`check_voting_algorithm`] regardless.
+/// `PolicyDefinition`) is non-decisive too: `> 0.0` is the electorate test, so a
+/// voter the map gives a negative weight sits outside the electorate for the
+/// purposes of this guard. That is deliberately *not* the same test
+/// [`compute_weighted_votes`] applies — it sums every cast weight, negative ones
+/// included — so the two diverge whenever a negative weight fails to drag the
+/// total below zero: `{a: 1.0, b: -0.5}` sums to `+0.5`, reaches the ratio with
+/// `b` contributing, and yet does not count `b`'s `REJECT` here. Only when the
+/// *total* goes negative does [`check_voting_algorithm`] short-circuit to
+/// `Failed` and make the divergence moot. It is left documented rather than
+/// resolved because `exclusiveMinimum: 0` makes the whole family unauthorable
+/// through registration.
 fn count_decisive_rejects(
     algorithm: &str,
     weights: &std::collections::HashMap<String, f64>,
@@ -1246,16 +1274,21 @@ mod tests {
         assert!(matches!(result, PolicyDecision::Deny { .. }));
     }
 
-    // ── Weighted degenerate totals (negative fixed, zero deferred) ──
+    // ── Weighted degenerate totals (both now defined, neither deferred) ──
     //
     // Two arithmetic facts these tests turn on, both easy to get wrong:
     //
     // 1. `compute_weighted_votes` sums only the *cast* APPROVE/REJECT weights,
     //    so the sign of the total is set by the weight map, not by which way
     //    the ballots went. `{a: 1.0, b: -1.0}` with both agents voting sums to
-    //    exactly **0.0** — the schema-legal case that is deliberately still
-    //    `NoVotes`. A negative total needs the negative weight to outweigh the
-    //    positive ones, e.g. `{a: 1.0, b: -2.0}`.
+    //    exactly **0.0**, which RFC-MACP-0012 §4.1 defines as the empty
+    //    decisive tally and therefore `NoVotes` — a named outcome, not a
+    //    deferral. (This map was once called schema-legal here; spec #99 moved
+    //    `voting.weights.additionalProperties` to `exclusiveMinimum: 0`, so it
+    //    is refused on `b` at registration and survives only as a
+    //    directly-constructed `PolicyDefinition`.) A negative total needs the
+    //    negative weight to outweigh the positive ones, e.g.
+    //    `{a: 1.0, b: -2.0}`.
     // 2. A negative total was **never** reported as `NoVotes`: the guard it
     //    escaped was `weighted_total == 0.0`, which a negative value does not
     //    match. It fell straight through to `weighted_approve /
@@ -2861,6 +2894,69 @@ mod tests {
     }
 
     #[test]
+    fn decline_denied_over_an_all_approve_round_with_the_knob() {
+        // The non-`weighted` reach of the `Passed`-arm decline guard, which no
+        // other test covers: `decline_allowed_over_passing_vote_with_knob`
+        // above carries a `REJECT`, and the weighted-electorate tests all bind
+        // `voting.algorithm: "weighted"`. This shape has **no** `weighted`
+        // algorithm and **no** `weights` map at all — an ordinary `majority`
+        // policy and three `APPROVE`s — and it is the widest reach of the
+        // change: `Allow` before the guard moved into the `Passed` arm, `Deny`
+        // after. `docs/deployment.md` item 6 documents it as the second
+        // stored-replay predicate, and RFC-MACP-0012 §8's bounded exception
+        // does **not** cover it: §8 is about weight-`0` decisiveness, and
+        // there are no weights here. RFC-MACP-0007 §6.2 carried "the guard
+        // applies across all three voting results" before spec #99, so this is
+        // a pre-existing conformance gap being closed rather than new
+        // semantics.
+        let policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 },
+            "commitment": { "allow_decline_over_approval": true }
+        }));
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "APPROVE"),
+            ("p1", "agent://growth", "APPROVE"),
+            ("p1", "agent://compliance", "APPROVE"),
+        ]);
+
+        // Precondition, load-bearing: the round must really be `Passed`, or
+        // the test silently exercises the `Failed`/`NoVotes` arms instead of
+        // the one it exists to cover.
+        assert!(
+            matches!(
+                check_voting_algorithm(
+                    "majority",
+                    0.5,
+                    &std::collections::HashMap::new(),
+                    &state.votes,
+                    &participants(),
+                ),
+                VotingResult::Passed(_)
+            ),
+            "an all-approve majority round must Pass for this test to reach the Passed arm"
+        );
+
+        let result = decline(&policy, &state, &participants());
+        let PolicyDecision::Deny { reasons } = &result else {
+            panic!("an all-approve round has no dissent to finalize a decline on, got: {result:?}");
+        };
+        let joined = reasons.join(" | ");
+        // Assert the *reason*, not only the variant: the `Deny` alone would
+        // also be produced by an implementation that had broken
+        // `allow_decline_over_approval` outright.
+        assert!(
+            joined.contains("no decisive reject backs it"),
+            "the denial must name the missing decisive reject, got: {joined}"
+        );
+        // And the wording must not send the operator to a knob this
+        // descriptor does not carry.
+        assert!(
+            !joined.contains("voting.weights"),
+            "a majority policy has no voting.weights; the reason must not cite it, got: {joined}"
+        );
+    }
+
+    #[test]
     fn decline_denied_with_no_votes() {
         // NoVotes → no explicit reject → a decline is not justified.
         let policy = make_policy(serde_json::json!({
@@ -3103,9 +3199,8 @@ mod tests {
             );
         };
         assert!(
-            reasons
-                .iter()
-                .any(|r| r == "no votes cast; a decline requires at least one explicit reject vote"),
+            reasons.iter().any(|r| r
+                == "no votes cast; a decline requires at least one decisive explicit reject vote"),
             "the denial must come from the decline guard, got: {reasons:?}"
         );
     }
@@ -3308,14 +3403,15 @@ mod tests {
 
     #[test]
     fn no_decisive_votes_always_blocks_a_negative_commitment() {
-        // §4.1: a decline must be backed by at least one explicit reject.
+        // §4.1: a decline must be backed by at least one *decisive* explicit
+        // reject.
         // Version-independent: RFC-MACP-0007 §6.2's NoVotes bullet denies a
         // vote-authorized decline on an empty tally, and §4.1 says the schema
         // versions "differ only in the **positive** direction" — so the
         // schema_version axis is swept to pin that the v3 branch left the
         // negative branch alone.
         const EXPECTED: &str =
-            "no votes cast; a decline requires at least one explicit reject vote";
+            "no votes cast; a decline requires at least one decisive explicit reject vote";
         for schema_version in [1u32, 2, 3] {
             for require_quorum in [false, true] {
                 let mut policy = make_policy(serde_json::json!({

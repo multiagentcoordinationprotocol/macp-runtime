@@ -16,7 +16,7 @@ Before exposing the runtime to production traffic, ensure these four items are c
 
 ## Upgrading into registration-time policy validation
 
-This release tightens what the governance policy registry accepts, what the Quorum mode will bind, and how the Decision evaluator reads a `weighted` round. Six changes are operationally visible, and **item 6 is the only one that can change how an already-stored session replays** -- read it first if you have any persisted Decision session bound to a `weighted` policy. Read this section before upgrading any deployment that sets `MACP_POLICIES_DIR`, or that has persisted sessions bound to a policy with a Quorum `threshold` or a `weighted` `voting.algorithm`. `CHANGELOG.md` is generated from commit subjects and does not carry this detail.
+This release tightens what the governance policy registry accepts, what the Quorum mode will bind, how the Decision evaluator reads a `weighted` round, and when a decline may be finalized over a passing vote. Six changes are operationally visible, and **item 6 is the only one that can change how an already-stored session replays** -- read it first if you have any persisted Decision session at all. Item 6 carries two independent predicates and **only one of them involves `weighted`**: the other reaches any Decision policy that sets `commitment.allow_decline_over_approval: true`, `majority` policies included. Read this section before upgrading any deployment that sets `MACP_POLICIES_DIR`, or that has persisted sessions bound to a policy with a Quorum `threshold`, a `weighted` `voting.algorithm`, or `commitment.allow_decline_over_approval: true`. `CHANGELOG.md` is generated from commit subjects and does not carry this detail.
 
 ### 1. An invalid policy file now refuses startup
 
@@ -86,14 +86,28 @@ This item affects admission only; no stored session's replay changes, because a 
 
 Under `voting.algorithm: "weighted"`, a declared participant absent from `voting.weights` used to weigh `1.0`. It now weighs `0` and is **non-decisive**: its ballot contributes to neither side of the weighted ratio, does not enter the decisive tally, and does not satisfy the decline guard of RFC-MACP-0007 §6.2. (It still counts toward the `voting.quorum` participation floor -- that carve-out is explicit in RFC-MACP-0012 §4.1 and is unchanged.) The `weights` map **is** the electorate; an observer is expressed by omission, which is also why item 5 refuses an explicit `0`.
 
-**This is the one change in this release that can alter a stored session's replay**, and unlike item 4 it is not confined to a hand-built descriptor. The rule is keyed on nothing -- RFC-MACP-0012 §4.1 makes it "normative for **every** schema version", so it reaches stored `schema_version: 1` and `2` descriptors as well as version 3.
+**This item is the only place in this release where a stored session's replay can change**, and unlike item 4 it is not confined to a hand-built descriptor. The electorate rule is keyed on nothing -- RFC-MACP-0012 §4.1 makes it "normative for **every** schema version", so it reaches stored `schema_version: 1` and `2` descriptors as well as version 3.
 
-**Blast radius -- two conjuncts, and direction is not one of them.** A stored session is affected when **both** hold:
+**This item carries two independent changes, and the second one needs no `weights` map at all.** Alongside the electorate rule above, the decline guard of RFC-MACP-0007 §6.2 is now applied on a `Passed` round as well as on `Failed` and `NoVotes` -- §6.2 says "the guard applies across all three voting results" and had said so *before* spec #99, while this runtime applied it in only one. So `commitment.allow_decline_over_approval` now waives the approval *result* and not the guard: a decline over a round with no decisive reject is denied whatever the knob says. That reaches ordinary `majority` policies that have never had a `voting.weights` key. Audit for **both** predicates below; neither subsumes the other.
+
+**Blast radius -- two independent predicates, either one sufficient.**
+
+**Predicate A -- the weighted electorate.** A stored session matches when **both** hold:
 
 1. the session is bound to a Decision policy whose `voting.algorithm` is `weighted`, **and**
 2. at least one accepted `Vote` was cast by a participant that does **not** appear as a key in that policy's `voting.weights` map, with a vote other than `ABSTAIN`.
 
-That is the whole predicate. It does **not** depend on the committed outcome's direction, on `schema_version`, or on `allow_decline_over_approval`. RFC-MACP-0012 §8's "Bounded exception -- weight-`0` decisiveness" describes a narrower case (a decline over a `Passed` tally under `allow_decline_over_approval: true`), because that is the only configuration the *spec's* earlier text had defined an outcome for. This runtime had defined an outcome for **every** unlisted-voter configuration -- it defaulted the weight to `1.0` -- so its blast radius is wider than §8's corner, and §8's decline-only framing must not be read as this runtime's exposure.
+A does **not** depend on the committed outcome's direction, on `schema_version`, or on `allow_decline_over_approval`.
+
+**Predicate B -- the decline guard on a passing round.** A stored session matches when **all three** hold:
+
+1. the session is bound to a Decision policy that sets `commitment.allow_decline_over_approval: true`, **and**
+2. its accepted history contains a **negative** `Commitment` (`outcome_positive: false`), **and**
+3. the round that commitment sealed was `Passed` with **zero** decisive rejects -- in the ordinary case an all-`APPROVE` tally, since neither an abstention nor a missing ballot is a rejection.
+
+B needs no `weighted` algorithm and no `weights` map. The minimal instance is fully registerable and trivially reachable: `{"voting": {"algorithm": "majority", "threshold": 0.5}, "commitment": {"allow_decline_over_approval": true}}` with three `APPROVE`s and a negative `Commitment` was `Allow` before this release and is `Deny` after.
+
+**Neither predicate is complete on its own, and A is not the safe one to check.** An operator who audits only for `weighted` policies, finds none, and concludes the deployment is unaffected **can be wrong** -- B reaches ordinary `majority`, `supermajority`, `unanimous` and `plurality` policies. RFC-MACP-0012 §8's "Bounded exception -- weight-`0` decisiveness" describes something narrower than either predicate (a decline over a `Passed` tally under `allow_decline_over_approval: true` whose only reject came from a weight-`0` participant), because that is the only configuration the *spec's* earlier text had defined an outcome for. Two reasons that framing must not be read as this runtime's exposure. For A: this runtime had defined an outcome for **every** unlisted-voter configuration -- it defaulted the weight to `1.0` -- so A is wider than §8's corner in both directions. For B: §8 does not cover it at all. §8 is about weight-`0` decisiveness, and B has no weights; B is a **pre-existing conformance bug being fixed**, not a semantics change §8 sanctioned, which is precisely why the bounded exception does not extend to it.
 
 **Worked example -- the positive direction, flipping from accepted to denied.** This is the common shape, not an edge case. Weights `{"agent://a": 1.0}`, participants `a`, `b`, `c`; `b` and `c` cast `APPROVE`, `a` casts `REJECT`; `voting.threshold: 0.5`.
 
@@ -111,15 +125,29 @@ failed to replay session; skipping
 
 and **the session disappears from the registry on restart**, silently apart from that line. Under `MACP_STRICT_RECOVERY=1` the same error is fatal and **the runtime refuses to start**. Those are the two symptoms item 3 describes for the Quorum threshold guard, and the shapes are a pair -- read them together. One difference matters: `validate_replay_consistency` **never runs** for these sessions, because replay errors out before the consistency comparison is reached, so that check cannot be relied on to surface this.
 
-**Pre-upgrade audit query.** Find affected sessions before upgrading. Look for any **Decision** session whose bound policy has `voting.algorithm: "weighted"` and whose accepted `Vote` messages include a sender that does **not** appear as a key in that policy's `voting.weights` map. That is the exact and complete predicate -- it does not depend on outcome direction, on `schema_version`, or on `allow_decline_over_approval`. Sessions matching it may fail to replay after the upgrade.
+**Pre-upgrade audit query.** Find affected sessions before upgrading. Run **both** predicates -- a deployment can match B without owning a single `weighted` policy:
+
+- **For A:** any **Decision** session whose bound policy has `voting.algorithm: "weighted"` and whose accepted `Vote` messages include a sender that does **not** appear as a key in that policy's `voting.weights` map, with a vote other than `ABSTAIN`.
+- **For B:** any **Decision** session whose bound policy sets `commitment.allow_decline_over_approval: true` and whose accepted history contains a negative `Commitment` sealed over a round carrying **zero** accepted `REJECT` ballots.
+
+Sessions matching either may fail to replay after the upgrade.
+
+**How to run it -- the surfaces that carry each fact.** Everything both predicates name is readable on the **old** binary, before you upgrade, over the ordinary RPC surface:
+
+- **The session list and its mode.** `ListSessions` enumerates current session metadata; page it with `page_size` and the returned `next_page_token` until the token comes back empty. `GetSession` returns one session's `SessionMetadata`, which carries its `mode` and the `policy_version` it bound.
+- **The policy's rules.** `GetPolicy` on that `policy_version` returns the `PolicyDefinition`; read `voting.algorithm`, the key set of `voting.weights`, and `commitment.allow_decline_over_approval` out of its `rules`. `ListPolicies` with a mode filter narrows the sweep to Decision policies first, which is usually the cheaper order -- a deployment with no matching policy needs no per-session pass at all.
+- **The ballots and the committed outcome.** `StreamSession` replays a session's accepted history: send a frame carrying `subscribe_session_id` with `after_sequence: 0` and it emits the accepted envelopes in order, which is where the `Vote` senders and their values are, and where the `Commitment`'s `outcome_positive` is. Note the one gap: a session whose log has been compacted answers with `session history before ordinal N was compacted` instead of the early entries, so treat a compaction response as "not audited" rather than "clean".
+- **Offline, with the runtime down.** The same accepted history is on disk under the file backend at `<MACP_DATA_DIR>/sessions/<session_id>/log.jsonl`, one JSON entry per line, filterable with `jq` without starting the runtime.
 
 **Contrast with item 4, which shipped ungated for a reason that does not transfer.** Item 4's negative-weighted-total change was ungated because it was "reachable only from a directly-constructed `PolicyDefinition`, since registration already refuses negative weights". **This one is reachable from an ordinary registered policy**: a `weighted` descriptor that simply omits a declared participant from `weights` passes every admission check, before and after. So do not read item 6 as another item 4.
 
 Why the change is nonetheless right: the old reading let a participant the policy author had explicitly given no voting weight cast ballots that moved the outcome -- in §8's corner, the unilateral power to convert an approving weighted electorate's result into a decline; more commonly, as above, the power to carry a positive round the electorate had rejected. §8 accepts the resulting stored-replay break in writing. The rule itself is in [Policy](policy.md#voting-algorithm-semantics).
 
-**Recovery.** There is no configuration that restores the old reading -- the rule is ungated by design. Correct the policy instead: add to `voting.weights`, with the weight they should carry, the participants who were always meant to vote, and leave genuine observers omitted. A registered policy is re-resolved from the live registry on full replay, so correcting it there is enough for a session with no checkpoint; a session that carries the old descriptor in a **checkpoint** keeps that descriptor verbatim, exactly as item 3 describes for the Quorum case.
+**Recovery for A.** There is no configuration that restores the old reading -- the rule is ungated by design. Correct the policy instead: add to `voting.weights`, with the weight they should carry, the participants who were always meant to vote, and leave genuine observers omitted. A registered policy is re-resolved from the live registry on full replay, so correcting it there is enough for a session with no checkpoint; a session that carries the old descriptor in a **checkpoint** keeps that descriptor verbatim, exactly as item 3 describes for the Quorum case.
 
 Be honest about the case the correction does not cover. If the flipped ballots really were cast by intended observers, no weight map makes that session replay: the commitment in its history was authorized by voters the policy had given no weight, which is precisely the outcome §8 calls unsound. The append-only log is untouched either way -- an affected session was not loaded rather than lost -- so the history remains available for audit while you decide.
+
+**Recovery for B: there is none, and that is the honest answer.** No policy edit makes a B session replay. Clearing `commitment.allow_decline_over_approval` denies the decline earlier rather than later; setting it changes nothing, because it is the guard and not the knob that refuses. The reject the guard requires was never cast, so there is no descriptor under which that history is authorized -- RFC-MACP-0007 §6.2 held the same before spec #99, which is what makes this a bug fix rather than a semantics change. As with A the append-only log is untouched, so such a session is not loaded rather than lost and its history stays available for audit; but plan for it to stay unloaded, and under `MACP_STRICT_RECOVERY=1` plan to clear it before the upgrade rather than after.
 
 ## Environment variables
 
