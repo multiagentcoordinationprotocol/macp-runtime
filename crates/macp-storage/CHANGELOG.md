@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.6](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-storage-v0.7.5...macp-storage-v0.7.6) - 2026-09-12
+
+### Other
+
+- *(server)* bound the WatchSessions initial sync ([#161](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/161))
+
 ## [0.7.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-storage-v0.7.0...macp-storage-v0.7.1) - 2026-08-31
 
 ### Other
