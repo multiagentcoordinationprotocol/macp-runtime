@@ -479,3 +479,48 @@
   (the rendered docs would keep pointing readers at the wrong function).
 - **Blast radius if wrong:** rustdoc only; no signature or behavior change.
 - **Status:** UNCONFIRMED (2026-09-11)
+
+## A degenerate suspension pair (`e < s`) counts as a zero-width pause at `s`
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b, verifier GAP 1 — the walk can over-report
+  on a non-monotone pair)
+- **Assumed:** the GAP's prescribed clamp (`cur = e.max(cur)`) closes over-reporting but leaves the
+  opposite error: on a backwards pair the walk consumes the run up to `s` without advancing the
+  cursor past it, so `[(1_050, 1_000)]` from `1_000` for `100` returned **1_050** — a deadline
+  *before* `from_ms + duration_ms`, i.e. a timeout that fires before it nominally elapsed. Assumed
+  that is unintended: the under-count invariant is about not over-reporting suspended time, not a
+  licence to return a deadline earlier than the no-pause baseline.
+- **Chose:** `cur = e.max(s).max(cur)` — one term beyond the prescription. A pair whose `e` precedes
+  its `s` is treated as a zero-width pause at `s`, which keeps the walk's contribution inside
+  `[0, sum(max(e - s, 0))]` (asserted directly in
+  `unsuspended_deadline_never_over_reports_on_adversarial_pairs`). Mutation-proven load-bearing: the
+  prescribed `e.max(cur)` alone leaves that case RED at 1_050 vs 1_100.
+- **Alternatives:** the prescribed `e.max(cur)` verbatim (returns an early deadline on a backwards
+  pair); skip degenerate pairs in the `filter` (silently discards a pair whose `s` is legitimate and
+  whose `e` is merely clock-stepped, and changes nothing else — equivalent here, more code).
+- **Blast radius if wrong:** confined to pairs `Utc::now()` recorded non-monotonically or a library
+  consumer supplied through `SessionBuilder::suspension_intervals`. Either way the result stays
+  `>= from_ms + duration_ms` and `<=` the true union-corrected deadline, so 11d's planned
+  `debug_assert!(D <= now_ms)` holds.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## Nothing below `semantics_rev` 2 reads `suspension_intervals`, so dropping the overflow is invisible
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b, verifier GAP 2 — the cycle cap does not
+  cover the sessions it was justified for)
+- **Assumed:** `Session::unsuspended_deadline` is the only reader of the vec, and every caller of it
+  is gated on `semantics_rev >= 2`. So a rev <= 1 session that stops recording past
+  `MAX_SUSPENSION_CYCLES` replays bit-identically to one that recorded every cycle — verified by
+  grep: the only non-test reads are the `PersistedSession` round-trip
+  (`crates/macp-storage/src/registry.rs`), which is pure transport, and the warn-only consistency
+  check (`src/replay.rs`).
+- **Chose:** at rev <= 1, stop pushing once the vec reaches the cap; keep the rev >= 2 force-expire
+  untouched. A legacy session is reachable through the same un-rate-limited
+  `SuspendSession`/`ResumeSession` RPCs as a current one, so its vec has to be bounded — but it must
+  not be force-expired by a rule postdating its acceptance.
+- **Alternatives:** force-expire at every revision (changes legacy acceptance semantics — the thing
+  the rev gate exists to prevent); rotate/drop the oldest instead of the newest (rewrites pairs
+  already persisted, so a snapshot and its log would disagree about a pause that did happen); leave
+  it unbounded (the O(N²) snapshot amplification the cap exists to close stays open on exactly the
+  sessions that were replayed from legacy logs).
+- **Blast radius if wrong:** if some future rev <= 1 path did read the vec, it would see the first
+  `MAX_SUSPENSION_CYCLES` pauses and none after. Bounded, and the recorded prefix is never mutated.
+- **Status:** UNCONFIRMED (2026-09-11)

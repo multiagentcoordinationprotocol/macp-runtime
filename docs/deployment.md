@@ -169,6 +169,24 @@ RFC-MACP-0012 §4.2 promoted the `percentage` ceiling rule into normative text a
 
 The denominator is also pinned: it is the participant count declared at `SessionStart` and does **not** shrink as ballots, abstentions included, are cast. This runtime already read it that way.
 
+## Upgrading into suspension-interval recording
+
+### 1. Expect one-time `suspension_intervals mismatch` replay warnings on the first boot
+
+A session now records each completed `(suspended_at, resumed_at)` pair, so that time spent `Suspended` can be subtracted from the Handoff implicit-accept timeout (RFC-MACP-0010 §5.1). On the **first** boot after upgrading, startup recovery emits one warning per persisted session that was ever suspended and resumed:
+
+```
+WARN replay/snapshot suspension_intervals mismatch
+  session_id=... replayed_suspension_cycles=2 snapshot_suspension_cycles=0
+```
+
+**It is benign, and it does not recur.** The warning is the startup consistency check comparing two sources that necessarily disagree exactly once: the snapshot on disk was written by the *previous* release, which had no such field, so it deserializes as empty; replay rebuilds the pairs correctly from the `SessionSuspend`/`SessionResume` entries in the append-only log, which were always there. **Replay is the authority** -- the recovered session is the correct one, and it is what the runtime serves. Recovery then re-saves each replayed session, so the next boot's snapshot carries the intervals and the comparison agrees. Nothing is lost and no action is required.
+
+Two consequences worth knowing:
+
+- The warning is **advisory only**. It increments `recovery_replay_mismatches`, which is read zero-vs-nonzero, so a nonzero count on this one boot is expected and does not indicate a determinism bug. `MACP_STRICT_RECOVERY` does **not** turn these into startup failures -- it governs recovery *errors*, not consistency warnings.
+- A session whose recovery goes through a **mid-session checkpoint written before this release** replays with its pre-checkpoint pauses missing for good: the checkpoint fast path replays only the entries after the checkpoint, and a legacy checkpoint carries no intervals. That is deliberately the safe direction -- a short interval list can only make a newly computed implicit-accept deadline land *earlier*, never later, and it never changes a deadline already recorded in accepted history. Set `MACP_CHECKPOINT_INTERVAL=0` (the default) if you would rather not carry legacy checkpoints at all.
+
 ## Environment variables
 
 | Variable | Default | Description |

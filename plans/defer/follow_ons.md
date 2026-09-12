@@ -266,3 +266,52 @@ a stored `SessionStart` payload in the log necessarily passed acceptance-time
 validation, so relaxing replay for a promoted mode cannot admit anything
 acceptance refused. Worth closing anyway, because the asymmetry is invisible from
 the code.
+
+## 16. The mid-session checkpoint fast path was untested for its entire life
+
+**Found 2026-09-11** by the Phase 11b verifier (`plans/backlog-closeout-2026-09.md`),
+and independently reproduced twice, so it is not a reading error.
+
+`replay_from_checkpoint_restores_state` (`src/replay.rs:622`) does **not** test a
+checkpoint. It builds its session with `start_payload_bytes()` (`src/replay.rs:407`),
+which binds `policy_version: "policy-1"`, and then calls `replay_session(..., None)`
+with no policy registry. `try_replay_from_checkpoint` therefore bails at
+`src/replay.rs:61-69` — a checkpoint carrying a bound `policy_version` with
+`policy_definition: None` cannot be trusted — and falls back to a **full replay from
+the start of the log**. The test's three `seen_message_ids` assertions are satisfied
+by that full replay, so they pass whether or not the checkpoint code works at all.
+The name asserts coverage the test has never had.
+
+Proof (both run against `15318d0`):
+- replacing the bail-out at `src/replay.rs:69` with `panic!` makes this test **panic**,
+  while `replay_from_checkpoint_restores_suspension_intervals` passes untouched;
+- short-circuiting `try_replay_from_checkpoint` to `Ok(None)` (fast path disabled
+  entirely) reds exactly two tests in the whole workspace, and this is not one of them.
+
+**How much was actually covered.** `file_backend_full_lifecycle`
+(`tests/file_backend_integration.rs:155`) does reach the fast path, but only in the
+**terminal-compaction** shape — the log compacted down to a single checkpoint with
+nothing after it — and it asserts only `state == Resolved`. The **mid-session** shape,
+restore-from-checkpoint-then-replay-a-tail, had **zero** coverage before Phase 11b.
+That is the shape `MACP_CHECKPOINT_INTERVAL` produces, i.e. the entire reason the
+setting exists.
+
+Phase 11b's `replay_from_checkpoint_restores_suspension_intervals` is the first test
+that genuinely exercises it (unbound `policy_version` plus a snapshot tripwire value
+no full replay can reproduce). **That is one test covering one field**, which is not
+the same as the path being covered.
+
+Worth doing, in rough priority order:
+1. ~~Repair `replay_from_checkpoint_restores_state` so its name is true — or delete it,
+   since a test that silently tests something else is worse than no test.~~ **Done
+   2026-09-11** in the Phase 11b gap-closure pass: the fixture now binds an empty
+   `policy_version` and asserts the same snapshot tripwire
+   (`intent == "restored-from-checkpoint"`), so the fallback can no longer satisfy it.
+   Mutation-proven: restoring the bound `policy_version` reds it. No defect was found
+   in the fast path itself — the dedup assertions hold on the genuine path too.
+2. Give the mid-session fast path a real matrix: entries after the checkpoint,
+   dedup-slot restoration, TTL/expiry interaction, `mode_state` survival, and the
+   bail-out conditions at `src/replay.rs:61-69` each asserted to bail *for the reason
+   claimed* rather than incidentally.
+3. Audit every other test whose name claims checkpoint coverage for the same trap —
+   a bound `policy_version` with a `None` registry is silent, not an error.

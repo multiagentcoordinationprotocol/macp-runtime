@@ -618,11 +618,34 @@ mod tests {
         assert_eq!(entry.macp_version, "");
     }
 
+    /// The checkpoint fast path carries dedup state (`seen_message_ids`) for
+    /// the entries it subsumes, and replays only the tail after it.
+    ///
+    /// The SessionStart payload here deliberately binds **no** policy version.
+    /// `try_replay_from_checkpoint` bails to a full replay whenever a
+    /// checkpoint has a bound `policy_version` but no serialized
+    /// `policy_definition`, and this test used `start_payload_bytes()` (which
+    /// binds `policy-1`) with `replay_session(.., None)` -- so it always took
+    /// the fallback, and its three dedup assertions were satisfied by a plain
+    /// full replay. The tripwire below now pins which path ran.
     #[test]
     fn replay_from_checkpoint_restores_state() {
         use crate::registry::PersistedSession;
 
         let registry = make_registry();
+        let start_payload = SessionStartPayload {
+            intent: "test".into(),
+            participants: vec!["agent://orchestrator".into(), "agent://fraud".into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            policy_version: String::new(),
+            ttl_ms: 60_000,
+            context_id: String::new(),
+            extensions: std::collections::HashMap::new(),
+            roots: vec![],
+            max_suspend_ms: 0,
+        }
+        .encode_to_vec();
 
         // Build a session via normal replay first
         let proposal = ProposalPayload {
@@ -638,7 +661,7 @@ mod tests {
                 "m1",
                 "SessionStart",
                 "agent://orchestrator",
-                start_payload_bytes(),
+                start_payload,
                 1000,
             ),
             incoming_entry(
@@ -652,7 +675,11 @@ mod tests {
         let full_session = replay_session("s1", &full_entries, &registry, None).unwrap();
 
         // Create a checkpoint from the replayed session state
-        let persisted = PersistedSession::from(&full_session);
+        let mut persisted = PersistedSession::from(&full_session);
+        // Tripwire: a value only the snapshot can supply. A fallback full
+        // replay would rebuild `intent` from the SessionStart payload ("test"),
+        // so this assertion is what proves the fast path ran.
+        persisted.intent = "restored-from-checkpoint".into();
         let checkpoint_payload = serde_json::to_vec(&persisted).unwrap();
         let checkpoint = LogEntry {
             message_id: String::new(),
@@ -689,6 +716,11 @@ mod tests {
 
         let session = replay_session("s1", &entries_with_checkpoint, &registry, None).unwrap();
         assert_eq!(session.state, SessionState::Open);
+        assert_eq!(
+            session.intent, "restored-from-checkpoint",
+            "the checkpoint fast path must have been taken, else this test \
+             proves nothing about the checkpoint"
+        );
         // Should have dedup from checkpoint (m1, m2) plus newly replayed m3
         assert!(session.seen_message_ids.contains("m1"));
         assert!(session.seen_message_ids.contains("m2"));
