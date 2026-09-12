@@ -1,0 +1,149 @@
+{
+  "_comment": "Pins that a ballot set cast entirely by weight-0 participants is the EMPTY DECISIVE TALLY, and that this state is NoVotes rather than Failed, so BOTH commitment directions are denied under schema_version 3 (RFC-MACP-0012 4.1; RFC-MACP-0007 6.2). The negative arm is the load-bearing one: it is the assertion that distinguishes NoVotes from Failed, which differ only in the negative direction. Paired with decision_weighted_zero_weight_v1.json, which is the same transcript at schema_version 1 and diverges only in the POSITIVE direction.",
+  "description": "Decision Mode: weight-0 ballots are non-decisive; zero total decisive weight is NoVotes under schema_version 3.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://a",
+  "participants": [
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.weighted-zero-weight-v3",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Weighted vote over a one-member electorate, initiator-only commitment, schema_version 3 fail-closed empty-tally semantics.",
+    "rules": {
+      "voting": {
+        "algorithm": "weighted",
+        "threshold": 0.5,
+        "weights": {
+          "agent://a": 1
+        }
+      },
+      "commitment": {
+        "authority": "initiator_only"
+      }
+    }
+  },
+  "policy_version": "policy.decision.weighted-zero-weight-v3",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://a",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "A weight-0 vote is NON-DECISIVE under 'weighted' at EVERY schema_version (RFC-MACP-0012 4.1, weighted electorate rule): it is accepted as a message and preserved in history, but contributes to neither side of the ratio, does not enter the decisive tally, and does not satisfy the decline guard of RFC-MACP-0007 6.2. 'agent://b' is a declared participant absent from the weights map, so its weight is 0.",
+      "sender": "agent://b",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "REJECT",
+        "reason": "not convinced"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "ARBITRATING ASSERTION. The only REJECT on this tally was cast by a weight-0 participant, so it is non-decisive and the decline guard is NOT satisfied: the state is NoVotes, not Failed (RFC-MACP-0012 4.1, Empty tally, weighted bullet; RFC-MACP-0007 6.2). A reading that treated zero total decisive weight as Failed would ALLOW this negative commitment. It is denied.",
+      "sender": "agent://a",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c0",
+        "outcome_positive": false,
+        "action": "decision.rejected",
+        "authority_scope": "test",
+        "reason": "negative commitment attempted with only a weight-0 REJECT on the tally",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.weighted-zero-weight-v3",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "_comment": "Total decisive weight is zero, which IS the empty decisive tally. Under schema_version 3 every algorithm other than 'none' fails on it, so the positive commitment is denied too. An implementation MUST NOT compute a weighted ratio with a zero denominator.",
+      "sender": "agent://a",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "positive commitment attempted at zero total decisive weight",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.weighted-zero-weight-v3",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "_comment": "UNLOCK PROOF. 'agent://a' carries weight 1, so this ballot is decisive and the tally becomes non-empty: approve share 1/1 >= threshold 0.5.",
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "ship it"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "weighted approval by the full decisive electorate",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.weighted-zero-weight-v3",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  },
+  "expected_mode_state": {
+    "phase": "Committed",
+    "proposals": {
+      "p1": {
+        "proposal_id": "p1",
+        "sender": "agent://a"
+      }
+    },
+    "votes": {
+      "p1": {
+        "agent://b": {
+          "vote": "REJECT"
+        },
+        "agent://a": {
+          "vote": "APPROVE"
+        }
+      }
+    }
+  }
+}

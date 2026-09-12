@@ -1,0 +1,43 @@
+{
+  "_comment": "G6 companion (issue #98). RFC-MACP-0012 Section 4.1 rules that under schema_version >= 3, 'unanimous' over ZERO declared participants MUST fail -- the vacuously true predicate does not pass; the empty-tally rule controls. That arm cannot be transcript-tested: RFC-MACP-0007 Section 2.1 authorizes Proposal only for declared participants, so a zero-participant session can never contain a proposal, and Section 5 rule 5 forbids resolving before at least one proposal exists (policy can license only a zero-proposal NO-GO, never a positive outcome). RFC-MACP-0012 Section 6.4 orders mode validation before policy, so a positive Commitment here is rejected by mode validation before the empty-tally rule is ever consulted -- which is why this fixture does NOT attempt one: its rejection code is unpinned by any RFC or by registries/error-codes.md. This fixture instead pins the reachability guard that keeps the vacuous-truth state unreachable: a zero-participant Decision session accepts NO Proposal -- not even from the initiator, whose authority is role-based (SessionStart / Commitment / SessionCancel), not membership-based. A runtime that special-cases the initiator as an implicit participant would get a proposal into history, satisfy rule 5, and make the G6 hole reachable; this fixture fails such a runtime.",
+  "description": "Zero-participant Decision session under a schema_version 3 unanimous policy: the initiator's Proposal is rejected (RFC-MACP-0007 Section 2.1 -- Proposal requires declared-participant membership), so the decisive tally is permanently empty and the session can never resolve positively at any schema_version (RFC-MACP-0007 Section 5 rule 5).",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.unanimous-v3-empty-roster",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "The exact G6 configuration: fail-closed (schema_version 3) unanimous voting over an empty declared participant set. Bound to document the configuration under test; it is never evaluated. The initiator remains the default Commitment authority and could attempt one, but RFC-MACP-0012 Section 6.4 runs mode validation first, and RFC-MACP-0007 Section 5 rule 5 rejects it there for having no proposal -- so policy evaluation is never reached. No Commitment is attempted here because that rejection's error code is pinned by no RFC and no registry.",
+    "rules": {
+      "voting": {
+        "algorithm": "unanimous"
+      },
+      "commitment": {
+        "authority": "initiator_only"
+      }
+    }
+  },
+  "policy_version": "policy.decision.unanimous-v3-empty-roster",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "_comment": "RFC-MACP-0007 Section 2 requires the initiator to be included in participants to emit Proposal, and Section 2.1 authorizes Proposal for declared participants only. With participants: [] there are no declared participants, so no sender -- initiator included -- can create a proposal. Same rejection class as the outsider Proposal in decision_reject_paths.json: FORBIDDEN, an authenticated sender not authorized for the message type. This message can be rejected for exactly one reason, which is why its error code is safe to pin.",
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "initiator attempts to seed a proposal without being a declared participant",
+        "supporting_data": []
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    }
+  ],
+  "expected_final_state": "Open",
+  "expect_resolution_present": false
+}

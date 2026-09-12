@@ -10,7 +10,7 @@
   "mode_version": "1.0.0",
   "configuration_version": "cfg-1",
   "policy": {
-    "_comment": "RFC-MACP-0012 Section 4.1 (:102): critical_objection_action defaults to 'deny'. Left unset here deliberately so this fixture pins the DEFAULT arm.",
+    "_comment": "RFC-MACP-0012 Section 4.1, Negative-outcome parameters: critical_objection_action defaults to 'deny'. (Cited by heading, not line number -- the ':102' anchor this replaced was already stale at HEAD and every edit to Section 4.1 moves it again.) Left unset here deliberately so this fixture pins the DEFAULT arm.",
     "policy_id": "policy.decision.critical-veto",
     "mode": "macp.mode.decision.v1",
     "schema_version": 2,
