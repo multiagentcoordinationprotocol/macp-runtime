@@ -263,7 +263,62 @@ The evaluator half closes too, differently. `weighted_total == 0.0 => NoVotes` (
 
 ### Phase 4 — the objection-authorized decline
 
-- **Status:** TODO
+- **Status:** DONE — `92033fa` (cherry-picked from `ac5a46d`). Gate **772 passed / 0 failed** (+4 on
+  Phase 3's 768, exactly the four new `macp-policy` tests; `--lib` 185 → 189), tier-1 119 + 8 JWT +
+  5 tier-2, fmt/clippy/rustdoc clean, both lockfiles unmoved, all seven crates "no semver update
+  required". Verified **GAPS — no blockers**: 4 SHOULD-FIX, 4 NICE-TO-HAVE. All four criteria
+  mutation-checked red (criteria 2-4 by mutating the *fix* in three plausible wrong directions, since
+  they pass against unfixed code by construction).
+  **PLAN ERROR — I misread §6.2, and the consequence is worse than a wording slip.** My
+  "Deliberately out of scope" paragraph said §6.2 "says nothing about the other two", treating
+  `require_vote_quorum` as unaddressed and the strict choice as conservative. **§6.2 defines the
+  decline guard as a two-conjunct conjunction whose second conjunct IS the quorum condition**
+  (`RFC-MACP-0007:112`), so "not subject to the decline guard" (`:116`) waives it by construction.
+  RFC-MACP-0012 corroborates twice (§4.1's restatement names the quorum as *part of* the guard; the
+  `finalize_decline` parameter says the decline "is not subject to the decline guard"), and there is
+  **no independent normative hook** attaching `require_vote_quorum` to a negative commitment outside
+  the guard.
+  **And the strict reading is not conservative — it is un-terminable.** Reproduced: v3 `majority`,
+  `quorum {count:1}`, `require_vote_quorum: true`, `finalize_decline`, one standing critical
+  objection, zero votes → **both** directions `Deny`, so the session can terminate only by expiry —
+  verbatim the harm §6.2 exists to remove. Not a blocker: latent (no fixture reaches it; the
+  `finalize_decline` and `require_vote_quorum` fixture sets are **disjoint**), and a denial leaves
+  the session `OPEN` and recoverable whereas a wrongly-sealed decline is irreversible in append-only
+  history. **Filed as spec issue #117** with that reproducer as the argument. §6.2 *is* genuinely
+  silent on `minimum_confidence` (zero occurrences in RFC-MACP-0007) — that half of my claim was
+  right.
+  **The prescribed implementation was not implementable.** I specified "one added binding plus one
+  added conjunct". The verifier reconstructed it and confirmed the executor's prediction empirically:
+  adding `&& !objection_authorized_decline` to the existing `!= "none"` test routes an
+  objection-authorized decline under a **real** algorithm into the `none` branch, emitting the bogus
+  allow reason `voting algorithm is 'none'; no vote threshold required` for a `majority` policy — on
+  the wire. Inverting the test was **required**; `none`'s reason set is byte-identical and no ordering
+  moved.
+  **SHOULD-FIX, all pending:**
+  1. Shipped rustdoc claims §6.2 "names neither" — false, and self-contradicting in the same
+     sentence (the next clause admits the quorum "sits inside its decline-guard sentence").
+     `docs/policy.md` states it correctly; the rustdoc must match it and say **departure pending a
+     spec ruling**, not reading-of-silence.
+  2. This plan repeats the misreading in two places, including Open question 1 — re-file it as
+     "§6.2's literal text waives the quorum too; this release deliberately does not — spec #117".
+  3. **An untested DENY→ALLOW flip that is the phase's widest behavioural effect.** With
+     `allow_decline_over_approval: false` (the default), a decline over an all-approve **`Passed`**
+     tally was denied and is now allowed once a critical objection stands under `finalize_decline`.
+     Correct per §6.2 (the tri-state is waived *entirely*, `Passed` row included) and replay-safe (a
+     runtime that formerly denied it *rejected* the message, and rejected messages never enter
+     accepted history) — but **nothing pins it**: criterion 1 is empty-tally only, and the
+     pre-existing `finalize_decline` test uses a `Failed` tally that already allowed.
+  4. Record the stuck state in `docs/policy.md`/`docs/deployment.md` — an operator who sets
+     `require_vote_quorum: true` alongside `finalize_decline` gets a session terminable only by
+     expiry, and is currently told only that the choice is conservative.
+  **NICE-TO-HAVE:** criterion 4 is green under an action-agnostic flag that keeps the `deny` reason
+  push — verified real, but **outcome-equivalent in every reachable state** (the flag can only remove
+  reasons, and that path has already pushed one), so deliberately not strengthened; registration
+  refuses only `schema_version == 0`, so a v1 descriptor may *explicitly* set `finalize_decline` and
+  now collects a rule §6.2 scopes to `>= 2` (pre-existing, widened here — fold into Open question 2);
+  and `docs/policy.md`'s worked reason-ordering example, which this plan cited as the reason not to
+  reorder, **is itself already inconsistent with the code** (it lists the quorum reason before the
+  confidence reason; the code pushes confidence at check 1 and quorum at check 4).
 - **Delivers:** RFC-MACP-0007 §6.2's new "Objection-authorized decline" rule — a decline under `critical_objection_action: "finalize_decline"` is authorized by the recorded critical `Objection`, so it is gated by neither the voting tri-state nor the decline guard, at every schema version that can express the field.
 - **Depends on:** Phase 2 (the v3 empty-tally rule is what newly makes this case reachable and therefore observable).
 - **Files:** `crates/macp-policy/src/evaluator.rs` — the `FinalizeDecline` arm (`:177-186`) and the voting-block entry condition (`:216`).
