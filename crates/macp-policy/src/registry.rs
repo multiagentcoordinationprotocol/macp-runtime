@@ -31,18 +31,21 @@ const DECISION_VOTING_QUORUM_TYPES: [&str; 2] = ["count", "percentage"];
 /// Legal values of Quorum mode's `threshold.type`.
 ///
 /// `schemas/json/policy/quorum-rules.schema.json`
-/// (`properties.threshold.properties.type.enum`) lists `n_of_m`, `percentage`
-/// and `weighted`. This list departs from it twice, deliberately: `count` is a
-/// documented alias for `n_of_m` in this runtime (spec issue #98 tracks the
-/// schema gap), and `weighted` is refused as unimplemented — see
-/// [`QUORUM_UNIMPLEMENTED_THRESHOLD_TYPES`].
+/// (`properties.threshold.properties.type.enum`) is the closed pair `n_of_m`,
+/// `percentage` as of RFC-MACP-0012 1.2.0-draft (spec #110). This list departs
+/// from it **once**: `count` is a documented alias for `n_of_m` in this runtime
+/// (`docs/policy.md`), which both the mode and the evaluator already treat as
+/// one.
+///
+/// `weighted` used to be the second departure — the canonical enum listed it
+/// and this runtime refused it as unimplemented. Spec #110 removed it from the
+/// vocabulary outright (no weights map, no electorate rule, no weighted
+/// analogue of RFC-MACP-0011 §5's count-only termination arithmetic, so no
+/// conformant evaluation of it ever existed) and **reserved** the identifier,
+/// which MUST NOT be reused with a different meaning. Our refusal is therefore
+/// no longer a departure but agreement: `weighted` is now refused by this
+/// list's ordinary enum check, like any other unknown type.
 const QUORUM_THRESHOLD_TYPES: [&str; 3] = ["n_of_m", "percentage", "count"];
-
-/// Quorum `threshold.type` values the canonical schema allows but this runtime
-/// has no implementation for. `threshold.value` is typed `integer`, so a
-/// weighted sum is not expressible; both the mode and the evaluator would
-/// silently treat it as a raw approval count.
-const QUORUM_UNIMPLEMENTED_THRESHOLD_TYPES: [&str; 1] = ["weighted"];
 
 /// Every standards-track mode a policy may target, which is exactly the set a
 /// `mode: "*"` policy targets: `Runtime::handle_session_start` binds a wildcard
@@ -594,18 +597,18 @@ impl PolicyRegistry {
     /// Quorum-mode `threshold` value domains, mirroring
     /// `schemas/json/policy/quorum-rules.schema.json`:
     ///
-    /// - `properties.threshold.properties.type.enum` — `n_of_m`, `percentage`,
-    ///   `weighted`. Two deliberate departures:
-    ///   - `count` is **accepted** although the canonical enum omits it. This
-    ///     runtime documents it (`docs/policy.md`) and both layers already
-    ///     treat it as an alias for `n_of_m` (`QuorumMode::effective_threshold`
-    ///     and `evaluate_quorum_commitment_outcome`), so refusing it would
-    ///     break documented behaviour. The schema gap is tracked as spec
-    ///     issue #98.
-    ///   - `weighted` is **refused as unimplemented**. Both layers fall into a
-    ///     `_` arm that treats it as a raw approval count, and
-    ///     `threshold.value` is typed `integer`, so a weighted sum is not even
-    ///     expressible — there is no defined semantics to silently apply.
+    /// - `properties.threshold.properties.type.enum` — the closed pair
+    ///   `n_of_m`, `percentage` (RFC-MACP-0012 1.2.0-draft). One deliberate
+    ///   departure: `count` is **accepted** although the canonical enum omits
+    ///   it. This runtime documents it (`docs/policy.md`) and both layers
+    ///   already treat it as an alias for `n_of_m`
+    ///   (`QuorumMode::effective_threshold` and
+    ///   `evaluate_quorum_commitment_outcome`), so refusing it would break
+    ///   documented behaviour. Spec #110 ruled the alias out of the vocabulary
+    ///   permanently (issue #98 item 4), so this is now a standing departure
+    ///   rather than a schema gap awaiting a decision.
+    ///   `weighted` is refused by this same enum check: #110 removed it from
+    ///   the vocabulary and reserved the identifier.
     /// - `properties.threshold.properties.value.type` — `integer`. The Rust
     ///   field is `f64`, so this is enforced as a zero fractional part, which
     ///   is exactly what JSON Schema's `integer` type means (`2.0` is an
@@ -617,14 +620,6 @@ impl PolicyRegistry {
         threshold: &macp_core::policy::rules::QuorumThreshold,
     ) -> Result<(), String> {
         let kind = threshold.threshold_type.as_str();
-        if QUORUM_UNIMPLEMENTED_THRESHOLD_TYPES.contains(&kind) {
-            return Err(format!(
-                "INVALID_POLICY_DEFINITION: threshold.type '{kind}' is not implemented by this \
-                 runtime: threshold.value is typed as an integer, so a weighted sum has no \
-                 defined semantics here — use one of: {}",
-                QUORUM_THRESHOLD_TYPES.join(", ")
-            ));
-        }
         if !QUORUM_THRESHOLD_TYPES.contains(&kind) {
             return Err(format!(
                 "INVALID_POLICY_DEFINITION: threshold.type '{kind}' is not one of: {}",
@@ -1139,6 +1134,34 @@ mod tests {
         assert!(err.contains("supermajority"), "error: {err}");
     }
 
+    /// Spec #112 gave the canonical `supermajority` `allOf` arm
+    /// `required: ["threshold"]`, so
+    /// `{"voting": {"algorithm": "supermajority"}}` — the exact object in the
+    /// spec's `invalid-policy-rules/supermajority-missing-threshold.json` — is
+    /// no longer a legal policy. It was already refused here, and by design
+    /// rather than by accident: `default_threshold()` is `0.5`, and the
+    /// `supermajority` check is `threshold <= 0.5`, so the default the schema
+    /// would have supplied is exactly the value the arm declares illegal. That
+    /// coincidence is what closes the gap without new code, and it is fragile
+    /// enough in both directions (a looser `< 0.5` check, or a different
+    /// default) to be worth pinning.
+    #[test]
+    fn register_supermajority_without_threshold_fails() {
+        let registry = PolicyRegistry::new();
+        let policy = PolicyDefinition {
+            policy_id: "test-super-no-threshold".into(),
+            mode: "macp.mode.decision.v1".into(),
+            description: "supermajority with no threshold at all".into(),
+            rules: serde_json::json!({
+                "voting": { "algorithm": "supermajority" }
+            }),
+            schema_version: 1,
+        };
+        let err = registry.register(policy).unwrap_err();
+        assert!(err.contains("supermajority"), "error: {err}");
+        assert!(err.contains("voting.threshold"), "error: {err}");
+    }
+
     #[test]
     fn register_designated_role_without_roles_fails() {
         let registry = PolicyRegistry::new();
@@ -1453,13 +1476,19 @@ mod tests {
         })));
     }
 
+    /// `weighted` is refused, and since spec #110 that refusal is **agreement**
+    /// with the canonical vocabulary rather than a departure from it: the
+    /// identifier was removed from `threshold.type`'s enum and reserved, so it
+    /// now fails the ordinary enum check. It keeps a test of its own because
+    /// the reservation is normative — a future runtime must not quietly revive
+    /// it with invented semantics.
     #[test]
-    fn register_quorum_weighted_threshold_type_fails_as_unimplemented() {
+    fn register_quorum_weighted_threshold_type_fails() {
         let err = refuse(quorum_policy(serde_json::json!({
             "threshold": { "type": "weighted", "value": 2 }
         })));
         assert!(err.contains("threshold.type 'weighted'"), "error: {err}");
-        assert!(err.contains("not implemented"), "error: {err}");
+        assert!(err.contains("is not one of"), "error: {err}");
     }
 
     #[test]
@@ -1842,14 +1871,48 @@ mod tests {
              note it is deliberately inclusive, unlike supermajority's exclusive 0.5"
         );
 
+        // The `supermajority` arm requires the key as well as constraining the
+        // value (spec #112 / issue #101). Without `required` the arm was
+        // self-contradicting — `{"algorithm": "supermajority"}` validated and
+        // the subschema default of 0.5 then supplied a value the same arm
+        // declares illegal. This runtime reaches the same refusal through
+        // `default_threshold()` landing on 0.5 and failing the `> 0.5` check,
+        // so the assertion here is what keeps the two facts tied together: if
+        // upstream ever drops `required`, an omitted threshold becomes legal
+        // and our refusal becomes the departure.
+        let supermajority_arm = decision["allOf"]
+            .as_array()
+            .expect("decision-rules.schema.json has an allOf array")
+            .iter()
+            .find(|arm| {
+                arm["if"]["properties"]["voting"]["properties"]["algorithm"]["const"]
+                    == serde_json::json!("supermajority")
+            })
+            .expect(
+                "decision-rules.schema.json has an allOf arm keyed on algorithm 'supermajority'",
+            );
+        assert_eq!(
+            supermajority_arm["then"]["properties"]["voting"]["required"],
+            serde_json::json!(["threshold"]),
+            "the supermajority arm no longer requires voting.threshold in \
+             decision-rules.schema.json"
+        );
+        assert_eq!(
+            supermajority_arm["then"]["properties"]["voting"]["properties"]["threshold"]
+                ["exclusiveMinimum"],
+            serde_json::json!(0.5),
+            "the supermajority threshold floor has drifted from decision-rules.schema.json"
+        );
+
         let quorum = schema(&dir, "quorum-rules.schema.json");
         let threshold = &quorum["properties"]["threshold"];
-        // Two deliberate departures, both documented on the constants:
-        // `count` is accepted as an alias this runtime documents, and
-        // `weighted` is refused as unimplemented. Everything else must match.
+        // One deliberate departure, documented on the constant: `count` is
+        // accepted as an alias this runtime documents. `weighted` was the
+        // second until spec #110 removed it from the canonical enum; our
+        // refusal is now agreement, so it is no longer carved out here.
+        // Everything else must match.
         let mut ours: Vec<String> = QUORUM_THRESHOLD_TYPES
             .iter()
-            .chain(QUORUM_UNIMPLEMENTED_THRESHOLD_TYPES.iter())
             .filter(|t| **t != "count")
             .map(|t| t.to_string())
             .collect();
@@ -1863,9 +1926,14 @@ mod tests {
             threshold["properties"]["value"]["type"],
             serde_json::json!("integer")
         );
+        // Exclusive as of spec #110 — the quorum-side twin of the Decision
+        // floor tightening #99 landed. A zero approval bar is trivially
+        // satisfied, so a restrictive-looking quorum policy approved
+        // everything.
         assert_eq!(
-            threshold["properties"]["value"]["minimum"],
-            serde_json::json!(0)
+            threshold["properties"]["value"]["exclusiveMinimum"],
+            serde_json::json!(0),
+            "threshold.value's lower bound has drifted from quorum-rules.schema.json"
         );
         assert_eq!(
             threshold["allOf"][0]["then"]["properties"]["value"]["maximum"],

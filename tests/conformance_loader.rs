@@ -652,6 +652,20 @@ conformance_test!(
     "decision_zero_participants.json"
 );
 
+// Spec #111 (RFC-MACP-0002 Section 6.1, RFC-MACP-0007 1.2.0-draft Section 5).
+// Rule 5 — "the Session MUST NOT resolve before at least one proposal exists"
+// — lost its "unless policy explicitly allows a no-go outcome with zero
+// proposals" clause, and RFC-MACP-0002 Section 6.1 newly pins the rejection
+// code for a Mode validation-rule breach at `INVALID_ENVELOPE`. Together those
+// made the rule fixturable in both directions; it was previously unfixtured.
+// Both Commitments come from the initiator, who is a declared participant and
+// the commitment authority, so `FORBIDDEN` is impossible and rule 5 is the only
+// reason either can be rejected.
+conformance_test!(
+    conformance_decision_zero_proposal_commitment,
+    "decision_zero_proposal_commitment.json"
+);
+
 /// Guard: every vendored fixture must be registered with `conformance_test!`.
 ///
 /// Unlike both SDK harnesses, which discover fixtures dynamically, the
@@ -662,7 +676,7 @@ conformance_test!(
 /// precisely because every other signal stays green.
 ///
 /// This test reads its own source and fails if any fixture file is missing
-/// from it. `fixtures_conform_to_canonical_format`'s `checked >= 31` is a
+/// from it. `fixtures_conform_to_canonical_format`'s `checked >= 32` is a
 /// floor on files *seen*, not on files *replayed*, so it cannot catch this.
 #[test]
 fn every_fixture_is_registered() {
@@ -746,9 +760,10 @@ fn fixtures_conform_to_canonical_format() {
     // Exact count of vendored fixtures (`*.json` under tests/conformance/ less
     // schema.json). Raised from 17 alongside the spec #99 corpus: the old floor
     // had drifted two fixtures below the real count, so it would have passed
-    // with a fixture silently unvendored.
+    // with a fixture silently unvendored. Raised again to 32 by spec #111's
+    // `decision_zero_proposal_commitment.json`.
     assert!(
-        checked >= 31,
+        checked >= 32,
         "expected all fixtures checked, got {checked}"
     );
 }

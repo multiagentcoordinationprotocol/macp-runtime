@@ -299,14 +299,15 @@ pub enum EffectiveThreshold {
     /// Never zero: a bar of zero would be met before any ballot was cast.
     Approvals(u32),
     /// No number of approvals can satisfy the rule, so the session can seal no
-    /// positive commitment. Returned for `type: "weighted"` (unimplemented
-    /// here — `threshold.value` is typed `integer` by
-    /// `quorum-rules.schema.json`, so a weighted sum is not expressible and
-    /// per-participant quorum weights are not modelled), for any unrecognised
-    /// `type`, and for a `percentage` over an empty participant set.
+    /// positive commitment. Returned for any unrecognised `type` — which as of
+    /// RFC-MACP-0012 1.2.0-draft includes `weighted`, removed from
+    /// `quorum-rules.schema.json`'s enum and reserved by spec #110 because it
+    /// never had a weights vocabulary, an electorate rule, or a weighted
+    /// analogue of RFC-MACP-0011 §5's count-only termination arithmetic — and
+    /// for a `percentage` over an empty participant set.
     ///
-    /// Registration refuses the first two
-    /// (`PolicyRegistry::validate_quorum_threshold`), so reaching those needs
+    /// Registration refuses an unrecognised type
+    /// (`PolicyRegistry::validate_quorum_threshold`), so reaching that needs
     /// a directly-constructed `PolicyDefinition`; the empty-participant-set
     /// case is not catchable there, since registration has no participant
     /// count, and `QuorumMode::on_session_start` blocks it instead. It

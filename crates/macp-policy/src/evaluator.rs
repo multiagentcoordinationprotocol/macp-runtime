@@ -940,8 +940,9 @@ pub fn evaluate_quorum_commitment(
 ///   [`QuorumThreshold::effective`](macp_core::policy::rules::QuorumThreshold::effective)
 ///   — the one implementation `QuorumMode::effective_threshold` also calls, so
 ///   a policy cannot mean two different bars in the two layers. It ceils and
-///   floors at 1, and reports `weighted`/unrecognised types as unsatisfiable
-///   rather than as a raw approval count. A **negative** (decline) commitment
+///   floors at 1, and reports an unrecognised type — `weighted` among them,
+///   since RFC-MACP-0012 1.2.0-draft removed it from the vocabulary — as
+///   unsatisfiable rather than as a raw approval count. A **negative** (decline) commitment
 ///   is the legitimate terminal when approval is not reached — the threshold
 ///   does not gate it (RFC-MACP-0011 §4b). Note the mode adds a gate this
 ///   evaluator cannot: it refuses the decline when *no ballot has been cast*,

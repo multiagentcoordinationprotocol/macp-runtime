@@ -43,7 +43,7 @@
       "expect": "accept"
     },
     {
-      "_comment": "RFC-MACP-0007 Section 4 (:62-64): Objection carries an explicit severity; only 'critical' feeds the veto path of RFC-MACP-0012 objection_handling. It is placed before any Vote because the Decision mode only accepts Objection while the session is still deliberating -- once a Vote moves the phase on, a further Objection is rejected.",
+      "_comment": "RFC-MACP-0007 Section 4: Objection carries an explicit severity; only 'critical' feeds the veto path of RFC-MACP-0012 objection_handling. It is placed before any Vote because the Decision mode only accepts Objection while the session is still deliberating -- once a Vote moves the phase on, a further Objection is rejected.",
       "sender": "agent://b",
       "message_type": "Objection",
       "payload_type": "macp.modes.decision.v1.ObjectionPayload",
