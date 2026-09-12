@@ -1782,6 +1782,74 @@ mod tests {
     }
 
     #[test]
+    fn zero_participant_unanimous_is_no_votes_not_a_pass() {
+        // The sharp end of the test above, and newly *reachable*: Decision now
+        // accepts `SessionStart` with `participants: []`, so a session with an
+        // empty declared roster and an empty vote map is authorable over the
+        // wire rather than only constructible in a test.
+        //
+        // `check_voting_algorithm`'s `unanimous` arm is
+        // `participants.iter().all(…)`, which is **vacuously true** over an
+        // empty slice; with `reject_count == 0` it would return `Passed` — a
+        // positive pass on a session nobody voted in. RFC-MACP-0012 §4.1 names
+        // the case in terms: "With **zero** declared participants the
+        // universally quantified predicate is vacuously true and MUST NOT be
+        // taken as a pass."
+        //
+        // The **only** thing standing between this runtime and that outcome is
+        // the front-of-dispatch `non_abstain_total == 0` short-circuit, and
+        // nothing in the fixture corpus pins it —
+        // `decision_zero_participants.json` stops at a `FORBIDDEN` `Proposal`
+        // and never reaches policy evaluation, which its own `_comment` says.
+        // This test is therefore the sole guard against a later
+        // "simplification" of that short-circuit.
+        let no_participants: Vec<String> = vec![];
+        let no_weights = std::collections::HashMap::new();
+        let no_votes = make_state_with_votes(vec![]);
+
+        let result = check_voting_algorithm(
+            "unanimous",
+            0.5,
+            &no_weights,
+            &no_votes.votes,
+            &no_participants,
+        );
+        // `VotingResult` is not `Debug`, so name the two wrong answers in the
+        // message instead: `Passed` is the vacuous pass §4.1 forbids, `Failed`
+        // is the disagreement with a conformant peer it also forbids.
+        assert!(
+            matches!(result, VotingResult::NoVotes),
+            "a zero-participant unanimous round with no ballots must report NoVotes, \
+             never a vacuous Passed and never Failed"
+        );
+
+        // And through the full evaluator, so the variant actually maps onto a
+        // refusal rather than being reported and then ignored. `schema_version:
+        // 3` makes the empty tally binding on its own (§4.1), with no
+        // `require_vote_quorum` in the descriptor to do the work instead.
+        let mut policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "unanimous" }
+        }));
+        policy.schema_version = 3;
+        let decision = evaluate_decision_commitment_outcome(
+            &policy,
+            &no_votes,
+            &no_participants,
+            true, // outcome_positive
+        );
+        let PolicyDecision::Deny { reasons } = &decision else {
+            panic!(
+                "a positive commitment in a zero-participant session must be denied, \
+                 got: {decision:?}"
+            );
+        };
+        assert!(
+            reasons.iter().any(|r| r.contains("no decisive votes cast")),
+            "the denial must come from the empty-tally rule, got: {reasons:?}"
+        );
+    }
+
+    #[test]
     fn empty_tally_denies_a_positive_commitment_under_schema_version_3() {
         // RFC-MACP-0012 §4.1 "Empty tally (schema_version >= 3)": every
         // algorithm other than `none` is binding on its own, so an empty

@@ -334,9 +334,67 @@ pub fn extract_ttl_ms(payload: &SessionStartPayload) -> Result<i64, MacpError> {
     Ok(payload.ttl_ms)
 }
 
+/// Modes whose canonical `SessionStart` may bind an **empty** `participants`
+/// list.
+///
+/// Decision alone. RFC-MACP-0001 §7.1 requires `participants` only "when
+/// required by the Mode", and RFC-MACP-0007 makes the initiator's authority
+/// role-based rather than membership-based, so a Decision session with no
+/// declared participants is well-defined: nobody — the initiator included — can
+/// emit a `Proposal`, `Evaluation`, `Objection` or `Vote`, because
+/// `DecisionMode::authorize_sender` routes all four through
+/// `is_declared_participant`, which is `false` over an empty list. Such a
+/// session can therefore only expire or be cancelled. Spec #99 removed
+/// `minItems: 1` from the conformance fixture schema on exactly that reasoning
+/// and added `decision_zero_participants.json` to pin it.
+///
+/// **Deliberately a positive allowlist of one, checked in one place.** The
+/// other four standards-track modes each re-reject an insufficient roster in
+/// their own `on_session_start`, but those are five independent
+/// implementations: if the rule lived only there, deleting any one guard would
+/// silently remove the guarantee with nothing at the core level left to notice.
+/// Keeping the rule here means the exception is named once and every other
+/// mode — including a promoted extension mode the list below has never heard
+/// of — keeps the full canonical contract by default.
+fn allows_empty_participants(mode: &str) -> bool {
+    mode == "macp.mode.decision.v1"
+}
+
 /// Validate the complete canonical SessionStart binding contract.
+///
+/// Mode-independent, and therefore holds the roster non-emptiness rule for
+/// **every** mode. Prefer
+/// [`validate_canonical_session_start_payload_for_mode`] on any path that knows
+/// the mode name; this entry point is retained with its original signature and
+/// its original behaviour.
 pub fn validate_canonical_session_start_payload(
     payload: &SessionStartPayload,
+) -> Result<(), MacpError> {
+    validate_canonical_start(payload, false)
+}
+
+/// The canonical SessionStart binding contract, with the roster rule scoped to
+/// the mode.
+///
+/// Identical to [`validate_canonical_session_start_payload`] in every respect
+/// except one: an empty `participants` list is accepted for the modes
+/// [`allows_empty_participants`] names (Decision, and only Decision) and
+/// rejected for all others, promoted extension modes included.
+///
+/// This is additive rather than a new parameter on
+/// [`validate_canonical_session_start_payload`] on purpose — changing that
+/// function's signature would be a `macp-core` API break, and every crate in
+/// this workspace shares one version.
+pub fn validate_canonical_session_start_payload_for_mode(
+    mode: &str,
+    payload: &SessionStartPayload,
+) -> Result<(), MacpError> {
+    validate_canonical_start(payload, allows_empty_participants(mode))
+}
+
+fn validate_canonical_start(
+    payload: &SessionStartPayload,
+    allow_empty_participants: bool,
 ) -> Result<(), MacpError> {
     extract_ttl_ms(payload)?;
 
@@ -344,7 +402,7 @@ pub fn validate_canonical_session_start_payload(
         return Err(MacpError::InvalidPayload);
     }
 
-    if payload.participants.is_empty() {
+    if payload.participants.is_empty() && !allow_empty_participants {
         return Err(MacpError::InvalidPayload);
     }
 
@@ -380,7 +438,7 @@ pub fn validate_strict_session_start_payload(
         return Ok(());
     }
 
-    validate_canonical_session_start_payload(payload)
+    validate_canonical_session_start_payload_for_mode(mode, payload)
 }
 
 /// Validate that a session ID meets the acceptance policy.
@@ -477,7 +535,13 @@ mod tests {
     }
 
     #[test]
-    fn standard_mode_requires_explicit_versions_and_participants() {
+    fn standard_mode_requires_explicit_versions() {
+        // Renamed from `standard_mode_requires_explicit_versions_and_participants`
+        // and narrowed: the empty-`participants` half moved out, because
+        // Decision now accepts an empty roster. The version and TTL halves of
+        // the strict contract are kept verbatim so the rest stays pinned; the
+        // roster rule is pinned for every other mode by
+        // `every_standard_mode_except_decision_rejects_an_empty_roster` below.
         let payload = SessionStartPayload {
             participants: vec!["alice".into()],
             mode_version: String::new(),
@@ -493,14 +557,113 @@ mod tests {
         );
 
         let payload = SessionStartPayload {
-            participants: vec![],
+            participants: vec!["alice".into()],
             mode_version: "1.0.0".into(),
-            configuration_version: "cfg-1".into(),
+            configuration_version: String::new(),
             ttl_ms: 1000,
             ..Default::default()
         };
         assert_eq!(
             validate_strict_session_start_payload("macp.mode.decision.v1", &payload)
+                .unwrap_err()
+                .to_string(),
+            "InvalidPayload"
+        );
+
+        let payload = SessionStartPayload {
+            participants: vec!["alice".into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            ttl_ms: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_strict_session_start_payload("macp.mode.decision.v1", &payload)
+                .unwrap_err()
+                .to_string(),
+            "InvalidTtl"
+        );
+    }
+
+    /// Build an otherwise-valid strict payload with an empty roster.
+    fn empty_roster_payload() -> SessionStartPayload {
+        SessionStartPayload {
+            participants: vec![],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            ttl_ms: 1000,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn decision_accepts_an_empty_participant_list() {
+        assert!(
+            validate_strict_session_start_payload("macp.mode.decision.v1", &empty_roster_payload())
+                .is_ok(),
+            "RFC-MACP-0001 §7.1 requires participants only when the mode does, and \
+             RFC-MACP-0007 makes Decision authority role-based; spec #99's \
+             decision_zero_participants.json pins the accepted SessionStart"
+        );
+        // The relaxation must be the *only* thing that moved: the same payload
+        // with everything else intact still fails on a missing version.
+        let mut broken = empty_roster_payload();
+        broken.mode_version = String::new();
+        assert!(
+            validate_strict_session_start_payload("macp.mode.decision.v1", &broken).is_err(),
+            "an empty roster must not waive the rest of the strict contract"
+        );
+    }
+
+    #[test]
+    fn every_standard_mode_except_decision_rejects_an_empty_roster() {
+        // The structural guard, and the reason the rule lives here rather than
+        // in five `on_session_start` implementations. Iterating the strict-mode
+        // list means a mode *added* to it inherits the roster requirement, and
+        // a future change that widened the carve-out would have to edit this
+        // table to stay green — neither is true of a per-mode guard, which a
+        // PR can delete alongside its own test.
+        for mode in [
+            "macp.mode.proposal.v1",
+            "macp.mode.task.v1",
+            "macp.mode.handoff.v1",
+            "macp.mode.quorum.v1",
+            "ext.multi_round.v1",
+        ] {
+            assert!(
+                requires_strict_session_start(mode),
+                "{mode} must be strict for this table to mean anything"
+            );
+            assert_eq!(
+                validate_strict_session_start_payload(mode, &empty_roster_payload())
+                    .unwrap_err()
+                    .to_string(),
+                "InvalidPayload",
+                "{mode} must still reject an empty participant list at the core layer"
+            );
+        }
+
+        // And a *promoted* extension mode — a name the static carve-out list
+        // has never heard of, which `ModeRegistry::promote_mode` can mark
+        // strict at runtime — keeps the full canonical contract. This is the
+        // trap the two call sites had to avoid: swapping the strictness source
+        // for the core's static list would have dropped canonical validation
+        // for exactly these names.
+        assert_eq!(
+            validate_canonical_session_start_payload_for_mode(
+                "ext.promoted.v1",
+                &empty_roster_payload()
+            )
+            .unwrap_err()
+            .to_string(),
+            "InvalidPayload",
+            "an unrecognised (e.g. promoted) mode must default to the strict roster rule"
+        );
+
+        // The mode-independent entry point keeps its original behaviour, so a
+        // caller that cannot supply a mode name is never silently relaxed.
+        assert_eq!(
+            validate_canonical_session_start_payload(&empty_roster_payload())
                 .unwrap_err()
                 .to_string(),
             "InvalidPayload"

@@ -5,8 +5,8 @@ use crate::pb::Envelope;
 use crate::policy::registry::PolicyRegistry;
 use crate::registry::PersistedSession;
 use crate::session::{
-    extract_ttl_ms, parse_session_start_payload, validate_canonical_session_start_payload, Session,
-    SessionState,
+    extract_ttl_ms, parse_session_start_payload, validate_canonical_session_start_payload_for_mode,
+    Session, SessionState,
 };
 
 /// Rebuild a `Session` from its append-only log.
@@ -252,8 +252,11 @@ fn replay_from_start(
     } else {
         parse_session_start_payload(&start_entry.raw_payload)?
     };
+    // Same split as the acceptance path in `runtime.rs`: the registry decides
+    // whether the canonical contract applies, the validator decides which
+    // roster rule applies within it.
     if require_complete_start {
-        validate_canonical_session_start_payload(&start_payload)?;
+        validate_canonical_session_start_payload_for_mode(mode_name, &start_payload)?;
     }
 
     let ttl_ms = if !require_complete_start && start_payload.ttl_ms == 0 {
