@@ -600,6 +600,21 @@ conformance_test!(
     "decision_critical_objection_finalize_decline.json"
 );
 
+// Added upstream by spec #126 (RFC-MACP-0007 Section 6.2), which settled the
+// decline-guard waiver question this runtime raised as spec issue #117: a
+// critical objection authorizes a DECLINE even when the vote tally would not
+// otherwise permit one, and the waiver covers the decline guard WHOLE -- it
+// does not additionally require commitment.require_vote_quorum, nor the
+// evaluation.* prerequisites of the same voting pipeline, because all three
+// gate an outcome deriving its authority from the voting result and this
+// decline derives none. The same commit closed deliberation at the
+// first accepted Vote (Section 5 rule 6), which this runtime already enforced
+// via DecisionMode::ensure_can_deliberate's phase check.
+conformance_test!(
+    conformance_decision_finalize_decline_quorum_waiver,
+    "decision_finalize_decline_quorum_waiver.json"
+);
+
 // The `schema_version` 3 / empty-tally corpus added upstream by spec #99
 // (RFC-MACP-0012 Sections 4.1 and 8, RFC-MACP-0007 Section 6.2). Two of these
 // are legacy-arm regression guards rather than new coverage:

@@ -20,6 +20,23 @@ env:
   # `rust-version` in the root Cargo.toml.
   MSRV_TOOLCHAIN: "1.89.0"
   PROTOC_VERSION: "31.x"
+  # The spec-repo commit the `conformance-oracle` job reads its canonical
+  # fixtures and policy schemas from. PINNED ON PURPOSE -- this job gates merges,
+  # and before the pin it checked out the spec's default branch at run time, so a
+  # green PR could turn red because another repository merged something. That is
+  # not hypothetical: on 2026-09-11 three separate upstream merges reddened this
+  # repo's CI with no change on our side, and the third blocked a release PR.
+  #
+  # Bumping this is a deliberate act and belongs in the SAME PR as the alignment
+  # work it requires (vendor changed fixtures byte-identically, re-check the
+  # hand-written schema mirrors in crates/macp-policy/src/registry.rs, implement
+  # any new normative behaviour). Bumping it alone reddens every PR.
+  #
+  # The `spec-drift` workflow parses this exact value -- it is the single source
+  # of truth -- and files one tracked issue when upstream moves ahead of it in a
+  # way that touches the mirrored trees. Pin without that watcher and the gate
+  # quietly rots; that pairing is the whole design.
+  SPEC_REV: "c137f735358a046d677b607315006bb1c03baabd"
 
 jobs:
   actionlint:
@@ -564,6 +581,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: multiagentcoordinationprotocol/multiagentcoordinationprotocol
+          ref: ${{ env.SPEC_REV }}
           path: spec-repo
 
       - name: Vendored fixtures are byte-identical to canonical

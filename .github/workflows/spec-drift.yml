@@ -1,0 +1,190 @@
+name: Spec drift watch
+
+# The `conformance-oracle` job in ci.yml pins the spec repo to one commit
+# (`SPEC_REV`) so that a required status check is reproducible: before the pin,
+# CI read the spec's default branch at run time, which made our green depend on
+# another repository's merge timing. On 2026-09-11 three separate upstream merges
+# turned this repo's CI red with no change on our side, and the third blocked a
+# release PR.
+#
+# Pinning alone would rot into a dead gate -- drift would accumulate silently
+# until somebody happened to bump the pin. This job is the other half of the
+# deal: it watches the pin, never blocks a PR, and files one tracked issue when
+# the spec moves ahead of us in a way that actually touches the artifacts we
+# mirror.
+#
+# Deliberately narrow: it reports only on `schemas/conformance/**` and
+# `schemas/json/policy/**`, the two trees the conformance-oracle job consumes.
+# RFC prose moving without a schema or fixture change is not drift we can act
+# on mechanically, and reporting it would train everyone to ignore this issue.
+
+on:
+  schedule:
+    # Daily, 07:00 UTC. Spec merges cluster in working hours; one check a day is
+    # enough for a gate nobody is blocked on.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: spec-drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    name: Spec drift against the pinned revision
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Read the pinned revision from ci.yml
+        id: pin
+        run: |
+          set -euo pipefail
+          # Single source of truth: the SPEC_REV in ci.yml. Parsed rather than
+          # duplicated here, so the pin can never disagree with what CI used.
+          rev=$(grep -E '^[[:space:]]+SPEC_REV:' .github/workflows/ci.yml \
+                | head -1 | sed -E 's/.*SPEC_REV:[[:space:]]*"?([0-9a-f]+)"?.*/\1/')
+          if [ -z "$rev" ]; then
+            echo "::error::could not parse SPEC_REV out of .github/workflows/ci.yml"
+            exit 1
+          fi
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+          echo "pinned spec revision: $rev"
+
+      - name: Checkout spec repo at the pinned revision
+        uses: actions/checkout@v7
+        with:
+          repository: multiagentcoordinationprotocol/multiagentcoordinationprotocol
+          ref: ${{ steps.pin.outputs.rev }}
+          path: spec-pinned
+
+      - name: Checkout spec repo at its default branch
+        uses: actions/checkout@v7
+        with:
+          repository: multiagentcoordinationprotocol/multiagentcoordinationprotocol
+          path: spec-head
+
+      - name: Compare the trees the conformance oracle consumes
+        id: diff
+        run: |
+          # The printf formats below emit literal issue-body markdown. They are
+          # double-quoted with escaped backticks rather than single-quoted: the text
+          # must reach the issue body unexpanded either way, but single quotes around a
+          # backtick trip shellcheck's SC2016, and actionlint exits non-zero on it.
+          set -uo pipefail
+          head_sha=$(git -C spec-head rev-parse HEAD)
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          if [ "$head_sha" = "$PINNED" ]; then
+            echo "drift=none" >> "$GITHUB_OUTPUT"
+            echo "pin is current; nothing to report"
+            exit 0
+          fi
+
+          report=$(mktemp)
+          for tree in schemas/conformance schemas/json/policy; do
+            # README.md is excluded deliberately: it is not vendored into this
+            # repo, so a change to it implies no action from the issue's
+            # checklist. Reporting it would be noise, and noise is how a
+            # non-blocking issue gets trained into being ignored.
+            diff -rq -x 'README.md' "spec-pinned/$tree" "spec-head/$tree" >> "$report" 2>&1 || true
+          done
+          # Relabel the checkout prefixes rather than stripping them. `diff -rq`
+          # reports a one-sided file as "Only in <dir>", so stripping the prefix
+          # would destroy the direction -- added upstream and deleted upstream
+          # would render identically, and they need opposite responses.
+          sed -i 's|spec-pinned/|pinned:|g; s|spec-head/|upstream:|g' "$report"
+
+          if [ ! -s "$report" ]; then
+            echo "drift=prose-only" >> "$GITHUB_OUTPUT"
+            echo "spec moved to $head_sha but neither mirrored tree changed; not reporting"
+            exit 0
+          fi
+
+          echo "drift=yes" >> "$GITHUB_OUTPUT"
+
+          body=$(mktemp)
+          {
+            printf "The spec repo has moved ahead of the revision \`conformance-oracle\` is pinned to, and the change touches the trees that job consumes.\n\n"
+            printf '| | |\n|---|---|\n'
+            printf "| Pinned (\`SPEC_REV\` in \`ci.yml\`) | \`%s\` |\n" "$PINNED"
+            printf "| Spec default branch | \`%s\` |\n\n" "$head_sha"
+            printf "### Differences in the mirrored trees\n\n\`\`\`\n"
+            cat "$report"
+            printf "\`\`\`\n\n### Commits since the pin\n\n"
+            git -C spec-head log --oneline "$PINNED..$head_sha" \
+              -- schemas/conformance schemas/json/policy 2>/dev/null | sed 's/^/- /' \
+              || printf -- '- (could not enumerate; the pinned commit may not be an ancestor)\n'
+            printf '\n'
+          } > "$body"
+          cat >> "$body" <<'MARKDOWN'
+          ### What to do
+          
+          1. Vendor any changed or added fixture from `schemas/conformance/` into `tests/conformance/` **byte-identically** (never hand-edit them), and register new ones with `conformance_test!`.
+          2. If `schemas/json/policy/**` changed, re-check the hand-written mirrors in `crates/macp-policy/src/registry.rs` (`validate_conditional_constraints`) and the `enum_lists_match_the_canonical_schemas` parity test.
+          3. Implement any new normative behaviour, then bump `SPEC_REV` in `.github/workflows/ci.yml` in the same PR.
+          
+          Bumping `SPEC_REV` without doing 1 and 2 turns `conformance-oracle` red on every PR, which is the failure mode the pin exists to prevent. This issue refreshes itself daily and closes itself once the pin catches up.
+          MARKDOWN
+
+          {
+            echo 'body<<REPORT_EOF'
+            cat "$body"
+            echo REPORT_EOF
+          } >> "$GITHUB_OUTPUT"
+        env:
+          PINNED: ${{ steps.pin.outputs.rev }}
+
+      - name: File or update the drift issue
+        if: steps.diff.outputs.drift == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BODY: ${{ steps.diff.outputs.body }}
+        run: |
+          set -euo pipefail
+          title="Spec drift: conformance-oracle pin is behind ${{ steps.diff.outputs.head_sha }}"
+          # One issue at a time, refreshed in place, so a week of drift does not
+          # produce seven issues.
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                       --label spec-drift --limit 1 --json number -q '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$BODY"
+            echo "::notice::refreshed existing drift issue #$existing"
+          else
+            gh label create spec-drift --repo "$GITHUB_REPOSITORY" \
+              --description "The conformance-oracle spec pin is behind upstream" \
+              --color D4C5F9 2>/dev/null || true
+            num=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+                    --body "$BODY" --label spec-drift | grep -oE '[0-9]+$')
+            echo "::notice::filed drift issue #$num"
+          fi
+
+      - name: Close a stale drift issue once the pin catches up
+        if: steps.diff.outputs.drift != 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                       --label spec-drift --limit 1 --json number -q '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" --repo "$GITHUB_REPOSITORY" \
+              --comment "The mirrored trees (\`schemas/conformance\`, \`schemas/json/policy\`) no longer differ from the pinned revision. Closed automatically."
+            echo "::notice::closed drift issue #$existing"
+          else
+            echo "no open drift issue; nothing to close"
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "### Spec drift watch"
+            echo
+            echo "- pinned: \`${{ steps.pin.outputs.rev }}\`"
+            echo "- spec head: \`${{ steps.diff.outputs.head_sha }}\`"
+            echo "- verdict: \`${{ steps.diff.outputs.drift }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
