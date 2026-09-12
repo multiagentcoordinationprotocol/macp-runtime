@@ -178,3 +178,44 @@
 - **Blast radius if wrong:** one test. The cost of *not* having it is a wildcard-mode policy carrying
   an empty `weights` map being wrongly refused, for rules the Decision schema does not govern.
 - **Status:** UNCONFIRMED (2026-09-11)
+
+## Hoisting the critical-objection scan above check 1 rather than filtering deny reasons
+- **Plan:** spec #126 alignment (RFC-MACP-0007 §6.2, closing this runtime's spec issue #117)
+- **Assumed:** §6.2's waiver now reaches two gates that run on *opposite sides* of the
+  objection scan — `evaluation.*` (check 1, before) and `require_vote_quorum` (check 4, after) —
+  so `objection_authorized_decline` had to become known before the first gate. The task named two
+  candidate shapes: hoist the scan, or collect gate denials and filter them at the end.
+- **Chose:** hoist. The scan becomes a single `Option<String>` (`critical_veto`) computed as
+  "check 0" at `crates/macp-policy/src/evaluator.rs:230`, with the waiver derived from it at `:251`;
+  every deny/allow reason is still pushed from the numbered check that owns it, in the original
+  order. One source of truth for "is there a standing veto?", no duplicated objection scanning,
+  and — measured — byte-identical reason vectors for every non-waived commitment, which is what
+  keeps the 198 `macp-policy` unit tests and all 35 conformance fixtures green unchanged.
+- **Alternatives:** collect denials into a tagged structure and filter at the end. Rejected: it
+  makes every gate's denial conditional on a *later* computation, so reason ordering becomes an
+  emergent property of the filter rather than of the checks, and a future gate added without a tag
+  silently escapes the waiver. Also rejected: scanning the objections twice (once for the flag,
+  once for check 2), which is the duplication the task explicitly warned against.
+- **Blast radius if wrong:** contained to `evaluate_decision_commitment_outcome`. Mutation-proven:
+  four separate one-line reversions each turn exactly one of the four new named tests red and
+  leave the other three green, and reverting the check-4 conjunct also turns
+  `conformance_decision_finalize_decline_quorum_waiver` red.
+- **Status:** UNCONFIRMED (2026-09-12)
+
+## `docs/deployment.md` item 10 for a DENY → ALLOW widening
+- **Plan:** spec #126 alignment (RFC-MACP-0007 §6.2, closing this runtime's spec issue #117)
+- **Assumed:** the waiver moves a negative `Commitment` from `POLICY_DENIED` to accepted for
+  `finalize_decline` policies that also set `require_vote_quorum` or the evaluation prerequisites.
+  Items 1-9 of "Upgrading into registration-time policy validation" are the established home for
+  per-release behaviour changes of this shape (items 7 and 9 are likewise not registration rules),
+  so a new item 10 follows precedent rather than inventing a section.
+- **Chose:** added item 10, and replaced the obsolete "Hazard: `require_vote_quorum` together with
+  `finalize_decline`" bullet in `docs/policy.md` with a "Resolved" bullet that keeps the reproducer
+  (operators who configured around the strand need to recognise it) while stating the pairing now
+  carries no caveat. The hazard bullet was deleted rather than edited in place because its thesis —
+  that this runtime is deliberately narrower than the text — is now false in every sentence.
+- **Alternatives:** delete the hazard bullet outright with no replacement (loses the signal for
+  anyone still running the workaround); leave `deployment.md` untouched on the grounds that nothing
+  breaks (true, but the whole point of the section is that item 9 documents a widening too).
+- **Blast radius if wrong:** docs only.
+- **Status:** UNCONFIRMED (2026-09-12)
