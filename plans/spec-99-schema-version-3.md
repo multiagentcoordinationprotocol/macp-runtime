@@ -367,7 +367,45 @@ The evaluator half closes too, differently. `weighted_total == 0.0 => NoVotes` (
 
 ### Phase 6 — vendor the 12 fixtures, sync the 3 drifted files, register all 12 in the loader
 
-- **Status:** TODO
+- **Status:** DONE — `473d0ef`. **All 12 fixtures pass**, and both pre-existing legacy-arm guards
+  (`decision_empty_tally_legacy`, `decision_legacy_require_vote_quorum`) still pass, so phases 2-3
+  preserved the fail-open rule for schema versions 1-2 as required. `conformance_loader` 33/0 against
+  both the vendored dir and a clean export; `checked` measured empirically at exactly 31. Workspace
+  791/0. **This is the first independent judgement of phases 1-5 — criteria the spec wrote, not
+  criteria I wrote — and it held.** No production code needed changing to make a fixture pass.
+  **PLAN ERROR, and it invalidates this phase's headline claim.** The plan asserts CI reads spec
+  `main` = `b59af6a`. **Spec `main` had moved five commits to `aedfcad`** (#109-#113) while phases 1-6
+  were executing, and `conformance-oracle` checks the spec out with **no `ref:`** — so this phase did
+  **not** turn the job green. Measured against actual `main`: 1 MISSING / 6 DRIFT / 0 EXTRA, plus a
+  parity failure on the quorum `threshold.type` mirror. The executor correctly vendored `b59af6a` as
+  instructed and reported the gap with numbers rather than chasing it. Closed by Phase 7.
+
+### Phase 7 — catch up to spec `main` at `aedfcad` (added 2026-09-11, not in the original plan)
+
+- **Status:** DONE — `20bf3fa` (mechanical) + `9e956ae` (behavioural), deliberately split so a
+  regression stays bisectable. `check_dir` **0 MISSING / 0 DRIFT / 0 EXTRA** against spec `main`,
+  `cmt-hash` identical, workspace **795/0**, tier-1 at baseline, all seven crates semver-clean.
+  Independently re-verified.
+- **A real correctness bug, found by reading the new normative text rather than editing the mirror.**
+  #110 newly requires percentage quorum thresholds be computed "with exact integer arithmetic …
+  MUST NOT use floating-point division". `QuorumThreshold::effective` computed `(value / 100.0) * n`
+  — dividing first is inexact in binary64 and the error survives the ceiling, producing a bar **one
+  approval too high**: `value: 28` over 25 participants required 8 where the rule gives 7; `7` over
+  100 gave 8 not 7; `68` over 75 gave 52 not 51. **13 diverging pairs** within 1..=100 × 1..=100,
+  **2821** within 1..=20000. Fixed with `u128` `div_ceil`, pinned by an exhaustive test against an
+  independently written oracle. The bar *drops* by one, so a positive commitment we used to deny is
+  now allowed — **no stored replay changes**, because a denied commitment was rejected and rejected
+  messages never enter history (RFC-MACP-0001 §8.3).
+- **Two of my suspicions were wrong.** `supermajority`'s new `required: ["threshold"]` is **not** a
+  gap: `default_threshold()` is `0.5` and the check is `threshold <= 0.5`, so the value the schema
+  would default in is *exactly* the one the arm declares illegal — the spec's own negative fixture was
+  already refused. A load-bearing coincidence, now pinned in both directions. And #111's "rule 5
+  unconditional" needed no runtime change: the deleted hatch was never expressible by any rule schema,
+  and the new `INVALID_ENVELOPE` mapping codifies what we already returned.
+- **`weighted` removed from the quorum vocabulary makes our refusal conformant by agreement**, so
+  `QUORUM_UNIMPLEMENTED_THRESHOLD_TYPES` was deleted — it mirrored nothing canonical. The parity test
+  now carries **one** documented departure instead of two. See `follow_ons.md` item 14 for the other
+  one (`count`), which #110 ruled **against** us and which nothing in CI gates.
 - **Delivers:** `conformance-oracle` green end to end — both the byte-compare step and the fixture run.
 - **Depends on:** Phases 2, 3, 4 and 5. Landing this earlier is what makes the tree knowingly red; landing it here is what makes each earlier phase's work observable at the conformance boundary.
 - **Files:** `tests/conformance/` — 12 new `.json` files copied byte-identically from spec `b59af6a`, plus byte-identical replacement of `decision_critical_objection_finalize_decline.json`, `decision_critical_objection_veto.json` and `schema.json`. `tests/conformance_loader.rs` — 12 `conformance_test!` lines after `:601`, and the `checked >= 17` floor at `:695`.
