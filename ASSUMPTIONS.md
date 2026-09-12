@@ -429,3 +429,53 @@
 - **Blast radius if wrong:** one test. The cost of *not* having it is a wildcard-mode policy carrying
   an empty `weights` map being wrongly refused, for rules the Decision schema does not govern.
 - **Status:** UNCONFIRMED (2026-09-11)
+
+## `suspension_intervals` added to `validate_replay_consistency` (11b's "optional fourth comparison")
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b, criterion 4: "11a's widened consistency
+  check would flag a divergence here if the vec is later added to it (optional fourth comparison;
+  take it if cheap)")
+- **Assumed:** "take it if cheap" means take it now, since the comparison is five lines and the vec
+  is exactly the kind of state whose live/replay divergence the check exists to surface.
+- **Chose:** added a sixth warn-only comparison in `validate_replay_consistency`
+  (`src/replay.rs`) and extended `replay_consistency_flags_state_and_dedup_divergence` so the
+  all-at-once case now asserts 6 mismatches instead of 5.
+- **Alternatives:** defer to 11e (the check would then be blind to the field for three sub-phases,
+  exactly while 11c-11e are building on it); leave it out permanently (loses the tripwire).
+- **Blast radius if wrong:** warn-only; `recovery_replay_mismatches` is only ever read as
+  zero-vs-nonzero (`src/main.rs`), so at worst a snapshot lag logs one extra warn line. No
+  behavior change.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## Criterion 3's checkpoint fixture binds no `policy_version`
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b, criterion 3: "extend
+  `replay_from_checkpoint_restores_state` or a sibling so a checkpoint written after a pause restores
+  the vec")
+- **Assumed:** the criterion intends the **checkpoint fast path** to be the thing under test. Written
+  the obvious way — reusing `start_payload_bytes()`, which binds `policy_version: "policy-1"` — it is
+  not: `try_replay_from_checkpoint` (`src/replay.rs:61-68`) bails to a full replay whenever a
+  checkpoint has a bound `policy_version` but no serialized `policy_definition`, which is exactly
+  what a `replay_session(..., None)`-built snapshot produces. Mutation-proven: with the reused
+  payload, deleting the field from **both** `PersistedSession` `From` impls left the test green.
+- **Chose:** a sibling test (`replay_from_checkpoint_restores_suspension_intervals`) that binds an
+  empty `policy_version`, plus a tripwire — the snapshot's `intent` is overwritten with a value no
+  full replay can produce and asserted on — so the test can never again pass via the fallback.
+- **Alternatives:** extend the existing `replay_from_checkpoint_restores_state` (same trap, and that
+  test's own checkpoint assertions look vacuous for the same reason — flagged to the orchestrator,
+  not fixed here); pass a populated `PolicyRegistry` so the definition resolves (more machinery for
+  no extra coverage).
+- **Blast radius if wrong:** test-only. The production round-trip is the same either way; the
+  assumption only governs whether the test can see it.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## `Session::resume`'s stray doc comment re-attached
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b, Docs bullet)
+- **Assumed:** the pre-existing merge of `resume`'s rustdoc into `effective_max_suspend_ms`'s
+  (`crates/macp-core/src/session.rs`, where the "Resume a `Suspended` session..." paragraph sat above
+  the wrong function and `resume` itself was undocumented) is a typo, not intent — so documenting the
+  new cap meant fixing it rather than adding a third paragraph to the wrong item.
+- **Chose:** moved the paragraph onto `resume` and extended it to name both caps and the
+  record-before-check ordering; `effective_max_suspend_ms` keeps its own one-liner.
+- **Alternatives:** leave the misattachment and document the cap on `MAX_SUSPENSION_CYCLES` only
+  (the rendered docs would keep pointing readers at the wrong function).
+- **Blast radius if wrong:** rustdoc only; no signature or behavior change.
+- **Status:** UNCONFIRMED (2026-09-11)

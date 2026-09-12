@@ -15,6 +15,30 @@ pub const MAX_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 /// (RFC-MACP-0003 §2) — see [`Session::effective_max_suspend_ms`].
 pub const MAX_SUSPEND_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
+/// Cap on the number of completed suspend/resume *cycles* a session may
+/// record in [`Session::suspension_intervals`]. Enforced in
+/// [`Session::resume`] for sessions at `semantics_rev >= 2` only, so legacy
+/// histories replay bit-identically.
+///
+/// Why a *count* cap is needed even though [`MAX_SUSPEND_MS`] exists:
+/// `MAX_SUSPEND_MS` bounds accumulated suspended *duration* (7 days by
+/// default), not the number of cycles — N one-millisecond suspend/resume
+/// cycles accrue ~0 against that budget, and there is no other cycle counter
+/// anywhere in the session model. `SuspendSession`/`ResumeSession` are also
+/// un-rate-limited RPCs (unlike `Send`), so the cycle count is attacker- (or
+/// bug-) controlled by the session initiator alone.
+///
+/// What the cap closes: each cycle writes two full `PersistedSession`
+/// snapshots, and `suspension_intervals` is part of that snapshot — so an
+/// unbounded vec turns two constant-size writes per cycle into O(N) writes,
+/// i.e. O(N²) total snapshot bytes over a session's life. Bounding the vec
+/// bounds the amplification.
+///
+/// Over the cap, `resume` takes the posture it already takes for
+/// `MAX_SUSPEND_MS`: force-expire the session and return
+/// [`MacpError::TtlExpired`].
+pub const MAX_SUSPENSION_CYCLES: usize = 1024;
+
 /// Current session-semantics revision. Recorded at SessionStart (on the
 /// session and its log entry) and consulted wherever acceptance-time behavior
 /// changed across releases, so legacy histories replay under the semantics
@@ -91,6 +115,19 @@ pub struct Session {
     /// Cumulative ms the session has spent suspended across all suspend/resume
     /// cycles. Drives the `MAX_SUSPEND_MS` cap.
     pub accumulated_suspended_ms: i64,
+    /// Completed `(suspended_at, resumed_at)` pairs on the session timeline
+    /// (ms), in the order they completed. An *in-progress* suspension is
+    /// deliberately **not** here — the pair is pushed by [`Session::resume`],
+    /// so the vec always describes finished pauses only.
+    ///
+    /// Recorded at **every** `semantics_rev` (so a session that later matters
+    /// has the history), but read only at rev >= 2, by
+    /// [`Session::unsuspended_deadline`] (RFC-MACP-0010 §5.1). Legacy
+    /// snapshots and checkpoints deserialize this as empty; see
+    /// `unsuspended_deadline`'s under-count invariant for why that is safe.
+    ///
+    /// Bounded at rev >= 2 by [`MAX_SUSPENSION_CYCLES`].
+    pub suspension_intervals: Vec<(i64, i64)>,
     /// Session-semantics revision this session was accepted under. See
     /// [`CURRENT_SEMANTICS_REV`]. Legacy persisted sessions load as `0`.
     pub semantics_rev: u32,
@@ -139,6 +176,7 @@ impl Session {
                 policy_definition: None,
                 suspended_at_ms: None,
                 accumulated_suspended_ms: 0,
+                suspension_intervals: vec![],
                 semantics_rev: CURRENT_SEMANTICS_REV,
                 max_suspend_ms: 0,
             },
@@ -166,10 +204,6 @@ impl Session {
         Ok(())
     }
 
-    /// Resume a `Suspended` session, banking the suspended duration into the
-    /// TTL deadline (`ttl_expiry += now - suspended_at`). If the cumulative
-    /// suspended time would exceed `MAX_SUSPEND_MS`, the session is force-expired
-    /// instead and `MacpError::TtlExpired` is returned.
     /// The suspension cap governing this session: the value bound at
     /// SessionStart, or the [`MAX_SUSPEND_MS`] default when unbound (0).
     pub fn effective_max_suspend_ms(&self) -> i64 {
@@ -180,6 +214,18 @@ impl Session {
         }
     }
 
+    /// Resume a `Suspended` session, banking the suspended duration into the
+    /// TTL deadline (`ttl_expiry += now - suspended_at`) and recording the
+    /// completed pause in [`Session::suspension_intervals`].
+    ///
+    /// Force-expires the session (state `Expired`, `Err(TtlExpired)`) when
+    /// either suspension cap is exceeded: cumulative duration past
+    /// [`MAX_SUSPEND_MS`] (every revision), or completed cycle count past
+    /// [`MAX_SUSPENSION_CYCLES`] (`semantics_rev >= 2` only). The pair is
+    /// pushed before either check, so history is recorded even on the
+    /// expiring call.
+    ///
+    /// Pure: no clock, no I/O — the caller injects `now_ms`.
     pub fn resume(&mut self, now_ms: i64) -> Result<(), MacpError> {
         if self.state != SessionState::Suspended {
             return Err(MacpError::SessionNotOpen);
@@ -188,6 +234,17 @@ impl Session {
         let banked = (now_ms - suspended_at).max(0);
         self.accumulated_suspended_ms = self.accumulated_suspended_ms.saturating_add(banked);
         self.suspended_at_ms = None;
+        // Record the completed pair at EVERY revision and BEFORE either cap
+        // check can return: the vec is history, not a decision input, and a
+        // pause that force-expires the session is still a pause that happened.
+        // (Phase-9 precedent: record everywhere, read only under rev >= 2.)
+        self.suspension_intervals.push((suspended_at, now_ms));
+        // Cycle-count cap, rev >= 2 only — see `MAX_SUSPENSION_CYCLES`. Gated
+        // on the revision so rev <= 1 histories replay bit-identically.
+        if self.semantics_rev >= 2 && self.suspension_intervals.len() > MAX_SUSPENSION_CYCLES {
+            self.state = SessionState::Expired;
+            return Err(MacpError::TtlExpired);
+        }
         if self.accumulated_suspended_ms > self.effective_max_suspend_ms() {
             self.state = SessionState::Expired;
             return Err(MacpError::TtlExpired);
@@ -219,6 +276,58 @@ impl Session {
             }
             None => self.accumulated_suspended_ms > self.effective_max_suspend_ms(),
         }
+    }
+
+    /// The session-timeline instant at which `duration_ms` of **unsuspended**
+    /// time has elapsed since `from_ms` — i.e. the earliest `T` with
+    /// `(T - from_ms) - suspended_in[from_ms, T] >= duration_ms`.
+    ///
+    /// This is RFC-MACP-0010 §5.1(3)'s own formula for the synthetic implicit
+    /// accept's timestamp ("offer acceptance time + timeout + suspended time
+    /// **within the window**"), evaluated on the recorded timeline required by
+    /// §5.1(1). It is deliberately not the naive
+    /// `from_ms + duration_ms + banked_since(from_ms)`: that counts pauses
+    /// that begin *after* the true deadline, so it is wrong whenever a
+    /// suspend/resume pair lands between the deadline and the observation —
+    /// fully reachable, since `SuspendSession`/`ResumeSession` are RPCs that
+    /// need no session-scoped message. It would also make the timestamp
+    /// depend on *when* it was computed, which is unacceptable for a value
+    /// baked into permanent history.
+    ///
+    /// The walk: start at `from_ms` with the full `duration_ms` remaining;
+    /// for each completed pause `(s, e)` starting at or after `from_ms`, if
+    /// the unsuspended run up to `s` already covers what remains, stop inside
+    /// that run; otherwise consume it and jump to `e`. A pause starting
+    /// exactly at the returned deadline does not extend it — the offer's
+    /// unsuspended time had already hit the timeout at that instant.
+    ///
+    /// Pure and saturating: no clock read, no I/O, no panics on overflow.
+    ///
+    /// **Under-count invariant.** The walk's contribution satisfies
+    /// `walk_sum <= accumulated_suspended_ms - offer.suspended_ms_at_offer`:
+    /// [`Session::suspension_intervals`] may *under*-report completed pauses
+    /// (a snapshot or checkpoint written before the field existed
+    /// deserializes it as empty while `accumulated_suspended_ms` is already
+    /// positive) but can never over-report them. An under-count only moves
+    /// the returned deadline *earlier*, never later — the safe direction, so
+    /// callers may rely on `deadline <= now_ms` once the scalar arithmetic has
+    /// already decided the timeout elapsed.
+    pub fn unsuspended_deadline(&self, from_ms: i64, duration_ms: i64) -> i64 {
+        let mut cur = from_ms;
+        let mut remaining = duration_ms;
+        for &(s, e) in self
+            .suspension_intervals
+            .iter()
+            .filter(|(s, _)| *s >= from_ms)
+        {
+            let run = s.saturating_sub(cur);
+            if run >= remaining {
+                return cur.saturating_add(remaining);
+            }
+            remaining = remaining.saturating_sub(run);
+            cur = e;
+        }
+        cur.saturating_add(remaining)
     }
 
     pub fn apply_mode_response(&mut self, response: ModeResponse) {
@@ -277,6 +386,11 @@ impl SessionBuilder {
         policy_definition: Option<crate::policy::PolicyDefinition>,
         suspended_at_ms: Option<i64>,
         accumulated_suspended_ms: i64,
+        /// Completed suspend/resume pairs (see
+        /// [`Session::suspension_intervals`]). Needed so persistence layers
+        /// can restore the field — `Session` is `#[non_exhaustive]`, so they
+        /// cannot use a struct literal.
+        suspension_intervals: Vec<(i64, i64)>,
         semantics_rev: u32,
         /// Suspension cap bound at SessionStart; 0 = use the
         /// [`MAX_SUSPEND_MS`] default (legacy sessions, library consumers).
@@ -702,6 +816,7 @@ mod tests {
             policy_definition: None,
             suspended_at_ms: None,
             accumulated_suspended_ms: 0,
+            suspension_intervals: vec![],
             semantics_rev: CURRENT_SEMANTICS_REV,
             max_suspend_ms: 0,
         }
@@ -1013,5 +1128,167 @@ mod tests {
         let bytes = encode_payload(5000, participants);
         let payload = parse_session_start_payload(&bytes).unwrap();
         validate_canonical_session_start_payload(&payload).unwrap();
+    }
+
+    // ---- Phase 11b: suspension intervals + the unsuspended deadline ----
+
+    /// `resume` records the completed pause, in order, at every revision.
+    #[test]
+    fn resume_records_completed_suspension_intervals() {
+        let mut s = open_session(100_000);
+        assert!(s.suspension_intervals.is_empty());
+        s.suspend(2_000).unwrap();
+        // An in-progress suspension is NOT in the vec — completed pairs only.
+        assert!(s.suspension_intervals.is_empty());
+        s.resume(5_000).unwrap();
+        s.suspend(6_000).unwrap();
+        s.resume(6_500).unwrap();
+        assert_eq!(s.suspension_intervals, vec![(2_000, 5_000), (6_000, 6_500)]);
+
+        // Recorded at legacy revisions too (read only at rev >= 2).
+        let mut legacy = open_session(100_000);
+        legacy.semantics_rev = 0;
+        legacy.suspend(1_000).unwrap();
+        legacy.resume(1_400).unwrap();
+        assert_eq!(legacy.suspension_intervals, vec![(1_000, 1_400)]);
+    }
+
+    /// The pause is recorded even when the resume force-expires the session:
+    /// the push happens before either cap check can return.
+    #[test]
+    fn resume_records_the_pause_even_when_it_force_expires() {
+        let mut s = open_session(10_000);
+        s.suspend(0).unwrap();
+        assert!(s.resume(MAX_SUSPEND_MS + 1).is_err());
+        assert_eq!(s.state, SessionState::Expired);
+        assert_eq!(s.suspension_intervals, vec![(0, MAX_SUSPEND_MS + 1)]);
+    }
+
+    /// Acceptance criterion 1 — the `unsuspended_deadline` matrix
+    /// (RFC-MACP-0010 §5.1(3): "offer acceptance time + timeout + suspended
+    /// time *within the window*").
+    #[test]
+    fn unsuspended_deadline_walks_the_suspension_intervals() {
+        let base = open_session(1_000_000);
+        let with = |pairs: Vec<(i64, i64)>| {
+            let mut s = base.clone();
+            s.suspension_intervals = pairs;
+            s
+        };
+
+        // No pauses: the raw deadline.
+        assert_eq!(with(vec![]).unsuspended_deadline(1_000, 100), 1_100);
+
+        // One pause that starts inside the window: extends by its full width.
+        assert_eq!(
+            with(vec![(1_050, 1_200)]).unsuspended_deadline(1_000, 100),
+            1_250
+        );
+
+        // One pause starting after the raw deadline: does NOT extend it.
+        assert_eq!(
+            with(vec![(1_500, 1_600)]).unsuspended_deadline(1_000, 100),
+            1_100
+        );
+
+        // Boundary: a pause starting exactly at the returned deadline does not
+        // extend it — the timeout had already elapsed at that instant.
+        assert_eq!(
+            with(vec![(1_100, 1_300)]).unsuspended_deadline(1_000, 100),
+            1_100
+        );
+
+        // Two pauses, both inside the window: both are added.
+        assert_eq!(
+            with(vec![(1_050, 1_200), (1_230, 1_300)]).unsuspended_deadline(1_000, 100),
+            1_320
+        );
+
+        // A pause predating `from_ms` is ignored entirely.
+        assert_eq!(
+            with(vec![(500, 700)]).unsuspended_deadline(1_000, 100),
+            1_100
+        );
+        assert_eq!(
+            with(vec![(500, 700), (1_050, 1_200)]).unsuspended_deadline(1_000, 100),
+            1_250
+        );
+    }
+
+    /// Acceptance criterion 5 — the cycle cap fires on *count*, at rev 2 only.
+    ///
+    /// Every pause here is 0 ms wide, so `accumulated_suspended_ms` stays at 0
+    /// and `MAX_SUSPEND_MS` is nowhere near exhausted: only the count cap can
+    /// be what expires the session.
+    #[test]
+    fn suspension_cycle_cap_force_expires_at_rev2() {
+        let mut s = open_session(1_000_000_000);
+        assert_eq!(s.semantics_rev, CURRENT_SEMANTICS_REV);
+        assert!(CURRENT_SEMANTICS_REV >= 2);
+        for i in 0..MAX_SUSPENSION_CYCLES as i64 {
+            s.suspend(i).unwrap();
+            s.resume(i).unwrap();
+        }
+        assert_eq!(s.suspension_intervals.len(), MAX_SUSPENSION_CYCLES);
+        assert_eq!(s.accumulated_suspended_ms, 0);
+        assert_eq!(s.state, SessionState::Open);
+
+        // One cycle past the cap force-expires.
+        s.suspend(MAX_SUSPENSION_CYCLES as i64).unwrap();
+        let err = s.resume(MAX_SUSPENSION_CYCLES as i64).unwrap_err();
+        assert!(matches!(err, MacpError::TtlExpired));
+        assert_eq!(s.state, SessionState::Expired);
+        assert_eq!(
+            s.accumulated_suspended_ms, 0,
+            "the duration cap must be nowhere near exhausted, else the count \
+             cap is not what fired"
+        );
+
+        // The rev gate: the identical sequence on a rev-1 session keeps
+        // succeeding, so legacy histories replay bit-identically.
+        let mut legacy = open_session(1_000_000_000);
+        legacy.semantics_rev = 1;
+        for i in 0..(MAX_SUSPENSION_CYCLES as i64 + 10) {
+            legacy.suspend(i).unwrap();
+            legacy.resume(i).unwrap();
+        }
+        assert_eq!(legacy.state, SessionState::Open);
+        assert_eq!(
+            legacy.suspension_intervals.len(),
+            MAX_SUSPENSION_CYCLES + 10
+        );
+    }
+
+    /// Acceptance criterion 6 — a rev-2 session carrying the pre-11b artifact
+    /// shape (positive `accumulated_suspended_ms`, empty
+    /// `suspension_intervals`, e.g. a snapshot or mid-session checkpoint
+    /// written before the field existed) walks to a deadline at or *earlier*
+    /// than the fully-recorded one. Under-counting is the safe direction.
+    #[test]
+    fn legacy_rev2_snapshot_without_intervals_walks_early_not_late() {
+        let mut recorded = open_session(1_000_000);
+        recorded.semantics_rev = 2;
+        recorded.accumulated_suspended_ms = 150 + 70;
+        recorded.suspension_intervals = vec![(1_050, 1_200), (1_230, 1_300)];
+
+        let mut legacy = recorded.clone();
+        legacy.suspension_intervals.clear();
+
+        let recorded_deadline = recorded.unsuspended_deadline(1_000, 100);
+        let legacy_deadline = legacy.unsuspended_deadline(1_000, 100);
+        assert_eq!(recorded_deadline, 1_320);
+        assert_eq!(legacy_deadline, 1_100);
+        assert!(
+            legacy_deadline <= recorded_deadline,
+            "an under-reported interval vec must move the deadline EARLIER \
+             ({legacy_deadline} vs {recorded_deadline}), never later"
+        );
+
+        // The invariant the walk relies on: the walk's own contribution never
+        // exceeds the scalar it is refining.
+        let walk_sum = recorded_deadline - (1_000 + 100);
+        assert!(walk_sum <= recorded.accumulated_suspended_ms);
+        let legacy_walk_sum = legacy_deadline - (1_000 + 100);
+        assert!(legacy_walk_sum <= legacy.accumulated_suspended_ms);
     }
 }

@@ -614,4 +614,29 @@ async fn suspend_resume_entries_share_the_session_mutation_clock() {
         session.accumulated_suspended_ms > 0,
         "the suspension must have measured something, else the equality is vacuous"
     );
+
+    // Phase 11b acceptance criterion 4 — live/replay agreement on the new
+    // `suspension_intervals` vec. The live session records the pair in
+    // `Session::resume`; replay reconstructs it by driving the same method
+    // from the two internal entries' recorded timestamps, so the two must be
+    // identical, not merely consistent.
+    assert_eq!(
+        session.suspension_intervals,
+        vec![(suspended_at, resumed_at)],
+        "the live session's completed-pause record must match the internal \
+         log entries it was derived from"
+    );
+    let replay_registry = macp_runtime::mode_registry::ModeRegistry::build_default(Arc::new(
+        macp_runtime::policy::DefaultPolicyEvaluator,
+    ));
+    let replayed = macp_runtime::replay::replay_session(&sid, &entries, &replay_registry, None)
+        .expect("replay must succeed");
+    assert_eq!(
+        replayed.suspension_intervals, session.suspension_intervals,
+        "replay must reconstruct the identical suspension intervals"
+    );
+    assert_eq!(
+        replayed.accumulated_suspended_ms,
+        session.accumulated_suspended_ms
+    );
 }

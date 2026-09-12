@@ -259,6 +259,19 @@ pub fn validate_replay_consistency(
             "replay/snapshot suspended_at_ms mismatch"
         );
     }
+    // Completed suspend/resume pairs (Phase 11b). These feed the
+    // implicit-accept deadline walk (RFC-MACP-0010 §5.1(3)), so a snapshot
+    // that disagrees with the log about *when* a session was paused is the
+    // same class of determinism bug as disagreeing about how long.
+    if replayed.suspension_intervals != snapshot.suspension_intervals {
+        mismatches += 1;
+        tracing::warn!(
+            session_id,
+            replayed_suspension_cycles = replayed.suspension_intervals.len(),
+            snapshot_suspension_cycles = snapshot.suspension_intervals.len(),
+            "replay/snapshot suspension_intervals mismatch"
+        );
+    }
     mismatches
 }
 
@@ -682,6 +695,100 @@ mod tests {
         assert!(session.seen_message_ids.contains("m3"));
     }
 
+    /// Phase 11b acceptance criterion 3 — a checkpoint written *after* a
+    /// suspend/resume pair carries `suspension_intervals` through the
+    /// `PersistedSession` round-trip, so the checkpoint fast path (which
+    /// replays only the entries after the checkpoint, and therefore never
+    /// sees the earlier `SessionSuspend`/`SessionResume` entries) restores
+    /// the pause the deadline walk depends on.
+    ///
+    /// The SessionStart payload here deliberately binds **no** policy version:
+    /// `try_replay_from_checkpoint` falls back to a full replay whenever a
+    /// checkpoint has a bound `policy_version` but no serialized
+    /// `policy_definition`, and a full replay would rebuild the vec from the
+    /// pre-checkpoint entries — hiding the very round-trip under test.
+    #[test]
+    fn replay_from_checkpoint_restores_suspension_intervals() {
+        use crate::registry::PersistedSession;
+
+        let registry = make_registry();
+        let start_payload = SessionStartPayload {
+            intent: "test".into(),
+            participants: vec!["agent://orchestrator".into(), "agent://fraud".into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            policy_version: String::new(),
+            ttl_ms: 60_000,
+            context_id: String::new(),
+            extensions: std::collections::HashMap::new(),
+            roots: vec![],
+            max_suspend_ms: 0,
+        }
+        .encode_to_vec();
+
+        let prefix = vec![
+            incoming_entry(
+                "m1",
+                "SessionStart",
+                "agent://orchestrator",
+                start_payload,
+                1_000,
+            ),
+            internal_entry("SessionSuspend", 1_050),
+            internal_entry("SessionResume", 1_300),
+        ];
+        let before_checkpoint = replay_session("s1", &prefix, &registry, None).unwrap();
+        assert_eq!(before_checkpoint.suspension_intervals, vec![(1_050, 1_300)]);
+
+        let mut persisted = PersistedSession::from(&before_checkpoint);
+        // Tripwire: a value only the snapshot can supply, so the assertions
+        // below cannot silently be satisfied by a fallback full replay.
+        persisted.intent = "restored-from-checkpoint".into();
+        // Go through the wire format, not just the struct: `#[serde(default)]`
+        // must not be the thing that supplies the value here.
+        let checkpoint_payload = serde_json::to_vec(&persisted).unwrap();
+        let checkpoint = LogEntry {
+            message_id: String::new(),
+            received_at_ms: 1_400,
+            sender: "_runtime".into(),
+            message_type: "Checkpoint".into(),
+            raw_payload: checkpoint_payload,
+            entry_kind: EntryKind::Checkpoint,
+            session_id: "s1".into(),
+            mode: "macp.mode.decision.v1".into(),
+            macp_version: "1.0".into(),
+            timestamp_unix_ms: 1_400,
+            bound_mode_version: None,
+            semantics_rev: 0,
+            bound_max_suspend_ms: None,
+            compacted_incoming_ordinals: 0,
+        };
+
+        // The checkpoint fast path replays only what follows the checkpoint,
+        // so the pause can only survive via the snapshot.
+        let entries = vec![
+            prefix[0].clone(),
+            prefix[1].clone(),
+            prefix[2].clone(),
+            checkpoint,
+            internal_entry("SessionSuspend", 1_500),
+            internal_entry("SessionResume", 1_600),
+        ];
+        let session = replay_session("s1", &entries, &registry, None).unwrap();
+        assert_eq!(session.state, SessionState::Open);
+        assert_eq!(
+            session.intent, "restored-from-checkpoint",
+            "the checkpoint fast path must have been taken, else this test \
+             proves nothing about the snapshot round-trip"
+        );
+        assert_eq!(
+            session.suspension_intervals,
+            vec![(1_050, 1_300), (1_500, 1_600)],
+            "the pre-checkpoint pause must come from the snapshot and the \
+             post-checkpoint pause from the replayed tail"
+        );
+    }
+
     #[test]
     fn replay_without_checkpoint_still_works() {
         // Ensure logs without checkpoints replay correctly (backward compat)
@@ -856,14 +963,18 @@ mod tests {
         assert_eq!(validate_replay_consistency("s1", &a, &d), 1);
         d.suspended_at_ms = Some(1_000);
         assert_eq!(validate_replay_consistency("s1", &a, &d), 2);
+        // Completed pairs are a third, independent suspension comparison.
+        d.suspension_intervals = vec![(1_000, 6_000)];
+        assert_eq!(validate_replay_consistency("s1", &a, &d), 3);
 
-        // All five at once, to pin that each comparison contributes exactly
+        // All six at once, to pin that each comparison contributes exactly
         // one count and none of them shadow another.
         let mut e = b.clone();
         e.mode_state = vec![7, 7, 7];
         e.accumulated_suspended_ms = 5_000;
         e.suspended_at_ms = Some(1_000);
-        assert_eq!(validate_replay_consistency("s1", &a, &e), 5);
+        e.suspension_intervals = vec![(1_000, 6_000)];
+        assert_eq!(validate_replay_consistency("s1", &a, &e), 6);
     }
 
     // ---------------------------------------------------------------------
@@ -1224,5 +1335,39 @@ mod tests {
         let session = replay_session("s1", &entries, &registry, Some(&policies)).unwrap();
         assert_eq!(session.accumulated_suspended_ms, 420);
         assert_implicitly_accepted(&session);
+    }
+
+    /// Phase 11b acceptance criterion 2 — replay rebuilds
+    /// `suspension_intervals` with **zero replay-code changes**, because the
+    /// `SessionSuspend`/`SessionResume` arms already drive
+    /// `Session::suspend`/`Session::resume` from the recorded
+    /// `received_at_ms` and `resume` is what records the pair.
+    ///
+    /// Asserted at both revisions: the vec is recorded everywhere (read only
+    /// at rev >= 2), so a rev gate on the *recording* would red this.
+    #[test]
+    fn replay_rebuilds_suspension_intervals_from_the_log() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+
+        let rev1 = handoff_history_with_two_suspensions(1, 1_510);
+        let session = replay_session("s1", &rev1, &registry, Some(&policies)).unwrap();
+        assert_eq!(
+            session.suspension_intervals,
+            vec![(1_050, 1_300), (1_330, 1_500)]
+        );
+
+        let rev2 =
+            handoff_history_with_two_suspensions(macp_core::session::CURRENT_SEMANTICS_REV, 1_600);
+        let session = replay_session("s1", &rev2, &registry, Some(&policies)).unwrap();
+        assert_eq!(
+            session.suspension_intervals,
+            vec![(1_050, 1_300), (1_330, 1_500)]
+        );
+        // And the walk reads them: an offer at 1_000 with a 100ms timeout
+        // lands past both pauses rather than at the naive 1_100.
+        // 50ms unsuspended before the first pause + 30ms between the pauses +
+        // 20ms after the second = the 100ms timeout, so D = 1_500 + 20.
+        assert_eq!(session.unsuspended_deadline(1_000, 100), 1_520);
     }
 }

@@ -42,6 +42,12 @@ pub struct PersistedSession {
     pub suspended_at_ms: Option<i64>,
     #[serde(default)]
     pub accumulated_suspended_ms: i64,
+    /// Completed `(suspended_at, resumed_at)` pairs on the session timeline
+    /// (see `macp_core::session::Session::suspension_intervals`). Snapshots
+    /// written before this field existed deserialize as empty, which is the
+    /// safe direction — the deadline walk only under-counts.
+    #[serde(default)]
+    pub suspension_intervals: Vec<(i64, i64)>,
     /// Session-semantics revision (see `macp_core::session::CURRENT_SEMANTICS_REV`).
     /// Legacy snapshots deserialize as 0 and keep legacy behavior.
     #[serde(default)]
@@ -88,6 +94,7 @@ impl From<&Session> for PersistedSession {
             policy_definition: session.policy_definition.clone(),
             suspended_at_ms: session.suspended_at_ms,
             accumulated_suspended_ms: session.accumulated_suspended_ms,
+            suspension_intervals: session.suspension_intervals.clone(),
             semantics_rev: session.semantics_rev,
             max_suspend_ms: session.max_suspend_ms,
         }
@@ -132,6 +139,7 @@ impl From<PersistedSession> for Session {
             .policy_definition(session.policy_definition)
             .suspended_at_ms(session.suspended_at_ms)
             .accumulated_suspended_ms(session.accumulated_suspended_ms)
+            .suspension_intervals(session.suspension_intervals)
             .semantics_rev(session.semantics_rev)
             .max_suspend_ms(session.max_suspend_ms)
             .build()

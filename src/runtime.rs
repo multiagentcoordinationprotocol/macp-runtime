@@ -998,7 +998,11 @@ impl Runtime {
                 })
             }
             Err(_) => {
-                // MAX_SUSPEND_MS exceeded: the session is now Expired.
+                // A suspension cap was exceeded — either MAX_SUSPEND_MS
+                // (cumulative suspended duration) or, at semantics_rev >= 2,
+                // MAX_SUSPENSION_CYCLES (completed suspend/resume cycles).
+                // Both take the same posture in `Session::resume`: the
+                // session is now Expired.
                 self.save_session_to_storage(session).await;
                 self.metrics.record_session_expired(&session.mode);
                 let _ = self
