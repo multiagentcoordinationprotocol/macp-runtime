@@ -520,3 +520,55 @@ stronger, since it also breaks the cap check.
 **Next:** Phase 11, replanned by Fable at the user's instruction (reversing this run's
 no-Fable-at-any-tier constraint) because it is the one genuine one-way door. Its `Incoming` decision
 is now settled by RFC-MACP-0010 §5.1(2)'s explicit §7.5 analogy rather than by inference.
+
+## Phase 11b — DONE (2026-09-12)
+
+- **Verdict:** round 1 `GAPS` (4 SHOULD-FIX, 3 NIT, no blocker) → round 2 `PASS`. Two rounds.
+- **Tiering:** Opus executor, fresh Opus verifier, fresh Opus fixer, fresh Opus re-verifier.
+  Fable substituted with Opus at every tier per the standing user instruction; 11b is not itself
+  a one-way door (the door is 11e, which writes this phase's arithmetic into permanent history).
+- **Commits:** `15318d0` (implementation), `c5b82b4` (gap closure), plus an orchestrator commit
+  for the round-2 SHOULD-FIX and NITs.
+- **Files:** `crates/macp-core/src/session.rs` (3 production lines: push guard, run clamp, cursor
+  clamp; the rest rustdoc + tests), `crates/macp-storage/src/registry.rs` (`PersistedSession`
+  field + both `From` impls + `SessionBuilder` setter), `src/runtime.rs` (comment only),
+  `src/replay.rs` (tests only + the warn-only 4th consistency comparison),
+  `tests/integration_mode_lifecycle.rs`, `docs/deployment.md`, `ASSUMPTIONS.md`,
+  `plans/defer/follow_ons.md`.
+- **Accumulating** toward the G4 PR — explicitly NOT shipped alone. The verifier's reasoning,
+  adopted: 11b publishes five new public API items with no consumer (`MAX_SUSPENSION_CYCLES`,
+  `Session::unsuspended_deadline`, `Session::suspension_intervals`,
+  `SessionBuilder::suspension_intervals`, `PersistedSession::suspension_intervals`) and spends the
+  `PersistedSession` `constructible_struct_adds_field` major on a release delivering nothing
+  observable but a rev-2 cycle cap. If 11d's call site changes the walk's signature, that would be
+  a second published change to an API nobody ever used.
+
+### What the mutation discipline bought this phase
+
+Three things that passing tests alone would not have caught:
+
+1. **Acceptance criterion 3 was vacuous** — the checkpoint test never reached the checkpoint fast
+   path (silent bail to full replay on a bound `policy_version` with a `None` registry). Both
+   persistence mutations stayed green. Caught by the executor's own mandatory mutation pass.
+2. **The plan's own prescribed walk over-reported**, and the orchestrator's prescribed repair for
+   it was itself incomplete. Settled by fuzzing four variants, not by argument.
+3. **`replay_from_checkpoint_restores_state` has never tested a checkpoint** — a lying test name
+   hiding the fact that the mid-session fast path was wholly uncovered. Now follow-on 16.
+
+### Carried forward
+
+- Follow-on 16 points 2 and 3 remain open: a real matrix for the mid-session fast path, and an
+  audit of every other test with the bound-`policy_version` trap.
+- **`PersistedSession::seen_message_ids` snapshot order is nondeterministic** (`HashSet` →
+  `Vec<String>` via `.iter().cloned().collect()`, `crates/macp-storage/src/registry.rs:78`).
+  Pre-existing and harmless today, but **Phase 12's byte-identity criterion must be scoped to the
+  accepted-history log, not to `PersistedSession` bytes**, or it will flake. Pinned here because
+  Phase 12 is where it would bite.
+- The rev gate on the *force-expire* check is load-bearing but untested (removing it leaves the
+  workspace green, because the new push gate makes `len > cap` unreachable from an empty start).
+  Shipped behaviour is correct; coverage gap only.
+
+### Next
+
+Phase 11c — the client boundary (reject forged implicit accepts, reserve the `implicit-accept:`
+`message_id` namespace). Blocked on nothing.

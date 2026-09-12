@@ -272,7 +272,7 @@ the code.
 **Found 2026-09-11** by the Phase 11b verifier (`plans/backlog-closeout-2026-09.md`),
 and independently reproduced twice, so it is not a reading error.
 
-`replay_from_checkpoint_restores_state` (`src/replay.rs:622`) does **not** test a
+`replay_from_checkpoint_restores_state` (`src/replay.rs:632`) does **not** test a
 checkpoint. It builds its session with `start_payload_bytes()` (`src/replay.rs:407`),
 which binds `policy_version: "policy-1"`, and then calls `replay_session(..., None)`
 with no policy registry. `try_replay_from_checkpoint` therefore bails at

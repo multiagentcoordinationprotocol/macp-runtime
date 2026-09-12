@@ -832,7 +832,52 @@ this list.
 
 #### Phase 11b — suspension intervals on the session + the deadline function (pure model)
 
-- **Status:** TODO
+- **Status:** DONE (2026-09-12) — commits `15318d0` (implementation) + `c5b82b4` (gap closure).
+  Verified over two rounds: round 1 GAPS (4 SHOULD-FIX, 3 NIT, no blocker), round 2 PASS.
+
+  **Divergences from this section as written, all recorded deliberately:**
+
+  1. **The prescribed clamp for the walk was incomplete, and the fix improves on it.** This
+     section's `Approach` gives the walk as `remaining -= s - cur; cur = e`. Written literally that
+     **over-reports** on any non-monotone, overlapping or unsorted pair, because `s - cur` can be
+     negative and `remaining -= run` then *grows* `remaining`: `[(1050,1400),(1100,1200)]` from
+     1000 for 100 returns **1550** where 1450 is correct. Reachable two ways — `Utc::now()` is not
+     monotonic, so an NTP backward step between suspend and resume pushes a pair with `e < s`
+     (`resume` clamps `banked` but not the pair), and the new **public**
+     `SessionBuilder::suspension_intervals` setter accepts anything. The orchestrator's prescribed
+     repair (`run.max(0)` + `cur = e.max(cur)`) closes over-reporting but leaves the mirror-image
+     bug: a backwards pair then yields a deadline *before* `from_ms + duration_ms`, i.e. a timeout
+     firing before it nominally elapsed. **Shipped instead:** `run = s.saturating_sub(cur).max(0)`
+     and `cur = e.max(s).max(cur)`. Adjudicated independently by fuzzing 450k adversarial vecs per
+     variant against a reference implementation — of the four variants it is the only one with both
+     zero deadlines before `from + duration` and zero over-reports. This matters beyond tidiness:
+     11e writes this function's output into permanent accepted history.
+  2. **The cycle cap as specified did not cover the sessions that justified it.** The spec gates
+     enforcement `semantics_rev >= 2`, but recording and persistence are unconditional, so a
+     session replayed from a legacy log (rev 0/1) still accrued an unbounded vec through the
+     un-rate-limited Suspend/Resume RPCs — the exact O(N²) snapshot amplification the cap exists to
+     close. Shipped: at rev <= 1 recording *stops* at the cap instead of force-expiring (nothing
+     reads the vec below rev 2, so legacy replay stays bit-identical); the rev >= 2 force-expire is
+     byte-for-byte unchanged, confirmed by diffing the extracted `resume` body across both commits.
+  3. **The optional fourth consistency comparison was taken**, and it has an operator-visible
+     consequence this section did not anticipate: it fires once for *every* persisted session that
+     was ever suspended and resumed, on the first boot after upgrade, because the legacy snapshot
+     deserializes an empty vec while replay rebuilds it populated. Warn-only and self-clearing
+     (recovery re-saves the replayed session). Documented in `docs/deployment.md`.
+  4. **Acceptance criterion 3 was VACUOUS as first written** and was caught only by the mandatory
+     mutation check. Built the obvious way — reusing `start_payload_bytes()`, which binds
+     `policy_version: "policy-1"` — `try_replay_from_checkpoint` silently bails to a **full replay**
+     because the checkpoint has a bound policy version but no serialized `policy_definition`, so
+     both persistence mutations stayed green. Rewritten with an unbound `policy_version` plus a
+     snapshot tripwire no full replay can reproduce.
+  5. **A pre-existing defect surfaced and is now tracked as follow-on 16.**
+     `replay_from_checkpoint_restores_state` had the *same* vacuity and **had never tested a
+     checkpoint** in its entire life; the mid-session checkpoint fast path — the code that makes
+     `MACP_CHECKPOINT_INTERVAL` safe — had **zero** coverage before this phase. Repaired here as a
+     rider; no defect was found in the fast path itself (independently corroborated by replaying one
+     log both ways and comparing the entire `PersistedSession` wire form, identical on every field).
+  6. Line drift only: the `resume_session` `Err`-arm comment is at `src/runtime.rs:1000-1003`, not
+     `:961-962` (11a moved it).
 - **Delivers:** the state and arithmetic 11d needs for D. **Behavior change is confined to one
   new rejection:** nothing reads the new field or `unsuspended_deadline` outside tests, but the
   `MAX_SUSPENSION_CYCLES` cap below does force-expire a rev-2 session past the cap (rev ≤ 1 is

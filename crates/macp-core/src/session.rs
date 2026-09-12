@@ -329,8 +329,8 @@ impl Session {
     /// **Under-count invariant.** The walk's contribution satisfies
     /// `walk_sum <= accumulated_suspended_ms - offer.suspended_ms_at_offer`:
     /// [`Session::suspension_intervals`] may *under*-report completed pauses
-    /// but can never over-report them. Two distinct sources produce a short
-    /// or empty vec, both permanent for the life of that log:
+    /// but can never over-report them. Three distinct sources produce a short
+    /// or empty vec, each permanent for the life of that log:
     ///
     /// 1. A snapshot or checkpoint written *before the field existed*
     ///    deserializes it as empty (`#[serde(default)]`) while
@@ -340,15 +340,25 @@ impl Session {
     ///    `&log_entries[idx + 1..]`, so every pause that completed before that
     ///    checkpoint is gone and can never be recovered, no matter how many
     ///    times the log is replayed afterwards.
+    /// 3. A `semantics_rev <= 1` session that exceeded
+    ///    [`MAX_SUSPENSION_CYCLES`]: recording stops rather than
+    ///    force-expiring, so pairs past the cap are dropped. This one is
+    ///    outside this function's read domain by construction — the walk is
+    ///    only consulted at `semantics_rev >= 2`, where the cap force-expires
+    ///    instead of dropping — so the enumeration above is exhaustive for
+    ///    every vec this function can actually be asked to walk.
     ///
     /// An under-count only moves the returned deadline *earlier*, never later
     /// — the safe direction, so callers may rely on `deadline <= now_ms` once
     /// the scalar arithmetic has already decided the timeout elapsed.
     ///
-    /// **Why a short vec cannot break replay determinism.** Replay never
-    /// *recomputes* a synthetic implicit-accept timestamp: it replays the
-    /// recorded synthetic entry as data. Only the live emitter computes a
-    /// deadline, exactly once, at acceptance time. So a short vec can make a
+    /// **Why a short vec cannot break replay determinism.** This describes the
+    /// design this function exists to serve; the synthetic entry itself
+    /// arrives in a later phase. Replay is never to *recompute* a synthetic
+    /// implicit-accept timestamp — it replays the recorded synthetic entry as
+    /// data. Only the live emitter computes a deadline, exactly once, at
+    /// *emission* time, from the offer's recorded `offered_at_ms`. So a short
+    /// vec can make a
     /// *newly* emitted implicit accept land earlier than a fully-recorded one
     /// would have, but it can never make a *replayed* one disagree with the
     /// live value already baked into history — byte-identical replay is not
@@ -1330,7 +1340,7 @@ mod tests {
         );
 
         // The invariant stated in the rustdoc, checked directly: the walk's
-        // own contribution never exceeds the true union of the pauses.
+        // own contribution never exceeds the sum of the normalized pair widths (an upper bound on their union).
         for pairs in [
             vec![(1_050, 1_400), (1_100, 1_200)],
             vec![(1_050, 1_400), (1_200, 1_300)],
