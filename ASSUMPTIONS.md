@@ -77,6 +77,13 @@
 - **Blast radius if wrong:** Low and bounded in the safe direction. The mode is the stricter of the two: it will not call the evaluator until its own bar is met, so the evaluator's laxer reading can only fail to add a constraint, never remove one. It cannot produce a commitment the mode would have refused.
 - **Status:** UNCONFIRMED (2026-09-10)
 
+- **Narrowed 2026-09-11 by spec #110 + Phase 7 of plans/spec-99-schema-version-3.md.** This entry's
+  premise — that a supplied `threshold.value` of `0` is registrable — is **no longer true**. Canonical
+  moved `threshold.value` to `exclusiveMinimum: 0`, and the mirror now refuses a supplied `0` (and any
+  negative) at admission. `EffectiveThreshold::Inert` is therefore reachable only by **omission** of
+  the key. The residual half of the entry still stands: the two callers' differing `Inert` defaults
+  still diverge, and that divergence is now the entry's only live content.
+
 ## The quorum mode silently tolerates a rules object the evaluator rejects
 - **Plan:** `plans/backlog-closeout-2026-09.md` (Phase 3 — named in the phase's edge cases as explicitly NOT in scope to unify)
 - **Assumed:** `QuorumMode::effective_threshold` parses the bound policy's `rules` with `serde_json::from_value(...).unwrap_or_default()`, so a rules object that fails to deserialize (a type error — `"threshold": "majority"`) yields the schema defaults and an inert threshold, and the mode proceeds on the ApprovalRequest's `required_approvals`. The evaluator's `parse_rules` on the same object **denies the commitment**. A session can therefore be "ready to commit" by the mode's reckoning and then refused with `POLICY_DENIED` at the last step.
@@ -392,4 +399,33 @@
   passing once fixed. **The injected-clock signature, not the test, is the real guarantee**, and the
   plan's claim that the test "could only fail on a clock tick" was right in kind but understated:
   it undersold a signal that does exist, rather than overselling one that does not.
+## `MACP_POLICY_SCHEMAS_DIR` documented in the operator-facing env table
+- **Plan:** plans/spec-99-schema-version-3.md (Phase 1)
+- **Assumed:** the plan wants this var in `docs/deployment.md`'s table for discoverability, not because
+  operators ever set it. Verified: it is read only by `crates/macp-policy/src/registry.rs`'s test
+  module and by `ci.yml:646` — **the server never reads it** — and it appears in no tracked `.md`.
+- **Chose:** added the row, but led the description with "**Development and CI only; the server never
+  reads it.**", followed by both warnings: it must point at a clean `git archive` export of the spec
+  commit CI reads, never at the sibling working tree (which sits ahead of `main` and produces parity
+  failures that do not exist in CI), and `canonical_schema_dir`
+  (`crates/macp-policy/src/registry.rs:1739-1755`) **panics by design** via `assert!` on a set-but-
+  missing directory.
+- **Alternatives:** omit it (contradicts the plan and leaves it documented nowhere);
+  put it in `CONTRIBUTING.md` instead — arguably the better home, since it is a contributor concern
+  rather than a deployment one, but not what the plan says.
+- **Blast radius if wrong:** docs only. Moving it to `CONTRIBUTING.md` is a two-line change.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## An extra Phase 1 test guarding the mode-guard placement
+- **Plan:** plans/spec-99-schema-version-3.md (Phase 1)
+- **Assumed:** the plan named hoisting the new raw-JSON `weights` check out of the Decision mode
+  guard as the second-likeliest way to break the phase, but its criterion-5 pair cannot detect that
+  hoist — so the risk would have shipped untested.
+- **Chose:** added `register_empty_weights_map_for_another_mode_succeeds` (a Task-mode policy
+  carrying `voting.weights: {}`) beyond the stated criteria. Independently confirmed as the **sole**
+  red when the check is hoisted above the `matches!(mode, "macp.mode.decision.v1" | "*")` guard at
+  `crates/macp-policy/src/registry.rs:437`, while both criterion-5 tests stay green.
+- **Alternatives:** rely on the criterion-5 pair alone — mutation-proven inadequate.
+- **Blast radius if wrong:** one test. The cost of *not* having it is a wildcard-mode policy carrying
+  an empty `weights` map being wrongly refused, for rules the Decision schema does not govern.
 - **Status:** UNCONFIRMED (2026-09-11)

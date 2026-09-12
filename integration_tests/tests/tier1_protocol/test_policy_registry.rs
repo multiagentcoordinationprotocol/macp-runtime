@@ -618,6 +618,19 @@ async fn register_policy_refuses_out_of_schema_values() {
             serde_json::json!({ "voting": { "quorum": { "type": "n_of_m", "value": 1 } } }),
             "voting.quorum.type",
         ),
+        // Spec #99 moved both of these from `minimum: 0` to
+        // `exclusiveMinimum: 0`; they were accepted as schema-legal boundary
+        // values until this release.
+        (
+            "macp.mode.decision.v1",
+            serde_json::json!({ "voting": { "algorithm": "majority", "threshold": 0.0 } }),
+            "voting.threshold",
+        ),
+        (
+            "macp.mode.decision.v1",
+            serde_json::json!({ "voting": { "algorithm": "weighted", "weights": { "a": 0.0, "b": 0.0 } } }),
+            "voting.weights",
+        ),
         (
             "macp.mode.quorum.v1",
             serde_json::json!({ "threshold": { "type": "n_of_m", "value": 0.5 } }),
@@ -627,6 +640,17 @@ async fn register_policy_refuses_out_of_schema_values() {
             "macp.mode.quorum.v1",
             serde_json::json!({ "threshold": { "type": "weighted", "value": 2 } }),
             "threshold.type",
+        ),
+        // Spec #110 did the same to the quorum-side floor: `threshold.value`
+        // moved from `minimum: 0` to `exclusiveMinimum: 0`, because a zero
+        // approval bar is trivially satisfied. Keyed on the `value` key being
+        // supplied — a rules object that omits it stays legal and inert, which
+        // is what `register_policy_accepts_schema_legal_boundary_values`
+        // covers.
+        (
+            "macp.mode.quorum.v1",
+            serde_json::json!({ "threshold": { "type": "n_of_m", "value": 0 } }),
+            "threshold.value",
         ),
     ];
 
@@ -646,17 +670,16 @@ async fn register_policy_refuses_out_of_schema_values() {
 
 #[tokio::test]
 async fn register_policy_accepts_schema_legal_boundary_values() {
-    // Degenerate but schema-legal: `minimum` is inclusive in every case, and
-    // `count` is a documented alias for the quorum `n_of_m` threshold type.
+    // Degenerate but schema-legal: `maximum: 100` is inclusive, and `count` is
+    // a documented alias for the quorum `n_of_m` threshold type. The two
+    // Decision cases that used to live here — `threshold: 0.0` and an all-zero
+    // `weights` map — moved to `register_policy_refuses_out_of_schema_values`
+    // when spec #99 made both bounds exclusive, and the quorum
+    // `threshold.value: 0` case followed them there under spec #110. What
+    // remains of the zero case is the *omitted* value, which JSON Schema never
+    // reaches: the rule stays inert and the ApprovalRequest's own
+    // `required_approvals` stands.
     let cases: Vec<(&str, serde_json::Value)> = vec![
-        (
-            "macp.mode.decision.v1",
-            serde_json::json!({ "voting": { "algorithm": "majority", "threshold": 0.0 } }),
-        ),
-        (
-            "macp.mode.decision.v1",
-            serde_json::json!({ "voting": { "algorithm": "weighted", "weights": { "a": 0.0, "b": 0.0 } } }),
-        ),
         (
             "macp.mode.quorum.v1",
             serde_json::json!({ "threshold": { "type": "count", "value": 2 } }),
@@ -664,6 +687,14 @@ async fn register_policy_accepts_schema_legal_boundary_values() {
         (
             "macp.mode.quorum.v1",
             serde_json::json!({ "threshold": { "type": "percentage", "value": 100 } }),
+        ),
+        (
+            "macp.mode.quorum.v1",
+            serde_json::json!({ "threshold": { "type": "percentage" } }),
+        ),
+        (
+            "macp.mode.quorum.v1",
+            serde_json::json!({ "abstention": { "counts_toward_quorum": true } }),
         ),
     ];
 

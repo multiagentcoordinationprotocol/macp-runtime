@@ -732,6 +732,58 @@ mod tests {
     }
 
     #[test]
+    fn only_decision_accepts_an_empty_roster_at_the_mode_layer() {
+        // The mode-layer half of the empty-roster carve-out. `macp-core`
+        // enforces the rule once (see
+        // `session::tests::every_standard_mode_except_decision_rejects_an_empty_roster`),
+        // but four standards-track modes plus `multi_round` also re-reject an
+        // insufficient roster in their own `on_session_start`, and those guards
+        // carry mode-specific minima the core rule cannot express — Task needs
+        // a participant other than the initiator (RFC-MACP-0009 §2), Handoff
+        // needs two parties (RFC-MACP-0010 §2/§3).
+        //
+        // Iterating the registry rather than naming the guards is the point:
+        // this is one table that a PR deleting any single guard has to notice,
+        // where an unmodified per-mode test is deleted alongside the code it
+        // covers. It also pins that Decision is the *only* exception, so a
+        // later relaxation cannot widen silently.
+        let registry = ModeRegistry::build_default(Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let env = macp_pb::pb::Envelope {
+            message_type: "SessionStart".into(),
+            sender: "agent://initiator".into(),
+            ..Default::default()
+        };
+
+        let mut names: Vec<&str> = STANDARD_MODE_NAMES.to_vec();
+        names.push("ext.multi_round.v1");
+        assert_eq!(
+            names.len(),
+            6,
+            "the strict-mode set is five standard plus multi_round"
+        );
+
+        for name in names {
+            let session = macp_core::session::Session::builder("s1", name, "agent://initiator")
+                .participants(vec![])
+                .build();
+            let mode = registry.get_mode(name).expect("mode is registered");
+            let result = mode.on_session_start(&session, &env);
+            if name == "macp.mode.decision.v1" {
+                assert!(
+                    matches!(result, Ok(crate::mode::ModeResponse::PersistState(_))),
+                    "Decision is the one carve-out and must accept an empty roster, got: {result:?}"
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "InvalidPayload",
+                    "{name} must reject an empty roster in its own on_session_start"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn unknown_mode_returns_none() {
         let registry = ModeRegistry::build_default(Arc::new(macp_policy::DefaultPolicyEvaluator));
         assert!(registry.get_mode("nonexistent").is_none());

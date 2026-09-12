@@ -37,7 +37,7 @@
       "expect": "accept"
     },
     {
-      "_comment": "RFC-MACP-0007 Section 5 rule 2 (:78): Objection MUST reference an existing proposal_id.",
+      "_comment": "RFC-MACP-0007 Section 5 rule 2: Objection MUST reference an existing proposal_id.",
       "sender": "agent://b",
       "message_type": "Objection",
       "payload_type": "macp.modes.decision.v1.ObjectionPayload",

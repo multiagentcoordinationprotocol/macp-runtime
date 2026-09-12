@@ -33,7 +33,14 @@ MACP_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test -p macp-storage --features
 ## Ground rules
 
 - **Read `CLAUDE.md`** for the architecture, layering invariants (enforced by
-  the `deps-isolation` CI job), and the freeze-profile invariants.
+  the `deps-isolation` CI job), and the freeze-profile invariants. One
+  freeze-profile invariant carries a carve-out that is easy to miss because
+  `CLAUDE.md` is gitignored and so never appears in a diff: strict
+  `SessionStart` requires a non-empty `participants` list for every
+  standards-track mode **except `macp.mode.decision.v1`**, which accepts an
+  empty roster (RFC-MACP-0001 §7.1, RFC-MACP-0007; the resulting session is
+  inert — see `docs/API.md` and `docs/modes.md`). The rule and the exception
+  live in one place, `macp_core::session::allows_empty_participants`.
 - **Every behavior change lands with a test.** Changes affecting message
   acceptance or replay need a regression test, and — if they change semantics
   of persisted histories — a legacy-log fixture proving old logs still replay

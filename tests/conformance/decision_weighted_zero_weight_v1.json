@@ -1,0 +1,118 @@
+{
+  "_comment": "Companion to decision_weighted_zero_weight.json at schema_version 1. Together the pair pins EXACTLY where the versions diverge on a zero-decisive-weight tally: the NEGATIVE direction is denied at every schema_version (the decline guard needs a decisive reject, and weight-0 votes are non-decisive at every version), while the POSITIVE direction is denied only under schema_version 3 and sealed under the preserved legacy arm. Neither fixture alone pins that split.",
+  "description": "Decision Mode: schema_version 1 keeps the legacy fail-open positive path on a zero-weight tally.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://a",
+  "participants": [
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.weighted-zero-weight-v1",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 1,
+    "description": "Weighted vote over a one-member electorate, initiator-only commitment, legacy schema_version 1 fail-open empty-tally semantics.",
+    "rules": {
+      "voting": {
+        "algorithm": "weighted",
+        "threshold": 0.5,
+        "weights": {
+          "agent://a": 1
+        }
+      },
+      "commitment": {
+        "authority": "initiator_only",
+        "require_vote_quorum": false
+      }
+    }
+  },
+  "policy_version": "policy.decision.weighted-zero-weight-v1",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://a",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "A weight-0 vote is NON-DECISIVE under 'weighted' at EVERY schema_version (RFC-MACP-0012 4.1, weighted electorate rule): it is accepted as a message and preserved in history, but contributes to neither side of the ratio, does not enter the decisive tally, and does not satisfy the decline guard of RFC-MACP-0007 6.2. 'agent://b' is a declared participant absent from the weights map, so its weight is 0.",
+      "sender": "agent://b",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "REJECT",
+        "reason": "not convinced"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "VERSION-INVARIANT. The decline guard requires at least one DECISIVE explicit REJECT, and weight-0 non-decisiveness holds at every schema_version, so this is denied here exactly as it is under schema_version 3 (RFC-MACP-0012 4.1; RFC-MACP-0007 6.2). The negative direction does not diverge across versions.",
+      "sender": "agent://a",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c0",
+        "outcome_positive": false,
+        "action": "decision.rejected",
+        "authority_scope": "test",
+        "reason": "negative commitment attempted with only a weight-0 REJECT on the tally",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.weighted-zero-weight-v1",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "_comment": "THE DIVERGENCE. Identical tally, identical decisive weight of zero -- but schema_version 1 applies the legacy fail-open rule: the algorithm produces no result, and with require_vote_quorum false the absence of decisive votes does not block a positive commitment, so it SEALS. The same message is DENIED under schema_version 3 (decision_weighted_zero_weight.json). Preserved for replay per RFC-MACP-0012 8, not endorsed.",
+      "sender": "agent://a",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "positive commitment at zero total decisive weight under legacy semantics",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.weighted-zero-weight-v1",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  },
+  "expected_mode_state": {
+    "phase": "Committed",
+    "proposals": {
+      "p1": {
+        "proposal_id": "p1",
+        "sender": "agent://a"
+      }
+    },
+    "votes": {
+      "p1": {
+        "agent://b": {
+          "vote": "REJECT"
+        }
+      }
+    }
+  }
+}

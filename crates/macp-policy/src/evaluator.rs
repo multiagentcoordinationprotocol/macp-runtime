@@ -6,10 +6,22 @@ use macp_core::policy::rules::{
 use macp_core::policy::{PolicyDecision, PolicyDefinition};
 use std::collections::BTreeMap;
 
-// Additive per RFC-MACP-0012 §3: schema_version 1 policies stay valid; version 2
-// only signals the descriptor MAY carry the Decision decline-gating fields
-// (`commitment.allow_decline_over_approval`, `objection_handling.critical_objection_action`).
-const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[1, 2];
+// RFC-MACP-0012 §3: "A runtime MUST accept every schema version it supports
+// (`{1, 2, 3}`)", with no per-mode carve-out — so this gate is shared by all
+// five standard modes.
+//
+// 1 → 2 is **additive**: version 2 only signals the descriptor MAY carry the
+// Decision decline-gating fields (`commitment.allow_decline_over_approval`,
+// `objection_handling.critical_objection_action`), so schema_version 1 policies
+// stay valid.
+//
+// 2 → 3 is the first **semantic** bump: the same rules bytes can evaluate
+// differently, because under version 3 every voting algorithm other than `none`
+// is binding on an empty decisive tally (§4.1 "Empty tally"). Versions 1 and 2
+// keep the fail-open legacy arm forever so stored sessions replay identically
+// (§8), which is why the semantics are selected by the declared version on the
+// *stored descriptor* and never by the runtime's release.
+const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3];
 
 fn check_schema_version(policy: &PolicyDefinition) -> Option<PolicyDecision> {
     if !SUPPORTED_SCHEMA_VERSIONS.contains(&policy.schema_version) {
@@ -73,25 +85,100 @@ pub fn evaluate_decision_commitment(
 ///
 /// | `VotingResult` | approve commit | decline commit |
 /// |---|---|---|
-/// | `Passed`  | allowed | denied, unless `commitment.allow_decline_over_approval` |
-/// | `Failed`  | denied  | allowed iff the decline guard passes (`reject_count > 0`) |
-/// | `NoVotes` | denied iff quorum required | denied (no explicit reject) |
+/// | `Passed`  | allowed | denied, unless `commitment.allow_decline_over_approval` **and** the decline guard passes |
+/// | `Failed`  | denied  | allowed iff the decline guard passes |
+/// | `NoVotes` | `schema_version >= 3`: denied; `<= 2`: denied iff quorum required | denied (no decisive reject can exist) |
+///
+/// The table governs **vote-authorized** commitments only. An
+/// *objection-authorized* decline skips it entirely — see "Objection-authorized
+/// decline" below.
+///
+/// **Empty decisive tally (`NoVotes`):** which of the two positive-commitment
+/// readings applies is selected by the **policy's own `schema_version`**
+/// (RFC-MACP-0012 §4.1). Under `schema_version >= 3` every algorithm other than
+/// `none` is binding on its own, so a positive commitment is denied
+/// unconditionally. Under `schema_version <= 2` the fail-open legacy arm
+/// applies, where `commitment.require_vote_quorum` alone decides; §4.1 requires
+/// implementations to keep that arm (so stored sessions replay identically,
+/// §8) and requires they MUST NOT apply it to `schema_version >= 3` policies.
+/// The discriminator is a property of the stored descriptor, never of the
+/// runtime release: two sessions started by the same binary in the same
+/// millisecond, one binding a v1 policy and one a v3 policy, must evaluate
+/// differently. A **vote-authorized decline** is denied on an empty tally at
+/// every schema version — no decisive reject can exist — so only the positive
+/// column moves; an objection-authorized decline (below) never reaches this row
+/// at all. `none` is untouched in both directions: it never enters the voting
+/// block.
+///
+/// **The weighted electorate (every schema version).** Under `weighted`, the
+/// `voting.weights` map *is* the electorate: a declared participant absent from
+/// it weighs `0` and is **non-decisive** — outside both sides of the ratio, and
+/// unable to satisfy the decline guard (RFC-MACP-0012 §4.1, and
+/// `decision-rules.schema.json`'s "normative for EVERY schema version, not only
+/// 3"). Unlike the empty-tally split above this is keyed off nothing, so it
+/// reaches stored `schema_version <= 2` descriptors too; §8's "Bounded
+/// exception — weight-`0` decisiveness" accepts that in writing, and
+/// `docs/deployment.md` carries the operator note. The participation floor is
+/// carved out and unchanged: a weight-`0` vote still counts toward
+/// `voting.quorum` (see `count_unique_voters`). Under every other algorithm
+/// `weights` is not consulted and nothing here applies.
 ///
 /// **Negative weighted total:** a `weighted` round whose *cast* weights sum
-/// below zero is out-of-schema (`voting.weights[*]` is `minimum: 0`) and
+/// below zero is out-of-schema (`voting.weights[*]` is `exclusiveMinimum: 0`
+/// since spec #99, and was `minimum: 0` before it) and
 /// short-circuits to `Failed` before any ratio is computed, so it takes the
-/// `Failed` row above — an approve is denied, and a decline is allowed iff an
-/// explicit reject backs it. It previously reached the ratio, where the
+/// `Failed` row above — an approve is denied, and a decline is allowed iff a
+/// decisive explicit reject backs it. It previously reached the ratio, where the
 /// negative denominator inverted `ratio >= threshold` and could report
 /// `Passed`; that made this a *tightening* for an approve (`Passed` →
 /// `Failed`) and, on the same round, a `DENY` → `ALLOW` move for a decline. A
-/// total of exactly **zero** is schema-legal (`minimum: 0` is inclusive) and
-/// reports `NoVotes` — deferred to spec issue #98 item 3.
+/// total of exactly **zero** reports `NoVotes`, which is no longer a deferral:
+/// §4.1 defines a tally whose total decisive weight is zero as *the* empty
+/// decisive tally, and RFC-MACP-0007 §6.2 agrees it is `NoVotes` for every
+/// algorithm at every schema version.
 ///
 /// **Decline guard (universal reject-floor):** a decline backed by the vote
-/// outcome requires at least one *explicit* reject (`reject_count > 0`). A
-/// non-vote must never authorize a finalized adverse decline. The quorum gate
-/// (check 3) supplies the additional, opt-in `require_vote_quorum` condition.
+/// outcome requires at least one *decisive* explicit reject
+/// (`decisive_reject_count > 0`; see `count_decisive_rejects`). A non-vote
+/// must never authorize a finalized adverse decline, and neither may a ballot
+/// from outside the weighted electorate. RFC-MACP-0007 §6.2 states the guard
+/// "applies across all three voting results", so it gates the `Passed` row as
+/// well: `allow_decline_over_approval` waives the approval *result*, not the
+/// guard. The quorum gate (check 3) supplies the additional, opt-in
+/// `require_vote_quorum` condition.
+///
+/// **Objection-authorized decline (`schema_version >= 2`):** when the policy
+/// sets `objection_handling.critical_objection_action` to `finalize_decline`
+/// and a standing critical objection blocks the positive direction, a decline
+/// is authorized by the recorded `Objection` rather than by the tally.
+/// RFC-MACP-0007 §6.2: such a decline "is not gated by the tri-state above and
+/// is not subject to the decline guard" — the objection is itself the explicit,
+/// attributable dissent the guard exists to require — so it is available at
+/// every tally, the empty one included. Without it a `schema_version >= 3`
+/// session with a non-`none` algorithm, an empty tally and a standing critical
+/// objection could terminate only by expiry, the stuck state
+/// `finalize_decline` exists to resolve. Three bounds. It is one-directional:
+/// a *positive* commitment is still denied by the veto and still evaluated
+/// against the voting block. It is scoped to the action: `deny` and `hold`
+/// stay hard-stops in both directions. And it waives the tri-state and the
+/// reject-floor only — checks 1 (`minimum_confidence`) and 3
+/// (`require_vote_quorum`) are outcome-agnostic and still apply. That last
+/// bound is a **deliberate departure from §6.2's literal wording**, not a
+/// reading of silence: §6.2 defines the decline guard as a conjunction whose
+/// *second conjunct is* the quorum condition ("…and, when
+/// `commitment.require_vote_quorum` is `true`, the voting quorum MUST be
+/// met"), so "not subject to the decline guard" waives the quorum by
+/// construction, and RFC-MACP-0012 §4.1 and its `finalize_decline` parameter
+/// note restate the guard the same way. §6.2 is genuinely silent only about
+/// `minimum_confidence`. Retaining both gates is therefore narrower than the
+/// text, and not merely conservative: it reconstructs the stuck state §6.2
+/// exists to remove, because with `require_vote_quorum: true` and an unmet
+/// floor *neither* direction can commit. It is held here pending spec issue
+/// #117, which asks for the ruling; the "Hazard: `require_vote_quorum`
+/// together with `finalize_decline`" bullet in `docs/policy.md` carries the
+/// operator-facing shape and the reproducer. No version check is needed:
+/// `critical_objection_action` is a v2 field and a v1 descriptor that omits it
+/// defaults to `Deny`, which never sets the flag.
 ///
 /// **`none` exception:** with `algorithm == "none"` the decision is
 /// initiator-driven and `outcome_positive` is taken at face value (a `none`
@@ -116,6 +203,10 @@ pub fn evaluate_decision_commitment_outcome(
 
     let mut deny_reasons: Vec<String> = Vec::new();
     let mut allow_reasons: Vec<String> = Vec::new();
+    // Set by check 2 when a standing critical objection authorizes *this*
+    // decline under `critical_objection_action: "finalize_decline"`. It is what
+    // makes check 5 skippable — see RFC-MACP-0007 §6.2 there.
+    let mut objection_authorized_decline = false;
 
     // 1. Check evaluation requirements (minimum confidence threshold).
     // RFC-MACP-0007: REVIEW evaluations are informational only and MUST NOT
@@ -180,6 +271,12 @@ pub fn evaluate_decision_commitment_outcome(
                             "veto blocks a positive commitment: {detail} (critical_objection_action=finalize_decline)"
                         ));
                     } else {
+                        // RFC-MACP-0007 §6.2 "Objection-authorized decline":
+                        // the authorization is the recorded critical
+                        // `Objection`, not the voting result, so check 5 is
+                        // skipped entirely for this direction. Set only here —
+                        // the positive branch above keeps evaluating policy.
+                        objection_authorized_decline = true;
                         allow_reasons.push(format!(
                             "critical-objection veto finalized as a decline: {detail}"
                         ));
@@ -190,12 +287,23 @@ pub fn evaluate_decision_commitment_outcome(
     }
 
     // 3. Collect all votes across all proposals.
+    //
+    // `total_voters` is deliberately *not* weight-aware: RFC-MACP-0012 §4.1
+    // says a weight-`0` vote "still counts as a vote cast for the
+    // `voting.quorum` participation floor, which this rule does not alter".
+    // The decline guard is the opposite — RFC-MACP-0007 §6.2 counts only
+    // *decisive* rejects — so the two counts diverge under `weighted`.
     let total_voters = count_unique_voters(&state.votes);
     let participant_count = participants.len();
-    let (_, reject_count, _, _) = aggregate_votes(&state.votes);
+    let decisive_reject_count =
+        count_decisive_rejects(&rules.voting.algorithm, &rules.voting.weights, &state.votes);
 
     // 4. Check vote quorum (outcome-agnostic — a decline needs the same quorum
-    //    as an approve when `require_vote_quorum` is set).
+    //    as an approve when `require_vote_quorum` is set). Applying it to an
+    //    *objection-authorized* decline departs from RFC-MACP-0007 §6.2's
+    //    literal wording, where the quorum is the decline guard's second
+    //    conjunct and is waived with the rest of the guard; held pending spec
+    //    issue #117. See the rustdoc above and `docs/policy.md`.
     let quorum_met = check_quorum(
         &rules.voting.quorum.quorum_type,
         rules.voting.quorum.value,
@@ -213,7 +321,18 @@ pub fn evaluate_decision_commitment_outcome(
     }
 
     // 5. Map the voting algorithm result to the requested outcome.
-    if rules.voting.algorithm != "none" {
+    //
+    // An objection-authorized decline skips this block whole: RFC-MACP-0007
+    // §6.2 says such a decline "is not gated by the tri-state above and is not
+    // subject to the decline guard", because the recorded critical `Objection`
+    // is itself the explicit, attributable dissent the guard exists to require.
+    // The `none` arm is tested first so the skip cannot swallow the face-value
+    // allow reason — `none` never had a tri-state to be exempted from, and its
+    // reason set must not change.
+    if rules.voting.algorithm == "none" {
+        // `none`: initiator-driven; outcome taken at face value (no reject-floor).
+        allow_reasons.push("voting algorithm is 'none'; no vote threshold required".into());
+    } else if !objection_authorized_decline {
         match check_voting_algorithm(
             &rules.voting.algorithm,
             rules.voting.threshold,
@@ -224,47 +343,100 @@ pub fn evaluate_decision_commitment_outcome(
             VotingResult::Passed(reason) => {
                 if outcome_positive {
                     allow_reasons.push(reason);
-                } else if rules.commitment.allow_decline_over_approval {
+                } else if !rules.commitment.allow_decline_over_approval {
+                    deny_reasons.push(format!(
+                        "vote passed the approval threshold but a decline was requested; set commitment.allow_decline_over_approval to permit an executive override ({reason})"
+                    ));
+                } else if decisive_reject_count > 0 {
                     allow_reasons.push(format!(
                         "decline authorized over a passing approval vote (allow_decline_over_approval=true): {reason}"
                     ));
                 } else {
+                    // RFC-MACP-0007 §6.2: the decline guard "applies across
+                    // all three voting results". `allow_decline_over_approval`
+                    // waives the *approval result*, not the guard, so a round
+                    // with no decisive dissent — an all-approve tally, or one
+                    // whose only rejects were cast by participants outside
+                    // `voting.weights` and are therefore non-decisive — still
+                    // has nothing to finalize an adverse outcome on.
+                    //
+                    // The explanatory clause is algorithm-conditional on
+                    // purpose. RFC-MACP-0012 §8's "Bounded exception —
+                    // weight-`0` decisiveness" is only about the `weighted`
+                    // half of this arm; the arm itself is reached by every
+                    // algorithm, and a `majority` policy has no
+                    // `voting.weights` at all, so naming that key there would
+                    // point the operator at a knob their descriptor does not
+                    // carry.
+                    let detail = if rules.voting.algorithm == "weighted" {
+                        "a REJECT from a participant outside voting.weights is non-decisive, \
+                         and incomplete participation is not a rejection"
+                    } else {
+                        "no REJECT was cast; neither an abstention nor a missing ballot is a \
+                         rejection"
+                    };
                     deny_reasons.push(format!(
-                        "vote passed the approval threshold but a decline was requested; set commitment.allow_decline_over_approval to permit an executive override ({reason})"
+                        "allow_decline_over_approval permits a decline over a passing vote, but no decisive reject backs it ({detail}): {reason}"
                     ));
                 }
             }
             VotingResult::Failed(reason) => {
                 if outcome_positive {
                     deny_reasons.push(reason);
-                } else if reject_count > 0 {
+                } else if decisive_reject_count > 0 {
                     // Decline guard satisfied: the approval bar was not met and
-                    // there is at least one explicit reject backing the decline.
+                    // there is at least one decisive explicit reject backing
+                    // the decline.
                     allow_reasons.push(format!("decline backed by conclusive rejection: {reason}"));
                 } else {
                     // Approval failed only through incomplete participation
-                    // (no explicit reject) — must not finalize an adverse decline.
+                    // (no decisive explicit reject) — must not finalize an
+                    // adverse decline.
                     deny_reasons.push(format!(
-                        "approval threshold not met but no explicit reject to justify a decline (incomplete participation is not a rejection): {reason}"
+                        "approval threshold not met but no decisive reject to justify a decline (incomplete participation is not a rejection): {reason}"
                     ));
                 }
             }
             VotingResult::NoVotes => {
                 if outcome_positive {
-                    if rules.commitment.require_vote_quorum {
+                    // RFC-MACP-0012 §4.1 "Empty tally (schema_version >= 3)":
+                    // every algorithm other than `none` is binding on its own,
+                    // so an empty decisive tally denies a positive commitment
+                    // whatever `require_vote_quorum` says. `>= 3` rather than
+                    // `== 3` so a future schema version inherits the current,
+                    // fail-closed semantics instead of silently falling back to
+                    // the fail-open arm below.
+                    //
+                    // Below 3, §4.1's "Legacy empty-tally rule" applies and is
+                    // retained verbatim: implementations MUST keep it so stored
+                    // sessions replay identically (§8), and MUST NOT apply it to
+                    // `schema_version >= 3`. The discriminator is the *stored
+                    // descriptor's* declared version (§8 item 3), not the
+                    // runtime's release, so nothing here consults `semantics_rev`.
+                    if policy.schema_version >= 3 {
+                        deny_reasons.push(format!(
+                            "no decisive votes cast: under policy schema_version {} the '{}' \
+                             voting algorithm is binding on an empty tally and does not \
+                             authorize a positive commitment (RFC-MACP-0012 §4.1)",
+                            policy.schema_version, rules.voting.algorithm
+                        ));
+                    } else if rules.commitment.require_vote_quorum {
                         deny_reasons.push("no votes cast".into());
                     }
                 } else {
+                    // "decisive" rather than merely "explicit", to stay
+                    // parallel with the `Passed` and `Failed` arms above and
+                    // with `docs/policy.md`: under `weighted` an explicit
+                    // `REJECT` from a participant outside `voting.weights` is
+                    // not enough, which is exactly how this arm becomes
+                    // reachable on a complete ballot set.
                     deny_reasons.push(
-                        "no votes cast; a decline requires at least one explicit reject vote"
+                        "no votes cast; a decline requires at least one decisive explicit reject vote"
                             .into(),
                     );
                 }
             }
         }
-    } else {
-        // `none`: initiator-driven; outcome taken at face value (no reject-floor).
-        allow_reasons.push("voting algorithm is 'none'; no vote threshold required".into());
     }
 
     if deny_reasons.is_empty() {
@@ -281,7 +453,63 @@ pub fn evaluate_decision_commitment_outcome(
     }
 }
 
+/// Count the explicit `REJECT` ballots that are **decisive** under the bound
+/// voting algorithm — the figure RFC-MACP-0007 §6.2's decline guard is defined
+/// over ("`reject_count > 0`, where `reject_count` counts decisive rejects").
+///
+/// Under `weighted` the `voting.weights` map **is** the electorate
+/// (RFC-MACP-0012 §4.1): a declared participant absent from it has weight `0`,
+/// and a weight-`0` ballot "is accepted as a message and preserved in history,
+/// but it is **non-decisive** … it contributes to neither side of the weighted
+/// ratio, does not enter the decisive tally, and does not satisfy the decline
+/// guard". Under every other algorithm `weights` is not consulted at all and
+/// every non-abstain ballot is decisive, so the raw [`aggregate_votes`] reject
+/// count is already the decisive count.
+///
+/// This rule is keyed off nothing — §4.1 states it is "normative for **every**
+/// schema version", and `decision-rules.schema.json` spells the same rule out
+/// as "normative for EVERY schema version, not only 3". It is therefore *not*
+/// gated on `policy.schema_version` the way the empty-tally arm is, and
+/// RFC-MACP-0012 §8's "Bounded exception — weight-`0` decisiveness" accepts the
+/// resulting break in stored-session replay in writing.
+///
+/// A negative weight (out-of-schema, reachable only from a directly-constructed
+/// `PolicyDefinition`) is non-decisive too: `> 0.0` is the electorate test, so a
+/// voter the map gives a negative weight sits outside the electorate for the
+/// purposes of this guard. That is deliberately *not* the same test
+/// [`compute_weighted_votes`] applies — it sums every cast weight, negative ones
+/// included — so the two diverge whenever a negative weight fails to drag the
+/// total below zero: `{a: 1.0, b: -0.5}` sums to `+0.5`, reaches the ratio with
+/// `b` contributing, and yet does not count `b`'s `REJECT` here. Only when the
+/// *total* goes negative does [`check_voting_algorithm`] short-circuit to
+/// `Failed` and make the divergence moot. It is left documented rather than
+/// resolved because `exclusiveMinimum: 0` makes the whole family unauthorable
+/// through registration.
+fn count_decisive_rejects(
+    algorithm: &str,
+    weights: &std::collections::HashMap<String, f64>,
+    votes: &BTreeMap<String, BTreeMap<String, Vote>>,
+) -> usize {
+    if algorithm != "weighted" {
+        let (_, reject_count, _, _) = aggregate_votes(votes);
+        return reject_count;
+    }
+    votes
+        .values()
+        .flat_map(|proposal_votes| proposal_votes.iter())
+        .filter(|(voter, vote)| {
+            vote.vote == "REJECT" && weights.get(*voter).copied().unwrap_or(0.0) > 0.0
+        })
+        .count()
+}
+
 /// Count the number of unique voters across all proposals.
+///
+/// Deliberately **not** weight-aware, and must not become so: RFC-MACP-0012
+/// §4.1 carves the participation floor out of the weighted-electorate rule — a
+/// weight-`0` vote "still counts as a vote cast for the `voting.quorum`
+/// participation floor, which this rule does not alter". Only the decline guard
+/// and the ratio narrow; see [`count_decisive_rejects`].
 fn count_unique_voters(votes: &BTreeMap<String, BTreeMap<String, Vote>>) -> usize {
     let mut voters = std::collections::HashSet::new();
     for proposal_votes in votes.values() {
@@ -397,8 +625,10 @@ fn check_voting_algorithm(
         "weighted" => {
             let (weighted_approve, weighted_total) = compute_weighted_votes(votes, weights);
             // A *negative* total is out-of-schema: `voting.weights`'s
-            // `additionalProperties` is `{"type":"number","minimum":0}`
-            // (`decision-rules.schema.json`), so registration already refuses
+            // `additionalProperties` is
+            // `{"type":"number","exclusiveMinimum":0}`
+            // (`decision-rules.schema.json`, spec #99), so registration
+            // already refuses
             // it and only a directly-constructed `PolicyDefinition` can get
             // here. It used to escape the `== 0.0` guard below and reach the
             // ratio, where a negative denominator *inverts*
@@ -409,13 +639,19 @@ fn check_voting_algorithm(
             if weighted_total < 0.0 {
                 return VotingResult::Failed(format!(
                     "weighted vote failed: the weights of the votes cast sum to {weighted_total:.1}; \
-                     voting.weights values must be >= 0, so no approval ratio is meaningful"
+                     voting.weights values must be > 0, so no approval ratio is meaningful"
                 ));
             }
-            // A total of exactly zero is schema-legal (`minimum: 0` is
-            // inclusive) and stays `NoVotes` — deliberately deferred to spec
-            // issue #98 item 3, not an oversight. See
-            // `zero_weighted_total_still_returns_no_votes`.
+            // A total of exactly zero **is** the empty decisive tally, not a
+            // deferral. Spec #99 made `voting.weights[*]`
+            // `exclusiveMinimum: 0` with `minProperties: 1`, so an explicit-`0`
+            // or empty weight map is no longer authorable at all; the reachable
+            // cause is now a ballot set cast entirely by participants *outside*
+            // the map, who weigh `0` (RFC-MACP-0012 §4.1's electorate rule).
+            // §4.1 defines exactly that state: "a tally whose total decisive
+            // weight is zero **is** the empty decisive tally … This state is
+            // **NoVotes**", and "Implementations MUST NOT compute a weighted
+            // ratio with a zero denominator". See `zero_decisive_weight_is_no_votes`.
             if weighted_total == 0.0 {
                 return VotingResult::NoVotes;
             }
@@ -491,7 +727,22 @@ fn aggregate_votes(
 /// Compute weighted votes using the configured weight map.
 ///
 /// RFC-MACP-0004: Abstain votes are excluded from the weighted total
-/// so they do not dilute the approval ratio.
+/// so they do not dilute the approval ratio. They are skipped *before* the
+/// weight lookup, and must stay that way — an abstention is not an
+/// observer-weight question.
+///
+/// **The `weights` map is the electorate.** A voter absent from it weighs `0`,
+/// not `1.0`: RFC-MACP-0012 §4.1 — "a declared participant absent from the map
+/// has weight `0` (an observer is expressed by omission, and the schema
+/// rejects explicit `0` values and an empty map)" — and
+/// `decision-rules.schema.json`'s `voting.weights.description` adds that the
+/// rule "is normative for EVERY schema version, not only 3". A weight-`0`
+/// ballot therefore contributes to neither returned figure, which is what makes
+/// an all-unlisted ballot set sum to a zero decisive total and read as the
+/// empty tally. This runtime previously defaulted an unlisted voter to `1.0`,
+/// which is the opposite; RFC-MACP-0012 §8's "Bounded exception — weight-`0`
+/// decisiveness" accepts the resulting stored-replay break, and
+/// `docs/deployment.md` carries the operator-facing note.
 fn compute_weighted_votes(
     votes: &BTreeMap<String, BTreeMap<String, Vote>>,
     weights: &std::collections::HashMap<String, f64>,
@@ -505,7 +756,9 @@ fn compute_weighted_votes(
             if vote.vote != "APPROVE" && vote.vote != "REJECT" {
                 continue;
             }
-            let weight = weights.get(voter).copied().unwrap_or(1.0);
+            // Omission means weight `0` — the map is the electorate, not a set
+            // of overrides on an implicit default of `1.0`.
+            let weight = weights.get(voter).copied().unwrap_or(0.0);
             weighted_total += weight;
             if vote.vote == "APPROVE" {
                 weighted_approve += weight;
@@ -702,8 +955,9 @@ pub fn evaluate_quorum_commitment(
 ///   [`QuorumThreshold::effective`](macp_core::policy::rules::QuorumThreshold::effective)
 ///   — the one implementation `QuorumMode::effective_threshold` also calls, so
 ///   a policy cannot mean two different bars in the two layers. It ceils and
-///   floors at 1, and reports `weighted`/unrecognised types as unsatisfiable
-///   rather than as a raw approval count. A **negative** (decline) commitment
+///   floors at 1, and reports an unrecognised type — `weighted` among them,
+///   since RFC-MACP-0012 1.2.0-draft removed it from the vocabulary — as
+///   unsatisfiable rather than as a raw approval count. A **negative** (decline) commitment
 ///   is the legitimate terminal when approval is not reached — the threshold
 ///   does not gate it (RFC-MACP-0011 §4b). Note the mode adds a gate this
 ///   evaluator cannot: it refuses the decline when *no ballot has been cast*,
@@ -1036,16 +1290,21 @@ mod tests {
         assert!(matches!(result, PolicyDecision::Deny { .. }));
     }
 
-    // ── Weighted degenerate totals (negative fixed, zero deferred) ──
+    // ── Weighted degenerate totals (both now defined, neither deferred) ──
     //
     // Two arithmetic facts these tests turn on, both easy to get wrong:
     //
     // 1. `compute_weighted_votes` sums only the *cast* APPROVE/REJECT weights,
     //    so the sign of the total is set by the weight map, not by which way
     //    the ballots went. `{a: 1.0, b: -1.0}` with both agents voting sums to
-    //    exactly **0.0** — the schema-legal case that is deliberately still
-    //    `NoVotes`. A negative total needs the negative weight to outweigh the
-    //    positive ones, e.g. `{a: 1.0, b: -2.0}`.
+    //    exactly **0.0**, which RFC-MACP-0012 §4.1 defines as the empty
+    //    decisive tally and therefore `NoVotes` — a named outcome, not a
+    //    deferral. (This map was once called schema-legal here; spec #99 moved
+    //    `voting.weights.additionalProperties` to `exclusiveMinimum: 0`, so it
+    //    is refused on `b` at registration and survives only as a
+    //    directly-constructed `PolicyDefinition`.) A negative total needs the
+    //    negative weight to outweigh the positive ones, e.g.
+    //    `{a: 1.0, b: -2.0}`.
     // 2. A negative total was **never** reported as `NoVotes`: the guard it
     //    escaped was `weighted_total == 0.0`, which a negative value does not
     //    match. It fell straight through to `weighted_approve /
@@ -1073,15 +1332,34 @@ mod tests {
         check_voting_algorithm("weighted", 0.5, &weights, &state.votes, &participants())
     }
 
+    /// Drive `check_voting_algorithm` with a policy's *own* `voting` rules, so
+    /// a test can pin the `VotingResult` variant and the `PolicyDecision` for
+    /// the same descriptor without restating the weight map twice.
+    fn weighted_result_for(
+        policy: &PolicyDefinition,
+        state: &DecisionState,
+        participants: &[String],
+    ) -> VotingResult {
+        let rules: DecisionPolicyRules = parse_rules(policy).expect("test rules must parse");
+        check_voting_algorithm(
+            &rules.voting.algorithm,
+            rules.voting.threshold,
+            &rules.voting.weights,
+            &state.votes,
+            participants,
+        )
+    }
+
     fn negative_weighted_policy() -> PolicyDefinition {
         make_policy(serde_json::json!({
             "voting": {
                 "algorithm": "weighted",
                 "threshold": 0.5,
-                // Out-of-schema: `voting.weights[*]` is `minimum: 0`, so
-                // registration refuses this. Only a directly-constructed
-                // `PolicyDefinition` — which is how these tests build one —
-                // can reach the evaluator with it.
+                // Out-of-schema: `voting.weights[*]` is `exclusiveMinimum: 0`
+                // (spec #99; it was `minimum: 0` before, which already refused
+                // negatives), so registration refuses this. Only a
+                // directly-constructed `PolicyDefinition` — which is how these
+                // tests build one — can reach the evaluator with it.
                 "weights": {
                     "agent://fraud": 1.0,
                     "agent://growth": -2.0
@@ -1185,50 +1463,290 @@ mod tests {
     }
 
     #[test]
-    fn zero_weighted_total_still_returns_no_votes() {
-        // DEFERRED, NOT AN OVERSIGHT. `voting.weights[*]` is `minimum: 0`
-        // *inclusive*, so an all-zero weight map is schema-legal and what it
-        // ought to mean is spec issue #98 item 3. Only the out-of-schema
-        // negative case was changed. This test exists so a later phase cannot
-        // close the deferred case by accident.
+    fn zero_decisive_weight_is_no_votes() {
+        // Re-based, not a new test: this was `zero_weighted_total_still_returns_
+        // no_votes`, whose premise — that `voting.weights[*]` is `minimum: 0`
+        // *inclusive*, so an all-zero weight map is schema-legal, and what it
+        // ought to mean was spec issue #98 item 3 — died with spec #99. The
+        // bound is now `exclusiveMinimum: 0` with `minProperties: 1`, so an
+        // explicit-`0` or empty map is unauthorable and the shape below is the
+        // only remaining route to a zero decisive total: a ballot set cast
+        // entirely by participants *outside* the map, who weigh `0` under
+        // RFC-MACP-0012 §4.1's electorate rule. §4.1 names the state — "a tally
+        // whose total decisive weight is zero **is** the empty decisive tally
+        // … This state is **NoVotes**" — so the assertion survives verbatim
+        // while its justification moves from a deferral to a conformance pin.
+        let unlisted_ballots = vec![
+            ("p1", "agent://fraud", "REJECT"),
+            ("p1", "agent://growth", "REJECT"),
+        ];
         assert!(matches!(
-            weighted_result(
-                &[("agent://fraud", 0.0), ("agent://growth", 0.0)],
-                vec![
-                    ("p1", "agent://fraud", "APPROVE"),
-                    ("p1", "agent://growth", "REJECT"),
-                ],
-            ),
+            weighted_result(&[("agent://compliance", 1.0)], unlisted_ballots.clone()),
             VotingResult::NoVotes
         ));
 
         // The sharp end of the same claim: `NoVotes` denies a decline
-        // unconditionally where `Failed` would allow it on the explicit reject
-        // above, so this asserts the deferral is real and not just a variant
-        // name.
+        // unconditionally, where `Failed` — which is what an unlisted voter
+        // weighing `1.0` produced — would allow it on the explicit rejects
+        // above. So this asserts the electorate rule is real and not just a
+        // variant name.
         let policy = make_policy(serde_json::json!({
             "voting": {
                 "algorithm": "weighted",
                 "threshold": 0.5,
-                "weights": { "agent://fraud": 0.0, "agent://growth": 0.0 }
+                "weights": { "agent://compliance": 1.0 }
             }
         }));
-        let state = make_state_with_votes(vec![
-            ("p1", "agent://fraud", "APPROVE"),
-            ("p1", "agent://growth", "REJECT"),
-        ]);
+        let state = make_state_with_votes(unlisted_ballots);
         assert!(matches!(
             decline(&policy, &state, &participants()),
             PolicyDecision::Deny { .. }
         ));
     }
 
+    // ── The weighted electorate (RFC-MACP-0012 §4.1, every schema version) ──
+    //
+    // `voting.weights` *is* the electorate: a declared participant absent from
+    // it weighs `0` and is non-decisive — outside both sides of the ratio, and
+    // unable to satisfy RFC-MACP-0007 §6.2's decline guard. Only the
+    // `voting.quorum` participation floor is carved out. None of this is keyed
+    // on `schema_version`; `decision-rules.schema.json` says the rule is
+    // "normative for EVERY schema version, not only 3", and §8's "Bounded
+    // exception — weight-`0` decisiveness" accepts the stored-replay break.
+
+    /// The canonical shape: `agent://a` is the whole electorate.
+    fn single_voter_weighted_policy(commitment: Option<serde_json::Value>) -> PolicyDefinition {
+        let mut rules = serde_json::json!({
+            "voting": {
+                "algorithm": "weighted",
+                "threshold": 0.5,
+                "weights": { "agent://a": 1.0 }
+            }
+        });
+        if let Some(commitment) = commitment {
+            rules["commitment"] = commitment;
+        }
+        make_policy(rules)
+    }
+
+    fn abc_participants() -> Vec<String> {
+        vec!["agent://a".into(), "agent://b".into(), "agent://c".into()]
+    }
+
     #[test]
-    fn non_abstain_short_circuit_precedes_algorithm_dispatch() {
-        // Regression guard for `check_voting_algorithm`'s front-of-dispatch
-        // `non_abstain_total == 0 => NoVotes` return. RFC-MACP-0012 §4.1's
-        // "no decisive votes" contract rests on it, and revisiting it is
-        // blocked on spec issue #98 — so no phase may remove it quietly.
+    fn an_unlisted_voter_is_non_decisive_under_weighted() {
+        // Criterion 1. `agent://b` is declared but absent from `weights`, so it
+        // weighs `0`; its REJECT is the only ballot. The decisive tally is
+        // therefore **empty**, which §4.1 says is `NoVotes` for every
+        // algorithm, "never **Failed**" — and the distinction is the whole
+        // observable, so assert the variant through `check_voting_algorithm`
+        // rather than the `PolicyDecision` it maps onto.
+        //
+        // Before the electorate rule, `b` weighed `1.0`: total `1.0`, approve
+        // share `0.0 < 0.5`, result `Failed`.
+        let weights: std::collections::HashMap<String, f64> =
+            [("agent://a".to_string(), 1.0)].into_iter().collect();
+        let state = make_state_with_votes(vec![("p1", "agent://b", "REJECT")]);
+        let result =
+            check_voting_algorithm("weighted", 0.5, &weights, &state.votes, &abc_participants());
+        assert!(
+            matches!(result, VotingResult::NoVotes),
+            "an unlisted voter's ballot must leave the decisive tally empty (NoVotes), \
+             not produce a decided Failed round"
+        );
+    }
+
+    #[test]
+    fn a_weight_zero_reject_does_not_authorize_a_decline() {
+        // Criterion 2, and the unit-test expression of
+        // `decision_weighted_zero_weight_v1.json`'s discriminator. §6.2: "under
+        // `weighted` a `REJECT` cast by a weight-`0` participant is
+        // non-decisive and does not count". Swept across all three schema
+        // versions because the electorate rule is keyed on none of them —
+        // §8's bounded exception reaches stored v1 and v2 descriptors too.
+        //
+        // Before: `b` weighed `1.0`, the round read `Failed`, `reject_count`
+        // was 1 and the decline was ALLOWED at every version.
+        let state = make_state_with_votes(vec![("p1", "agent://b", "REJECT")]);
+        for schema_version in [1u32, 2, 3] {
+            let mut policy = single_voter_weighted_policy(None);
+            policy.schema_version = schema_version;
+            let decision = decline(&policy, &state, &abc_participants());
+            assert!(
+                matches!(decision, PolicyDecision::Deny { .. }),
+                "schema_version {schema_version}: a weight-0 REJECT must not authorize a \
+                 decline, got: {decision:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_weight_zero_reject_does_not_authorize_a_decline_over_a_passed_vote() {
+        // Criterion 3 — RFC-MACP-0012 §8's "Bounded exception — weight-`0`
+        // decisiveness", the one configuration where the pre-#99 text *did*
+        // define the outcome this rule reverses. No conformance fixture covers
+        // it (the spec dropped the fixture because explicit-`0` descriptors are
+        // no longer admissible), so this unit test is the only thing that
+        // discharges it.
+        //
+        // `a` is the whole electorate and approves, so the round Passes.
+        // `b` is unlisted and rejects. With `allow_decline_over_approval: true`
+        // the knob waives the approval *result*, but §6.2's guard "applies
+        // across all three voting results", and `b`'s ballot is non-decisive —
+        // so there is no dissent to finalize. Before: the `Passed` arm consulted
+        // only the knob and ALLOWED the decline.
+        let policy = single_voter_weighted_policy(Some(
+            serde_json::json!({ "allow_decline_over_approval": true }),
+        ));
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://a", "APPROVE"),
+            ("p1", "agent://b", "REJECT"),
+        ]);
+        assert!(
+            matches!(
+                weighted_result_for(&policy, &state, &abc_participants()),
+                VotingResult::Passed(_)
+            ),
+            "the listed voter approved, so the round must Pass — otherwise this test \
+             is not exercising the Passed arm at all"
+        );
+        let decision = decline(&policy, &state, &abc_participants());
+        assert!(
+            matches!(decision, PolicyDecision::Deny { .. }),
+            "a weight-0 REJECT must not authorize a decline over a passing vote, got: \
+             {decision:?}"
+        );
+    }
+
+    #[test]
+    fn a_listed_voters_reject_still_authorizes_a_decline_over_a_passed_vote() {
+        // Criterion 4, and the reason criterion 3 is not vacuous: the same
+        // shape with `b` inside the electorate at weight `1.0`. The round still
+        // Passes (`1.0 / 2.0 = 0.5 >= 0.5`, inclusive), `b`'s REJECT is now
+        // decisive, and `allow_decline_over_approval` does what it says. An
+        // implementation that broke the knob outright would satisfy criterion 3
+        // and fail here.
+        let policy = make_policy(serde_json::json!({
+            "voting": {
+                "algorithm": "weighted",
+                "threshold": 0.5,
+                "weights": { "agent://a": 1.0, "agent://b": 1.0 }
+            },
+            "commitment": { "allow_decline_over_approval": true }
+        }));
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://a", "APPROVE"),
+            ("p1", "agent://b", "REJECT"),
+        ]);
+        assert!(matches!(
+            weighted_result_for(&policy, &state, &abc_participants()),
+            VotingResult::Passed(_)
+        ));
+        let decision = decline(&policy, &state, &abc_participants());
+        assert!(
+            matches!(decision, PolicyDecision::Allow { .. }),
+            "a decisive REJECT under allow_decline_over_approval must still authorize a \
+             decline, got: {decision:?}"
+        );
+    }
+
+    #[test]
+    fn weighted_quorum_counts_weight_zero_ballots() {
+        // Criterion 5 — §4.1's explicit carve-out: a weight-`0` vote "still
+        // counts as a vote cast for the `voting.quorum` participation floor,
+        // which this rule does not alter". Two ballots are cast (`a` abstains,
+        // unlisted `b` rejects) against `{"type":"count","value":2}`, so the
+        // quorum gate is SATISFIED; the decisive tally is nonetheless empty, so
+        // the commitment is denied by the v3 empty-tally rule instead. The
+        // reason assertion is what distinguishes the two denials — a
+        // `PolicyDecision::Deny` alone would not.
+        let mut policy = make_policy(serde_json::json!({
+            "voting": {
+                "algorithm": "weighted",
+                "threshold": 0.5,
+                "weights": { "agent://a": 1.0 },
+                "quorum": { "type": "count", "value": 2 }
+            },
+            "commitment": { "require_vote_quorum": true }
+        }));
+        policy.schema_version = 3;
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://a", "ABSTAIN"),
+            ("p1", "agent://b", "REJECT"),
+        ]);
+        let decision =
+            evaluate_decision_commitment_outcome(&policy, &state, &abc_participants(), true);
+        let PolicyDecision::Deny { reasons } = &decision else {
+            panic!("an empty decisive tally must deny a positive commitment at v3: {decision:?}");
+        };
+        let joined = reasons.join(" | ");
+        assert!(
+            !joined.contains("vote quorum not met"),
+            "the participation floor must not narrow with the electorate — two ballots \
+             were cast against a quorum of 2, got: {joined}"
+        );
+        assert!(
+            joined.contains("no decisive votes cast"),
+            "the denial must come from the empty-tally rule, not from quorum, got: {joined}"
+        );
+    }
+
+    #[test]
+    fn an_unlisted_voter_cannot_carry_a_positive_round() {
+        // Criterion 8 — THE POSITIVE DIRECTION, and the widest and most common
+        // behavioural change in this work. Criteria 1-7 are all reject-side and
+        // not one of them can observe this reversal.
+        //
+        // Worked example, reproduced verbatim in
+        // `docs/deployment.md`: weights `{"agent://a": 1.0}`, participants `a`,
+        // `b`, `c`; `b` and `c` cast APPROVE, `a` casts REJECT;
+        // `voting.threshold: 0.5`.
+        //
+        // Before: every voter weighed `1.0`, so the total was `3.0`, the approve
+        // share `2.0 / 3.0 = 0.667 >= 0.5`, the result `Passed`, and a positive
+        // `Commitment` was ACCEPTED into history.
+        //
+        // After: the total decisive weight is `1.0` (only `a` is in the
+        // electorate, and `a` rejected), the approve share is `0.0`, the result
+        // is `Failed`, and the commitment is DENIED.
+        //
+        // This is the majority-approves-but-the-weighted-voter-dissents shape —
+        // the most natural reason to reach for `weighted` at all — and it is
+        // authorable today with an ordinary, schema-valid, registered policy.
+        let policy = single_voter_weighted_policy(None);
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://a", "REJECT"),
+            ("p1", "agent://b", "APPROVE"),
+            ("p1", "agent://c", "APPROVE"),
+        ]);
+        let result = weighted_result_for(&policy, &state, &abc_participants());
+        assert!(
+            matches!(result, VotingResult::Failed(_)),
+            "two unlisted APPROVEs must not outvote the electorate's only REJECT; \
+             expected Failed"
+        );
+        let decision =
+            evaluate_decision_commitment_outcome(&policy, &state, &abc_participants(), true);
+        assert!(
+            matches!(decision, PolicyDecision::Deny { .. }),
+            "a positive commitment carried only by unlisted voters must be denied, got: \
+             {decision:?}"
+        );
+    }
+
+    #[test]
+    fn empty_decisive_tally_is_no_votes_for_every_algorithm() {
+        // Conformance pin for `check_voting_algorithm`'s front-of-dispatch
+        // `non_abstain_total == 0 => NoVotes` return. RFC-MACP-0012 §4.1 makes
+        // it a MUST: the empty decisive tally "is **NoVotes** for *every*
+        // algorithm, never **Failed**", and implementations "MUST report
+        // NoVotes so that two conformant runtimes agree on what they
+        // observed". Two dispatched arms would disagree if reached —
+        // `plurality` reads a 0-0 tie as `Failed`, and `unanimous`'s universally
+        // quantified predicate is *vacuously true* over an empty declared set,
+        // which §4.1 says "MUST NOT be taken as a pass". So no phase may remove
+        // this short-circuit; issue #147 proposed exactly that and #99 did not
+        // adopt it.
         let state = make_state_with_votes(vec![
             ("p1", "agent://fraud", "ABSTAIN"),
             ("p1", "agent://growth", "ABSTAIN"),
@@ -1277,6 +1795,193 @@ mod tests {
                 "{algorithm} must not be dispatched with zero non-abstain votes"
             );
         }
+    }
+
+    #[test]
+    fn zero_participant_unanimous_is_no_votes_not_a_pass() {
+        // The sharp end of the test above, and newly *reachable*: Decision now
+        // accepts `SessionStart` with `participants: []`, so a session with an
+        // empty declared roster and an empty vote map is authorable over the
+        // wire rather than only constructible in a test.
+        //
+        // `check_voting_algorithm`'s `unanimous` arm is
+        // `participants.iter().all(…)`, which is **vacuously true** over an
+        // empty slice; with `reject_count == 0` it would return `Passed` — a
+        // positive pass on a session nobody voted in. RFC-MACP-0012 §4.1 names
+        // the case in terms: "With **zero** declared participants the
+        // universally quantified predicate is vacuously true and MUST NOT be
+        // taken as a pass."
+        //
+        // The **only** thing standing between this runtime and that outcome is
+        // the front-of-dispatch `non_abstain_total == 0` short-circuit, and
+        // nothing in the fixture corpus pins it —
+        // `decision_zero_participants.json` stops at a `FORBIDDEN` `Proposal`
+        // and never reaches policy evaluation, which its own `_comment` says.
+        // This test is therefore the sole guard against a later
+        // "simplification" of that short-circuit.
+        let no_participants: Vec<String> = vec![];
+        let no_weights = std::collections::HashMap::new();
+        let no_votes = make_state_with_votes(vec![]);
+
+        let result = check_voting_algorithm(
+            "unanimous",
+            0.5,
+            &no_weights,
+            &no_votes.votes,
+            &no_participants,
+        );
+        // `VotingResult` is not `Debug`, so name the two wrong answers in the
+        // message instead: `Passed` is the vacuous pass §4.1 forbids, `Failed`
+        // is the disagreement with a conformant peer it also forbids.
+        assert!(
+            matches!(result, VotingResult::NoVotes),
+            "a zero-participant unanimous round with no ballots must report NoVotes, \
+             never a vacuous Passed and never Failed"
+        );
+
+        // And through the full evaluator, so the variant actually maps onto a
+        // refusal rather than being reported and then ignored. `schema_version:
+        // 3` makes the empty tally binding on its own (§4.1), with no
+        // `require_vote_quorum` in the descriptor to do the work instead.
+        let mut policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "unanimous" }
+        }));
+        policy.schema_version = 3;
+        let decision = evaluate_decision_commitment_outcome(
+            &policy,
+            &no_votes,
+            &no_participants,
+            true, // outcome_positive
+        );
+        let PolicyDecision::Deny { reasons } = &decision else {
+            panic!(
+                "a positive commitment in a zero-participant session must be denied, \
+                 got: {decision:?}"
+            );
+        };
+        assert!(
+            reasons.iter().any(|r| r.contains("no decisive votes cast")),
+            "the denial must come from the empty-tally rule, got: {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn empty_tally_denies_a_positive_commitment_under_schema_version_3() {
+        // RFC-MACP-0012 §4.1 "Empty tally (schema_version >= 3)": every
+        // algorithm other than `none` is binding on its own, so an empty
+        // decisive tally denies a positive commitment — with **no**
+        // `require_vote_quorum` anywhere in the descriptor, which is the whole
+        // point, since the legacy arm gates this same case on that flag alone.
+        //
+        // The assertion reads the deny *reasons*, not just the variant: a
+        // `schema_version: 3` policy is denied by `check_schema_version` until
+        // this phase widens `SUPPORTED_SCHEMA_VERSIONS`, so a variant-only
+        // assertion would pass against the unfixed runtime.
+        let empty = make_state_with_votes(vec![]);
+        for (algorithm, threshold) in [
+            ("majority", 0.5),
+            ("supermajority", 0.67),
+            ("unanimous", 0.5),
+            ("weighted", 0.5),
+            ("plurality", 0.5),
+        ] {
+            let mut policy = make_policy(serde_json::json!({
+                "voting": {
+                    "algorithm": algorithm,
+                    "threshold": threshold,
+                    "weights": { "agent://fraud": 1.0 }
+                }
+            }));
+            policy.schema_version = 3;
+            match evaluate_decision_commitment(&policy, &empty, &participants()) {
+                PolicyDecision::Deny { reasons } => {
+                    let joined = reasons.join(" | ");
+                    assert!(
+                        joined.contains("no decisive votes cast")
+                            && joined.contains("schema_version 3")
+                            && joined.contains(algorithm),
+                        "{algorithm}: the denial must cite the empty tally under \
+                         schema_version 3, got: {joined}"
+                    );
+                    assert!(
+                        !joined.contains("unsupported policy schema version"),
+                        "{algorithm}: schema_version 3 must be accepted, not \
+                         version-denied: {joined}"
+                    );
+                }
+                other => panic!("{algorithm}: expected a deny, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn empty_tally_under_schema_version_2_still_follows_require_vote_quorum() {
+        // RFC-MACP-0012 §4.1 "Legacy empty-tally rule (schema_version <= 2)"
+        // and "Retaining the legacy arm": implementations MUST keep the
+        // fail-open arm so stored sessions replay identically (§8). Both rules
+        // objects and the reason string below are the ones
+        // `no_decisive_votes_blocks_a_positive_commitment_only_under_require_vote_quorum`
+        // has always pinned, re-declared here at `schema_version: 2`.
+        //
+        // The `Allow` half is the load-bearing one — it proves the legacy arm
+        // survived. A runtime that fail-closed every schema version would still
+        // pass the `Deny` half.
+        let empty = make_state_with_votes(vec![]);
+
+        let mut permissive = make_policy(serde_json::json!({
+            "voting": { "algorithm": "unanimous" },
+            "commitment": { "require_vote_quorum": false }
+        }));
+        permissive.schema_version = 2;
+        assert!(
+            approves(&permissive, &empty, &participants()),
+            "at schema_version 2, without require_vote_quorum an unvoted positive \
+             commitment is not blocked"
+        );
+
+        let mut binding = make_policy(serde_json::json!({
+            "voting": { "algorithm": "unanimous" },
+            "commitment": { "require_vote_quorum": true }
+        }));
+        binding.schema_version = 2;
+        match evaluate_decision_commitment(&binding, &empty, &participants()) {
+            PolicyDecision::Deny { reasons } => assert!(
+                reasons.iter().any(|r| r == "no votes cast"),
+                "the legacy denial keeps its exact reason string, got: {reasons:?}"
+            ),
+            other => panic!("expected a deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn none_at_schema_version_3_allows_an_empty_tally_in_both_directions() {
+        // §4.1's empty-tally bullets end with "`none` — unaffected; no voting
+        // constraint is enforced at any tally". The conformance corpus
+        // previously pinned `none` only at v2, so a runtime that folded `none`
+        // into the fail-closed arm passed every fixture in the repository —
+        // spec #99 added two `decision_none_v3_*` fixtures for exactly that,
+        // and this is their unit-level guard. It holds because `none` never
+        // enters the voting block at all.
+        let empty = make_state_with_votes(vec![]);
+        let mut policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "none" }
+        }));
+        policy.schema_version = 3;
+        assert!(
+            matches!(
+                evaluate_decision_commitment(&policy, &empty, &participants()),
+                PolicyDecision::Allow { .. }
+            ),
+            "`none` at schema_version 3 must allow a positive commitment on an empty tally"
+        );
+        assert!(
+            matches!(
+                decline(&policy, &empty, &participants()),
+                PolicyDecision::Allow { .. }
+            ),
+            "`none` at schema_version 3 must allow a decline on an empty tally: the \
+             reject-floor does not reach `none` (RFC-MACP-0007 §6.2)"
+        );
     }
 
     // ── Voting algorithm: plurality ─────────────────────────────────
@@ -2129,8 +2834,29 @@ mod tests {
     }
 
     #[test]
+    fn schema_version_3_is_accepted() {
+        // RFC-MACP-0012 §3: "A runtime MUST accept every schema version it
+        // supports (`{1, 2, 3}`)". `none` is used so the only denial available
+        // is the version gate itself — under §4.1, `none` is exempt from the
+        // v3 empty-tally rule.
+        let mut policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "none" }
+        }));
+        policy.schema_version = 3;
+        let state = make_state_with_votes(vec![]);
+        let result = evaluate_decision_commitment(&policy, &state, &participants());
+        assert!(
+            matches!(result, PolicyDecision::Allow { .. }),
+            "schema_version 3 must be accepted, got: {result:?}"
+        );
+    }
+
+    #[test]
     fn unsupported_schema_versions_are_denied() {
-        for v in [0u32, 3, 99] {
+        // The probe sat at 3 until spec #99 defined it; it moves to 4 rather
+        // than being deleted so fail-closed behaviour for a *genuinely* unknown
+        // version stays pinned.
+        for v in [0u32, 4, 99] {
             let mut policy = make_policy(serde_json::json!({
                 "voting": { "algorithm": "none" }
             }));
@@ -2249,6 +2975,69 @@ mod tests {
             decline(&policy, &state, &participants()),
             PolicyDecision::Allow { .. }
         ));
+    }
+
+    #[test]
+    fn decline_denied_over_an_all_approve_round_with_the_knob() {
+        // The non-`weighted` reach of the `Passed`-arm decline guard, which no
+        // other test covers: `decline_allowed_over_passing_vote_with_knob`
+        // above carries a `REJECT`, and the weighted-electorate tests all bind
+        // `voting.algorithm: "weighted"`. This shape has **no** `weighted`
+        // algorithm and **no** `weights` map at all — an ordinary `majority`
+        // policy and three `APPROVE`s — and it is the widest reach of the
+        // change: `Allow` before the guard moved into the `Passed` arm, `Deny`
+        // after. `docs/deployment.md` item 6 documents it as the second
+        // stored-replay predicate, and RFC-MACP-0012 §8's bounded exception
+        // does **not** cover it: §8 is about weight-`0` decisiveness, and
+        // there are no weights here. RFC-MACP-0007 §6.2 carried "the guard
+        // applies across all three voting results" before spec #99, so this is
+        // a pre-existing conformance gap being closed rather than new
+        // semantics.
+        let policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 },
+            "commitment": { "allow_decline_over_approval": true }
+        }));
+        let state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "APPROVE"),
+            ("p1", "agent://growth", "APPROVE"),
+            ("p1", "agent://compliance", "APPROVE"),
+        ]);
+
+        // Precondition, load-bearing: the round must really be `Passed`, or
+        // the test silently exercises the `Failed`/`NoVotes` arms instead of
+        // the one it exists to cover.
+        assert!(
+            matches!(
+                check_voting_algorithm(
+                    "majority",
+                    0.5,
+                    &std::collections::HashMap::new(),
+                    &state.votes,
+                    &participants(),
+                ),
+                VotingResult::Passed(_)
+            ),
+            "an all-approve majority round must Pass for this test to reach the Passed arm"
+        );
+
+        let result = decline(&policy, &state, &participants());
+        let PolicyDecision::Deny { reasons } = &result else {
+            panic!("an all-approve round has no dissent to finalize a decline on, got: {result:?}");
+        };
+        let joined = reasons.join(" | ");
+        // Assert the *reason*, not only the variant: the `Deny` alone would
+        // also be produced by an implementation that had broken
+        // `allow_decline_over_approval` outright.
+        assert!(
+            joined.contains("no decisive reject backs it"),
+            "the denial must name the missing decisive reject, got: {joined}"
+        );
+        // And the wording must not send the operator to a knob this
+        // descriptor does not carry.
+        assert!(
+            !joined.contains("voting.weights"),
+            "a majority policy has no voting.weights; the reason must not cite it, got: {joined}"
+        );
     }
 
     #[test]
@@ -2387,6 +3176,212 @@ mod tests {
                 "hold should surface an escalation reason, got: {reasons:?}"
             );
         }
+    }
+
+    // ── RFC-MACP-0007 §6.2 objection-authorized decline ─────────────
+    //
+    // A decline under `critical_objection_action: "finalize_decline"` is
+    // authorized by the recorded critical `Objection`, not by the tally, so it
+    // is gated by neither the voting tri-state nor the decline guard. The five
+    // tests below are mutually load-bearing: each one blocks a wrong
+    // implementation that would satisfy the others.
+
+    /// `finalize_decline` over a real algorithm, with no vote ever cast.
+    fn finalize_decline_policy(schema_version: u32) -> PolicyDefinition {
+        let mut policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 },
+            "objection_handling": {
+                "critical_severity_vetoes": true,
+                "veto_threshold": 1,
+                "critical_objection_action": "finalize_decline"
+            }
+        }));
+        policy.schema_version = schema_version;
+        policy
+    }
+
+    /// One standing critical objection, zero votes — the empty decisive tally.
+    fn objection_only_state() -> DecisionState {
+        let mut state = make_state_with_votes(vec![]);
+        state.objections.push(Objection {
+            proposal_id: "p1".into(),
+            reason: "unresolved data-retention finding".into(),
+            severity: "critical".into(),
+            sender: "agent://compliance".into(),
+        });
+        state
+    }
+
+    #[test]
+    fn a_critical_objection_authorizes_a_decline_on_an_empty_tally() {
+        // Swept over both versions that can express `finalize_decline`: §6.2
+        // says the rule "applies at every schema version that can express
+        // `finalize_decline` (`schema_version >= 2`)". Before this rule the
+        // decline was denied by the NoVotes negative branch — an empty tally
+        // holds no decisive reject — which left a v3 session with a non-`none`
+        // algorithm and a standing critical objection able to terminate only by
+        // expiry, the exact stuck state `finalize_decline` exists to resolve.
+        for schema_version in [2u32, 3] {
+            let policy = finalize_decline_policy(schema_version);
+            let result = decline(&policy, &objection_only_state(), &participants());
+            let PolicyDecision::Allow { reasons } = &result else {
+                panic!(
+                    "a standing critical objection must authorize a decline on an empty \
+                     tally (schema_version={schema_version}), got: {result:?}"
+                );
+            };
+            let joined = reasons.join(" | ");
+            assert!(
+                joined.contains("critical-objection veto finalized as a decline"),
+                "the allow reason must name the veto as the authorization, not the \
+                 tally (schema_version={schema_version}), got: {joined}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_critical_objection_does_not_authorize_a_positive_commitment() {
+        // The flag is set in the negative direction only. This is the half that
+        // keeps the test above from being satisfied by an implementation that
+        // stopped evaluating policy for `finalize_decline` sessions: both the
+        // veto reason *and* the v3 empty-tally reason must still be reported.
+        let policy = finalize_decline_policy(3);
+        let result = evaluate_decision_commitment_outcome(
+            &policy,
+            &objection_only_state(),
+            &participants(),
+            true,
+        );
+        let PolicyDecision::Deny { reasons } = &result else {
+            panic!("a veto must still block a positive commitment, got: {result:?}");
+        };
+        let joined = reasons.join(" | ");
+        assert!(
+            joined.contains("veto blocks a positive commitment"),
+            "the veto denial must survive (critical_objection_action=finalize_decline), \
+             got: {joined}"
+        );
+        assert!(
+            joined.contains("no decisive votes cast"),
+            "the voting block must still run for a positive commitment — the skip is \
+             scoped to the decline direction, got: {joined}"
+        );
+    }
+
+    #[test]
+    fn a_decline_without_a_standing_objection_is_still_vote_gated() {
+        // Same policy, no objection: nothing authorizes the decline, so the
+        // decline guard still denies it. Without this, the first test could be
+        // satisfied by unconditionally allowing declines under
+        // `finalize_decline`.
+        let policy = finalize_decline_policy(3);
+        let result = decline(&policy, &make_state_with_votes(vec![]), &participants());
+        let PolicyDecision::Deny { reasons } = &result else {
+            panic!(
+                "with no standing objection a decline on an empty tally stays \
+                 vote-gated, got: {result:?}"
+            );
+        };
+        assert!(
+            reasons.iter().any(|r| r
+                == "no votes cast; a decline requires at least one decisive explicit reject vote"),
+            "the denial must come from the decline guard, got: {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn critical_objection_action_deny_is_unaffected() {
+        // §4.1 leaves `deny` (the default) and `hold` as hard-stops in both
+        // directions; only `finalize_decline` authorizes a decline. Pairs with
+        // the untouched `decision_critical_objection_veto.json` fixture.
+        let mut policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 },
+            "objection_handling": { "critical_severity_vetoes": true, "veto_threshold": 1 }
+        }));
+        policy.schema_version = 3;
+        let result = decline(&policy, &objection_only_state(), &participants());
+        let PolicyDecision::Deny { reasons } = &result else {
+            panic!("the default `deny` action must still hard-stop a decline, got: {result:?}");
+        };
+        assert!(
+            reasons.iter().any(|r| r.contains("blocked by")),
+            "the default action keeps its hard-stop reason, got: {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn a_critical_objection_authorizes_a_decline_over_a_passing_vote() {
+        // The `Passed` row, with `commitment.allow_decline_over_approval` left
+        // at its **default** `false`. §6.2 waives the tri-state *entirely* for
+        // an objection-authorized decline, so the row that would otherwise be
+        // the hardest `Deny` to move — a vote that passed the approval
+        // threshold, declined without the executive-override knob — allows.
+        //
+        // This is the widest behavioural reach of the rule and the only arm
+        // that flips an operator-visible default: before it, the knob was what
+        // stood between a passing vote and a decline; after it, a standing
+        // critical objection is enough. It is nonetheless replay-safe — a
+        // runtime that formerly denied this *rejected* the message, and
+        // rejected messages never enter accepted history (RFC-MACP-0001 §8.3).
+        //
+        // Neither of the other `finalize_decline` tests reaches it:
+        // `a_critical_objection_authorizes_a_decline_on_an_empty_tally` uses
+        // the empty tally (`NoVotes`), and the older
+        // `critical_objection_finalize_decline_allows_negative_blocks_positive`
+        // uses a two-reject `Failed` tally that the decline guard already
+        // allowed on its own.
+        let policy = finalize_decline_policy(3);
+        let mut state = make_state_with_votes(vec![
+            ("p1", "agent://fraud", "APPROVE"),
+            ("p1", "agent://growth", "APPROVE"),
+            ("p1", "agent://compliance", "APPROVE"),
+        ]);
+
+        // Two preconditions, both load-bearing: without them the test could
+        // pass while exercising a different arm entirely.
+        let rules: DecisionPolicyRules = serde_json::from_value(policy.rules.clone()).unwrap();
+        assert!(
+            !rules.commitment.allow_decline_over_approval,
+            "the knob must stay at its default `false` — the point of this test \
+             is that the objection alone authorizes the decline"
+        );
+        assert!(
+            matches!(
+                check_voting_algorithm(
+                    "majority",
+                    0.5,
+                    &std::collections::HashMap::new(),
+                    &state.votes,
+                    &participants(),
+                ),
+                VotingResult::Passed(_)
+            ),
+            "precondition: the round must really be `Passed`"
+        );
+
+        state.objections.push(Objection {
+            proposal_id: "p1".into(),
+            reason: "unresolved data-retention finding".into(),
+            severity: "critical".into(),
+            sender: "agent://compliance".into(),
+        });
+
+        let result = decline(&policy, &state, &participants());
+        let PolicyDecision::Allow { reasons } = &result else {
+            panic!(
+                "a standing critical objection must authorize a decline over a passing \
+                 vote, with `allow_decline_over_approval` at its default: {result:?}"
+            );
+        };
+        let joined = reasons.join(" | ");
+        assert!(
+            joined.contains("critical-objection veto finalized as a decline"),
+            "the allow reason must name the veto as the authorization, got: {joined}"
+        );
+        assert!(
+            !joined.contains("allow_decline_over_approval"),
+            "the tri-state must be skipped whole, not routed through the knob: {joined}"
+        );
     }
 
     // ── RFC-MACP-0012 §5.2 reserved governance profiles ─────────────
@@ -2567,20 +3562,39 @@ mod tests {
 
     #[test]
     fn no_decisive_votes_always_blocks_a_negative_commitment() {
-        // §4.1: a decline must be backed by at least one explicit reject.
-        for require_quorum in [false, true] {
-            let policy = make_policy(serde_json::json!({
-                "voting": { "algorithm": "majority", "threshold": 0.5 },
-                "commitment": { "require_vote_quorum": require_quorum }
-            }));
-            let empty = make_state_with_votes(vec![]);
-            assert!(
-                matches!(
-                    evaluate_decision_commitment_outcome(&policy, &empty, &participants(), false),
-                    PolicyDecision::Deny { .. }
-                ),
-                "a decline with no votes must be denied (require_vote_quorum={require_quorum})"
-            );
+        // §4.1: a decline must be backed by at least one *decisive* explicit
+        // reject.
+        // Version-independent: RFC-MACP-0007 §6.2's NoVotes bullet denies a
+        // vote-authorized decline on an empty tally, and §4.1 says the schema
+        // versions "differ only in the **positive** direction" — so the
+        // schema_version axis is swept to pin that the v3 branch left the
+        // negative branch alone.
+        const EXPECTED: &str =
+            "no votes cast; a decline requires at least one decisive explicit reject vote";
+        for schema_version in [1u32, 2, 3] {
+            for require_quorum in [false, true] {
+                let mut policy = make_policy(serde_json::json!({
+                    "voting": { "algorithm": "majority", "threshold": 0.5 },
+                    "commitment": { "require_vote_quorum": require_quorum }
+                }));
+                policy.schema_version = schema_version;
+                let empty = make_state_with_votes(vec![]);
+                let result =
+                    evaluate_decision_commitment_outcome(&policy, &empty, &participants(), false);
+                match result {
+                    PolicyDecision::Deny { reasons } => assert!(
+                        reasons.iter().any(|r| r == EXPECTED),
+                        "the decline denial keeps its version-independent reason \
+                         (schema_version={schema_version}, require_vote_quorum={require_quorum}), \
+                         got: {reasons:?}"
+                    ),
+                    other => panic!(
+                        "a decline with no votes must be denied \
+                         (schema_version={schema_version}, \
+                         require_vote_quorum={require_quorum}), got: {other:?}"
+                    ),
+                }
+            }
         }
     }
 

@@ -78,12 +78,13 @@ pub enum ApprovalThreshold {
     Approvals(u32),
     /// The bound policy admits no positive commitment at any approval count.
     ///
-    /// Reached by `threshold.type: "weighted"` (not implemented here), an
-    /// unrecognised type, or a `percentage` over an empty participant set —
-    /// see [`macp_core::policy::rules::EffectiveThreshold::Unsatisfiable`].
-    /// `RegisterPolicy` refuses the first two, so a session can only carry
+    /// Reached by an unrecognised `threshold.type` — including `weighted`,
+    /// which RFC-MACP-0012 1.2.0-draft removed from the vocabulary and
+    /// reserved — or by a `percentage` over an empty participant set — see
+    /// [`macp_core::policy::rules::EffectiveThreshold::Unsatisfiable`].
+    /// `RegisterPolicy` refuses the first, so a session can only carry
     /// such a policy if the `PolicyDefinition` was constructed directly (or
-    /// restored from a checkpoint that predates those checks). The third is
+    /// restored from a checkpoint that predates those checks). The second is
     /// not catchable at registration — there is no participant count there —
     /// and is blocked by `QuorumMode::on_session_start` rejecting an empty
     /// participant set. The mode seals **neither** outcome on such a session,

@@ -1,5 +1,6 @@
 {
-  "description": "Decision mode: critical_objection_action 'finalize_decline' blocks a positive commitment but authorizes a negative one, resolving the session as a decline.",
+  "_comment": "Pins the objection-authorized decline channel where RFC-MACP-0012 4.1's schema_version-3 empty-tally rule and RFC-MACP-0007 6.2's finalize_decline meet: a non-'none' algorithm, zero decisive votes, and a standing critical objection. The tri-state gates only VOTE-authorized commitments; the decline here is authorized by the recorded critical Objection, so it seals even though the tally is empty and the decline guard is unsatisfiable. Companion to decision_critical_objection_finalize_decline.json, whose algorithm is 'none' and therefore never reaches the empty-tally rule.",
+  "description": "Decision Mode: under schema_version 3 with a non-'none' algorithm and an empty tally, 'finalize_decline' still authorizes a negative commitment -- the decline is objection-authorized, not vote-authorized.",
   "mode": "macp.mode.decision.v1",
   "initiator": "agent://orchestrator",
   "participants": [
@@ -10,21 +11,24 @@
   "mode_version": "1.0.0",
   "configuration_version": "cfg-1",
   "policy": {
-    "_comment": "RFC-MACP-0012 Section 4.1, Negative-outcome parameters: 'finalize_decline' finalizes the session as a negative outcome. (Cited by heading, not line number -- the previous ':102' anchor was already stale at HEAD and every edit to Section 4.1 moves it again.) voting.algorithm is 'none' deliberately — with any vote-based algorithm a decline additionally requires an explicit reject vote, which would confound this fixture's discriminator with the vote-gated decline already pinned by decision_negative_outcome.json.",
-    "policy_id": "policy.decision.critical-veto-decline",
+    "policy_id": "policy.decision.finalize-decline-empty-tally",
     "mode": "macp.mode.decision.v1",
-    "schema_version": 2,
-    "description": "Initiator-driven commitment where a critical-severity objection finalizes the session as a decline.",
+    "schema_version": 3,
+    "description": "Majority vote with a critical-objection veto that finalizes as a decline; schema_version 3 fail-closed empty-tally semantics.",
     "rules": {
-      "voting": { "algorithm": "none" },
+      "voting": {
+        "algorithm": "majority"
+      },
       "objection_handling": {
         "critical_severity_vetoes": true,
         "critical_objection_action": "finalize_decline"
       },
-      "commitment": { "authority": "initiator_only" }
+      "commitment": {
+        "authority": "initiator_only"
+      }
     }
   },
-  "policy_version": "policy.decision.critical-veto-decline",
+  "policy_version": "policy.decision.finalize-decline-empty-tally",
   "ttl_ms": 60000,
   "messages": [
     {
@@ -51,7 +55,7 @@
       "expect": "accept"
     },
     {
-      "_comment": "Under 'finalize_decline' the veto still blocks the POSITIVE direction — this is the arm shared with the default 'deny' action.",
+      "_comment": "Doubly blocked: the standing critical objection vetoes the positive direction, and under schema_version 3 the empty tally independently fails every algorithm other than 'none' (RFC-MACP-0012 4.1). Either ground alone suffices for POLICY_DENIED.",
       "sender": "agent://orchestrator",
       "message_type": "Commitment",
       "payload_type": "macp.v1.CommitmentPayload",
@@ -60,16 +64,16 @@
         "outcome_positive": true,
         "action": "decision.approved",
         "authority_scope": "test",
-        "reason": "attempt to commit over a standing critical objection",
+        "reason": "attempt to commit over a standing critical objection on an empty tally",
         "mode_version": "1.0.0",
-        "policy_version": "policy.decision.critical-veto-decline",
+        "policy_version": "policy.decision.finalize-decline-empty-tally",
         "configuration_version": "cfg-1"
       },
       "expect": "reject",
       "expected_error_code": "POLICY_DENIED"
     },
     {
-      "_comment": "This is the discriminator. Under the default 'deny' action this same message is rejected with POLICY_DENIED; under 'finalize_decline' the veto authorizes the decline and the session resolves negatively. No vote was ever cast, so nothing but critical_objection_action can produce this outcome.",
+      "_comment": "THE DISCRIMINATOR. No vote was ever cast, so the decisive tally is empty and the decline guard of RFC-MACP-0007 6.2 is unsatisfiable -- a vote-authorized decline would be denied. This decline is OBJECTION-authorized under critical_objection_action 'finalize_decline': its authorization is the recorded critical Objection, it is not gated by the voting tri-state, and it seals the session negatively. A runtime that swallows finalize_decline into the empty-tally rule rejects this message and fails the fixture.",
       "sender": "agent://orchestrator",
       "message_type": "Commitment",
       "payload_type": "macp.v1.CommitmentPayload",
@@ -78,9 +82,9 @@
         "outcome_positive": false,
         "action": "decision.rejected",
         "authority_scope": "test",
-        "reason": "critical objection finalized as a decline",
+        "reason": "critical objection finalized as a decline on an empty tally",
         "mode_version": "1.0.0",
-        "policy_version": "policy.decision.critical-veto-decline",
+        "policy_version": "policy.decision.finalize-decline-empty-tally",
         "configuration_version": "cfg-1"
       },
       "expect": "accept"

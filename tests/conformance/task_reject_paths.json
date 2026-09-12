@@ -63,7 +63,7 @@
       "expect": "accept"
     },
     {
-      "_comment": "RFC-MACP-0009 Section 4 (:31, :58) and Section 5 rule 4 (:73): TaskUpdate does not carry an explicit assignee field -- authorship is validated via the Envelope sender, which MUST match the active assignee. A non-assignee sender (here, the requester) MUST be rejected.",
+      "_comment": "RFC-MACP-0009 Section 4 and Section 5 rule 4: TaskUpdate does not carry an explicit assignee field -- authorship is validated via the Envelope sender, which MUST match the active assignee. A non-assignee sender (here, the requester) MUST be rejected.",
       "sender": "agent://planner",
       "message_type": "TaskUpdate",
       "payload_type": "macp.modes.task.v1.TaskUpdatePayload",

@@ -1,0 +1,76 @@
+{
+  "_comment": "Sibling of decision_none_v3_empty_tally.json, pinning the POSITIVE direction of the 'none' exemption at schema_version 3. Under 'unanimous' or any other bound algorithm this exact empty tally DENIES the positive commitment (decision_empty_tally_binding.json); under 'none' it seals. The difference is the algorithm, not the schema_version. Two fixtures rather than one because a session resolves on its first accepted Commitment, so the two directions cannot share a transcript.",
+  "description": "Decision Mode: 'none' is unaffected by the schema_version 3 empty-tally rule -- a positive commitment seals on zero ballots.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.none-v3-positive",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "No voting constraint, initiator-only commitment, schema_version 3. Pins that 'none' is exempt from the fail-closed empty-tally rule.",
+    "rules": {
+      "voting": {
+        "algorithm": "none"
+      },
+      "commitment": {
+        "authority": "initiator_only"
+      }
+    }
+  },
+  "policy_version": "policy.decision.none-v3-positive",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "schema_version 3, zero ballots -- and it SEALS. 'none' enforces no voting constraint at any tally, so nothing in the Empty tally paragraph applies to it, and RFC-MACP-0007 6.2's face-value exception takes outcome_positive at face value with no decline guard. Compare decision_empty_tally_binding.json, which is the same empty tally under 'unanimous' at the same schema_version and is DENIED. The difference is the algorithm, not the version.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c0",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "initiator-driven commitment under no voting constraint",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.none-v3-positive",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  },
+  "expected_mode_state": {
+    "phase": "Committed",
+    "proposals": {
+      "p1": {
+        "proposal_id": "p1",
+        "sender": "agent://orchestrator"
+      }
+    }
+  }
+}

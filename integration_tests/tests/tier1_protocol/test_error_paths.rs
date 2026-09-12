@@ -44,12 +44,19 @@ async fn empty_mode_rejected() {
 
 #[tokio::test]
 async fn session_start_without_participants_rejected() {
+    // Re-based from `MODE_DECISION` to `MODE_PROPOSAL`: Decision now accepts
+    // an empty roster (see `decision_session_start_with_zero_participants` in
+    // `test_decision_mode.rs`), so this test would otherwise have inverted.
+    // Kept on a sibling standards-track mode because the rule it pins — an
+    // empty `participants` list is refused at `SessionStart` — still holds for
+    // every mode except the one carve-out, and this is the only place the wire
+    // asserts it.
     let mut client = common::grpc_client().await;
     let sid = new_session_id();
     let agent = "agent://test";
 
     let env = envelope(
-        MODE_DECISION,
+        MODE_PROPOSAL,
         "SessionStart",
         &new_message_id(),
         &sid,

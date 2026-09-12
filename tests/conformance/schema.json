@@ -28,11 +28,11 @@
     },
     "participants": {
       "type": "array",
+      "description": "Declared participant roster. MAY be empty: RFC-MACP-0012 Section 4.1 states that MACP does not require SessionStart to declare a non-empty participants list, and macp-envelope.schema.json sets no minItems on the field. See decision_zero_participants.json.",
       "items": {
         "type": "string",
         "minLength": 1
-      },
-      "minItems": 1
+      }
     },
     "mode_version": {
       "type": "string",

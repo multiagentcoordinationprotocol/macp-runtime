@@ -24,7 +24,7 @@
       "expect": "accept"
     },
     {
-      "_comment": "RFC-MACP-0007 Section 4 (:62-64): Objection is a formal blocking action distinct from a BLOCK Evaluation, with an explicit severity level.",
+      "_comment": "RFC-MACP-0007 Section 4: Objection is a formal blocking action distinct from a BLOCK Evaluation, with an explicit severity level.",
       "sender": "agent://b",
       "message_type": "Objection",
       "payload_type": "macp.modes.decision.v1.ObjectionPayload",
