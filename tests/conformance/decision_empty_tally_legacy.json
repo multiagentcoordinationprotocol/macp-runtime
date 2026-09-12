@@ -1,0 +1,77 @@
+{
+  "_comment": "Pins the PRESERVED legacy (schema_version <= 2) fail-open empty-tally rule (RFC-MACP-0012 4.1, Legacy empty-tally rule). RFC-MACP-0012 8 requires a stored policy to evaluate under its declared schema_version forever, so this arm is normative and permanent even though its behavior is the bug reported in issue #98. Paired with decision_empty_tally_binding.json, which is the same transcript at schema_version 3.",
+  "description": "Decision Mode: schema_version 2 keeps the legacy fail-open empty-tally rule, for replay.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.unanimous-legacy-v2",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 2,
+    "description": "Unanimous vote, initiator-only commitment, legacy schema_version 2 fail-open empty-tally semantics.",
+    "rules": {
+      "voting": {
+        "algorithm": "unanimous"
+      },
+      "commitment": {
+        "authority": "initiator_only",
+        "require_vote_quorum": false
+      }
+    }
+  },
+  "policy_version": "policy.decision.unanimous-legacy-v2",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "schema_version 2, empty tally, require_vote_quorum set EXPLICITLY to false (the default is also false; it is spelled out here so the fixture pins the flag's effect rather than the default's). Set it to true and this message is DENIED -- see decision_legacy_require_vote_quorum.json. The legacy rule is FAIL-OPEN: 'unanimous' produces no result, and with require_vote_quorum false the absence of votes does not block the positive commitment, so it SEALS. This fixture pins preservation for REPLAY (RFC-MACP-0012 8), not endorsement -- the identical transcript under schema_version 3 is DENIED, see decision_empty_tally_binding.json. An implementation that 'fixes' schema_version <= 2 to fail closed silently breaks replay of every stored session bound to a v1 or v2 policy.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c0",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "positive commitment on an empty decisive tally under legacy semantics",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.unanimous-legacy-v2",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  },
+  "expected_mode_state": {
+    "phase": "Committed",
+    "proposals": {
+      "p1": {
+        "proposal_id": "p1",
+        "sender": "agent://orchestrator"
+      }
+    }
+  }
+}

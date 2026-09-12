@@ -1,0 +1,158 @@
+{
+  "_comment": "Pins 'plurality' end to end: the schema_version 3 empty-tally denial, the tie-fails rule (previously unfixtured anywhere in the corpus), and the passing case. 'plurality' takes no threshold, so the empty tally and the tie are the same failure -- zero approvals are not strictly more than zero rejections (RFC-MACP-0012 4.1).",
+  "description": "Decision Mode: 'plurality' denies the empty tally and a tie, and passes on a strict plurality.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.plurality-v3",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Plurality vote, initiator-only commitment, schema_version 3 fail-closed empty-tally semantics.",
+    "rules": {
+      "voting": {
+        "algorithm": "plurality"
+      },
+      "commitment": {
+        "authority": "initiator_only"
+      }
+    }
+  },
+  "policy_version": "policy.decision.plurality-v3",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "schema_version 3, empty tally. 'plurality' needs no special case: zero approvals against zero rejections is a tie, and a tie fails (RFC-MACP-0012 4.1).",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c0",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "positive commitment attempted on an empty decisive tally",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.plurality-v3",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "ship it"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://b",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "REJECT",
+        "reason": "regression risk"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "'plurality' requires strictly MORE approvals than rejections. 1 approve against 1 reject is a tie and fails. This tie-fails rule was previously unfixtured.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "positive commitment attempted at a 1-1 tie",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.plurality-v3",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "confirmed"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "plurality reached: 2 approvals against 1 rejection",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.plurality-v3",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  },
+  "expected_mode_state": {
+    "phase": "Committed",
+    "proposals": {
+      "p1": {
+        "proposal_id": "p1",
+        "sender": "agent://orchestrator"
+      }
+    },
+    "votes": {
+      "p1": {
+        "agent://a": {
+          "vote": "APPROVE"
+        },
+        "agent://b": {
+          "vote": "REJECT"
+        },
+        "agent://orchestrator": {
+          "vote": "APPROVE"
+        }
+      }
+    }
+  }
+}

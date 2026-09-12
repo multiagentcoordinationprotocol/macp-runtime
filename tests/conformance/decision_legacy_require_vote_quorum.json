@@ -1,0 +1,151 @@
+{
+  "_comment": "Pins the OTHER half of the legacy (schema_version <= 2) arm. RFC-MACP-0012 4.1 says a v<=2 policy that intends its voting algorithm to be binding MUST set commitment.require_vote_quorum to true; every other legacy fixture in the corpus leaves it false and so pins only the fail-open path. This one pins that the documented remedy actually works -- with the flag true, the empty tally denies a positive commitment at schema_version 2, the same outcome schema_version 3 gives without the flag.",
+  "description": "Decision Mode: a schema_version 2 policy with require_vote_quorum true denies the empty tally -- the documented pre-v3 remedy.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.majority-legacy-quorum-bound",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 2,
+    "description": "Majority vote with a participation quorum of 2, initiator-only commitment, legacy schema_version 2 semantics made binding via require_vote_quorum.",
+    "rules": {
+      "voting": {
+        "algorithm": "majority",
+        "threshold": 0.5,
+        "quorum": {
+          "type": "count",
+          "value": 2
+        }
+      },
+      "commitment": {
+        "authority": "initiator_only",
+        "require_vote_quorum": true
+      }
+    }
+  },
+  "policy_version": "policy.decision.majority-legacy-quorum-bound",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "schema_version 2, zero votes cast. The legacy arm gates the positive direction SOLELY on commitment.require_vote_quorum, and here it is true, so the empty tally blocks the commitment -- the outcome schema_version 3 produces without the flag. voting.quorum is inert on its own: remove require_vote_quorum and this same message SEALS. decision_empty_tally_legacy.json pins that fail-open path under 'unanimous'; the legacy arm is algorithm-agnostic, stating it holds 'even under majority or unanimous' (RFC-MACP-0012 4.1).",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c0",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "positive commitment attempted before the participation quorum is met",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.majority-legacy-quorum-bound",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "ship it"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "One vote cast against a count quorum of 2. The tally is no longer empty and the approve share is 1/1 = 1.0, which clears threshold 0.5 -- but require_vote_quorum is true and the PARTICIPATION floor is not yet met, so the commitment is still denied. This separates the two gates: the algorithm passes and the quorum does not.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "positive commitment attempted with one vote against a quorum of 2",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.majority-legacy-quorum-bound",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "sender": "agent://b",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "agreed"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Two votes cast, meeting the count quorum of 2; approve share 2/2 = 1.0 >= 0.5. Both gates are now satisfied.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "quorum met and majority reached",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.majority-legacy-quorum-bound",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  },
+  "expected_mode_state": {
+    "phase": "Committed",
+    "proposals": {
+      "p1": {
+        "proposal_id": "p1",
+        "sender": "agent://orchestrator"
+      }
+    },
+    "votes": {
+      "p1": {
+        "agent://a": {
+          "vote": "APPROVE"
+        },
+        "agent://b": {
+          "vote": "APPROVE"
+        }
+      }
+    }
+  }
+}

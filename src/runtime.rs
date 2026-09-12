@@ -11,7 +11,7 @@ use crate::policy::registry::PolicyRegistry;
 use crate::policy::PolicyDefinition;
 use crate::registry::SessionRegistry;
 use crate::session::{
-    extract_ttl_ms, parse_session_start_payload, validate_canonical_session_start_payload,
+    extract_ttl_ms, parse_session_start_payload, validate_canonical_session_start_payload_for_mode,
     validate_session_id_for_acceptance, Session, SessionState,
 };
 use crate::storage::StorageBackend;
@@ -357,9 +357,16 @@ impl Runtime {
             .ok_or(MacpError::UnknownMode)?;
 
         let start_payload = parse_session_start_payload(&env.payload)?;
+        // `requires_strict_session_start` stays the source of *whether* the
+        // canonical contract applies: it reads the registry's per-entry
+        // `strict_session_start` flag, which `promote_mode` sets for modes the
+        // core's static name list has never heard of. The `_for_mode` validator
+        // decides only *which* roster rule applies within that contract, and
+        // defaults to the strict one for any mode it does not recognise — so a
+        // promoted mode keeps full canonical validation.
         let require_complete_start = self.mode_registry.requires_strict_session_start(mode_name);
         if require_complete_start {
-            validate_canonical_session_start_payload(&start_payload)?;
+            validate_canonical_session_start_payload_for_mode(mode_name, &start_payload)?;
         }
 
         // Validate mode_version matches the registered descriptor's version.
@@ -1320,6 +1327,114 @@ mod tests {
             err,
             MacpError::InvalidPayload | MacpError::InvalidTtl
         ));
+    }
+
+    /// A **promoted** extension mode keeps the full canonical `SessionStart`
+    /// contract, including the roster requirement.
+    ///
+    /// This pins the *call site's* choice of strictness source, which no other
+    /// test covers. `ModeRegistry::requires_strict_session_start` reads a
+    /// per-entry `strict_session_start` flag that `promote_mode` sets to `true`;
+    /// `macp_core::session::requires_strict_session_start` reads a static name
+    /// list that has never heard of a promoted mode's name. The two disagree
+    /// exactly here, so routing this call through
+    /// `validate_strict_session_start_payload` — which consults the static list
+    /// — would silently skip canonical validation for every promoted mode while
+    /// leaving the whole suite green. Measured: it does.
+    #[tokio::test]
+    async fn a_promoted_mode_still_gets_canonical_session_start_validation() {
+        let mode_registry = Arc::new(ModeRegistry::build_default(std::sync::Arc::new(
+            macp_policy::DefaultPolicyEvaluator,
+        )));
+        mode_registry
+            .register_extension(crate::pb::ModeDescriptor {
+                mode: "ext.promoted.v1".into(),
+                mode_version: "1.0.0".into(),
+                title: "Promoted".into(),
+                description: "promotion target".into(),
+                determinism_class: "semantic-deterministic".into(),
+                participant_model: "declared".into(),
+                message_types: vec!["SessionStart".into(), "Commitment".into()],
+                terminal_message_types: vec!["Commitment".into()],
+                ..Default::default()
+            })
+            .expect("register extension");
+        assert_eq!(
+            mode_registry.promote_mode("ext.promoted.v1", None).unwrap(),
+            "ext.promoted.v1"
+        );
+        assert!(
+            mode_registry.requires_strict_session_start("ext.promoted.v1"),
+            "promotion must mark the entry strict"
+        );
+        assert!(
+            !crate::session::requires_strict_session_start("ext.promoted.v1"),
+            "the core's static list must NOT know this name — that disagreement is the point"
+        );
+
+        let rt = Runtime::with_mode_registry(
+            Arc::new(crate::storage::MemoryBackend),
+            Arc::new(SessionRegistry::new()),
+            Arc::new(LogStore::new()),
+            mode_registry,
+        );
+
+        // An empty roster: refused, because the carve-out names Decision only.
+        let err = rt
+            .process(
+                &env(
+                    "ext.promoted.v1",
+                    "SessionStart",
+                    "m1",
+                    &new_sid(),
+                    "agent://orchestrator",
+                    session_start(vec![]),
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "InvalidPayload");
+
+        // And the rest of the canonical contract too, so the assertion above
+        // cannot be satisfied by a runtime that only kept the roster rule.
+        let no_versions = SessionStartPayload {
+            participants: vec!["agent://fraud".into()],
+            ttl_ms: 1_000,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let err = rt
+            .process(
+                &env(
+                    "ext.promoted.v1",
+                    "SessionStart",
+                    "m2",
+                    &new_sid(),
+                    "agent://orchestrator",
+                    no_versions,
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "InvalidPayload");
+
+        // Positive control: a complete payload is accepted, so the two refusals
+        // above are the roster and version rules and not a broken mode.
+        rt.process(
+            &env(
+                "ext.promoted.v1",
+                "SessionStart",
+                "m3",
+                &new_sid(),
+                "agent://orchestrator",
+                session_start(vec!["agent://fraud".into()]),
+            ),
+            None,
+        )
+        .await
+        .expect("a complete SessionStart must still be accepted for a promoted mode");
     }
 
     #[tokio::test]

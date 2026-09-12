@@ -1,0 +1,61 @@
+{
+  "_comment": "Rule 5 coverage, both directions (issues #104 and #105). RFC-MACP-0007 Section 5 rule 5 -- 'The Session MUST NOT resolve before at least one proposal exists' -- was previously UNFIXTURED in either direction, and two planned fixtures were dropped from PR #99 for one reason: no error code was pinnable. RFC-MACP-0002 Section 6.1 now pins it (INVALID_ENVELOPE for a Mode validation-rule breach that is not a sender-authorization breach), and rule 5 lost its 'unless policy explicitly allows a no-go outcome with zero proposals' clause, which no rule schema could ever express. Both dropped fixtures live here.",
+  "description": "Zero-proposal Decision session under a bound voting.algorithm 'none' policy: both a negative and a positive Commitment from the initiator are rejected by RFC-MACP-0007 Section 5 rule 5, with INVALID_ENVELOPE per RFC-MACP-0002 Section 6.1. The session stays Open.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": ["agent://orchestrator", "agent://a", "agent://b"],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.none-zero-proposal",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "voting.algorithm 'none' is chosen deliberately: it is the ONLY configuration in which the deleted rule-5 hatch was ever live. RFC-MACP-0007 Section 6.2's face-value exception waives the decline guard here, so nothing in Section 6.2 stops a negative Commitment -- rule 5 alone does. Binding a policy also pins RFC-MACP-0012 Section 6.4's ordering: mode validation runs FIRST, so the expected code is INVALID_ENVELOPE and NOT POLICY_DENIED, even though a policy is bound.",
+    "rules": {
+      "voting": {
+        "algorithm": "none"
+      },
+      "commitment": {
+        "authority": "initiator_only"
+      }
+    }
+  },
+  "policy_version": "policy.decision.none-zero-proposal",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "_comment": "The zero-proposal decline: the arm the deleted hatch would have licensed. Under algorithm 'none' the face-value exception takes outcome_positive at face value with no decline guard, so this message reaches rule 5 with nothing else standing in its way. Sender is the initiator, who IS a declared participant and IS the commitment authority, so FORBIDDEN is impossible and rule 5 is the only reason this can be rejected -- which is what makes the code safe to pin.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "action": "decision.declined",
+        "reason": "no proposals arrived before the deadline",
+        "outcome_positive": false,
+        "mode_version": "1.0.0",
+        "configuration_version": "cfg-1",
+        "policy_version": "policy.decision.none-zero-proposal"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "The positive arm. Same sender, same single reason for rejection. Rule 5 is directional-neutral: it bars resolution, not one polarity of it.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "action": "decision.committed",
+        "reason": "attempting to resolve with no proposal on record",
+        "outcome_positive": true,
+        "mode_version": "1.0.0",
+        "configuration_version": "cfg-1",
+        "policy_version": "policy.decision.none-zero-proposal"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    }
+  ],
+  "expected_final_state": "Open",
+  "expect_resolution_present": false
+}

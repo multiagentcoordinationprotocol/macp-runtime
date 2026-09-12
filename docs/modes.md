@@ -19,6 +19,8 @@ The decision mode tracks proposals, evaluations, objections, and votes through a
 
 **Commitment readiness**: The runtime requires at least one proposal to exist before accepting a commitment. If governance policies are bound to the session, they impose additional requirements -- vote quorum, confidence thresholds, and veto rules -- that must also be satisfied.
 
+**An empty `participants` list is accepted -- for Decision alone.** Every other standards-track mode refuses `SessionStart` with an empty roster (and Task and Handoff refuse more than that: Task needs a participant other than the initiator, Handoff needs two parties). RFC-MACP-0001 §7.1 requires `participants` only "when required by the Mode", and RFC-MACP-0007 makes the initiator's authority role-based rather than membership-based, so for Decision the roster and the authority model are independent. The resulting session is well-defined and **inert**: `Proposal`, `Evaluation`, `Objection` and `Vote` are authorized only for declared participants, so with none declared **every** such message is `FORBIDDEN` -- the initiator's included -- no proposal can ever exist, and commitment readiness can never be met. Such a session can only expire or be cancelled. The carve-out is enforced in one place (`macp_core::session`), not by the Decision mode itself.
+
 ## Proposal Mode
 
 **Source**: `crates/macp-modes/src/mode/proposal.rs` | **Identifier**: `macp.mode.proposal.v1`

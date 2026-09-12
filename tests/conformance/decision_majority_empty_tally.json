@@ -1,0 +1,128 @@
+{
+  "_comment": "Gives 'majority' -- the most widely used algorithm, and one of the two that carry the explicit 'Implementations MUST NOT compute 0/0' prohibition (RFC-MACP-0012 4.1) -- schema_version 3 empty-tally coverage. Also pins the INCLUSIVE threshold comparison: an even split at threshold 0.5 APPROVES (RFC-MACP-0012 4.1, Inclusive comparison), which is the boundary a runtime is most likely to implement as strictly-greater-than.",
+  "description": "Decision Mode: 'majority' fails on an empty tally under schema_version 3, and an even split passes at the inclusive default threshold.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.majority-v3",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Majority vote at the default inclusive threshold, initiator-only commitment, schema_version 3 fail-closed empty-tally semantics.",
+    "rules": {
+      "voting": {
+        "algorithm": "majority",
+        "threshold": 0.5
+      },
+      "commitment": {
+        "authority": "initiator_only"
+      }
+    }
+  },
+  "policy_version": "policy.decision.majority-v3",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "schema_version 3, zero decisive votes. The approval ratio is UNDEFINED, not zero: the arm MUST fail without evaluating ratio >= threshold, and an implementation MUST NOT compute 0/0 (RFC-MACP-0012 4.1). Under the legacy schema_version <= 2 rule this same message would have SEALED, because 'majority' produced no result and require_vote_quorum defaults to false.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c0",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "positive commitment attempted on an empty decisive tally",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.majority-v3",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "ship it"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://b",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "REJECT",
+        "reason": "regression risk"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Two decisive votes, approve share 1/2 = 0.5. Every threshold comparison in RFC-MACP-0012 4.1 is INCLUSIVE, so 0.5 >= 0.5 holds and the vote Passes. 'agent://orchestrator' is a declared participant who did not vote; abstentions and non-voters are excluded from the denominator, so the denominator is 2 and not 3. A rule requiring strictly more approvals than rejections is 'plurality', not 'majority' at threshold 0.5 -- see decision_plurality.json, where this exact tally is DENIED.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "even split approves under the inclusive comparison",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.majority-v3",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  },
+  "expected_mode_state": {
+    "phase": "Committed",
+    "proposals": {
+      "p1": {
+        "proposal_id": "p1",
+        "sender": "agent://orchestrator"
+      }
+    },
+    "votes": {
+      "p1": {
+        "agent://a": {
+          "vote": "APPROVE"
+        },
+        "agent://b": {
+          "vote": "REJECT"
+        }
+      }
+    }
+  }
+}

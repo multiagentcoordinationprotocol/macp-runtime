@@ -110,14 +110,31 @@ impl Mode for DecisionMode {
         }
     }
 
+    /// Decision accepts an **empty** `participants` list.
+    ///
+    /// RFC-MACP-0001 §7.1 requires `participants` only "when required by the
+    /// Mode", and RFC-MACP-0007 makes the initiator's authority role-based
+    /// rather than membership-based, so the roster and the authority model are
+    /// independent here. A zero-participant Decision session is well-defined
+    /// and inert: [`Self::authorize_sender`] routes `Proposal`, `Evaluation`,
+    /// `Objection` and `Vote` through `is_declared_participant`, which is
+    /// `false` over an empty list, so **every** such message is `FORBIDDEN`
+    /// — the initiator's included — and the session can only expire or be
+    /// cancelled. Spec #99 removed `minItems: 1` from the conformance fixture
+    /// schema on that reasoning and added `decision_zero_participants.json`.
+    ///
+    /// The roster rule is enforced in `macp_core::session` rather than here, so
+    /// the carve-out is named in exactly one place and every other mode keeps
+    /// the full canonical contract by default. The other four standards-track
+    /// modes still re-reject an insufficient roster in their own
+    /// `on_session_start`, which is where their mode-specific minima
+    /// (Task's "someone other than the initiator", Handoff's two parties) have
+    /// to live anyway.
     fn on_session_start(
         &self,
-        session: &Session,
+        _session: &Session,
         _env: &Envelope,
     ) -> Result<ModeResponse, MacpError> {
-        if session.participants.is_empty() {
-            return Err(MacpError::InvalidPayload);
-        }
         Ok(ModeResponse::PersistState(Self::encode_state(
             &Self::default_state(),
         )))
@@ -352,19 +369,50 @@ mod tests {
     }
 
     #[test]
-    fn session_start_requires_declared_participants() {
+    fn zero_participant_session_starts() {
+        // Replaces `session_start_requires_declared_participants`. Spec #99
+        // removed `minItems: 1` from the conformance fixture schema and added
+        // `decision_zero_participants.json`, whose first step is an *accepted*
+        // SessionStart with `participants: []`.
         let mode = DecisionMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
         let mut session = test_session();
         session.participants.clear();
-        assert_eq!(
-            mode.on_session_start(
+        let response = mode
+            .on_session_start(
                 &session,
-                &env("agent://orchestrator", "SessionStart", vec![])
+                &env("agent://orchestrator", "SessionStart", vec![]),
             )
-            .unwrap_err()
-            .to_string(),
-            "InvalidPayload"
+            .expect("a zero-participant Decision SessionStart must be accepted");
+        assert!(
+            matches!(response, ModeResponse::PersistState(_)),
+            "the mode must still persist its initial state, got: {response:?}"
         );
+    }
+
+    #[test]
+    fn zero_participant_session_forbids_every_proposal() {
+        // The reachability guard that makes the relaxation safe, and the case
+        // `decision_zero_participants.json` exists to pin: the **initiator**
+        // is refused too. A runtime that treated the SessionStart sender as an
+        // implicit participant would accept this, and the session would no
+        // longer be inert. `authorize_sender` routes all four participant
+        // message types through `is_declared_participant`, which is `false`
+        // over an empty list.
+        let mode = DecisionMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = test_session();
+        session.participants.clear();
+        for message_type in ["Proposal", "Evaluation", "Objection", "Vote"] {
+            assert_eq!(
+                mode.authorize_sender(
+                    &session,
+                    &env("agent://orchestrator", message_type, proposal("p1")),
+                )
+                .unwrap_err()
+                .to_string(),
+                "Forbidden",
+                "{message_type} from the initiator must be FORBIDDEN on an empty roster"
+            );
+        }
     }
 
     #[test]

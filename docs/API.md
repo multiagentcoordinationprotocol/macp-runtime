@@ -71,6 +71,10 @@ rpc Send(SendRequest) returns (SendResponse)
 
 The runtime overrides `envelope.sender` with the authenticated identity. If the envelope contains a non-empty `sender` that does not match the authenticated identity, the request is rejected with `UNAUTHENTICATED`.
 
+**`SessionStart` requirements.** For every standards-track mode (and `ext.multi_round.v1`) the `SessionStartPayload` must bind `mode_version`, `configuration_version`, a `ttl_ms` in `1..=86400000`, and a `participants` list of at most 1000 distinct non-empty entries; `max_suspend_ms` must not be negative. A payload missing any of these is rejected with `INVALID_PAYLOAD` (or `INVALID_TTL`) and no session is created.
+
+`participants` must be **non-empty for every mode except `macp.mode.decision.v1`**, which accepts an empty list. RFC-MACP-0001 §7.1 requires the field only "when required by the Mode", and RFC-MACP-0007 makes the Decision initiator's authority role-based rather than membership-based. A zero-participant Decision session is accepted and **inert**: `Proposal`, `Evaluation`, `Objection` and `Vote` are authorized only for declared participants, so with none declared every one of them is refused with `FORBIDDEN` -- including from the initiator -- no proposal can ever be accepted, and therefore no `Commitment` can be sealed. Such a session can only expire or be cancelled. Do not start one expecting to add participants later; the roster is bound at `SessionStart` and never changes.
+
 ### StreamSession
 
 Provides bidirectional streaming scoped to a single session. Clients send envelopes and receive all accepted envelopes for that session in real time.
