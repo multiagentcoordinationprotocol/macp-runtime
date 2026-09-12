@@ -13,6 +13,20 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// `message_id` namespace reserved for the runtime-synthesized implicit
+/// `HandoffAccept` (RFC-MACP-0010 §5.1(3), which fixes the id as
+/// `implicit-accept:<handoff_id>`).
+///
+/// At semantics rev >= 2 no client-submitted envelope in a handoff session may
+/// carry a `message_id` with this prefix, whatever its message type — see
+/// [`Mode::validate_client_envelope`]. Reserving the whole prefix (rather than
+/// the one exact id) keeps the failure loud: a client that squats the id a
+/// future offer would use consumes that dedup slot, after which the runtime's
+/// own synthesis would be silently skipped and the session could never reach a
+/// `Commitment`. The parties able to do it are the session's own initiator and
+/// the offerer, so this is fail-fast conformance, not attack mitigation.
+pub const IMPLICIT_ACCEPT_MESSAGE_ID_PREFIX: &str = "implicit-accept:";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum HandoffDisposition {
     Offered,
@@ -164,6 +178,51 @@ impl HandoffMode {
 }
 
 impl Mode for HandoffMode {
+    /// RFC-MACP-0010 §5.1(3): a client-submitted `HandoffAccept` carrying
+    /// `implicit = true` MUST be rejected, and the synthetic accept's
+    /// `message_id` namespace is reserved.
+    ///
+    /// Gated to `semantics_rev >= 2` so rev <= 1 wire behavior is
+    /// byte-identical: a legacy session's client could send an
+    /// `implicit-accept:`-prefixed id and be accepted, and its history must
+    /// stay replayable under the semantics it was accepted with.
+    ///
+    /// Two rules, in this order:
+    /// 1. any `message_id` in the reserved namespace -> `InvalidEnvelope`
+    ///    (checked first, and for every message type: the squat works through
+    ///    `SessionStart`, `Commitment` and `HandoffContext` too);
+    /// 2. `HandoffAccept` whose payload decodes with `implicit = true` ->
+    ///    `InvalidPayload` — the same code `handle_message` returns for the
+    ///    same envelope today, so the rev-2 error surface does not shift.
+    ///
+    /// Rule 2 is what the mode itself will *stop* being able to enforce once
+    /// the runtime synthesizes implicit accepts: at rev >= 2 a well-formed
+    /// implicit accept with the deterministic `message_id` is exactly what
+    /// dispatch must accept on replay, and the mode cannot tell client
+    /// provenance from runtime provenance. This boundary can.
+    fn validate_client_envelope(&self, session: &Session, env: &Envelope) -> Result<(), MacpError> {
+        if session.semantics_rev < 2 {
+            return Ok(());
+        }
+        if env
+            .message_id
+            .starts_with(IMPLICIT_ACCEPT_MESSAGE_ID_PREFIX)
+        {
+            return Err(MacpError::InvalidEnvelope);
+        }
+        if env.message_type == "HandoffAccept" {
+            // A payload that does not decode is left to `handle_message`,
+            // which rejects it `InvalidPayload` on the same grounds. Deciding
+            // it here would only duplicate that.
+            if let Ok(payload) = HandoffAcceptPayload::decode(&*env.payload) {
+                if payload.implicit {
+                    return Err(MacpError::InvalidPayload);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn authorize_sender(&self, session: &Session, env: &Envelope) -> Result<(), MacpError> {
         match env.message_type.as_str() {
             "Commitment" => check_commitment_authority(session, &env.sender),

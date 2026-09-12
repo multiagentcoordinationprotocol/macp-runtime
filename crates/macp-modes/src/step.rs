@@ -60,15 +60,29 @@ pub fn check_preconditions(
     Ok(Precheck::Proceed)
 }
 
-/// Mode-dependent validation: sender authorization + mode rules. Pure — returns
-/// the [`ModeResponse`] to apply and mutates nothing. Call only after
-/// [`check_preconditions`] returns [`Precheck::Proceed`].
+/// Mode-dependent validation: sender authorization + the client boundary +
+/// mode rules. Pure — returns the [`ModeResponse`] to apply and mutates
+/// nothing. Call only after [`check_preconditions`] returns
+/// [`Precheck::Proceed`].
+///
+/// The middle phase is [`Mode::validate_client_envelope`], which rejects
+/// envelope shapes that are legal as *recorded history* but illegal as *client
+/// submissions* (see that method's contract). It runs after
+/// [`Mode::authorize_sender`] so the existing authorization-before-payload
+/// error ordering is untouched. Because it is a client-boundary check, replay
+/// must not go through this function — this runtime's replay calls
+/// `authorize_sender`/`on_message_at` directly and never reaches here.
+///
+/// A durable consumer that bypasses this helper (as the runtime does, to
+/// interpose its append between validation and commit) MUST call
+/// [`Mode::validate_client_envelope`] itself.
 pub fn validate_message(
     session: &Session,
     env: &Envelope,
     mode: &dyn Mode,
 ) -> Result<ModeResponse, MacpError> {
     mode.authorize_sender(session, env)?;
+    mode.validate_client_envelope(session, env)?;
     mode.on_message(session, env)
 }
 

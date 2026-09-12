@@ -491,6 +491,13 @@ impl Runtime {
             .build();
 
         let response = mode.on_session_start(&session, env)?;
+        // The client boundary, on the start path too: the reserved
+        // `message_id` namespace is squattable through `SessionStart`, whose
+        // id enters `seen_message_ids` below. Runs after `on_session_start`
+        // (so existing roster rejections keep their error) and well before the
+        // commit-point append, and before the registry reservation — so a
+        // rejection needs no rollback and leaves no session behind.
+        mode.validate_client_envelope(&session, env)?;
         let semantics_rev = session.semantics_rev;
 
         // Reserve the session id atomically (dedup + max_open TOCTOU safety),
@@ -681,6 +688,18 @@ impl Runtime {
             .get_mode(&session.mode)
             .ok_or(MacpError::UnknownMode)?;
         mode.authorize_sender(session, env)?;
+        // The client boundary (RFC-MACP-0010 §5.1(3)): shapes that are legal
+        // as recorded history but illegal as client submissions. Called here
+        // and NEVER on replay — replay re-reads entries that already passed
+        // this check when they were first accepted, and a runtime-synthesized
+        // envelope is not a client submission either. Placed after
+        // `authorize_sender` so the pre-existing Forbidden-before-InvalidPayload
+        // ordering is unchanged. This call is not optional plumbing: the
+        // runtime deliberately bypasses `macp_modes::step::validate_message`
+        // (which also calls the hook) so it can interpose the durable append
+        // between validation and commit, so without this line the runtime
+        // would have no client boundary at all.
+        mode.validate_client_envelope(session, env)?;
         // One acceptance clock for both the mode call and the log entry, so
         // replay (which re-reads received_at_ms) observes the identical time.
         let accepted_at_ms = Utc::now().timestamp_millis();

@@ -691,6 +691,20 @@ impl<'a> ModeRef<'a> {
         let mode = self.factory()?.create();
         mode.authorize_sender(session, env)
     }
+
+    /// The client boundary. Forwards to [`crate::mode::Mode::validate_client_envelope`].
+    ///
+    /// Live client path only — the kernel must not call this on replay, nor on
+    /// an envelope it synthesized itself. See the trait method for why the
+    /// distinction cannot be made inside the mode's own dispatch.
+    pub fn validate_client_envelope(
+        &self,
+        session: &macp_core::session::Session,
+        env: &macp_pb::pb::Envelope,
+    ) -> Result<(), macp_core::error::MacpError> {
+        let mode = self.factory()?.create();
+        mode.validate_client_envelope(session, env)
+    }
 }
 
 #[cfg(test)]
