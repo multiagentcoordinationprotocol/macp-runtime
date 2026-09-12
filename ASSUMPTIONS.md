@@ -77,6 +77,13 @@
 - **Blast radius if wrong:** Low and bounded in the safe direction. The mode is the stricter of the two: it will not call the evaluator until its own bar is met, so the evaluator's laxer reading can only fail to add a constraint, never remove one. It cannot produce a commitment the mode would have refused.
 - **Status:** UNCONFIRMED (2026-09-10)
 
+- **Narrowed 2026-09-11 by spec #110 + Phase 7 of plans/spec-99-schema-version-3.md.** This entry's
+  premise — that a supplied `threshold.value` of `0` is registrable — is **no longer true**. Canonical
+  moved `threshold.value` to `exclusiveMinimum: 0`, and the mirror now refuses a supplied `0` (and any
+  negative) at admission. `EffectiveThreshold::Inert` is therefore reachable only by **omission** of
+  the key. The residual half of the entry still stands: the two callers' differing `Inert` defaults
+  still diverge, and that divergence is now the entry's only live content.
+
 ## The quorum mode silently tolerates a rules object the evaluator rejects
 - **Plan:** `plans/backlog-closeout-2026-09.md` (Phase 3 — named in the phase's edge cases as explicitly NOT in scope to unify)
 - **Assumed:** `QuorumMode::effective_threshold` parses the bound policy's `rules` with `serde_json::from_value(...).unwrap_or_default()`, so a rules object that fails to deserialize (a type error — `"threshold": "majority"`) yields the schema defaults and an inert threshold, and the mode proceeds on the ApprovalRequest's `required_approvals`. The evaluator's `parse_rules` on the same object **denies the commitment**. A session can therefore be "ready to commit" by the mode's reckoning and then refused with `POLICY_DENIED` at the last step.

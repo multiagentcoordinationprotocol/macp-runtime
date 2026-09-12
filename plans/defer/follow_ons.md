@@ -92,3 +92,50 @@ tier-1 policy-registry tests and `std_policies_all_require_vote_quorum`.
   participation-quorum concept that schema_version ≤2 no longer has
   (flagged in spec PR #48 for a future schema_version alongside any real
   participation-quorum field).
+
+## 14. The `count` quorum-threshold alias is now a departure the spec ruled against
+**Status changed 2026-09-11 by spec #110** (`1bb30ad`, "close the threshold
+vocabulary — remove weighted, pin ceiling rounding"), which closed spec issue
+#98 item 4 **against** this runtime.
+
+This runtime accepts `count` as an alias for `n_of_m` in a Quorum-mode
+`threshold.type`. That was recorded as a documented local departure while the
+vocabulary was open upstream. It is now closed, and the spec's reasoning is
+substantive rather than stylistic:
+
+- `count` already names a **participation floor** in Decision's `voting.quorum`,
+  whereas Quorum's `threshold` is an **approval bar**. One identifier for two
+  different concepts across two modes is the ambiguity #110 removes.
+- RFC-MACP-0012 §8 makes policy identity **byte-level `rules` equality**. So the
+  alias means two semantically identical policies — one written `count`, one
+  written `n_of_m` — compare **unequal forever**, which breaks idempotent
+  re-registration and cross-runtime replay equality.
+
+The spec pins the refusal with `invalid-quorum-rules/threshold-type-weighted.json`
+alongside `weighted`. **Nothing in our CI gates this**: the parity test
+(`enum_lists_match_the_canonical_schemas`) filters `count` out by construction as
+one of its documented departures, so the mirror can agree with canonical while the
+accepted set does not.
+
+Phase 7 of `plans/spec-99-schema-version-3.md` left the behaviour alone and only
+re-labelled the docs (they now say prefer `n_of_m` and expect withdrawal).
+**Removing it is a breaking change for any deployment that wrote `count`**, so it
+wants its own release and a deprecation note, not a rider. Note the contrast with
+`weighted`, whose removal Phase 7 *did* take: `weighted` was always **refused**
+here, so deleting the constant that mirrored it changed nothing an operator could
+observe beyond an error string.
+
+## 15. `src/replay.rs`'s strict-`SessionStart` call site has the repoint trap untested
+Phase 5 of `plans/spec-99-schema-version-3.md` added
+`a_promoted_mode_still_gets_canonical_session_start_validation` covering the
+runtime-side call site, after measuring that a naive repoint to
+`validate_strict_session_start_payload` leaves the whole suite **green** — nothing
+else exercises a promoted mode's `SessionStart` payload validation, so the trap
+would ship silently.
+
+The **replay-side** call site carries a comment pointing at that test's reasoning
+but has no test of its own. Judged genuinely lower-risk and deliberately deferred:
+a stored `SessionStart` payload in the log necessarily passed acceptance-time
+validation, so relaxing replay for a promoted mode cannot admit anything
+acceptance refused. Worth closing anyway, because the asymmetry is invisible from
+the code.
