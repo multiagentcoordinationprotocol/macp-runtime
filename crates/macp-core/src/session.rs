@@ -378,7 +378,7 @@ pub fn validate_canonical_session_start_payload(
 ///
 /// Identical to [`validate_canonical_session_start_payload`] in every respect
 /// except one: an empty `participants` list is accepted for the modes
-/// [`allows_empty_participants`] names (Decision, and only Decision) and
+/// `allows_empty_participants` names (Decision, and only Decision) and
 /// rejected for all others, promoted extension modes included.
 ///
 /// This is additive rather than a new parameter on

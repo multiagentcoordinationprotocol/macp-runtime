@@ -120,7 +120,7 @@ pub fn evaluate_decision_commitment(
 /// exception — weight-`0` decisiveness" accepts that in writing, and
 /// `docs/deployment.md` carries the operator note. The participation floor is
 /// carved out and unchanged: a weight-`0` vote still counts toward
-/// `voting.quorum` (see [`count_unique_voters`]). Under every other algorithm
+/// `voting.quorum` (see `count_unique_voters`). Under every other algorithm
 /// `weights` is not consulted and nothing here applies.
 ///
 /// **Negative weighted total:** a `weighted` round whose *cast* weights sum
@@ -139,7 +139,7 @@ pub fn evaluate_decision_commitment(
 ///
 /// **Decline guard (universal reject-floor):** a decline backed by the vote
 /// outcome requires at least one *decisive* explicit reject
-/// (`decisive_reject_count > 0`; see [`count_decisive_rejects`]). A non-vote
+/// (`decisive_reject_count > 0`; see `count_decisive_rejects`). A non-vote
 /// must never authorize a finalized adverse decline, and neither may a ballot
 /// from outside the weighted electorate. RFC-MACP-0007 §6.2 states the guard
 /// "applies across all three voting results", so it gates the `Passed` row as
