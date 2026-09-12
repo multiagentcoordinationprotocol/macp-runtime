@@ -326,6 +326,15 @@ impl QuorumThreshold {
     /// one approval. That floor is what makes `T = 0` unreachable: at `T = 0`
     /// a session is "ready to commit" with no ballot cast at all, and a
     /// negative commitment then seals with zero approvals (issue #145).
+    ///
+    /// For `percentage`, RFC-MACP-0012 §4.2 (1.2.0-draft, spec #110) promoted
+    /// that rounding direction from a non-normative rationale into normative
+    /// text and pinned the arithmetic with it: the effective bar is
+    /// `ceil(value × declared_participant_count / 100)`, computed with **exact
+    /// integer arithmetic** — "implementations … MUST NOT use floating-point
+    /// division". The denominator is fixed at `SessionStart` and does not
+    /// shrink as ballots, abstentions included, are cast (§8's completion note;
+    /// RFC-MACP-0011 §5 rule 4a made that arguable).
     pub fn effective(&self, total_participants: usize) -> EffectiveThreshold {
         // `is_sign_negative` would mis-handle NaN and -0.0; comparing against
         // the ordered predicate keeps NaN, 0.0 and negatives on one path.
@@ -340,11 +349,45 @@ impl QuorumThreshold {
                     // direct evaluator call; a share of nobody is unmeetable.
                     return EffectiveThreshold::Unsatisfiable;
                 }
-                (self.value / 100.0) * total_participants as f64
+                // Exact integer ceiling division. §4.2 spells the equivalence
+                // as `(value × n + 99) div 100`; `div_ceil` is that, without
+                // the manual bias term. `value` is `f64` only because
+                // serde hands us a JSON number; the rule schema types it
+                // `integer` and registration refuses a fractional one
+                // (`PolicyRegistry::validate_quorum_threshold`), so the integer
+                // path below is the only one reachable through the registry.
+                //
+                // Dividing by 100 *first*, which this used to do, is not merely
+                // inelegant — it is wrong. `value / 100.0` is inexact in
+                // binary64 for most integer percentages, and the error survives
+                // the multiplication into the ceiling: `value: 7` over 100
+                // participants produced a bar of 8 where the exact rule gives
+                // 7, and `value: 28` over 25 participants produced 8 where the
+                // rule gives 7. Thirteen `(value, participants)` pairs diverge
+                // within `value ∈ 1..=100`, `participants ∈ 1..=100` alone.
+                //
+                // Float → integer casts saturate in Rust, and the arithmetic is
+                // saturating too, so an out-of-range `value` reachable only by
+                // constructing the struct directly yields an
+                // unmeetable-but-finite bar rather than panicking or wrapping.
+                if self.value.fract() == 0.0 {
+                    let scaled = (self.value as u128)
+                        .saturating_mul(total_participants as u128)
+                        .div_ceil(100);
+                    let required = scaled.clamp(1, u32::MAX as u128) as u32;
+                    return EffectiveThreshold::Approvals(required);
+                }
+                // A fractional `percentage` cannot be registered, so this is a
+                // directly-constructed descriptor. Multiply before dividing:
+                // that keeps the ceiling faithful where dividing first does
+                // not.
+                self.value * total_participants as f64 / 100.0
             }
             // `count` is this runtime's documented alias for `n_of_m`
-            // (`docs/policy.md`); the canonical schema enum omits it and the
-            // gap is tracked as spec issue #98.
+            // (`docs/policy.md`); the canonical schema enum omits it — spec
+            // #110 closed that enum against the alias for good (issue #98
+            // item 4) and this runtime's continued acceptance of it is a
+            // documented departure.
             "n_of_m" | "count" => self.value,
             _ => return EffectiveThreshold::Unsatisfiable,
         };
@@ -573,6 +616,57 @@ mod tests {
             t("n_of_m", 1e30).effective(3),
             EffectiveThreshold::Approvals(u32::MAX)
         );
+        assert_eq!(
+            t("percentage", 1e30).effective(3),
+            EffectiveThreshold::Approvals(u32::MAX)
+        );
+    }
+
+    /// RFC-MACP-0012 §4.2 (1.2.0-draft) pins the `percentage` bar at
+    /// `ceil(value × declared_participant_count / 100)` computed with exact
+    /// integer arithmetic and forbids floating-point division. Dividing by 100
+    /// first — what this used to do — is off by one wherever `value / 100.0`
+    /// rounds up in binary64 and the error survives into the ceiling.
+    #[test]
+    fn percentage_threshold_uses_exact_integer_ceiling_division() {
+        let pct = |value: f64| QuorumThreshold {
+            threshold_type: "percentage".into(),
+            value,
+        };
+        // The four cases the float path got wrong at small participant counts.
+        // Each of these returned one approval too many.
+        assert_eq!(pct(28.0).effective(25), EffectiveThreshold::Approvals(7));
+        assert_eq!(pct(14.0).effective(50), EffectiveThreshold::Approvals(7));
+        assert_eq!(pct(7.0).effective(100), EffectiveThreshold::Approvals(7));
+        assert_eq!(pct(68.0).effective(75), EffectiveThreshold::Approvals(51));
+
+        // RFC-MACP-0012 §5.2's worked examples, which are arithmetic only under
+        // ceiling.
+        assert_eq!(pct(67.0).effective(3), EffectiveThreshold::Approvals(3));
+        assert_eq!(pct(51.0).effective(200), EffectiveThreshold::Approvals(102));
+        assert_eq!(pct(50.0).effective(3), EffectiveThreshold::Approvals(2));
+
+        // Exact multiples are not rounded up past themselves.
+        assert_eq!(pct(50.0).effective(4), EffectiveThreshold::Approvals(2));
+        assert_eq!(pct(100.0).effective(7), EffectiveThreshold::Approvals(7));
+        assert_eq!(pct(25.0).effective(8), EffectiveThreshold::Approvals(2));
+
+        // Exhaustive against the reference formula over the whole registrable
+        // domain of `value`, for every participant count a session plausibly
+        // carries. This is the assertion that would have caught the old bug.
+        // Written as an explicit quotient-plus-remainder rather than reusing
+        // `div_ceil`, so the oracle stays independent of the implementation.
+        for value in 1..=100u128 {
+            for participants in 1..=500usize {
+                let product = value * participants as u128;
+                let expected = product / 100 + u128::from(!product.is_multiple_of(100));
+                assert_eq!(
+                    pct(value as f64).effective(participants),
+                    EffectiveThreshold::Approvals(expected as u32),
+                    "value {value} over {participants} participants"
+                );
+            }
+        }
     }
 
     #[test]

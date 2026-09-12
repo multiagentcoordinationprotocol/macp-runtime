@@ -492,6 +492,36 @@ impl PolicyRegistry {
         if matches!(mode, "macp.mode.quorum.v1" | "*") {
             if let Ok(quorum) = serde_json::from_value::<QuorumPolicyRules>(rules.clone()) {
                 Self::validate_quorum_threshold(&quorum.threshold)?;
+                // `threshold.value`'s `exclusiveMinimum: 0` (spec #110, the
+                // quorum-side twin of the Decision floor #99 tightened). A zero
+                // approval bar is trivially satisfied, so a restrictive-looking
+                // quorum policy approved everything — fail-open, the worst
+                // polarity to leave authorable.
+                //
+                // Discriminate on the raw JSON, for the same reason
+                // `voting.weights` does above: `QuorumThreshold::value`
+                // defaults to `0.0`, so a parsed-struct test could not tell a
+                // *supplied* `0` from an omitted `threshold` (or a
+                // `threshold: {}` carrying no `value`) and would refuse every
+                // quorum policy that declines to set a bar — including the
+                // built-in `policy.default` wildcard. JSON Schema applies the
+                // keyword only where the key is present, and the canonical
+                // `threshold` object sets no `required`, so presence is exactly
+                // the right discriminator. An omitted value still resolves to
+                // `EffectiveThreshold::Inert`, where the ApprovalRequest's own
+                // `required_approvals` stands.
+                if rules
+                    .get("threshold")
+                    .and_then(|t| t.get("value"))
+                    .and_then(|v| v.as_f64())
+                    .is_some_and(|v| v.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater))
+                {
+                    return Err(format!(
+                        "INVALID_POLICY_DEFINITION: threshold.value {} is out of range: \
+                         must be greater than 0 (RFC-MACP-0011 §5 rule 2)",
+                        quorum.threshold.value
+                    ));
+                }
             }
         }
 
@@ -613,9 +643,14 @@ impl PolicyRegistry {
     ///   field is `f64`, so this is enforced as a zero fractional part, which
     ///   is exactly what JSON Schema's `integer` type means (`2.0` is an
     ///   integer, `0.5` is not).
-    /// - `properties.threshold.properties.value.minimum` — `0`.
     /// - `allOf[0]`: `then.properties.value.maximum` — `100` when
     ///   `type` is `percentage`.
+    ///
+    /// The companion `properties.threshold.properties.value.exclusiveMinimum:
+    /// 0` is enforced in [`Self::validate_conditional_constraints`], where the
+    /// raw JSON is still available to tell a supplied `0` from an absent
+    /// `value` — `QuorumThreshold::value` defaults to `0.0`, so a
+    /// parsed-struct test here would refuse every policy that sets no bar.
     fn validate_quorum_threshold(
         threshold: &macp_core::policy::rules::QuorumThreshold,
     ) -> Result<(), String> {
@@ -629,12 +664,6 @@ impl PolicyRegistry {
         if threshold.value.fract() != 0.0 {
             return Err(format!(
                 "INVALID_POLICY_DEFINITION: threshold.value {} must be an integer",
-                threshold.value
-            ));
-        }
-        if threshold.value < 0.0 {
-            return Err(format!(
-                "INVALID_POLICY_DEFINITION: threshold.value {} is out of range: must be >= 0",
                 threshold.value
             ));
         }
@@ -1457,12 +1486,49 @@ mod tests {
         })));
     }
 
+    /// Spec #110 moved quorum `threshold.value` from `minimum: 0` to
+    /// `exclusiveMinimum: 0`, the quorum-side twin of the Decision floor #99
+    /// tightened. A zero approval bar is trivially satisfied, so a
+    /// restrictive-looking quorum policy approved everything. This test used to
+    /// assert the opposite (`register_zero_quorum_threshold_value_succeeds`).
     #[test]
-    fn register_zero_quorum_threshold_value_succeeds() {
-        // `minimum: 0`, inclusive. What a zero threshold *means* is Phase 3's
-        // problem; the schema permits the value.
-        accept(quorum_policy(serde_json::json!({
+    fn register_zero_quorum_threshold_value_fails() {
+        let err = refuse(quorum_policy(serde_json::json!({
             "threshold": { "type": "n_of_m", "value": 0 }
+        })));
+        assert!(err.contains("threshold.value"), "error: {err}");
+        assert!(err.contains("greater than 0"), "error: {err}");
+
+        // `percentage` too: the `maximum: 100` arm is conditional, the floor is
+        // not.
+        let err = refuse(quorum_policy(serde_json::json!({
+            "threshold": { "type": "percentage", "value": 0 }
+        })));
+        assert!(err.contains("greater than 0"), "error: {err}");
+
+        // Negatives, a fortiori — this is the sole owner of the lower bound now,
+        // so it has to reach them.
+        let err = refuse(quorum_policy(serde_json::json!({
+            "threshold": { "type": "n_of_m", "value": -2 }
+        })));
+        assert!(err.contains("greater than 0"), "error: {err}");
+    }
+
+    /// The floor is keyed on the `value` key being **supplied**, not on the
+    /// parsed struct, because `QuorumThreshold::value` defaults to `0.0`. A
+    /// policy that sets no bar at all must still register: it resolves to
+    /// `EffectiveThreshold::Inert`, where the ApprovalRequest's own
+    /// `required_approvals` stands. Getting this wrong would refuse the
+    /// built-in `policy.default` wildcard, which carries no `threshold`.
+    #[test]
+    fn register_quorum_rules_without_a_threshold_value_succeeds() {
+        accept(quorum_policy(serde_json::json!({})));
+        accept(quorum_policy(serde_json::json!({ "threshold": {} })));
+        accept(quorum_policy(
+            serde_json::json!({ "threshold": { "type": "percentage" } }),
+        ));
+        accept(quorum_policy(serde_json::json!({
+            "abstention": { "counts_toward_quorum": true }
         })));
     }
 

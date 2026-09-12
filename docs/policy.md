@@ -63,7 +63,7 @@ The runtime does **not** run a JSON-Schema evaluator: it carries no `jsonschema`
    | `voting.quorum.type` | One of `count`, `percentage`. `n_of_m` is **not** legal here, though the evaluator would accept it |
    | `voting.quorum.value` | `>= 0` (a number, not necessarily an integer) |
    | Quorum `threshold.type` | One of `n_of_m`, `percentage`, `count`. `weighted` is refused — the canonical vocabulary no longer contains it, see below |
-   | Quorum `threshold.value` | A non-negative **integer**; additionally `<= 100` when `threshold.type` is `percentage` |
+   | Quorum `threshold.value` | A positive **integer** when the key is supplied (`> 0`, **exclusive**); additionally `<= 100` when `threshold.type` is `percentage` |
 
    A wildcard (`"*"`) policy must satisfy **every** standards-track mode's schema and every mode's constraints above, not just Decision's, because `SessionStart` binds it to every mode's sessions. Before this release it was validated against the Decision schema alone, which has no top-level `threshold` — so a Quorum `threshold` inside a `"*"` policy was silently dropped at registration and then read, unchecked, by the Quorum mode. A `"*"` policy carrying an out-of-domain `threshold` is now refused. Fields one mode's schema does not know are still ignored rather than refused, so a Decision-shaped wildcard (including the built-in `policy.default`) registers unchanged.
 
@@ -193,7 +193,7 @@ Acceptance criteria: `all_parties`, `counterparty`, `initiator`.
 
 The threshold field is spelled `type`, not `threshold_type`: the latter is the Rust field name, and a policy that uses it silently falls back to the default `n_of_m`.
 
-Threshold types: `n_of_m`, `percentage`, and `count` — a documented alias for `n_of_m` that both the mode and the evaluator already treat as one. `threshold.value` must be a non-negative integer, and at most `100` for `percentage`.
+Threshold types: `n_of_m`, `percentage`, and `count` — a documented alias for `n_of_m` that both the mode and the evaluator already treat as one. `threshold.value` must be a **positive** integer wherever the key is supplied, and at most `100` for `percentage`. The floor was inclusive until RFC-MACP-0012 1.2.0-draft (spec #110) moved it to `exclusiveMinimum: 0`, the quorum-side twin of the Decision tightening above: a zero approval bar is trivially satisfied, so a restrictive-looking quorum policy approved everything.
 
 `weighted` is **refused**, and the canonical vocabulary now agrees. RFC-MACP-0012 1.2.0-draft (spec #110) removed it from `threshold.type`'s enum and **reserved** the identifier: it was enum-legal but never had a weights map, an electorate rule, or a weighted analogue of RFC-MACP-0011 §5's count-only termination arithmetic, so no conformant evaluation of it ever existed. It must not be reused with a different meaning. This runtime had refused it as unimplemented since before the removal, so nothing changes here except the reason: `weighted` now fails the ordinary enum check rather than a dedicated arm.
 
@@ -203,7 +203,8 @@ How the threshold resolves to an approval bar (RFC-MACP-0011 §6 — a policy th
 
 - `n_of_m` / `count`: `value` approvals. `percentage`: that share of the **declared participants**.
 - Fractional results are **ceiled**, and the bar has a floor of **one approval**. Before this release the mode truncated (`0.5` → `0`) while the evaluator ceiled (`0.5` → `1`), so one policy meant two different bars; a bar of `0` was also reached before any ballot was cast, which let a negative commitment seal with zero approvals. Both layers now resolve through one function (`QuorumThreshold::effective`).
-- `value: 0` (the default) leaves the rule **inert**: the ApprovalRequest's own `required_approvals` stands.
+- `percentage` resolves with **exact integer arithmetic**: `ceil(value × declared_participant_count / 100)`, equivalently `(value × participants + 99) div 100`. RFC-MACP-0012 §4.2 promoted the ceiling rule from a non-normative rationale into normative text and forbade floating-point division outright, and it was right to: this runtime used to divide by `100` first, which is inexact in binary64 for most integer percentages, and the error survived into the ceiling. `value: 28` over 25 participants asked for 8 approvals where the rule gives 7. Thirteen `(value, participants)` pairs diverged within `value` 1–100 and participants 1–100. The denominator is the count declared at `SessionStart` and does not shrink as ballots — abstentions included — are cast; see [Deployment](deployment.md#9-a-percentage-quorum-threshold-can-now-resolve-one-approval-lower) for who the correction reaches.
+- An **omitted** `value` (or an omitted `threshold`) leaves the rule **inert**: the ApprovalRequest's own `required_approvals` stands. A *supplied* `0` is refused at registration, so `inert` is now reached only by omission.
 - A bar outside `1..=participants` — including an unrecognised `type`, `weighted` among them, which resolves to "unsatisfiable" rather than to a raw count — makes the positive outcome impossible, so the **ApprovalRequest is refused** rather than opening a session that can only decline. Registration already refuses those types; this guard covers a policy edited under a running session.
 - A negative commitment needs at least one ballot. RFC-MACP-0011 §4a makes an unreachable threshold the trigger for a decline, but with an empty ballot box "unreachable" only means the bar exceeds the participant pool, which is a misconfiguration rather than a decision.
 

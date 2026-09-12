@@ -192,3 +192,87 @@ verifier. D7 does not exist on this branch — it was written on G4's branch
 (`feat/handoff-implicit-accept-rev2`), and `DECISIONS.md` here carries D1-D6. The 0.8.0 decision it
 records is real but belongs to the other branch; nothing on this branch collides with it, and all
 seven crates report "no semver update required" here.
+
+## Phase 7 — catch-up to spec `aedfcad` (five commits past `b59af6a`)
+
+`conformance-oracle` checks the spec repo out with no `ref:`, so it reads `main`. Spec `main` moved
+from `b59af6a` (#99) to `aedfcad` after Phase 6, which made this branch red in the two places it was
+red before: `check_dir` (1 MISSING, 6 DRIFT) and `enum_lists_match_the_canonical_schemas`. Both are
+closed. Commits `20bf3fa` (mechanical) and `2141bdb` (behavioural).
+
+**Every schema change between `b59af6a` and `aedfcad`, and what each turned out to be.** Diffed
+`schemas/` in full; nothing outside the six files below moved, and `schemas/conformance/schema.json`
+plus all of `cmt-hash/` are byte-identical across the two commits, so `473d0ef` had already synced
+them.
+
+| Change | Verdict |
+|---|---|
+| quorum `threshold.type` drops `weighted` (#110) | mirror edit |
+| quorum `threshold.value` `minimum: 0` → `exclusiveMinimum: 0` (#110) | **behaviour** — registration accepted `0` |
+| quorum `threshold` description: percentage `1`–`100`, `ceil(value × n / 100)`, exact integer arithmetic, `weighted` RESERVED (#110) | **behaviour** — we divided by 100 first |
+| decision `supermajority` arm gains `required: ["threshold"]` (#112) | mirror edit — already refused, see below |
+| decision `voting.weights` description: `minProperties`/per-weight floor unconditional at every algorithm (#112) | no change — already unconditional |
+| decision `majority` arm `$comment` "three"→"four" blocks (#112) | prose |
+| 6 conformance fixtures: stale `:line` anchors stripped, `decision_zero_participants` prose resynced (#111, #113) | prose — verified structurally, see below |
+| `schemas/json/tests/invalid-{quorum,handoff,proposal,task}-rules/` + `invalid-policy-rules/supermajority-missing-threshold.json` (#109, #110, #112, #113) | out of `check_dir`'s scope (it binds `schemas/conformance` and `cmt-hash` only); read as evidence, not vendored |
+
+**The six DRIFT fixtures are prose-only, and that was verified rather than eyeballed.** With
+`_comment` and `description` deleted at every depth, `jq -S` output for all six compares identical
+between `b59af6a` and `aedfcad`. No message, payload, expectation, or error code moved.
+
+**`supermajority` `required: ["threshold"]` is NOT a gap here, contrary to the brief's suspicion.**
+`default_threshold()` is `0.5` and the check is `threshold <= 0.5`, so the value the schema would
+have defaulted in is exactly the one the arm declares illegal — `{"algorithm": "supermajority"}` was
+already refused. The coincidence is load-bearing and fragile in both directions (a `< 0.5` check, or
+a different default, would open it), so it is now pinned by
+`register_supermajority_without_threshold_fails` and by a parity assertion on the `required` keyword.
+
+**#110's ceiling rounding: direction matched, arithmetic did not.** We ceil, which is what §4.2
+pins. But §4.2 also newly says "MUST compute this threshold with exact integer arithmetic ... and
+MUST NOT use floating-point division", and `QuorumThreshold::effective` computed
+`(value / 100.0) * n`. Dividing first is inexact in binary64 and the error survives into the ceiling:
+13 `(value, participants)` pairs within `1..=100 × 1..=100` came out one approval too high
+(`28`/25 → 8 vs 7; `7`/100 → 8 vs 7; `68`/75 → 52 vs 51). Fixed with `u128` `div_ceil` in `2141bdb`.
+The denominator was already the count declared at `SessionStart`, which is the other half of §4.2's
+completion note.
+
+**#111 needs no runtime change.** `decision_zero_proposal_commitment.json` passes unmodified, in both
+commitment directions, confirming the out-of-band probe. Rule 5 losing its "unless policy explicitly
+allows a no-go outcome with zero proposals" clause changes nothing here — no rule schema ever
+expressed that allowance — and RFC-MACP-0002 §6.1's new `INVALID_ENVELOPE` mapping for Mode
+validation-rule breaches codifies what this runtime already returned.
+
+### Items no phase owns — for `DECISIONS.md` / `plans/defer/`
+
+**The `count` alias is now a departure the spec has explicitly ruled against, not a schema gap.**
+`QUORUM_THRESHOLD_TYPES` accepts `count` as an `n_of_m` alias, documented in `docs/policy.md`.
+Issue #98 item 4 used to be open; #110 closed it *against* us, with reasons that are not merely
+stylistic: `count` names a *participation floor* in Decision Mode's `voting.quorum` while Quorum
+Mode's `threshold` is an *approval bar*, and RFC-MACP-0012 §8 makes policy identity byte-level
+`rules` equality, so the alias makes two semantically identical policies compare unequal forever —
+breaking idempotent re-registration and cross-runtime replay equality. The spec's own
+`invalid-quorum-rules/threshold-type-weighted.json` pins the refusal of `count` alongside
+`weighted`. Nothing in CI gates this: the parity test filters `count` out by construction. Phase 7
+left behaviour alone (removing it is a user-visible tightening with its own deprecation story) and
+only re-labelled it in the constant's docs and in `docs/policy.md`, which now tells authors to
+prefer `n_of_m` and says to expect the alias to be withdrawn. **Wants a deferral record and a
+release where it is removed.**
+
+**`QUORUM_UNIMPLEMENTED_THRESHOLD_TYPES` is deleted.** It existed only because the canonical enum
+listed `weighted` and we refused it; with the identifier removed and reserved upstream, our refusal
+is agreement and the constant had nothing canonical to mirror. `weighted` now fails the ordinary
+enum check, so the error text changed from "is not implemented by this runtime" to "is not one of".
+The two tests that assert on that message still pass; one was renamed
+(`register_quorum_weighted_threshold_type_fails_as_unimplemented` → `..._fails`).
+
+**`EffectiveThreshold::Inert` is now reachable only by omission.** With a supplied `threshold.value`
+of `0` refused at registration, `Inert` arrives only from an omitted `threshold` (or an omitted
+`value`). The two callers' `Inert` defaults still differ — the mode falls back to
+`ApprovalRequest.required_approvals`, the evaluator applies no bar — which is the divergence
+`ASSUMPTIONS.md` already records under "Quorum `threshold.value = 0`". That entry's premise has
+narrowed and its wording should follow.
+
+**RFC-MACP-0012 §4.2's SHOULD-adjacent detail we do not surface.** §4.2 now says the effective
+percentage threshold is "fixed at `SessionStart`" and does not change as ballots are cast. We behave
+that way, but nothing tells an operator the bar they see in `GetSession` is static; not required, and
+recorded here rather than lost.
