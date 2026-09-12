@@ -2761,4 +2761,393 @@ mod tests {
         // The session exists and is usable.
         assert!(rt.get_session_checked(&sid).await.is_some());
     }
+
+    // --- The client boundary at the kernel's two live entry points (11c) ---
+    //
+    // RFC-MACP-0010 §5.1(3). These are the runtime-level halves; the
+    // mode-level rules are unit-tested in
+    // `crates/macp-modes/src/mode/handoff.rs`, `step::validate_message` in
+    // `crates/macp-modes/src/step.rs`, and the proof that the hook is NOT on
+    // the replay path in `src/replay.rs`
+    // (`reserved_prefix_entry_replays_at_every_rev`).
+    //
+    // Both entry points matter independently: `process_message` and
+    // `process_session_start` each call the hook themselves, because the
+    // runtime deliberately bypasses `macp_modes::step::validate_message` (it
+    // interposes its durable append between validation and commit), so neither
+    // call site is covered by the other.
+
+    const HANDOFF_MODE: &str = "macp.mode.handoff.v1";
+    const OWNER: &str = "agent://owner";
+    const TARGET: &str = "agent://target";
+
+    fn reserved_id(handoff_id: &str) -> String {
+        format!(
+            "{}{handoff_id}",
+            crate::mode::handoff::IMPLICIT_ACCEPT_MESSAGE_ID_PREFIX
+        )
+    }
+
+    fn handoff_start_payload() -> Vec<u8> {
+        session_start(vec![OWNER.into(), TARGET.into()])
+    }
+
+    /// A `Commitment` that echoes the versions `handoff_session_with_offer`
+    /// binds, so the only thing left to reject it is the `message_id`.
+    fn handoff_commitment_payload() -> Vec<u8> {
+        CommitmentPayload {
+            commitment_id: "c1".into(),
+            action: "handoff.accepted".into(),
+            authority_scope: "support".into(),
+            reason: "bound".into(),
+            mode_version: "1.0.0".into(),
+            policy_version: "policy.default".into(),
+            configuration_version: "cfg-1".into(),
+            outcome_positive: true,
+            supersedes: None,
+        }
+        .encode_to_vec()
+    }
+
+    fn handoff_offer(handoff_id: &str) -> Vec<u8> {
+        crate::handoff_pb::HandoffOfferPayload {
+            handoff_id: handoff_id.into(),
+            target_participant: TARGET.into(),
+            scope: "support".into(),
+            reason: "escalate".into(),
+        }
+        .encode_to_vec()
+    }
+
+    fn handoff_context(handoff_id: &str) -> Vec<u8> {
+        crate::handoff_pb::HandoffContextPayload {
+            handoff_id: handoff_id.into(),
+            content_type: "text/plain".into(),
+            context: b"background".to_vec(),
+        }
+        .encode_to_vec()
+    }
+
+    fn handoff_accept(handoff_id: &str, implicit: bool) -> Vec<u8> {
+        crate::handoff_pb::HandoffAcceptPayload {
+            handoff_id: handoff_id.into(),
+            accepted_by: TARGET.into(),
+            reason: "ready".into(),
+            implicit,
+        }
+        .encode_to_vec()
+    }
+
+    /// An Open handoff session at the current semantics revision with one
+    /// outstanding offer `h1`. Returns the session id.
+    async fn handoff_session_with_offer(rt: &Runtime) -> String {
+        let sid = new_sid();
+        rt.process(
+            &env(
+                HANDOFF_MODE,
+                "SessionStart",
+                "start-1",
+                &sid,
+                OWNER,
+                handoff_start_payload(),
+            ),
+            None,
+        )
+        .await
+        .expect("handoff session start");
+        rt.process(
+            &env(
+                HANDOFF_MODE,
+                "HandoffOffer",
+                "offer-1",
+                &sid,
+                OWNER,
+                handoff_offer("h1"),
+            ),
+            None,
+        )
+        .await
+        .expect("handoff offer");
+        assert_eq!(
+            rt.get_session_checked(&sid).await.unwrap().semantics_rev,
+            macp_core::session::CURRENT_SEMANTICS_REV
+        );
+        sid
+    }
+
+    /// Phase 11c criterion 1, message path: at the current revision a client
+    /// envelope whose `message_id` is in the reserved `implicit-accept:`
+    /// namespace is rejected `InvalidEnvelope`, and the rejection mutates
+    /// nothing — neither accepted history nor `seen_message_ids` (CLAUDE.md §8
+    /// dedup invariant).
+    ///
+    /// `HandoffContext` is the interesting carrier: it is the one mode message
+    /// the offerer may send at any disposition, and it is rejected here
+    /// **before** dispatch, which is why the check cannot live in the mode's
+    /// own rules. `Commitment` is included because the initiator can squat the
+    /// id that way too, and because it proves the reservation is not scoped to
+    /// `HandoffAccept`.
+    #[tokio::test]
+    async fn reserved_message_id_namespace_is_rejected_at_rev2() {
+        let rt = make_runtime();
+        let sid = handoff_session_with_offer(&rt).await;
+
+        let history_before = rt.log_store.get_log(&sid).await.unwrap().len();
+        let dedup_before = rt
+            .get_session_checked(&sid)
+            .await
+            .unwrap()
+            .seen_message_ids
+            .clone();
+
+        for (message_type, sender, payload) in [
+            ("HandoffContext", OWNER, handoff_context("h1")),
+            ("Commitment", OWNER, handoff_commitment_payload()),
+            ("HandoffAccept", TARGET, handoff_accept("h1", false)),
+        ] {
+            let err = rt
+                .process(
+                    &env(
+                        HANDOFF_MODE,
+                        message_type,
+                        &reserved_id("h1"),
+                        &sid,
+                        sender,
+                        payload,
+                    ),
+                    None,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, MacpError::InvalidEnvelope),
+                "{message_type} with a reserved id must be InvalidEnvelope, got {err}"
+            );
+        }
+
+        // Nothing was appended and no dedup slot was consumed.
+        let session = rt.get_session_checked(&sid).await.unwrap();
+        assert_eq!(
+            rt.log_store.get_log(&sid).await.unwrap().len(),
+            history_before
+        );
+        assert_eq!(session.seen_message_ids, dedup_before);
+        assert!(!session.seen_message_ids.contains(&reserved_id("h1")));
+        assert_eq!(session.state, SessionState::Open);
+
+        // Control: the same `HandoffContext` with an ordinary id is accepted,
+        // so the rejections above are the id's doing and not the payload's.
+        rt.process(
+            &env(
+                HANDOFF_MODE,
+                "HandoffContext",
+                "ctx-1",
+                &sid,
+                OWNER,
+                handoff_context("h1"),
+            ),
+            None,
+        )
+        .await
+        .expect("an ordinary id is accepted");
+        assert_eq!(
+            rt.log_store.get_log(&sid).await.unwrap().len(),
+            history_before + 1
+        );
+    }
+
+    /// Phase 11c criterion 1, start path. This call site exists precisely
+    /// because the namespace is squattable through `SessionStart`, whose
+    /// `message_id` enters `seen_message_ids` at the commit point — after
+    /// which the runtime's own later synthesis would be silently skipped.
+    ///
+    /// The rejection must leave **no** trace: no session in the registry, no
+    /// session log, and no reservation of the session id — proved by starting
+    /// the same session id again with a clean `message_id` and having it
+    /// succeed (`SessionAlreadyExists` would be the failure signature of a
+    /// leaked reservation).
+    #[tokio::test]
+    async fn reserved_message_id_is_rejected_on_the_session_start_path() {
+        let rt = make_runtime();
+        let sid = new_sid();
+
+        let err = rt
+            .process(
+                &env(
+                    HANDOFF_MODE,
+                    "SessionStart",
+                    &reserved_id("h1"),
+                    &sid,
+                    OWNER,
+                    handoff_start_payload(),
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MacpError::InvalidEnvelope),
+            "reserved id on SessionStart must be InvalidEnvelope, got {err}"
+        );
+
+        // No session, no log, nothing to roll back.
+        assert!(rt.get_session_checked(&sid).await.is_none());
+        assert!(rt.log_store.get_log(&sid).await.is_none());
+        assert!(!rt.registry.sessions.read().await.contains_key(&sid));
+
+        // The session id was never reserved and the id never consumed a dedup
+        // slot: the same session starts cleanly.
+        rt.process(
+            &env(
+                HANDOFF_MODE,
+                "SessionStart",
+                "start-1",
+                &sid,
+                OWNER,
+                handoff_start_payload(),
+            ),
+            None,
+        )
+        .await
+        .expect("a rejected SessionStart must not reserve the session id");
+        let session = rt.get_session_checked(&sid).await.unwrap();
+        assert!(session.seen_message_ids.contains("start-1"));
+        assert!(!session.seen_message_ids.contains(&reserved_id("h1")));
+    }
+
+    /// Phase 11c criterion 2, runtime path: a client `HandoffAccept` carrying
+    /// `implicit = true` never enters history.
+    ///
+    /// Two envelopes, as the criterion requires:
+    /// (a) `implicit = true` with an ordinary `message_id` — `InvalidPayload`.
+    ///     **This assertion is double-guarded today** and so does not isolate
+    ///     the hook: `handle_message` rejects the same envelope with the same
+    ///     code (deliberately kept until 11d restructures that arm). What it
+    ///     does pin is the criterion's actual requirement — that the rev-2
+    ///     error *surface* through `Send` is unchanged — and it becomes the
+    ///     only guard once 11d teaches dispatch to accept the shape.
+    /// (b) `implicit = true` with the **reserved** `message_id` and the
+    ///     correct sender — `InvalidEnvelope`, which only the boundary can
+    ///     produce (dispatch would say `InvalidPayload`). That is the
+    ///     mutation-sensitive half, and the envelope is byte-shaped exactly
+    ///     like the one the runtime will synthesize from 11e.
+    #[tokio::test]
+    async fn client_implicit_accept_rejected_through_the_runtime() {
+        let rt = make_runtime();
+        let sid = handoff_session_with_offer(&rt).await;
+        let history_before = rt.log_store.get_log(&sid).await.unwrap().len();
+
+        // (a) ordinary id.
+        let err = rt
+            .process(
+                &env(
+                    HANDOFF_MODE,
+                    "HandoffAccept",
+                    "accept-1",
+                    &sid,
+                    TARGET,
+                    handoff_accept("h1", true),
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MacpError::InvalidPayload), "got {err}");
+
+        // (b) the runtime's own synthetic shape, submitted by the target.
+        let err = rt
+            .process(
+                &env(
+                    HANDOFF_MODE,
+                    "HandoffAccept",
+                    &reserved_id("h1"),
+                    &sid,
+                    TARGET,
+                    handoff_accept("h1", true),
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MacpError::InvalidEnvelope), "got {err}");
+
+        // The offer is still outstanding and history is untouched.
+        let session = rt.get_session_checked(&sid).await.unwrap();
+        assert_eq!(
+            rt.log_store.get_log(&sid).await.unwrap().len(),
+            history_before
+        );
+        assert!(session.seen_message_ids.is_disjoint(
+            &["accept-1".to_string(), reserved_id("h1")]
+                .into_iter()
+                .collect()
+        ));
+        let mode_state: serde_json::Value = serde_json::from_slice(&session.mode_state).unwrap();
+        assert_eq!(mode_state["offers"]["h1"]["disposition"], "Offered");
+
+        // Control: the explicit accept (`implicit = false`, ordinary id) is
+        // accepted, so the rejections above are not the envelope's other
+        // fields.
+        rt.process(
+            &env(
+                HANDOFF_MODE,
+                "HandoffAccept",
+                "accept-2",
+                &sid,
+                TARGET,
+                handoff_accept("h1", false),
+            ),
+            None,
+        )
+        .await
+        .expect("an explicit accept is still accepted");
+    }
+
+    /// Error-code ordering at the kernel is unchanged by the phase: an
+    /// envelope that is **both** unauthorized and carries a reserved id
+    /// reports `Forbidden`, because the hook is called after
+    /// `mode.authorize_sender`. Rev <= 1's Forbidden-before-payload ordering
+    /// therefore does not shift at rev 2.
+    #[tokio::test]
+    async fn client_boundary_error_ordering_is_unchanged_at_rev2() {
+        let rt = make_runtime();
+        let sid = handoff_session_with_offer(&rt).await;
+
+        // `agent://stranger` is not a declared participant.
+        let err = rt
+            .process(
+                &env(
+                    HANDOFF_MODE,
+                    "HandoffAccept",
+                    &reserved_id("h1"),
+                    &sid,
+                    "agent://stranger",
+                    handoff_accept("h1", true),
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MacpError::Forbidden),
+            "authorization must be reported before the client boundary, got {err}"
+        );
+
+        // Same envelope from the authorized sender: now the boundary speaks.
+        let err = rt
+            .process(
+                &env(
+                    HANDOFF_MODE,
+                    "HandoffAccept",
+                    &reserved_id("h1"),
+                    &sid,
+                    TARGET,
+                    handoff_accept("h1", true),
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MacpError::InvalidEnvelope), "got {err}");
+    }
 }

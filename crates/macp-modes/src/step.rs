@@ -330,6 +330,95 @@ mod tests {
         ));
     }
 
+    // A mode with a client boundary: it refuses one reserved `message_id` and
+    // records whether dispatch was reached, so a test can tell "rejected at
+    // the boundary" from "rejected by the mode's own rules".
+    struct BoundaryMode {
+        dispatched: std::sync::atomic::AtomicBool,
+    }
+    impl BoundaryMode {
+        fn new() -> Self {
+            Self {
+                dispatched: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+        fn dispatched(&self) -> bool {
+            self.dispatched.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+    impl Mode for BoundaryMode {
+        fn on_session_start(&self, _s: &Session, _e: &Envelope) -> Result<ModeResponse, MacpError> {
+            Ok(ModeResponse::PersistState(vec![]))
+        }
+        fn on_message(&self, _s: &Session, _e: &Envelope) -> Result<ModeResponse, MacpError> {
+            self.dispatched
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(ModeResponse::PersistState(vec![1]))
+        }
+        fn validate_client_envelope(&self, _s: &Session, env: &Envelope) -> Result<(), MacpError> {
+            if env.message_id == "reserved" {
+                return Err(MacpError::InvalidEnvelope);
+            }
+            Ok(())
+        }
+        // default authorize_sender: sender must be a declared participant.
+    }
+
+    /// `validate_message` enforces the client boundary (Phase 11c criterion 4),
+    /// so a library consumer driving the phases through this helper inherits it
+    /// without knowing the hook exists.
+    ///
+    /// Asserts the *position* too, not just the error: dispatch must not have
+    /// been reached, and the envelope must be rejected **after**
+    /// `authorize_sender` so the pre-existing Forbidden-before-payload error
+    /// ordering is untouched. `step` inherits it by construction (it calls
+    /// `validate_message`), and a rejection consumes no dedup slot.
+    #[test]
+    fn validate_message_enforces_the_client_boundary() {
+        let s = session();
+        let mode = BoundaryMode::new();
+
+        let err = validate_message(&s, &env("agent://a", "Msg", "reserved"), &mode).unwrap_err();
+        assert!(matches!(err, MacpError::InvalidEnvelope));
+        assert!(
+            !mode.dispatched(),
+            "the boundary must reject before dispatch"
+        );
+
+        // Ordering: unauthorized *and* reserved reports the authorization
+        // error, because the hook runs after `authorize_sender`.
+        let err =
+            validate_message(&s, &env("agent://stranger", "Msg", "reserved"), &mode).unwrap_err();
+        assert!(matches!(err, MacpError::Forbidden));
+
+        // A non-reserved id from the same sender passes the boundary and
+        // reaches dispatch, so the rejection above was the hook's doing.
+        validate_message(&s, &env("agent://a", "Msg", "m1"), &mode).unwrap();
+        assert!(mode.dispatched());
+
+        // Through `step`: rejected, and no dedup slot consumed.
+        let mut s2 = session();
+        let err = step(&mut s2, &env("agent://a", "Msg", "reserved"), &mode, 1).unwrap_err();
+        assert!(matches!(err, MacpError::InvalidEnvelope));
+        assert!(s2.seen_message_ids.is_empty());
+        assert_eq!(s2.state, SessionState::Open);
+    }
+
+    /// The default hook is `Ok(())`, so every mode that has no client-boundary
+    /// rules is unaffected by the phase (semver-minor, no behavior change).
+    #[test]
+    fn default_client_boundary_is_open() {
+        let s = session();
+        for message_id in ["m1", "reserved", "implicit-accept:h1"] {
+            assert!(
+                TestMode
+                    .validate_client_envelope(&s, &env("agent://a", "Msg", message_id))
+                    .is_ok(),
+                "default hook must accept {message_id}"
+            );
+        }
+    }
+
     #[test]
     fn phases_compose_like_step_for_durable_consumers() {
         // The runtime path: check_preconditions -> validate_message -> commit.

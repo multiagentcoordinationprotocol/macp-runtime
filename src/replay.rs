@@ -1402,4 +1402,148 @@ mod tests {
         // 20ms after the second = the 100ms timeout, so D = 1_500 + 20.
         assert_eq!(session.unsuspended_deadline(1_000, 100), 1_520);
     }
+
+    // --- The client boundary is NOT on the replay path (Phase 11c) ---
+    //
+    // The whole Phase 11 design rests on it: `Mode::validate_client_envelope`
+    // must run on live client submissions and never on replay, because from
+    // 11e the runtime writes an envelope into permanent history that the
+    // boundary is required to reject as a *client* submission. If replay ever
+    // called the hook, every such history would become unreplayable — which is
+    // the failure mode the rejected alternative (a persisted `LogEntry`
+    // discriminator) was supposed to avoid, and the reason it was rejected is
+    // that its failure would be *silent* instead.
+    //
+    // These two tests make that empirical rather than asserted. The live
+    // counterparts are in `src/runtime.rs`
+    // (`reserved_message_id_namespace_is_rejected_at_rev2`,
+    // `reserved_message_id_is_rejected_on_the_session_start_path`): the same
+    // envelope shapes are rejected there and replay through here.
+
+    /// The same three entries as `handoff_history`, but with the reserved
+    /// `implicit-accept:` prefix on **both** the `SessionStart` id and the
+    /// `Commitment` id — one per live call site, so neither is covered only by
+    /// the other.
+    fn handoff_history_with_reserved_message_ids(semantics_rev: u32) -> Vec<LogEntry> {
+        // Envelope clock 1_050 / acceptance clock 1_300: clears the 100ms
+        // timeout on the acceptance clock, which is what rev >= 1 uses.
+        let mut entries = handoff_history(semantics_rev, 1_050, 1_300);
+        entries[0].message_id = "implicit-accept:squatted-at-start".into();
+        entries[2].message_id = "implicit-accept:h1".into();
+        entries
+    }
+
+    /// A log whose entries carry ids the client boundary rejects replays
+    /// successfully **at every revision, including the current one** — proof
+    /// that `replay_entry`/`replay_from_start` do not call
+    /// `Mode::validate_client_envelope`.
+    ///
+    /// The reserved-namespace rule is the right probe precisely because its
+    /// error code (`InvalidEnvelope`) is one nothing on the replay path can
+    /// produce for these entries: if the hook were reachable from replay, both
+    /// revisions below would fail. Rev 1 is Phase 11c criterion 3's replay
+    /// half (legacy histories that already contain such an id stay
+    /// replayable); the current revision is the forward-looking half.
+    #[test]
+    fn reserved_prefix_entry_replays_at_every_rev() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+
+        for rev in [1, macp_core::session::CURRENT_SEMANTICS_REV] {
+            let entries = handoff_history_with_reserved_message_ids(rev);
+            let session = replay_session("s1", &entries, &registry, Some(&policies))
+                .unwrap_or_else(|e| panic!("rev {rev} must replay reserved ids, got {e}"));
+            assert_eq!(session.semantics_rev, rev);
+            assert_implicitly_accepted(&session);
+            // The ids are in dedup state, i.e. they were genuinely replayed as
+            // accepted history and not skipped.
+            assert!(session
+                .seen_message_ids
+                .contains("implicit-accept:squatted-at-start"));
+            assert!(session.seen_message_ids.contains("implicit-accept:h1"));
+        }
+
+        // Control: the identical ids are rejected on the live path at the
+        // current revision (see `runtime::tests`), so replay's acceptance here
+        // is the *absence of the hook*, not the absence of the rule.
+        let mode = crate::mode::handoff::HandoffMode::new(std::sync::Arc::new(
+            macp_policy::DefaultPolicyEvaluator,
+        ));
+        let entries =
+            handoff_history_with_reserved_message_ids(macp_core::session::CURRENT_SEMANTICS_REV);
+        let session = replay_session("s1", &entries, &registry, Some(&policies)).unwrap();
+        for message_id in ["implicit-accept:squatted-at-start", "implicit-accept:h1"] {
+            let env = Envelope {
+                macp_version: "1.0".into(),
+                mode: session.mode.clone(),
+                message_type: "HandoffContext".into(),
+                message_id: message_id.into(),
+                session_id: "s1".into(),
+                sender: "alice".into(),
+                timestamp_unix_ms: 1_000,
+                payload: vec![],
+            };
+            assert!(matches!(
+                crate::mode::Mode::validate_client_envelope(&mode, &session, &env).unwrap_err(),
+                MacpError::InvalidEnvelope
+            ));
+        }
+    }
+
+    /// The exact envelope shape 11e will write into permanent history — a
+    /// `HandoffAccept` with `implicit = true` and the deterministic
+    /// `message_id`, on a current-revision session — reaches **dispatch** on
+    /// replay. The boundary does not see it.
+    ///
+    /// Today that entry is still refused, by `handle_message`'s
+    /// `if payload.implicit` arm, which 11c deliberately leaves in place
+    /// (belt and suspenders until 11d restructures it). So the assertion here
+    /// is the *source* of the refusal, which is the part 11c is responsible
+    /// for: `InvalidPayload` from dispatch, never `InvalidEnvelope` from the
+    /// client boundary. Verified empirically while writing this test — with
+    /// that one `handle_message` arm deleted and nothing else changed, this
+    /// exact log replays `Ok` to a `Resolved` session whose offer `h1` is
+    /// `Accepted` by `bob` — so 11d/11e are not blocked: the only thing
+    /// standing between this shape and a clean replay is the mode arm 11d is
+    /// specified to restructure.
+    ///
+    /// **11d must flip this test from `Err(InvalidPayload)` to `Ok`.** It is
+    /// written to fail loudly then, not to be silently satisfied.
+    #[test]
+    fn synthetic_shaped_entry_reaches_dispatch_not_the_client_boundary() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+
+        let mut entries = handoff_history(macp_core::session::CURRENT_SEMANTICS_REV, 1_050, 1_300);
+        // Insert the synthetic accept between the offer and the commitment,
+        // with every constant RFC-MACP-0010 §5.1(3) fixes: sender and
+        // `accepted_by` = the offer's target, `implicit = true`, the
+        // deterministic id, and both clocks at the computed deadline D (offer
+        // 1_000 + 100ms timeout, no suspension in the window).
+        let commitment = entries.pop().expect("commitment is the last entry");
+        let synthetic = crate::handoff_pb::HandoffAcceptPayload {
+            handoff_id: "h1".into(),
+            accepted_by: "bob".into(),
+            reason: "implicit accept (timeout)".into(),
+            implicit: true,
+        }
+        .encode_to_vec();
+        let mut entry = handoff_entry(
+            "implicit-accept:h1",
+            "HandoffAccept",
+            synthetic,
+            1_100,
+            1_100,
+        );
+        entry.sender = "bob".into();
+        entries.push(entry);
+        entries.push(commitment);
+
+        let err = replay_session("s1", &entries, &registry, Some(&policies)).unwrap_err();
+        assert!(
+            matches!(err, MacpError::InvalidPayload),
+            "the synthetic shape must be refused by dispatch (InvalidPayload), \
+             not by the client boundary (InvalidEnvelope); got {err}"
+        );
+    }
 }

@@ -564,3 +564,46 @@
   breaks (true, but the whole point of the section is that item 9 documents a widening too).
 - **Blast radius if wrong:** docs only.
 - **Status:** UNCONFIRMED (2026-09-12)
+
+## Committing a replay test that pins today's *pre-11d* refusal of the synthetic shape
+- **Plan:** Phase 11c of `plans/backlog-closeout-2026-09.md` (the client boundary)
+- **Assumed:** the phase's load-bearing claim is that `Mode::validate_client_envelope` never runs
+  on replay, and the strongest available evidence is empirical. But the exact envelope 11e will
+  write into history (`implicit = true`, `message_id = implicit-accept:<handoff_id>`, rev-2
+  session) cannot replay `Ok` yet: 11c deliberately leaves `handle_message`'s
+  `if payload.implicit` arm in place (`crates/macp-modes/src/mode/handoff.rs:394`), and 11d owns
+  restructuring it. So a green "it replays" test is not writable in this sub-phase.
+- **Chose:** commit `synthetic_shaped_entry_reaches_dispatch_not_the_client_boundary`
+  (`src/replay.rs:1513`) asserting the *source* of the refusal — `InvalidPayload` from dispatch,
+  never `InvalidEnvelope` from the boundary — which is exactly the part 11c is responsible for,
+  and is mutation-killed only by adding the hook to `replay_entry`. The stronger claim was
+  verified out-of-tree instead: with that one `handle_message` arm deleted and nothing else
+  changed, the identical log replays `Ok` to a `Resolved` session whose offer `h1` is `Accepted`
+  by `bob` with `outcome_reason = "implicit accept (timeout)"`. Recorded in the test's rustdoc,
+  including the instruction that **11d must flip the assertion from `Err` to `Ok`**.
+- **Alternatives:** assert nothing about the synthetic shape until 11d (loses the proof that the
+  boundary is not what refuses it, which is the only 11c-owned half); or pull 11d's mode
+  restructure forward to make the test green now (out of scope, and it would make the boundary
+  the sole guard one sub-phase early).
+- **Blast radius if wrong:** one test. If 11d forgets it, the assertion fails loudly at that
+  commit rather than silently passing — which is the intended failure direction.
+- **Status:** UNCONFIRMED (2026-09-12)
+
+## Keeping a runtime-level assertion that is double-guarded (and saying so) rather than dropping it
+- **Plan:** Phase 11c of `plans/backlog-closeout-2026-09.md` (the client boundary)
+- **Assumed:** 11c criterion 2 asks for the `implicit: true` rejection "plus the runtime-level
+  path". Measured, the ordinary-`message_id` half of that runtime assertion is **vacuous for the
+  hook** today: mutation M2 (deleting the hook's `implicit` rule) leaves
+  `client_implicit_accept_rejected_through_the_runtime` green, because `handle_message` rejects
+  the same envelope with the same `InvalidPayload`.
+- **Chose:** keep it, and label the vacuity in the test's own rustdoc, because what it pins is the
+  criterion's actual requirement (the rev-2 error *surface* through `Send` does not shift) and it
+  becomes the only guard the moment 11d teaches dispatch to accept the shape. The
+  mutation-sensitive half lives in the same test: the reserved-`message_id` variant reports
+  `InvalidEnvelope`, which only the boundary can produce.
+- **Alternatives:** delete the ordinary-id assertion as vacuous (loses the error-surface pin and
+  the 11d tripwire); or fake isolation with a test-only mode override (tests the override, not the
+  runtime).
+- **Blast radius if wrong:** one assertion; the mode-level unit test
+  `client_implicit_accept_rejected_at_the_boundary` isolates the rule non-vacuously either way.
+- **Status:** UNCONFIRMED (2026-09-12)

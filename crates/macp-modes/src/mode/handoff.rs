@@ -1782,4 +1782,237 @@ mod tests {
         // all only while the constant stays there.
         const _: () = assert!(macp_core::session::CURRENT_SEMANTICS_REV >= 2);
     }
+
+    // --- The client boundary: `validate_client_envelope` (Phase 11c) ---
+    //
+    // RFC-MACP-0010 §5.1(3). The runtime-level halves of these criteria live
+    // in `src/runtime.rs`
+    // (`reserved_message_id_namespace_is_rejected_at_rev2`,
+    // `reserved_message_id_is_rejected_on_the_session_start_path`,
+    // `client_implicit_accept_rejected_through_the_runtime`), and the proof
+    // that the hook is NOT on the replay path lives in `src/replay.rs`
+    // (`reserved_prefix_entry_replays_at_every_rev`).
+
+    fn make_implicit_accept(handoff_id: &str, accepted_by: &str) -> Vec<u8> {
+        HandoffAcceptPayload {
+            handoff_id: handoff_id.into(),
+            accepted_by: accepted_by.into(),
+            reason: "implicit accept (timeout)".into(),
+            implicit: true,
+        }
+        .encode_to_vec()
+    }
+
+    fn reserved_id(handoff_id: &str) -> String {
+        format!("{IMPLICIT_ACCEPT_MESSAGE_ID_PREFIX}{handoff_id}")
+    }
+
+    /// A client-submitted `HandoffAccept` carrying `implicit = true` is
+    /// rejected at the boundary (RFC-MACP-0010 §5.1(3) MUST).
+    ///
+    /// **Two envelopes, deliberately**, so neither rule can pass for the
+    /// other's reason:
+    /// (a) `implicit = true` with the natural (non-reserved) `message_id` —
+    ///     isolates the `implicit` rule, `InvalidPayload` (the same code
+    ///     `handle_message` returns for the same envelope today, so the rev-2
+    ///     error surface does not shift);
+    /// (b) `implicit = true` with the **reserved** `message_id` and correct
+    ///     sender/`accepted_by` — byte-for-byte the envelope the runtime will
+    ///     synthesize from 11e, and therefore the only place the flag's
+    ///     *client provenance* can be pinned once 11d requires dispatch to
+    ///     accept exactly that shape. It reports `InvalidEnvelope`, not
+    ///     `InvalidPayload`, because the reserved-namespace rule is checked
+    ///     first — asserted rather than glossed, since the ordering is what
+    ///     makes this assertion mutation-sensitive after 11d lands.
+    #[test]
+    fn client_implicit_accept_rejected_at_the_boundary() {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let session = base_session();
+
+        // (a) the `implicit` rule, isolated.
+        let mut a = env(
+            "target",
+            "HandoffAccept",
+            make_implicit_accept("h1", "target"),
+        );
+        assert!(
+            !a.message_id.starts_with(IMPLICIT_ACCEPT_MESSAGE_ID_PREFIX),
+            "case (a) must not also trip the reserved-namespace rule"
+        );
+        assert!(matches!(
+            mode.validate_client_envelope(&session, &a).unwrap_err(),
+            MacpError::InvalidPayload
+        ));
+
+        // Same envelope with `implicit = false` passes the boundary: the rule
+        // discriminates on the flag, not on the message type.
+        a.payload = make_accept("h1", "target");
+        assert!(mode.validate_client_envelope(&session, &a).is_ok());
+
+        // (b) the runtime's own synthetic shape, submitted by a client.
+        let mut b = env(
+            "target",
+            "HandoffAccept",
+            make_implicit_accept("h1", "target"),
+        );
+        b.message_id = reserved_id("h1");
+        assert!(matches!(
+            mode.validate_client_envelope(&session, &b).unwrap_err(),
+            MacpError::InvalidEnvelope
+        ));
+    }
+
+    /// The reserved namespace is reserved for **every** message type, not just
+    /// `HandoffAccept`: the squat works through `SessionStart` (initiator),
+    /// `Commitment` (commitment authority) and `HandoffContext` (the offerer)
+    /// too, and consuming that dedup slot would make the runtime's own later
+    /// synthesis silently skipped.
+    ///
+    /// Also pins that it is a **prefix** reservation, not one exact id: the
+    /// squattable id is the one a *future* offer would use, which the boundary
+    /// cannot enumerate.
+    #[test]
+    fn reserved_prefix_is_rejected_for_every_message_type() {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let session = base_session();
+
+        for message_type in [
+            "SessionStart",
+            "Commitment",
+            "HandoffOffer",
+            "HandoffContext",
+            "HandoffAccept",
+            "HandoffDecline",
+            "SomeUnknownType",
+        ] {
+            for suffix in ["h1", "", "a-handoff-id-that-does-not-exist-yet"] {
+                let mut e = env("owner", message_type, vec![]);
+                e.message_id = format!("{IMPLICIT_ACCEPT_MESSAGE_ID_PREFIX}{suffix}");
+                assert!(
+                    matches!(
+                        mode.validate_client_envelope(&session, &e).unwrap_err(),
+                        MacpError::InvalidEnvelope
+                    ),
+                    "{message_type} with id {} must be rejected",
+                    e.message_id
+                );
+            }
+
+            // A near-miss id is untouched: the reservation is the prefix, and
+            // nothing wider.
+            let mut ok = env("owner", message_type, vec![]);
+            ok.message_id = "implicit-accept".into(); // no trailing colon
+            assert!(
+                mode.validate_client_envelope(&session, &ok).is_ok(),
+                "{message_type} with a near-miss id must pass"
+            );
+        }
+    }
+
+    /// Rev <= 1 is untouched, so legacy histories replay bit-identically: the
+    /// hook returns `Ok` for both rules on a legacy session, while the
+    /// identical envelopes are rejected at the current revision.
+    ///
+    /// The differential half is the point — without it, deleting the rev gate
+    /// would leave this test green.
+    #[test]
+    fn reserved_namespace_is_rev_gated() {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+
+        let mut reserved = env("owner", "HandoffContext", make_context("h1"));
+        reserved.message_id = reserved_id("h1");
+        let implicit = env(
+            "target",
+            "HandoffAccept",
+            make_implicit_accept("h1", "target"),
+        );
+
+        for rev in [0, 1] {
+            let mut legacy = base_session();
+            legacy.semantics_rev = rev;
+            assert!(
+                mode.validate_client_envelope(&legacy, &reserved).is_ok(),
+                "rev {rev} must accept a reserved-prefix id"
+            );
+            assert!(
+                mode.validate_client_envelope(&legacy, &implicit).is_ok(),
+                "rev {rev} must leave the implicit flag to dispatch"
+            );
+        }
+
+        let current = base_session();
+        assert_eq!(
+            current.semantics_rev,
+            macp_core::session::CURRENT_SEMANTICS_REV
+        );
+        assert!(mode.validate_client_envelope(&current, &reserved).is_err());
+        assert!(mode.validate_client_envelope(&current, &implicit).is_err());
+    }
+
+    /// A `HandoffAccept` whose payload does not decode is deliberately **not**
+    /// decided at the boundary — the hook returns `Ok` and `handle_message`
+    /// rejects it `InvalidPayload` on its own grounds. Duplicating the
+    /// decision here would only give two places to keep in sync.
+    #[test]
+    fn undecodable_handoff_accept_is_left_to_dispatch() {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = base_session();
+
+        // A payload that is not a valid `HandoffAcceptPayload` (field 1 is a
+        // string here, declared as a group-start wire type).
+        let garbage = vec![0xffu8, 0xff, 0xff, 0xff];
+        assert!(HandoffAcceptPayload::decode(&*garbage).is_err());
+
+        let e = env("target", "HandoffAccept", garbage);
+        assert!(
+            mode.validate_client_envelope(&session, &e).is_ok(),
+            "the boundary must not decide an undecodable payload"
+        );
+
+        // And dispatch still rejects it, so nothing is let through.
+        let result = mode
+            .on_session_start(&session, &env("owner", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+        assert!(matches!(
+            mode.on_message(&session, &e).unwrap_err(),
+            MacpError::InvalidPayload
+        ));
+    }
+
+    /// Error ordering is unchanged: an envelope that is both unauthorized and
+    /// carries a reserved id reports the **authorization** error. The hook
+    /// runs after `authorize_sender` precisely so the pre-existing
+    /// Forbidden-before-payload ordering does not shift at rev 2.
+    #[test]
+    fn client_boundary_runs_after_sender_authorization() {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = base_session();
+        let result = mode
+            .on_session_start(&session, &env("owner", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+
+        // `stranger` is not a declared participant -> Forbidden from
+        // `authorize_sender`, even though the id is reserved and the payload
+        // sets `implicit`.
+        let mut e = env(
+            "stranger",
+            "HandoffAccept",
+            make_implicit_accept("h1", "stranger"),
+        );
+        e.message_id = reserved_id("h1");
+        assert!(matches!(
+            crate::step::validate_message(&session, &e, &mode).unwrap_err(),
+            MacpError::Forbidden
+        ));
+
+        // The same envelope from the authorized sender does reach the hook.
+        let mut authorized = e.clone();
+        authorized.sender = "target".into();
+        assert!(matches!(
+            crate::step::validate_message(&session, &authorized, &mode).unwrap_err(),
+            MacpError::InvalidEnvelope
+        ));
+    }
 }
