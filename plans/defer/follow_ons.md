@@ -48,23 +48,45 @@ Docs: `docs/modes.md` (Handoff → Implicit accept, Revision gating),
 `docs/API.md` (Send → reserved `message_id` namespace; Background
 maintenance), `docs/deployment.md`, `docs/architecture.md`.
 
-## 2. `watch_sessions` initial-sync memory bound
-Narrowed. The `list_sessions` half of this item **shipped**: `page_size`
-capping + opaque `page_token` / `next_page_token` are implemented in
-`server.rs` `list_sessions` (keyset cursor over session IDs, bounded by
-`MACP_LIST_SESSIONS_{DEFAULT,MAX}_PAGE_SIZE`). The original "replace the
-documented server-side cap" clause was **stale** and is dropped: `docs/API.md`
-documented no cap and the handler applied none, so there was nothing to
-replace.
+## 2. `watch_sessions` initial-sync memory bound — **DONE** (2026-09-13)
+Both halves have now shipped; re-verified against `src/server.rs` and
+`src/watch_sync.rs` at HEAD.
 
-Still open: the `watch_sessions` initial sync emits one `Created` event per
-session in the registry with no bound, so a large registry produces an
-unbounded burst. Note this is a **memory** bound, not a protocol change —
-`WatchSessionsRequest` is empty in the proto, so there is nothing to paginate
-there without an upstream proto field; any fix is a server-side emission
-bound (chunking, or a documented cap with a reconcile-via-`ListSessions`
-contract). Proto fields for `list_sessions` shipped in 0.1.6 (spec PR #51);
+The `list_sessions` half shipped first: `page_size` capping + opaque
+`page_token` / `next_page_token` are implemented in `server.rs`
+`list_sessions` (keyset cursor over session IDs, bounded by
+`MACP_LIST_SESSIONS_{DEFAULT,MAX}_PAGE_SIZE`). The original "replace the
+documented server-side cap" clause was **stale** and was dropped: `docs/API.md`
+documented no cap and the handler applied none, so there was nothing to
+replace. Proto fields for `list_sessions` shipped in 0.1.6 (spec PR #51);
 master plan §3.4.
+
+The `watch_sessions` half shipped in `882beeb` — *perf(server): bound the
+WatchSessions initial sync* (#161). The memory was never in the event count:
+it was in the up-front `SessionRegistry::get_all_sessions()`, which deep-cloned
+every `Session` into one `Vec` that then stayed resident for the whole sync —
+a sync paced by the client's reads, times up to `MACP_MAX_CONCURRENT_STREAMS`
+concurrent streams, i.e. a copy of the registry per stream.
+`crate::watch_sync::InitialSync` replaces it with a one-time snapshot of the
+registry's shared `Arc<Mutex<Session>>` **handles**, locked and cloned one at a
+time, so peak resident `Session` clones is **one** regardless of registry size —
+structurally, since `InitialSync` has no `Session` field. Deliberately *not*
+paged through `session_ids_after`: that primitive scans every key per call, so
+driving the traversal through it would be O(N²) whole-map scans.
+
+The chunking / documented-cap option this item floated was correctly **not**
+taken: `core.proto` requires the initial sync to carry every session currently
+in the registry, so a truncating cap would have been non-conformant, and
+`WatchSessionsRequest` is empty in the proto so there is nothing to paginate
+without an upstream field. The emission is a lazily polled
+`async_stream::try_stream!`, already backpressured by HTTP/2 with no unbounded
+channel on the path, so the event *count* was never the memory problem it was
+written up as. One residual O(N) allocation is accepted and documented in
+place: the `synced` `HashSet<String>` of session IDs, bounded by the registry
+size at subscribe time and read-only afterwards. The same commit also bounded
+the lifecycle events arriving *during* the sync
+(`watch_sync::PENDING_EVENT_LIMIT`, 16x the 64-event bus), which otherwise made
+the first post-sync `recv()` return `Lagged` and kill the stream.
 
 ## 3. Multi-round JSON client fallback removal (one release after 0.5.0)
 Per master §4.5 step 5: stop advertising/accepting JSON `Contribute` from
@@ -227,7 +249,11 @@ forward are additive**:
 
 | Crate | Records |
 |---|---|
-| `macp-modes` | `HandoffOfferRecord`, `HandoffContextRecord`, `HandoffState`, `ApprovalRequestRecord`, `BallotRecord`, `QuorumState` |
+| `macp-modes` (handoff) | `HandoffOfferRecord`, `HandoffContextRecord`, `HandoffState` |
+| `macp-modes` (quorum) | `ApprovalRequestRecord`, `BallotRecord`, `QuorumState` |
+| `macp-modes` (proposal) | `ProposalRecord`, `TerminalRejectRecord`, `RejectRecord`, `ProposalState` |
+| `macp-modes` (task) | `TaskRecord`, `TaskRejectRecord`, `TaskUpdateRecord`, `TaskCompleteRecord`, `TaskFailRecord`, `TaskState` |
+| `macp-modes` (multi_round) | `MultiRoundState` |
 | `macp-storage` | `PersistedSession` |
 
 `PersistedSession` was the "not audited as part of D7" sibling this item
@@ -257,12 +283,28 @@ forced is the major already being taken — and it removes the *next* one.
   `ApprovalThreshold` that is the exact defect class issue #145 was. Adding a
   variant is already the major lint `enum_variant_added`. Do not "finish the
   sweep" by sealing these.
-- The decision, proposal, task and multi_round mode-state records were **not**
-  swept. They did not gain fields in 0.8.0, so no break was forced and none was
-  spent on them; the next release that adds persisted state to one of them will
-  face the choice this item describes. Re-run
-  `RUSTC_WRAPPER="" cargo semver-checks check-release --workspace
-  --baseline-version <last published>` before that release.
+- The **`macp-core` decision types** — `DecisionState`, `Proposal`,
+  `Evaluation`, `Objection`, `Vote` (`crates/macp-core/src/decision.rs`) — are
+  unsealed **on purpose**. They are not mode-state records in the same sense:
+  `macp-core` is vocabulary, and these five are the argument types of the
+  public `PolicyEvaluator` trait, i.e. the seam a consumer driving
+  `macp-core` + `macp-modes` with its own evaluator sits on. They are also
+  literal-constructed across crate boundaries **today** —
+  `crates/macp-modes/src/mode/decision.rs` builds all five in production code
+  and `crates/macp-policy/src/evaluator.rs` builds `DecisionState` fixtures in
+  its tests — and `DecisionState` derives no `Default`, so sealing them without
+  first designing constructors would leave a downstream evaluator implementor
+  unable to build a fixture for their own trait impl. Sealing them is a real
+  design task, not a free sweep; do it with constructors or not at all.
+- The proposal, task and multi_round mode-state records **were** swept in
+  0.8.0 (table above), on the ground that they are the same class on the same
+  evidence — `ProposalState.rejections`, `ProposalState.phase`,
+  `MultiRoundState.convergence_type` and `MultiRoundState.converged` all carry
+  `#[serde(default)]`, i.e. each was added after the fact and each would be a
+  major today — and that 0.8.0 was already being taken, so sealing them cost
+  nothing extra. Nothing outside `macp-modes` constructs any of them: audited
+  with `git grep` across the workspace, `tests/`, and the separate
+  `integration_tests/` workspace that consumes these crates as path deps.
 
 ## 13. `validate_replay_consistency` still ignores `ttl_expiry` and `resolution`
 Narrowed by Phase 11a of `plans/backlog-closeout-2026-09.md`, which added

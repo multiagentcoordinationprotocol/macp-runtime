@@ -1876,8 +1876,11 @@ this list.
   mode-state records, release cut **as 0.8.0**.
 - **Depends on:** Phase 12.
 - **Files:** `docs/modes.md`, `docs/API.md`, `plans/defer/follow_ons.md`,
-  `crates/macp-modes/src/mode/handoff.rs`, `crates/macp-modes/src/mode/quorum.rs`,
-  `CLAUDE.md` (local only).
+  `plans/defer/README.md`, `crates/macp-modes/src/mode/handoff.rs`,
+  `crates/macp-modes/src/mode/quorum.rs`, `crates/macp-modes/src/mode/proposal.rs`,
+  `crates/macp-modes/src/mode/task.rs`, `crates/macp-modes/src/mode/multi_round.rs`,
+  `crates/macp-storage/src/registry.rs`, `tests/quorum_threshold_public_api.rs`,
+  `DECISIONS.md`, `CLAUDE.md` (local only).
 - **Added 2026-09-11 — the release is 0.8.0, not 0.7.6, and this phase owns the API change that
   forces it.** `RUSTC_WRAPPER="" cargo semver-checks check-release --workspace` fails with
   `constructible_struct_adds_field` on `HandoffOfferRecord.suspended_ms_at_offer`
@@ -1891,6 +1894,33 @@ this list.
   (`macp-policy/src/registry.rs:67`) already follow — the mode-state records are the exception.
   **Keep it as its own commit** so Phase 11's behaviour change stays bisectable from the API
   change.
+- **Corrected 2026-09-13 — the forced breaks are two fields on two structs in two crates, not
+  two fields on `HandoffOfferRecord`.** `origin/main` has since released **0.7.6**, and the
+  published `.crate` sources for that version (`macp-modes-0.7.6/src/mode/handoff.rs`,
+  `macp-storage-0.7.6/src/registry.rs`) already carry `HandoffOfferRecord.offered_at_ms`,
+  `PersistedSession.semantics_rev` and `PersistedSession.max_suspend_ms`. Against a
+  `--baseline-version 0.7.6` baseline this branch adds exactly `suspended_ms_at_offer`
+  (`macp-modes`, `HandoffOfferRecord`) and `suspension_intervals` (`macp-storage`,
+  `PersistedSession`) — one field each, two crates. The verdict is unchanged; two forced majors
+  in two crates only strengthen it, and the lockstep `version_group` prices one break and two
+  identically. See `DECISIONS.md` D7's "Corrected 2026-09-13" block.
+- **Executed scope (2026-09-13):** D7's own reasoning is that the break is worth taking because
+  it **ends the class**, so the seal covers all 17 `macp-modes` mode-state records plus
+  `PersistedSession`, not just the handoff/quorum 6. Added here beyond the original file list:
+  `crates/macp-modes/src/mode/proposal.rs` (`ProposalRecord`, `TerminalRejectRecord`,
+  `RejectRecord`, `ProposalState`), `crates/macp-modes/src/mode/task.rs` (`TaskRecord`,
+  `TaskRejectRecord`, `TaskUpdateRecord`, `TaskCompleteRecord`, `TaskFailRecord`, `TaskState`)
+  and `crates/macp-modes/src/mode/multi_round.rs` (`MultiRoundState`). Free in this release
+  because 0.8.0 is already being taken, and demonstrably the same class:
+  `ProposalState.rejections`/`phase` and `MultiRoundState.convergence_type`/`converged` all
+  carry `#[serde(default)]`, i.e. each was added after the fact and each would be a major
+  today. The five `macp-core` decision types are deliberately **not** sealed — see D7.
+- **`ApprovalRequestRecord::new` is narrow on purpose.** It takes `(request_id, required_approvals)`
+  only; every other field is assigned on a `mut` binding. A constructor taking all six fields
+  would have re-opened the door the seal closes — a seventh field would force an arity change,
+  which cargo-semver-checks v0.50.0 **does** catch (`method_parameter_count_changed`, verified
+  empirically against a two-crate fixture), i.e. it would block the release PR exactly as the
+  struct-literal break did. The doc comment on `new` carries that contract.
 - **Acceptance criteria:**
   1. the wire-visible change is stated in the changelog as a deliberate semantics change gated on
      `semantics_rev = 2`, not as a bugfix;

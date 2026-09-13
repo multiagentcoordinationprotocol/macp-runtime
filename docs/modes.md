@@ -8,16 +8,22 @@ Each mode keeps its working state in `session.mode_state`, a serialized blob who
 
 | Crate | Sealed records |
 |---|---|
-| `macp-modes` | `HandoffOfferRecord`, `HandoffContextRecord`, `HandoffState`, `ApprovalRequestRecord`, `BallotRecord`, `QuorumState` |
+| `macp-modes` (handoff) | `HandoffOfferRecord`, `HandoffContextRecord`, `HandoffState` |
+| `macp-modes` (quorum) | `ApprovalRequestRecord`, `BallotRecord`, `QuorumState` |
+| `macp-modes` (proposal) | `ProposalRecord`, `TerminalRejectRecord`, `RejectRecord`, `ProposalState` |
+| `macp-modes` (task) | `TaskRecord`, `TaskRejectRecord`, `TaskUpdateRecord`, `TaskCompleteRecord`, `TaskFailRecord`, `TaskState` |
+| `macp-modes` (multi_round) | `MultiRoundState` |
 | `macp-storage` | `PersistedSession` |
 
 This is a **breaking change for external callers** that built any of these by exhaustive struct literal, and it was taken deliberately. It is not, however, what makes 0.8.0 a major release: 0.8.0 was **already** forced to be one. These records grow a field whenever a mode learns something new, and with all-`pub` fields and no seal each addition is a `constructible_struct_adds_field` major break of its own. Against the published 0.7.6, `cargo semver-checks check-release --workspace` reports exactly two such breaks in this release -- `HandoffOfferRecord.suspended_ms_at_offer` and `PersistedSession.suspension_intervals` -- and neither is avoidable: they are the state the suspension-corrected implicit-accept deadline has to persist. Since `release-plz.toml` sets `semver_check = true` and all seven crates move in one `version_group`, either one alone blocks the release PR for the whole family.
 
-Given a major was being spent regardless, it was spent once to end the class rather than twice on the same two fields: sealing the records makes every future mode-state field additive.
+Given a major was being spent regardless, it was spent once to **end the class** rather than twice on the same two fields: sealing the records makes every future mode-state field additive. That is why the table covers all seventeen `macp-modes` records and not only the two that were forced -- the rest demonstrably grow too (`ProposalState.rejections`, `ProposalState.phase`, `MultiRoundState.convergence_type` and `MultiRoundState.converged` all carry `#[serde(default)]`, i.e. each was added after the fact), and sealing them in a release that was already major costs nothing.
 
-What still works unchanged: reading fields, mutating fields on a value you were handed, pattern-matching with `..`, `Default::default()` on `HandoffState` and `QuorumState`, and `PersistedSession::from(&Session)` followed by field assignment. What does not: `HandoffState { offers, contexts }` and its siblings, including the `{ ..Default::default() }` form.
+What still works unchanged: reading fields, mutating fields on a value you were handed, pattern-matching with `..`, `Default::default()` on `HandoffState`, `QuorumState`, `ProposalState` and `TaskState`, and `PersistedSession::from(&Session)` followed by field assignment. What does not: `HandoffState { offers, contexts }` and its siblings, including the `{ ..Default::default() }` form.
 
-One record has a supported replacement, because it is a parameter of a public API rather than pure serialization detail: build an `ApprovalRequestRecord` with `ApprovalRequestRecord::new(..)`, which keeps `QuorumMode::effective_threshold(&Session, &ApprovalRequestRecord)` callable from another crate. The rest are produced by the runtime from accepted envelopes and have no supported construction path.
+One record has a supported replacement, because it is a parameter of a public API rather than pure serialization detail: build an `ApprovalRequestRecord` with `ApprovalRequestRecord::new(request_id, required_approvals)` and assign whatever else you need on a `mut` binding, which keeps `QuorumMode::effective_threshold(&Session, &ApprovalRequestRecord)` callable from another crate. The constructor is deliberately narrow -- it takes only the field threshold resolution reads plus the record's identity -- and **its arity will not change**: a future field on the record is reached by assignment, and a future *mandatory* field would get its own constructor. A constructor taking every field would have re-opened the door the seal closes, since widening it is a `method_parameter_count_changed` major that blocks the release PR exactly as the struct-literal break did. The rest of the records are produced by the runtime from accepted envelopes and have no supported construction path.
+
+The five decision domain types in `macp-core` -- `DecisionState`, `Proposal`, `Evaluation`, `Objection`, `Vote` -- are deliberately **not** sealed and stay constructible by struct literal. `macp-core` is the runtime's vocabulary crate, and those five are the argument types of the public `PolicyEvaluator` trait: a consumer driving `macp-core` + `macp-modes` with its own evaluator needs to build a `DecisionState` to test their implementation, and `DecisionState` derives no `Default`. Sealing them needs constructors designed first, so it was not folded into this sweep.
 
 The enums in the same modules -- `HandoffDisposition`, `BallotChoice`, `ApprovalThreshold` -- are deliberately **not** sealed. A `#[non_exhaustive]` enum forces a `_` arm in every external `match`, which would silently reinterpret a future variant as one of today's; for a governance bar that is the exact defect class issue #145 was. Adding a variant is already the major lint `enum_variant_added`, so the release PR catches it either way.
 
@@ -130,7 +136,7 @@ The quorum mode tracks approval requests and ballots against a threshold. Its in
 | `QuorumMode::effective_threshold_for_session(&Session)` | `Result<Option<ApprovalThreshold>, MacpError>` |
 | `QuorumMode::effective_threshold(&Session, &ApprovalRequestRecord)` | `ApprovalThreshold` |
 
-Prefer the session-level form. The request-level form exists for a caller that already holds a record; build one with `ApprovalRequestRecord::new(request_id, action, summary, details, required_approvals, requested_by)` -- as of 0.8.0 the record is `#[non_exhaustive]` (see [Mode-state records are sealed](#mode-state-records-are-sealed)) and the struct-literal form no longer compiles outside `macp-modes`.
+Prefer the session-level form. The request-level form exists for a caller that already holds a record; build one with `ApprovalRequestRecord::new(request_id, required_approvals)`, assigning `action`, `summary`, `details` and `requested_by` afterwards if you need them (they play no part in threshold resolution) -- as of 0.8.0 the record is `#[non_exhaustive]` (see [Mode-state records are sealed](#mode-state-records-are-sealed)) and the struct-literal form no longer compiles outside `macp-modes`.
 
 The session-level form decodes the accepted request out of `session.mode_state` itself. Each layer of its return type answers exactly one question:
 

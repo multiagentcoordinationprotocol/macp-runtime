@@ -154,6 +154,24 @@ semver-compatible; it must land before #114 publishes 0.7.0.
   fields and no `#[non_exhaustive]`, so Phase 9's added field breaks any external exhaustive
   struct literal. `release-plz.toml` sets `semver_check = true`, so this **blocks the release
   PR**; all seven crates share one `version_group`, so it moves the whole family.
+
+  **Corrected 2026-09-13 (Phase 13 verify round).** The capture above was taken mid-G4 and
+  is only half the picture: it names one struct in one crate, and an earlier reading of this
+  record took both forced breaks to be on `HandoffOfferRecord`. They are not. Checked against
+  the published `.crate` sources for 0.7.6 (`macp-modes-0.7.6/src/mode/handoff.rs`,
+  `macp-storage-0.7.6/src/registry.rs`), 0.7.6 **already ships** `HandoffOfferRecord.offered_at_ms`,
+  `PersistedSession.semantics_rev` and `PersistedSession.max_suspend_ms` — those were released,
+  not forced by this branch. Relative to the 0.7.6 baseline this branch adds exactly **one
+  field to each of two different structs in two different crates**:
+
+  | Crate | Struct | Added field |
+  |---|---|---|
+  | `macp-modes` | `HandoffOfferRecord` (`crates/macp-modes/src/mode/handoff.rs`) | `suspended_ms_at_offer` |
+  | `macp-storage` | `PersistedSession` (`crates/macp-storage/src/registry.rs`) | `suspension_intervals` |
+
+  The correction does not touch the verdict: two forced `constructible_struct_adds_field`
+  majors in two crates is, if anything, a stronger case for spending 0.8.0 once, and the
+  lockstep `version_group` means one break and two cost the same.
 - **Why there is no route back to 0.7.x:** for a `0.x` crate the minor position acts as major,
   so a major break means **0.8.0**. Every alternative is *also* a major break — adding
   `#[non_exhaustive]`, making the struct private, or making its fields private. Storing the
@@ -177,4 +195,35 @@ semver-compatible; it must land before #114 publishes 0.7.0.
 - **Where it lands:** the `#[non_exhaustive]` attributes belong in **Phase 13** (the G4
   release close-out), as their own commit, so the behaviour change in Phase 11 stays
   bisectable from the API change. Phase 11 may add fields freely in the meantime.
-- **Status:** CONFIRMED (2026-09-11).
+- **Executed scope (2026-09-13):** "end the class" was taken literally, as the reasoning
+  above requires — the first pass sealed only the 6 handoff/quorum records plus
+  `PersistedSession` and left 11 mode-state records of the same class unsealed, which would
+  have spent 0.8.0 and still left the next `ProposalState`/`MultiRoundState` field to force
+  another major. **18 structs** are sealed: `HandoffOfferRecord`, `HandoffContextRecord`,
+  `HandoffState`, `ApprovalRequestRecord`, `BallotRecord`, `QuorumState`, `ProposalRecord`,
+  `TerminalRejectRecord`, `RejectRecord`, `ProposalState`, `TaskRecord`, `TaskRejectRecord`,
+  `TaskUpdateRecord`, `TaskCompleteRecord`, `TaskFailRecord`, `TaskState`, `MultiRoundState`
+  (all `macp-modes`) and `PersistedSession` (`macp-storage`). The added records are the same
+  class on the same evidence: `ProposalState.rejections`, `ProposalState.phase`,
+  `MultiRoundState.convergence_type` and `MultiRoundState.converged` all carry
+  `#[serde(default)]`, i.e. each was added after the fact and each would be a major today.
+  No struct-literal construction of any of them exists outside `macp-modes` — audited with
+  `git grep` across the workspace, `tests/`, and the separate `integration_tests/` workspace
+  that consumes these crates as path deps (the true external-caller position); every match
+  is inside the defining file.
+- **Deliberately NOT sealed:** the five `macp-core` decision types (`DecisionState`,
+  `Proposal`, `Evaluation`, `Objection`, `Vote`). `macp-core` is *vocabulary*, and these are
+  the argument types of the public `PolicyEvaluator` trait — the seam a consumer driving
+  `macp-core` + `macp-modes` with its own evaluator sits on. Unlike the mode-state records
+  they **are** literal-constructed across crate boundaries today:
+  `crates/macp-modes/src/mode/decision.rs` builds all five in production code
+  (`default_state()` and the four `on_message` arms), and `crates/macp-policy/src/evaluator.rs`
+  builds `DecisionState` fixtures in its tests. `DecisionState` derives no `Default`, so a
+  downstream evaluator implementor would have **no** way to build a fixture for their own
+  trait impl. Sealing them is therefore not free the way the mode-state records are: it needs
+  constructors/builders designed first. Left open deliberately, not overlooked.
+- **Enums stay unsealed:** `HandoffDisposition`, `BallotChoice`, `ApprovalThreshold`. A `_`
+  arm silently reinterpreting a future governance variant is issue #145's defect class, and
+  `enum_variant_added` is already a major lint that blocks the release PR.
+- **Status:** CONFIRMED (2026-09-11); factual premise corrected and executed scope recorded
+  2026-09-13.
