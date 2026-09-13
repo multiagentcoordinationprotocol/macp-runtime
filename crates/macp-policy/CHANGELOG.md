@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.6](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-policy-v0.7.5...macp-policy-v0.7.6) - 2026-09-12
+
+### Fixed
+
+- *(policy)* align with spec #126 decline-guard waiver, and pin the conformance-oracle spec revision ([#168](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/168))
+- *(policy)* align with spec #99 schema_version 3 and the #109-#113 follow-ups ([#165](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/165))
+
 ## [0.7.5](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-policy-v0.7.4...macp-policy-v0.7.5) - 2026-09-11
 
 ### Fixed
