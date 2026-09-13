@@ -1781,7 +1781,71 @@ this list.
 
 ### Phase 12 — eager sweep (G4)
 
-- **Status:** TODO
+- **Status:** DONE (2026-09-13) — `cecd265`. Fresh-Opus verify: **PASS**, 0 blockers, 2 undisclosed
+  gaps + 2 notes, all four closed before commit. Divergences:
+  1. **The ordering invariant the whole equivalence argument rests on was pinned by nothing.** The
+     sweep must run **after** `cleanup_expired_sessions` so a session whose TTL and
+     implicit-accept deadline both lapse unobserved **expires rather than accepts**, matching the
+     lazy path's `Precheck::Expired` precedence. The order in the tree was correct and documented
+     in three places, but the verifier **inverted the two calls and every test stayed green** — all
+     8 tier-1 handoff tests and all 14 in-process. Closed with a tier-1 test that reds on exactly
+     that swap. It **must** be tier-1: in-process tests do not compile `src/main.rs`, which is why
+     this went unnoticed. The test also dodges the trap that would have made it vacuous — both
+     `GetSession` and the `StreamSession` subscribe frame route through `get_session_checked`,
+     which lazily expires the session itself, so polling for `Expired` settles the race before the
+     maintenance loop sees it and passes under either order. It sleeps blind, then subscribes, and
+     discriminates on accepted history rather than session state (the session ends `Expired` under
+     both orders — a synthetic accept does not resolve a handoff).
+  2. **The sweep never ran the checkpoint-interval check.** `maybe_insert_checkpoint` was called
+     only at the tail of `process_message`, so with `MACP_CHECKPOINT_INTERVAL > 0` a boundary
+     crossed by a synthetic entry was skipped entirely on the eager path and the modulus could stay
+     permanently offset. Benign — checkpoints are a replay optimization, not correctness — but a
+     genuine eager/lazy delta, which is exactly what criterion 2 governs, and criterion 2's test
+     could not see it (`MemoryBackend`, interval at default 0). Fixed **inside the seam**
+     (`synthesize_due_accept`) rather than in the sweep, so both callers cross a boundary the same
+     way by construction. No double checkpoint: `process_message`'s own check runs at a strictly
+     greater `log_len`, and `maybe_insert_checkpoint` is a pure function of that length.
+  3. **Criterion 2's lazy arm is driven by a REJECTED `Commitment`, not an accepted message.** The
+     first attempt used an accepted `HandoffContext` and went red on `mode_state` — the trigger
+     appended its own context, so the test was measuring the *trigger*, not the synthesis. A
+     rejected trigger fails inside `on_message_at`, which sits **after** synthesis
+     (`src/runtime.rs:859`) and **before** the trigger's own append (`:872`) and `step::commit`
+     (`:879`), so it leaves no entry, no dedup slot and no `mode_state` mutation.
+  4. **The byte comparison is on the `LogEntry`, never `PersistedSession`** — `seen_message_ids` is
+     a set with unstable serialization order, so a whole-session comparison is flaky by
+     construction. The compared string is what `FileBackend::append_log_entry` actually writes, and
+     `LogEntry` carries **no `#[serde(skip)]`**, so it covers every field and cannot pass on a
+     divergence the spelled-out asserts miss.
+  5. **`Err` mid-pass is logged and retried next tick, and this is correct — not a swallowed fatal
+     append failure.** Every error source precedes any mutation (both mode hooks take `&Session`;
+     the append, dedup insert and state apply are all downstream), so nothing is half-committed and
+     **nothing is acknowledged**. The 11e "log append failures are fatal" rule is about never
+     acking an unpersisted record; the sweep acks nothing. Byte-for-byte the posture
+     `cleanup_expired_sessions` already takes.
+  6. **The sweep's own `state != Open` guard is NOT individually load-bearing** — deleting it alone
+     leaves both criterion-3 tests green, because the seam declines first at `runtime.rs:726`
+     before `due_synthetic_envelope` is ever called. The guard is kept (the plan asks for it) but
+     its comment now says plainly that it enforces nothing alone, so the next reader is not misled.
+     Verified as genuine defence-in-depth with no window behind it, not a cover story.
+  7. **Criterion 3's disclosure was corrected UPWARD.** The executor reported the suspended half
+     reds only via the mode's `debug_assert!`, which compiles out in release. Re-run twice
+     independently under `RUSTFLAGS="-C debug-assertions=off"`: `sweep_skips_a_suspended_session`
+     **still reds on its own behavioural assertion**. The release-build harm is caught directly.
+  8. **`docs/API.md` placement diverges from "all three tracked env tables" deliberately.** That
+     file's only env table is introduced as *"Five bounds on request size, request frequency, and
+     response size"* and followed by *"The same five variables appear in README.md and
+     docs/deployment.md."* A sixth row would falsify both sentences and break a three-file
+     cross-reference, and a cleanup interval is not a resource limit. Added as a top-level
+     `## Background maintenance` section instead — a client can now receive a message nobody sent,
+     which belongs in the API reference. `docs/architecture.md` and `docs/deployment.md` prose were
+     also corrected; both made now-incomplete claims about what the background task does.
+  9. **`synthesize_due_accept` returns `bool`** (was `()`), so the sweep's emission count comes
+     from the seam rather than being inferred. Private method — `cargo semver-checks` on
+     `macp-runtime`: **196/196, no update required.** G4's known major stays confined to
+     `HandoffOfferRecord` in `macp-modes`.
+  10. **Criterion 1 is carried by two tests, not one.** Deleting the `main.rs` call leaves all 14
+      in-process tests green (they do not compile `main.rs`), so the wiring claim rests solely on
+      tier-1 and the method-level claim solely in-process. Neither covers the criterion alone.
 - **Delivers:** the deadline is observed without waiting for the next message.
 - **Depends on:** Phase 11. **Safe only after Phase 11 pins the entry timestamp to the computed
   deadline** — that is what makes eager and lazy byte-identical.

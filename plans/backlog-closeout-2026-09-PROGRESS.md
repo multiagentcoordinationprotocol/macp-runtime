@@ -728,3 +728,45 @@ Phase 11c — the client boundary (reject forged implicit accepts, reserve the `
   alone: it tests `synthesize_due_accept`, which does not exist on `main`, so a standalone PR would
   fail three of its own tests.
 - **Next:** Phase 12 — eager sweep.
+
+## Phase 12 — eager sweep (2026-09-13)
+
+- **Commit:** `cecd265`. 8 files, +935/-19: `src/runtime.rs` (new
+  `sweep_due_synthetic_accepts`, seam returns `bool`, checkpoint call), `src/main.rs` (fourth
+  maintenance call), 5 in-process tests + 1 unit test, 2 tier-1 tests, 4 doc files.
+- **Verifier tier:** fresh Opus (standing no-Fable instruction). **1 round, PASS**, 0 blockers,
+  2 undisclosed gaps + 2 notes; a fixer round closed all four before commit.
+- **The gap that mattered: a load-bearing invariant pinned by nothing.** Eager/lazy equivalence
+  rests on the sweep running after `cleanup_expired_sessions`. The verifier **inverted the two
+  calls and all 22 relevant tests stayed green.** Now pinned by a tier-1 test that reds on exactly
+  that swap — and it must be tier-1, since in-process tests do not compile `main.rs`. That is the
+  structural reason it went unnoticed, and it generalises: **anything whose only enforcement lives
+  in `main.rs` is invisible to the entire in-process suite.**
+- **The trap inside that fix.** Polling `GetSession` for `Expired` would have made the test green
+  under either order: `get_session_checked` lazily expires the session itself, settling the race
+  before the maintenance loop sees it. The test sleeps blind, then subscribes, and discriminates on
+  accepted history rather than session state.
+- **Second gap: the sweep skipped the checkpoint-interval check**, so a boundary crossed by a
+  synthetic entry was missed on the eager path and the modulus could stay permanently offset.
+  Benign, but a real equivalence delta criterion 2's test could not see. Fixed **inside the seam**
+  so both callers agree by construction, rather than in the sweep where they could drift again.
+- **Three worries I raised at dispatch, all resolved clean, each for a specific reason:**
+  - `Err` mid-pass is *not* a swallowed fatal append failure — every error source precedes any
+    mutation, so nothing is half-committed and nothing is acked. The fatal rule is about never
+    acking an unpersisted record; the sweep acks nothing.
+  - The TTL-vs-deadline precedence claim holds on both sides, verified against the code.
+  - The rejected-`Commitment` trigger is sound: it fails after synthesis and before its own append
+    and commit, leaving no residue. An accepted trigger was measuring itself.
+- **Criterion 3's disclosure corrected UPWARD** (twice, independently): under
+  `-C debug-assertions=off` the suspended test still reds on its own behavioural assertion, not on
+  a compiled-out `debug_assert!`. The executor undersold its own test.
+- **`docs/API.md` divergence upheld:** a top-level `## Background maintenance` section rather than
+  a sixth row in a table whose own text says "five bounds" and cross-references two other files.
+- **No new semver break** — `cargo semver-checks` on `macp-runtime` 196/196. G4's major stays
+  confined to `HandoffOfferRecord`.
+- **CI gate mirror:** ALL GATES PASS. Workspace 864/864, tier 1 127/127, JWT 8/8, tier 2 5/5.
+  Both new timing-sensitive tests flake-run 5/5.
+- **Shipped?** No — accumulating toward G4. No release PR can be cut until Phase 13 lands
+  `#[non_exhaustive]` and the 0.8.0 major, because `release-plz.toml` sets `semver_check = true`
+  and G4 already carries the `constructible_struct_adds_field` break.
+- **Next:** Phase 13 — G4 docs, API hygiene and close-out (the last phase in the plan).
