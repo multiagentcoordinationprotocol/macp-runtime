@@ -3,6 +3,7 @@ mod test_cancel_session;
 mod test_concurrent_sessions;
 mod test_decision_mode;
 mod test_error_paths;
+mod test_handoff_implicit_accept;
 mod test_initialize;
 mod test_limits;
 mod test_list_sessions_pagination;
