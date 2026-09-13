@@ -332,3 +332,28 @@ fix: hoist one instance in `Runtime::process_message` and pass it to all three, 
 Deliberately **not** done inside G4 — it touches the hot path for a non-functional
 reason, and G4's diff is already carrying a trait change plus a one-way door. Do it as
 its own commit with its own before/after measurement, or not at all.
+
+## 18. Unpinned structural guarantees around synthesis (Phase 11e NITs)
+
+The Phase 11e verifier found four things that are true by construction but asserted
+nowhere. None is a defect; each is a tripwire we do not have.
+
+1. **No test pins that a duplicate, TTL-expired, or unauthorized trigger synthesizes
+   nothing.** Guaranteed by where `synthesize_due_accept` sits in `process_message`
+   (after every precheck and after the 11c client boundary), so a reordering — not a
+   logic change — is what would break it. Criterion 6's squatter test does not cover
+   this: its squat is pre-deadline, so nothing is due at that point anyway.
+2. **The live/replay `participant_message_counts` divergence** that
+   `synthesize_due_accept`'s rustdoc argues for (no `record_participant_activity`,
+   because replay never records activity) is **not** caught by `assert_replay_matches`,
+   which compares only state, resolution, `mode_state` and `seen_message_ids`. Its single
+   guard is the one mutation test that adds `step::commit`.
+3. **Observation time is now unrecoverable from the log** — `received_at_ms` carries the
+   deadline D, and only a `tracing::info!` records when the runtime actually noticed.
+   Not a one-way door: `LogEntry` is an internal serde struct and can gain a defaulted
+   field later if we ever want both clocks.
+4. **`handoff_id` is client-supplied, unbounded, and now embedded verbatim into a
+   permanent `message_id`.** No new exposure — it was already in the payload and in
+   `mode_state` — but the blast surface moved into the id namespace.
+
+Worth doing if someone touches this area again; not worth a commit on its own.

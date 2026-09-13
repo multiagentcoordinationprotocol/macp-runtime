@@ -640,3 +640,47 @@ Phase 11c — the client boundary (reject forged implicit accepts, reserve the `
 - **Shipped?** No — accumulating toward G4, executor and verifier independently agreed.
 - **Next:** Phase 11e — the cutover, and the plan's one genuine one-way door. Two requirements
   were carried into its criteria from this round (criterion 11).
+
+### Phase 11e — the cutover (THE ONE-WAY DOOR) — 2026-09-13
+
+- **Verdict:** PASS (fresh Opus verifier, round 1). **0 blockers**, 1 SHOULD-FIX (PR-description
+  level, no code), 5 NITs. Applied: the ASSUMPTIONS correction; the rest recorded as follow-on 18.
+- **Verifier tier:** fresh Opus, not Fable — the standing no-Fable substitution, on the one phase
+  where the skill would have escalated. Recorded here as the skill requires.
+- **Rounds:** 2 executor attempts (the first **stalled during exploration**, tree left clean at
+  `ad4e428`, nothing lost — the second stall this session, and unlike the 11c one it made no
+  edits), 1 verify round.
+- **Commit:** `6d14e0b` — kernel wiring + interim rev-gate in ONE commit, as the plan's atomicity
+  requirement demands. 9 files, +1881/-53.
+- **The one-way door is verified final.** The verifier read RFC-MACP-0010 §5.1 verbatim from the
+  spec repo and the published `macp-proto-0.1.9` protos, and matched all 8 envelope fields and all
+  4 payload fields field-for-field. Verdict: "I would not change a single byte." The two places we
+  are stricter than the RFC (`timestamp_unix_ms = D` promoting a SHOULD to a MUST, and
+  `received_at_ms = D`) are both required for replay determinism.
+- **The executor's own brittleness call was overturned, in the safe direction.** It flagged the
+  `reason` string literal as the most brittle permanent commitment. It is the least:
+  `dispatch_implicit_accept` reads `outcome_reason` from the **payload**, not the constant, so
+  changing the constant later still replays existing logs to their recorded reason. The RFC does
+  not specify `reason` at all.
+- **The biggest catch of the phase — and of the plan.** Criterion 3, the byte-identity proof for a
+  one-way door, was **vacuous as the plan specified it**: replaying a resolved session's log
+  re-dispatches nothing, because resolution writes a checkpoint carrying the whole serialized
+  session. With the checkpoint left in, deleting `log_store.append` outright left the test green.
+  Caught by the executor's own mutation, independently reproduced by the verifier both ways. This
+  is the **sixth** vacuous acceptance criterion this session and the most consequential.
+- **Double-application traced rather than assumed:** removing the interim rev-gate does not break
+  the live path (the interim guards on `disposition == Offered`, already `Accepted` by then). The
+  gate's real load is replay — making a rev-2 log missing its synthetic fail loudly. No path
+  applies the accept twice.
+- **Criterion 11a proven the way that matters:** the non-`Open` filter mutation was run under
+  `RUSTFLAGS="-C debug-assertions=off"`, where 11d's `debug_assert!` is compiled out, and it still
+  reds on the real assertion. That is the proof the kernel filter — not the assert — is what ships.
+- **Upgrade hazard, explicitly answered:** a pre-commit rev-2 session with an outstanding offer
+  replays fine; one that already resolved through the interim replays to `Err`, which aborts
+  startup under `MACP_STRICT_RECOVERY=1`. **No released user is exposed** (main and v0.7.6 are rev
+  1); the blast radius is dev data from phases 11a–11d. Must be named in the G4 PR description.
+- **Conformance framing corrected upward:** lazy-only emission is not a tolerated shortfall. RFC
+  §5.1(2) makes eager observation a SHOULD and lazy a MUST; 11e ships the MUST in full.
+- **Shipped?** No — accumulating toward G4 with 11a–11d. The verifier judged it independently
+  shippable, but the G4 grouping is unchanged.
+- **Next:** Phase 11f — wire-level tier-1 coverage.

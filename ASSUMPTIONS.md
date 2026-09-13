@@ -781,7 +781,12 @@
 ## Two storage backends in the live harness, chosen for what each one cannot do
 - **Plan:** Phase 11e of `plans/backlog-closeout-2026-09.md`, acceptance criteria 1-9
 - **Assumed:** one harness would serve every criterion. It cannot. `MemoryBackend::save_session` is
-  a no-op and `load_session` always returns `None`, so criterion 9(c) passes vacuously against it;
+  a no-op and `load_session` always returns `None` (`crates/macp-storage/src/storage/memory.rs:11-16`),
+  so criterion 9(c) cannot be proven against it. **Correction from the phase verifier:** this entry
+  first said the criterion "passes vacuously" on `MemoryBackend`. It does not — the shipped test
+  calls `.expect("a snapshot must exist")`, so it would *hard-fail* there, not silently pass. The
+  backend split is still correct and mutation M6 proves it load-bearing; only the stated failure
+  mode was wrong, and it was wrong in the safe direction;
   but `MemoryBackend` also lacks `replace_log`, so terminal compaction fails and the full entry
   list survives resolution, which is what every ordering assertion needs. A `FileBackend` is the
   mirror image: real snapshots, and a resolved session's log compacted to one checkpoint.

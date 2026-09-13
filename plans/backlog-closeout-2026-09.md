@@ -1331,7 +1331,49 @@ this list.
 
 #### Phase 11e — the cutover: kernel emission, interim retired for rev ≥ 2, fixture migration
 
-- **Status:** TODO
+- **Status:** DONE (2026-09-13) — `6d14e0b`, the atomic commit. Fresh-Opus verify: **PASS**, 0
+  blockers, 1 SHOULD-FIX (PR-description level) + 5 NITs. **The one-way door's committed shape was
+  verified field-for-field against the normative RFC-MACP-0010 §5.1(3) text and the published
+  `macp-proto-0.1.9` protos, and confirmed final — not a byte would be changed.** Divergences:
+  1. **Criterion 3 — the byte-identity proof for a one-way door — was VACUOUS as the plan wrote
+     it.** Replaying a resolved session's log re-dispatches nothing: resolution writes a checkpoint
+     carrying the whole serialized session and `replay_session` resumes from it. Measured both
+     ways: with the checkpoint left in, deleting `log_store.append` outright leaves the test
+     **green**; with the strip in place the same mutation reds all nine live tests. Fixed by
+     stripping `EntryKind::Checkpoint` before replaying, falling back to the raw log when stripping
+     would leave no `SessionStart`. Independently reproduced by the verifier.
+  2. **The plan's "the list below is complete — do not redo it" break-list was not complete.** Six
+     tests outside it went red. Two of them —
+     `implicit_accept_ignores_forged_envelope_timestamp_on_rev1` and its backdated sibling — carry
+     `rev1` in the name but **never set a revision**: they ran on `base_session()` at
+     `CURRENT_SEMANTICS_REV` = 2 asserting only `>= 1`. The name described the claim, not the
+     fixture. Both were pinned to rev 1 *and* given genuine rev-2 arms, so no current-revision
+     coverage was dropped.
+  3. **One harness cannot serve all criteria**, which the plan assumed. `MemoryBackend` cannot
+     prove the snapshot criterion (`save_session` is a no-op); `FileBackend` compacts a resolved
+     session's log and erases the ordering assertions. Split into two, with an
+     `assert_log_is_uncompacted` tripwire.
+  4. **11d shipped the trait method with no `ModeRef` forwarder**, so the Approach's call did not
+     compile. Added here. (Second time this phase pair: 11c had the same gap, repaired by hand.)
+  5. **The `reason` literal is NOT the brittle commitment the executor flagged.** The verifier
+     overturned that: `dispatch_implicit_accept` sets `outcome_reason` from the **payload**, not
+     from the constant, so a future version changing the constant still replays existing rev-2 logs
+     to their recorded reason. The RFC does not specify `reason` at all.
+  6. **Double-application was traced, not assumed.** Removing the interim rev-gate does *not* break
+     the live path — the interim loop guards on `disposition == Offered` and the synthetic has
+     already set `Accepted`. The gate's real load is **replay**: it is what makes a rev-2 log
+     missing its synthetic fail loudly instead of silently re-inferring. No path applies twice.
+  7. **Upgrade hazard, explicitly answered.** A rev-2 session created before this commit with an
+     offer still outstanding replays fine. The broken case is a rev-2 session that already
+     *resolved through the interim*: its log has no synthetic, so post-upgrade replay returns
+     `Err` — warn-and-skipped by default, but **aborts startup under `MACP_STRICT_RECOVERY=1`**.
+     **No released user is exposed** — `CURRENT_SEMANTICS_REV = 2` exists only on this branch;
+     `origin/main` and `macp-runtime-v0.7.6` are rev 1. Blast radius is dev data created while
+     running phases 11a–11d. **This must be named in the G4 PR description.**
+  8. **Lazy-only emission is the conformant floor, not a shortfall.** RFC §5.1(2): a runtime
+     *SHOULD* observe the deadline eagerly and *MUST* observe it lazily at the latest when
+     processing the next session-scoped message. 11e ships the MUST in full; Phase 12's sweep is
+     the SHOULD.
 - **Delivers:** the RFC-MACP-0010 §5.1 behavior, live and lazily. **This is the atomic commit:
   kernel wiring and the interim's rev-gate move together** — either alone leaves rev-2 sessions
   with double-application or no implicit accept at all.
