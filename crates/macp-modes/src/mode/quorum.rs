@@ -30,7 +30,10 @@ pub enum BallotChoice {
 ///
 /// Unlike the handoff records this one **does** have a supported
 /// external construction path, because it is a parameter of the public
-/// [`QuorumMode::effective_threshold`]: use [`Self::new`].
+/// [`QuorumMode::effective_threshold`]: start from [`Self::new`] and assign
+/// whichever remaining fields you care about. They are all `pub` and
+/// `#[non_exhaustive]` does not restrict field assignment — it refuses only
+/// the struct-literal form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ApprovalRequestRecord {
@@ -43,29 +46,46 @@ pub struct ApprovalRequestRecord {
 }
 
 impl ApprovalRequestRecord {
-    /// Build a record from its fields.
+    /// Build a record carrying only the two fields a caller of
+    /// [`QuorumMode::effective_threshold`] must supply; assign any of the
+    /// remaining `pub` fields afterwards on a `mut` binding.
+    ///
+    /// ```
+    /// use macp_modes::mode::quorum::ApprovalRequestRecord;
+    /// let mut record = ApprovalRequestRecord::new("r1", 3);
+    /// record.action = "deploy.production".into();
+    /// ```
     ///
     /// The runtime builds these itself from an accepted `ApprovalRequest`
     /// envelope; this exists so the request-level
     /// [`QuorumMode::effective_threshold`] stays callable from another crate
-    /// now that the struct is `#[non_exhaustive]`. Only
-    /// [`required_approvals`](Self::required_approvals) participates in
-    /// threshold resolution — the rest are carried for the record's own sake.
-    pub fn new(
-        request_id: impl Into<String>,
-        action: impl Into<String>,
-        summary: impl Into<String>,
-        details: Vec<u8>,
-        required_approvals: u32,
-        requested_by: impl Into<String>,
-    ) -> Self {
+    /// now that the struct is `#[non_exhaustive]`. It takes
+    /// [`required_approvals`](Self::required_approvals) because that is the
+    /// only field threshold resolution reads, and
+    /// [`request_id`](Self::request_id) because a record that identifies no
+    /// request is not a meaningful one; the rest are carried for the record's
+    /// own sake and default to empty.
+    ///
+    /// # Stability contract
+    ///
+    /// **This constructor's arity never changes.** A field added to
+    /// [`ApprovalRequestRecord`] is additive — that is the whole point of the
+    /// `#[non_exhaustive]` seal (`DECISIONS.md` D7) — and it stays additive
+    /// only if the seal's one supported construction path stays additive too.
+    /// So a future field is reached by assignment, and if some future field
+    /// were ever genuinely mandatory it gets a **new** constructor rather than
+    /// a third parameter here. Widening this signature would be a
+    /// `method_parameter_count_changed` major (cargo-semver-checks does lint
+    /// inherent-method arity), i.e. it would block the release PR across all
+    /// seven lockstep crates — exactly the trap the seal was spent to escape.
+    pub fn new(request_id: impl Into<String>, required_approvals: u32) -> Self {
         Self {
             request_id: request_id.into(),
-            action: action.into(),
-            summary: summary.into(),
-            details,
+            action: String::new(),
+            summary: String::new(),
+            details: Vec::new(),
             required_approvals,
-            requested_by: requested_by.into(),
+            requested_by: String::new(),
         }
     }
 }

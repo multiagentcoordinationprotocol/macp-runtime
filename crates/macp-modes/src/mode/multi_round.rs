@@ -7,7 +7,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Internal state tracked across rounds.
+///
+/// **`#[non_exhaustive]`** (0.8.0, `DECISIONS.md` D7), for the same reason as
+/// the handoff, quorum, proposal and task records: this is runtime-produced
+/// coordination state, deserialized from accepted envelopes, that grows a
+/// field whenever the mode learns something new —
+/// [`convergence_type`](Self::convergence_type) and
+/// [`converged`](Self::converged) both carry `#[serde(default)]` because they
+/// were added after the fact, and each would be a
+/// `constructible_struct_adds_field` major today. `release-plz.toml`'s
+/// `semver_check = true` turns that into a blocked release PR across all seven
+/// lockstep crates. 0.8.0 is already being taken for the handoff field, so
+/// sealing the rest of the class here costs nothing extra and makes every
+/// future field additive.
+///
+/// Fields stay `pub` and readable; only construction by struct literal from
+/// another crate is refused, and nothing outside `macp-modes` constructs one —
+/// the mode mints it from accepted envelopes, which is why no constructor is
+/// offered in its place.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MultiRoundState {
     pub round: u64,
     pub participants: Vec<String>,

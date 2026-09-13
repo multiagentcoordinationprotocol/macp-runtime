@@ -28,7 +28,25 @@ pub enum ProposalPhase {
     Committed,
 }
 
+/// One proposal as it stands in the session's serialized `mode_state`.
+///
+/// **`#[non_exhaustive]`** (0.8.0, `DECISIONS.md` D7), for the same reason as
+/// the handoff and quorum records: this is runtime-produced coordination
+/// state, deserialized from accepted envelopes, that grows a field whenever
+/// the mode learns something new — [`ProposalState::rejections`] and
+/// [`ProposalState::phase`] both carry `#[serde(default)]` because they were
+/// added after the fact, and each would be a `constructible_struct_adds_field`
+/// major today. `release-plz.toml`'s `semver_check = true` turns that into a
+/// blocked release PR across all seven lockstep crates. 0.8.0 is already being
+/// taken for the handoff field, so sealing the rest of the class here costs
+/// nothing extra and makes every future field additive.
+///
+/// Fields stay `pub` and readable; only construction by struct literal from
+/// another crate is refused, and nothing outside `macp-modes` constructs one —
+/// the mode mints them from accepted envelopes, which is why no constructor is
+/// offered in their place.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ProposalRecord {
     pub proposal_id: String,
     pub title: String,
@@ -40,14 +58,22 @@ pub struct ProposalRecord {
     pub disposition: ProposalDisposition,
 }
 
+/// A terminal rejection as it stands in serialized `mode_state`.
+///
+/// `#[non_exhaustive]` for the reason on [`ProposalRecord`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TerminalRejectRecord {
     pub proposal_id: String,
     pub sender: String,
     pub reason: String,
 }
 
+/// Any rejection, terminal or not, as it stands in serialized `mode_state`.
+///
+/// `#[non_exhaustive]` for the reason on [`ProposalRecord`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RejectRecord {
     pub proposal_id: String,
     pub sender: String,
@@ -55,7 +81,16 @@ pub struct RejectRecord {
     pub terminal: bool,
 }
 
+/// The proposal mode's whole serialized `mode_state`.
+///
+/// `#[non_exhaustive]` for the reason on [`ProposalRecord`] — and this is the
+/// struct that demonstrates it, having already grown
+/// [`rejections`](Self::rejections) and [`phase`](Self::phase) after the fact.
+/// `Default` is still derived and still reachable from other crates
+/// (`ProposalState::default()`); `#[non_exhaustive]` refuses only the
+/// struct-literal form, including `ProposalState { ..Default::default() }`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub struct ProposalState {
     pub proposals: BTreeMap<String, ProposalRecord>,
     pub accepts: BTreeMap<String, String>,

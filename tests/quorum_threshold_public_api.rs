@@ -212,21 +212,22 @@ fn request_level_form_is_public_and_reports_unsatisfiable_separately() {
         .configuration_version("cfg-1")
         .policy_version("threshold-weighted")
         .build();
-    // Built through `ApprovalRequestRecord::new`, not a struct literal: the
-    // record is `#[non_exhaustive]` as of 0.8.0 (`DECISIONS.md` D7) and this
-    // test file lives in `macp-runtime`, a different crate from the
-    // `macp-modes` that defines it — so the literal form no longer compiles
-    // here, which is precisely the external-caller position this test exists
-    // to hold. The constructor is what keeps the request-level accessor
-    // reachable at all from outside `macp-modes`.
-    let record = ApprovalRequestRecord::new(
-        "r1",
-        "deploy.production",
-        "Deploy v2",
-        vec![],
-        3,
-        COORDINATOR,
-    );
+    // Built through `ApprovalRequestRecord::new` plus field assignment, not a
+    // struct literal: the record is `#[non_exhaustive]` as of 0.8.0
+    // (`DECISIONS.md` D7) and this test file lives in `macp-runtime`, a
+    // different crate from the `macp-modes` that defines it — so the literal
+    // form no longer compiles here, which is precisely the external-caller
+    // position this test exists to hold. Both halves of the supported path are
+    // exercised deliberately: the narrow constructor (which takes only the
+    // field threshold resolution reads, and whose arity is contracted never to
+    // change) and the assignment of the carried fields, which `#[non_exhaustive]`
+    // leaves reachable. If either half regressed to requiring a literal, this
+    // file would stop compiling.
+    let mut record = ApprovalRequestRecord::new("r1", 3);
+    record.action = "deploy.production".into();
+    record.summary = "Deploy v2".into();
+    record.details = vec![];
+    record.requested_by = COORDINATOR.into();
 
     session.policy_definition = Some(quorum_policy(
         "threshold-weighted",
