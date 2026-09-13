@@ -610,3 +610,102 @@
 - **Blast radius if wrong:** one assertion; the mode-level unit test
   `client_implicit_accept_rejected_at_the_boundary` isolates the rule non-vacuously either way.
 - **Status:** UNCONFIRMED (2026-09-12)
+
+## Flipping an `src/replay.rs` test in a phase whose file list names only the mode crate
+- **Plan:** Phase 11d of `plans/backlog-closeout-2026-09.md` (the synthesis contract in the mode)
+- **Assumed:** 11d's **Files** line lists `crates/macp-modes/src/mode/mod.rs` and
+  `crates/macp-modes/src/mode/handoff.rs` only, and its acceptance criteria are all described as
+  "`macp-modes` unit tests". But 11c landed `synthetic_shaped_entry_reaches_dispatch_not_the_client_boundary`
+  (`src/replay.rs:1513`) whose own rustdoc says, verbatim, "**11d must flip this test from
+  `Err(InvalidPayload)` to `Ok`.** It is written to fail loudly then" — and it does fail the moment
+  the rev-2 accept arm lands, because that log replays to `Resolved`.
+- **Chose:** flip it (assert `Ok` + `assert_implicitly_accepted` + the dedup slot) and rewrite its
+  rustdoc to describe the post-11d state, treating 11d's file list as incomplete rather than
+  authoritative. The plan is a document; the failing test is the fact.
+- **Alternatives:** leave the file untouched (impossible — the gate is red); or `#[ignore]` it until
+  11e (loses the only replay-path proof that the synthetic entry is accepted as data, which is the
+  half of 11d that 11e depends on).
+- **Blast radius if wrong:** one test in a file the plan did not enumerate. It is the strongest
+  evidence 11d works end-to-end through `replay_session`, so the risk of keeping it is lower than
+  the risk of deferring it.
+- **Status:** UNCONFIRMED (2026-09-12)
+
+## One shared `IMPLICIT_ACCEPT_REASON` const instead of two copies of the literal
+- **Plan:** Phase 11d of `plans/backlog-closeout-2026-09.md`
+- **Assumed:** the plan fixes `payload.reason = "implicit accept (timeout)"` for the synthetic
+  accept *specifically* so it stays byte-identical to the interim in-`Commitment` path's
+  `outcome_reason`, and 11d is otherwise told not to touch that interim arm. Duplicating the
+  literal is what the plan's wording implies; it also leaves the byte-identity requirement
+  unenforced by anything except two independent tests.
+- **Chose:** a private `const IMPLICIT_ACCEPT_REASON` (`crates/macp-modes/src/mode/handoff.rs:36`)
+  used by both the synthesizer and the interim arm — a one-token change inside the interim arm
+  (literal -> const), behavior-identical, and it makes drift impossible rather than merely detected.
+  Verified by mutation: changing the const reds `synthetic_payload_bytes_are_pinned`,
+  `legacy_offer_mode_state_without_suspension_snapshot_replays_unchanged`, and eight
+  `src/replay.rs` history tests together, which is the proof the two paths really do share it.
+- **Alternatives:** repeat the literal (the plan's literal reading — two places to keep in sync
+  across the 11e retirement); or make the const `pub` (a semver-minor surface commitment nothing
+  outside the crate needs yet).
+- **Blast radius if wrong:** the string is frozen either way; a wrong const value breaks replay of
+  every rev <= 1 history that implicitly accepted, loudly, in-tree, at the workspace gate.
+- **Status:** UNCONFIRMED (2026-09-12)
+
+## Error codes and check order inside the rev-2 implicit-accept arm
+- **Plan:** Phase 11d of `plans/backlog-closeout-2026-09.md` (the strict accept arm)
+- **Assumed:** the plan enumerates *what* the arm validates (offer exists, `disposition == Offered`,
+  `env.sender == offer.target_participant`, `payload.accepted_by == offer.target_participant`, the
+  deterministic `message_id`) but fixes neither the error code per failure nor the order of the
+  checks. Criterion 4 nevertheless depends on both: the surviving test asserts `InvalidPayload`
+  for an envelope that is correct in every respect *except* its `message_id`.
+- **Chose:** wrong sender -> `Forbidden` (the same code the explicit accept arm returns for the same
+  condition, so the error surface does not depend on the flag); every other failure ->
+  `InvalidPayload`. Order: offer lookup, sender, `accepted_by`, `message_id`, disposition — which is
+  what makes the renamed criterion-4 test report `InvalidPayload` from the `message_id` check.
+  Also chosen: `accepted_by` must equal the target **exactly**, where the explicit arm tolerates an
+  empty string — the synthetic envelope always names the target, so an empty one is not an envelope
+  this runtime emits.
+- **Alternatives:** `InvalidPayload` for the sender mismatch too (uniform, but it shifts the code
+  for a condition the explicit arm already answers `Forbidden`); or tolerate an empty `accepted_by`
+  for symmetry with the explicit arm (widens what replay will accept as a synthetic entry for no
+  gain).
+- **Blast radius if wrong:** the codes are only observable through replay failures and direct
+  library callers until 11e; no wire surface changes in this phase.
+- **Status:** UNCONFIRMED (2026-09-12)
+
+## A fifth test, beyond the four acceptance criteria, to make the phase's negative rule killable
+- **Plan:** Phase 11d of `plans/backlog-closeout-2026-09.md` ("the mode MUST NOT re-verify the
+  deadline arithmetic in this arm ... the single most important negative rule in the phase")
+- **Assumed:** the plan asks for that rule as a *comment*, and none of its four criteria can fail
+  if a future refactor adds a time check back — the rule would be green by construction, i.e.
+  guarded by nothing. The four criteria all dispatch the synthetic at a clock where a re-check
+  would happen to pass.
+- **Chose:** add `implicit_accept_dispatch_does_not_reverify_the_deadline`, which reproduces the
+  exact replay state that breaks a re-check (a pause from D+50 to D+250 banked before the entry is
+  dispatched at `accepted_at_ms = D`, making the scalar *negative*), and assert dispatch accepts
+  anyway. Mutation-verified: threading the clock in and adding
+  `implicit_accept_elapsed_ms(...) < timeout` reds this test and **only** this test — the flipped
+  `src/replay.rs` history has no pause after D, so it does not catch it. Also added
+  `due_synthetic_envelope_returns_none_unless_an_offer_is_due` for the plan's edge-case list (rev
+  gate, no policy, timeout 0, unparseable rules, no offer, settled offer, `offered_at_ms == 0`),
+  since criterion 1 covers only the due/not-due boundary.
+- **Alternatives:** ship the comment alone as written (the rule then survives only as prose); or
+  wait for 11e's live harness to cover it (leaves the mode contract untested at the commit that
+  introduces it).
+- **Blast radius if wrong:** two extra unit tests. If the invariant is ever deliberately reversed,
+  they fail loudly and name the reason.
+- **Status:** UNCONFIRMED (2026-09-12)
+
+## `debug_assert!(suspended_at_ms.is_none())` placed inside `due_synthetic_envelope`
+- **Plan:** Phase 11b of `plans/backlog-closeout-2026-09.md` ("`debug_assert!(session.suspended_at_ms.is_none())`
+  at the 11d call site") and 11d's `debug_assert!(D <= now_ms)`
+- **Assumed:** "the 11d call site" means the place 11d calls `unsuspended_deadline`, which is inside
+  `HandoffMode::due_synthetic_envelope` — not the kernel call site, which does not exist until 11e.
+- **Chose:** both `debug_assert!`s live in `due_synthetic_envelope`, immediately before and after the
+  walk. Consequence to be aware of: a *library* caller that asks a suspended session for a due
+  envelope panics in a debug build rather than returning `None`. That is intended — a suspended
+  session ticks no unsuspended time, so the question is malformed — and 11e's kernel must skip
+  non-`Open` sessions anyway (the same filter as the TTL sweep).
+- **Alternatives:** return `None` for a suspended session (silently absorbs a caller bug the assert
+  is meant to surface); or drop the assert (loses the 11b invariant's only in-tree check).
+- **Blast radius if wrong:** debug builds only; `debug_assert!` compiles out in release.
+- **Status:** UNCONFIRMED (2026-09-12)

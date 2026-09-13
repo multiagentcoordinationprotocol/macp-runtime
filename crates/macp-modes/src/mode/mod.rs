@@ -102,6 +102,61 @@ pub trait Mode: Send + Sync {
         Ok(())
     }
 
+    /// The synthesis seam: given this session and this clock reading, the
+    /// envelope (if any) that MUST enter accepted history *before* the message
+    /// currently being processed.
+    ///
+    /// Default `None` — nothing is ever due, which is the answer for every
+    /// mode but Handoff. The motivating case is RFC-MACP-0010 §5.1(2): once an
+    /// outstanding handoff offer's `implicit_accept_timeout_ms` has elapsed,
+    /// the runtime "MUST append a synthetic `HandoffAccept` envelope to the
+    /// session's accepted history — before evaluating any subsequent message
+    /// against the offer's acceptance state, and in particular before any
+    /// `Commitment` evaluation".
+    ///
+    /// # The kernel contract
+    ///
+    /// A kernel that calls this MUST, holding the session's lock and *before*
+    /// it validates or dispatches the triggering message:
+    ///
+    /// 1. dispatch the returned envelope through [`Mode::on_message_at`] with
+    ///    `accepted_at_ms` equal to the envelope's own `timestamp_unix_ms`,
+    /// 2. append it durably as an ordinary accepted (`Incoming`) history entry,
+    /// 3. commit the resulting session state and insert the envelope's
+    ///    `message_id` into the dedup set,
+    /// 4. publish it to the session's subscribers,
+    ///
+    /// and only then process the triggering message. Appending without
+    /// dispatching, or dispatching without appending, forks live state from
+    /// what replay will rebuild from the log.
+    ///
+    /// # Never called on replay
+    ///
+    /// The recorded entry *is* the product: replay dispatches it through the
+    /// ordinary message path like any other accepted entry, so the timer stays
+    /// outside the replay boundary while its recorded product is inside — the
+    /// same construction as the runtime-emitted lifecycle envelopes of
+    /// RFC-MACP-0001 §7.5. An implementation must therefore never read a clock
+    /// of its own: every field of the returned envelope, `timestamp_unix_ms`
+    /// included, has to be a pure function of the session state and `now_ms`,
+    /// because it is baked into permanent history and an observation-dependent
+    /// value could never be reproduced.
+    ///
+    /// # Idempotence
+    ///
+    /// Implementations MUST return `None` once the returned envelope has been
+    /// applied to the session: a second emission would append a duplicate
+    /// entry whose deterministic `message_id` already holds a dedup slot.
+    ///
+    /// Like [`Mode::validate_client_envelope`], this hook is fail-open by
+    /// construction — a kernel that never calls it simply never synthesizes,
+    /// and still compiles. There is no compile-time forcing function, only
+    /// this note.
+    fn due_synthetic_envelope(&self, session: &Session, now_ms: i64) -> Option<Envelope> {
+        let _ = (session, now_ms);
+        None
+    }
+
     /// Authorize the sender for this message. Modes can override to customize
     /// authorization (e.g., allowing orchestrator bypass for Commitment messages).
     fn authorize_sender(&self, session: &Session, env: &Envelope) -> Result<(), MacpError> {

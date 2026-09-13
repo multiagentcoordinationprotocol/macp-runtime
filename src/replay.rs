@@ -1493,22 +1493,26 @@ mod tests {
     /// The exact envelope shape 11e will write into permanent history — a
     /// `HandoffAccept` with `implicit = true` and the deterministic
     /// `message_id`, on a current-revision session — reaches **dispatch** on
-    /// replay. The boundary does not see it.
+    /// replay, and is accepted there.
     ///
-    /// Today that entry is still refused, by `handle_message`'s
-    /// `if payload.implicit` arm, which 11c deliberately leaves in place
-    /// (belt and suspenders until 11d restructures it). So the assertion here
-    /// is the *source* of the refusal, which is the part 11c is responsible
-    /// for: `InvalidPayload` from dispatch, never `InvalidEnvelope` from the
-    /// client boundary. Verified empirically while writing this test — with
-    /// that one `handle_message` arm deleted and nothing else changed, this
-    /// exact log replays `Ok` to a `Resolved` session whose offer `h1` is
-    /// `Accepted` by `bob` — so 11d/11e are not blocked: the only thing
-    /// standing between this shape and a clean replay is the mode arm 11d is
-    /// specified to restructure.
+    /// **Flipped by 11d from `Err(InvalidPayload)` to `Ok`, exactly as the
+    /// 11c version of this test instructed.** Until 11d, `handle_message`'s
+    /// `if payload.implicit` arm refused the shape unconditionally (11c left it
+    /// in place as belt and suspenders), and this test pinned the *source* of
+    /// that refusal — `InvalidPayload` from dispatch, never `InvalidEnvelope`
+    /// from the client boundary, which is the part 11c owned. 11d made the
+    /// rev >= 2 arm accept the well-formed shape, so the log now replays to a
+    /// `Resolved` session whose offer `h1` is `Accepted` by `bob`.
     ///
-    /// **11d must flip this test from `Err(InvalidPayload)` to `Ok`.** It is
-    /// written to fail loudly then, not to be silently satisfied.
+    /// The client boundary is still what keeps the shape out on the live path
+    /// (`runtime::tests::client_implicit_accept_rejected_through_the_runtime`);
+    /// the point here is that it is **not** on the replay path, so recorded
+    /// history is free to carry the entry.
+    ///
+    /// Note the replay clock: the entry is dispatched with
+    /// `accepted_at_ms == received_at_ms == 1_100`, the deadline it was emitted
+    /// at. Dispatch must not re-derive the timeout from that (see
+    /// `HandoffMode::dispatch_implicit_accept`).
     #[test]
     fn synthetic_shaped_entry_reaches_dispatch_not_the_client_boundary() {
         let registry = make_registry();
@@ -1539,11 +1543,11 @@ mod tests {
         entries.push(entry);
         entries.push(commitment);
 
-        let err = replay_session("s1", &entries, &registry, Some(&policies)).unwrap_err();
-        assert!(
-            matches!(err, MacpError::InvalidPayload),
-            "the synthetic shape must be refused by dispatch (InvalidPayload), \
-             not by the client boundary (InvalidEnvelope); got {err}"
-        );
+        let session = replay_session("s1", &entries, &registry, Some(&policies))
+            .expect("the synthetic entry must replay through dispatch at rev >= 2");
+        assert_implicitly_accepted(&session);
+        // Genuinely replayed as accepted history, not skipped: its
+        // deterministic id holds a dedup slot.
+        assert!(session.seen_message_ids.contains("implicit-accept:h1"));
     }
 }

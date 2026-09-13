@@ -33,6 +33,18 @@ use std::collections::BTreeMap;
 /// consume its dedup slot. It is accepted as an ordinary client id.
 pub const IMPLICIT_ACCEPT_MESSAGE_ID_PREFIX: &str = "implicit-accept:";
 
+/// `reason` carried by the implicit accept, and therefore the offer's
+/// `outcome_reason` once it is applied.
+///
+/// **Byte-frozen.** It lives in serialized `mode_state`, which
+/// `tests/conformance_loader.rs`'s `assert_replay_equivalence` compares
+/// byte-for-byte, so changing it breaks replay of every rev <= 1 history that
+/// implicitly accepted. It is also what keeps the synthesized accept
+/// (RFC-MACP-0010 §5.1(2)) and the interim in-`Commitment` path below
+/// indistinguishable in `mode_state` — the reason both share this one const
+/// rather than repeating the literal.
+const IMPLICIT_ACCEPT_REASON: &str = "implicit accept (timeout)";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum HandoffDisposition {
     Offered,
@@ -175,6 +187,23 @@ impl HandoffMode {
             .saturating_sub(suspended_since_offer)
     }
 
+    /// The bound governance policy's `acceptance.implicit_accept_timeout_ms`,
+    /// or `0` when no policy is bound or its rules do not parse.
+    ///
+    /// `0` means implicit accept never fires, so an unparseable rules document
+    /// degrades to "no implicit accept" rather than to some default timeout.
+    /// This mirrors the interim in-`Commitment` path's `unwrap_or_default()`
+    /// exactly, deliberately: until that path is retired the two must agree, or
+    /// a session could implicitly accept through one and not the other.
+    fn implicit_accept_timeout_ms(session: &Session) -> i64 {
+        let Some(policy) = session.policy_definition.as_ref() else {
+            return 0;
+        };
+        let rules: macp_core::policy::rules::HandoffPolicyRules =
+            serde_json::from_value(policy.rules.clone()).unwrap_or_default();
+        rules.acceptance.implicit_accept_timeout_ms as i64
+    }
+
     fn commitment_ready(state: &HandoffState) -> bool {
         state.offers.values().any(|offer| {
             offer.disposition == HandoffDisposition::Accepted
@@ -295,6 +324,108 @@ impl Mode for HandoffMode {
         };
         self.handle_message(session, env, clock_ms)
     }
+
+    /// RFC-MACP-0010 §5.1(2)-(3): the synthetic implicit `HandoffAccept`, due
+    /// once the outstanding offer's `implicit_accept_timeout_ms` has elapsed in
+    /// *unsuspended* session time.
+    ///
+    /// Gated to `semantics_rev >= 2`. Rev <= 1 sessions get `None` forever and
+    /// keep resolving through the interim in-`Commitment` path, so their
+    /// histories replay to the outcome they were accepted with.
+    ///
+    /// # Decision vs. timestamp — two different functions, on purpose
+    ///
+    /// The **decision** ("has the timeout elapsed?") is the scalar
+    /// `implicit_accept_elapsed_ms`, which is exact for this purpose:
+    /// `elapsed(T) >= timeout` iff `T >= D`, because every pause banked since
+    /// the offer lies inside `[offered_at, T]`.
+    ///
+    /// Only the **timestamp** needs the interval walk
+    /// [`Session::unsuspended_deadline`]. §5.1(3) fixes it at "offer acceptance
+    /// time + timeout + suspended time *within the window*", which is **not**
+    /// the naive `offered_at + timeout + banked_since_offer`: that form counts
+    /// pauses beginning *after* the deadline — fully reachable, since
+    /// `SuspendSession`/`ResumeSession` are RPCs and need no session-scoped
+    /// message — and it would make a permanently-recorded timestamp depend on
+    /// when it happened to be observed.
+    ///
+    /// The two are consistent in the safe direction: an under-recorded
+    /// `suspension_intervals` vec (see `unsuspended_deadline`'s under-count
+    /// invariant) can only move `D` earlier, never later, so the
+    /// `debug_assert!(D <= now_ms)` below holds even on a legacy rev-2
+    /// snapshot.
+    ///
+    /// # Cost
+    ///
+    /// One `mode_state` decode per call for handoff sessions with a bound
+    /// timeout, and an allocation only when an envelope is actually due. A
+    /// cached "next deadline" flag on the session was considered and rejected
+    /// as premature: it would need a writer on the resume path, which is not
+    /// mode-dispatched at all.
+    fn due_synthetic_envelope(&self, session: &Session, now_ms: i64) -> Option<Envelope> {
+        if session.semantics_rev < 2 {
+            return None;
+        }
+        let timeout = Self::implicit_accept_timeout_ms(session);
+        if timeout <= 0 {
+            return None;
+        }
+        if session.mode_state.is_empty() {
+            return None;
+        }
+        let state = Self::decode_state(&session.mode_state).ok()?;
+        // RFC-MACP-0010 §5(5): at most one offer is ever outstanding, and once
+        // one is accepted no further offers may be issued — hence `Option`, not
+        // a queue. `values()` is a `BTreeMap` walk, so even a corrupted state
+        // with two outstanding offers picks deterministically.
+        let offer = state
+            .offers
+            .values()
+            .find(|offer| offer.disposition == HandoffDisposition::Offered)?;
+        // Unreachable at rev >= 2 (rev >= 1 records the acceptance clock on
+        // every offer), but kept: it costs nothing, the interim path has the
+        // same guard, and a zero here would otherwise measure the timeout from
+        // the epoch.
+        if offer.offered_at_ms <= 0 {
+            return None;
+        }
+        if Self::implicit_accept_elapsed_ms(session, offer, now_ms) < timeout {
+            return None;
+        }
+        // Completed pauses only: an in-progress suspension is not in
+        // `suspension_intervals`, and a suspended session ticks no unsuspended
+        // time anyway. Kernel callers must skip non-`Open` sessions.
+        debug_assert!(
+            session.suspended_at_ms.is_none(),
+            "due_synthetic_envelope must not be asked about a suspended session"
+        );
+        let deadline = session.unsuspended_deadline(offer.offered_at_ms, timeout);
+        debug_assert!(
+            deadline <= now_ms,
+            "deadline {deadline} is in the future of the observation {now_ms}"
+        );
+        Some(Envelope {
+            macp_version: "1.0".into(),
+            mode: session.mode.clone(),
+            message_type: "HandoffAccept".into(),
+            message_id: format!(
+                "{IMPLICIT_ACCEPT_MESSAGE_ID_PREFIX}{}",
+                offer.handoff_id.as_str()
+            ),
+            session_id: session.session_id.clone(),
+            sender: offer.target_participant.clone(),
+            // §5.1(3) SHOULD, adopted here as a MUST: the recorded clocks are
+            // the computed deadline, never the observation time.
+            timestamp_unix_ms: deadline,
+            payload: HandoffAcceptPayload {
+                handoff_id: offer.handoff_id.clone(),
+                accepted_by: offer.target_participant.clone(),
+                reason: IMPLICIT_ACCEPT_REASON.into(),
+                implicit: true,
+            }
+            .encode_to_vec(),
+        })
+    }
 }
 
 impl HandoffMode {
@@ -393,12 +524,8 @@ impl HandoffMode {
             "HandoffAccept" => {
                 let payload = HandoffAcceptPayload::decode(&*env.payload)
                     .map_err(|_| MacpError::InvalidPayload)?;
-                // RFC-MACP-0010 §5.1: `implicit` is runtime-synthesized only
-                // (see the implicit_accept_timeout_ms handling below, which
-                // never constructs this message type). A client-submitted
-                // accept setting it MUST be rejected.
                 if payload.implicit {
-                    return Err(MacpError::InvalidPayload);
+                    return self.dispatch_implicit_accept(session, env, payload, state);
                 }
                 let offer = state
                     .offers
@@ -460,7 +587,7 @@ impl HandoffMode {
                             {
                                 offer.disposition = HandoffDisposition::Accepted;
                                 offer.accepted_by = Some(offer.target_participant.clone());
-                                offer.outcome_reason = Some("implicit accept (timeout)".into());
+                                offer.outcome_reason = Some(IMPLICIT_ACCEPT_REASON.into());
                             }
                         }
                     }
@@ -483,6 +610,88 @@ impl HandoffMode {
             }
             _ => Err(MacpError::InvalidPayload),
         }
+    }
+
+    /// The `HandoffAccept` arm for a payload carrying `implicit = true`.
+    ///
+    /// **Rev <= 1: reject, unconditionally** — RFC-MACP-0010 §5.1(3), and
+    /// today's behavior preserved verbatim so legacy histories replay
+    /// bit-identically. No rev <= 1 log can contain such an entry, because no
+    /// rev <= 1 runtime ever accepted or synthesized one.
+    ///
+    /// **Rev >= 2: validate strictly and accept.** The runtime synthesizes this
+    /// message into accepted history itself (§5.1(2)), so dispatch MUST accept
+    /// the well-formed shape — on replay of the recorded entry, and on the live
+    /// emission path. The mode cannot keep clients out here, because it cannot
+    /// tell client provenance from runtime provenance; that is
+    /// [`Mode::validate_client_envelope`]'s job (§5.1(3) scopes the client
+    /// prohibition to submission "via `Send`").
+    ///
+    /// # This arm MUST NOT re-verify the deadline arithmetic
+    ///
+    /// It validates identity and shape only — never time. On replay the entry
+    /// is dispatched with `ctx.accepted_at_ms = received_at_ms = D`, the
+    /// deadline it was emitted at, but `session.accumulated_suspended_ms` at
+    /// that point in the replay already includes pauses that happened *after*
+    /// D: the `SessionSuspend`/`SessionResume` entries between D and the
+    /// message that triggered the synthesis sit **earlier in the log** than the
+    /// synthetic entry does (its `received_at_ms` is D, which is why the log's
+    /// `received_at_ms` is locally non-monotonic in exactly this case — nothing
+    /// orders by it, replay and ordinals are positional). So re-checking
+    /// `implicit_accept_elapsed_ms(session, offer, D) >= timeout` would subtract
+    /// suspension from outside the window, compute *less* unsuspended time than
+    /// the timeout, and reject an entry that was emitted correctly — failing
+    /// replay of a valid log.
+    ///
+    /// [`Self::due_synthetic_envelope`] is the single place the timeout is
+    /// decided, once, at emission. Do not add a time check here.
+    fn dispatch_implicit_accept(
+        &self,
+        session: &Session,
+        env: &Envelope,
+        payload: HandoffAcceptPayload,
+        mut state: HandoffState,
+    ) -> Result<ModeResponse, MacpError> {
+        if session.semantics_rev < 2 {
+            return Err(MacpError::InvalidPayload);
+        }
+        let offer = state
+            .offers
+            .get_mut(&payload.handoff_id)
+            .ok_or(MacpError::InvalidPayload)?;
+        // Same code as the explicit arm for the same condition, so the error
+        // surface does not depend on the flag.
+        if offer.target_participant != env.sender {
+            return Err(MacpError::Forbidden);
+        }
+        // Stricter than the explicit arm, which tolerates an empty
+        // `accepted_by`: the synthetic envelope always names the target
+        // explicitly, so anything else is not the envelope this runtime emits.
+        if payload.accepted_by != offer.target_participant {
+            return Err(MacpError::InvalidPayload);
+        }
+        // The deterministic id from §5.1(3). Reserved at the client boundary at
+        // rev >= 2, so an envelope that reaches here carrying it is either
+        // replayed history or the kernel's own synthesis.
+        if env.message_id
+            != format!(
+                "{IMPLICIT_ACCEPT_MESSAGE_ID_PREFIX}{}",
+                offer.handoff_id.as_str()
+            )
+        {
+            return Err(MacpError::InvalidPayload);
+        }
+        if offer.disposition != HandoffDisposition::Offered {
+            return Err(MacpError::InvalidPayload);
+        }
+        // Exactly the mutation an explicit accept applies (and exactly the one
+        // the interim in-`Commitment` path applies, `IMPLICIT_ACCEPT_REASON`
+        // included), so a history carrying the synthetic entry rebuilds
+        // byte-identical `mode_state`.
+        offer.disposition = HandoffDisposition::Accepted;
+        offer.accepted_by = Some(offer.target_participant.clone());
+        offer.outcome_reason = Some(payload.reason);
+        Ok(ModeResponse::PersistState(Self::encode_state(&state)))
     }
 }
 
@@ -790,10 +999,27 @@ mod tests {
         }
     }
 
+    /// A `HandoffAccept` carrying `implicit = true` under a `message_id`
+    /// **outside** the reserved namespace is rejected `InvalidPayload`.
+    ///
+    /// This test used to be named `client_submitted_implicit_accept_is_rejected`
+    /// and claimed to prove RFC-MACP-0010 §5.1(3)'s client prohibition. Since
+    /// 11d it does not: at `semantics_rev >= 2` dispatch *must* accept a
+    /// well-formed implicit accept (it is what replay feeds back in), so what
+    /// still fails here is the `message_id` check — the `env()` helper produces
+    /// `"target-HandoffAccept"`, not `"implicit-accept:h1"`. Renamed rather than
+    /// left green under a false name.
+    ///
+    /// The §5.1(3) claim is pinned in the two places it still holds:
+    /// - the **rev-1 arm below**, where the flag rejection is still
+    ///   unconditional whatever the `message_id`;
+    /// - at the **client boundary** for rev >= 2 —
+    ///   `client_implicit_accept_rejected_at_the_boundary` case (b) submits the
+    ///   fully well-formed synthetic shape, reserved `message_id` included, and
+    ///   the boundary refuses it. That is the only layer that can, because the
+    ///   mode cannot tell client provenance from runtime provenance.
     #[test]
-    fn client_submitted_implicit_accept_is_rejected() {
-        // RFC-MACP-0010 §5.1: `implicit` is runtime-synthesized only; a
-        // client MUST NOT submit it, and the runtime MUST reject it.
+    fn implicit_accept_with_a_non_reserved_message_id_is_rejected() {
         let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
         let mut session = base_session();
         let result = mode
@@ -818,6 +1044,29 @@ mod tests {
             .on_message(&session, &env("target", "HandoffAccept", forged_accept))
             .unwrap_err();
         assert_eq!(err.to_string(), "InvalidPayload");
+
+        // Rev <= 1: the flag rejection is still UNCONDITIONAL — the original
+        // §5.1(3) claim, preserved at the revision where it holds. Even the
+        // otherwise perfect synthetic shape (reserved `message_id`, right
+        // sender, right `accepted_by`) is refused, because no rev <= 1 runtime
+        // ever synthesized one and no rev <= 1 log can contain one.
+        let mut legacy = session.clone();
+        legacy.semantics_rev = 1;
+        let mut perfect = env(
+            "target",
+            "HandoffAccept",
+            make_implicit_accept("h1", "target"),
+        );
+        perfect.message_id = reserved_id("h1");
+        assert_eq!(
+            mode.on_message(&legacy, &perfect).unwrap_err().to_string(),
+            "InvalidPayload"
+        );
+        // ... while at the current revision the identical envelope is
+        // ACCEPTED through dispatch (see `implicit_accept_dispatch_accepted_at_rev2`).
+        // The differential is the point: without it, deleting the rev gate
+        // would leave this test green.
+        assert!(mode.on_message(&session, &perfect).is_ok());
     }
 
     #[test]
@@ -2020,5 +2269,385 @@ mod tests {
             crate::step::validate_message(&session, &authorized, &mode).unwrap_err(),
             MacpError::InvalidEnvelope
         ));
+    }
+
+    // --- The synthesis contract: `due_synthetic_envelope` (Phase 11d) ---
+    //
+    // RFC-MACP-0010 §5.1(2)-(3). Nothing calls the hook yet — the kernel
+    // wiring is 11e — so these drive it by hand with injected clocks.
+
+    /// A current-revision session with [`auto_accept_policy`] bound and one
+    /// outstanding offer `h1` to `target`, accepted at [`OFFER_TIME_MS`].
+    fn offered_session() -> (HandoffMode, Session) {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = base_session();
+        session.policy_definition = Some(auto_accept_policy());
+        let result = mode
+            .on_session_start(&session, &env("owner", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+        let ctx = macp_core::mode::MessageContext::new(OFFER_TIME_MS);
+        let result = mode
+            .on_message_at(
+                &session,
+                &env("owner", "HandoffOffer", make_offer("h1", "target")),
+                &ctx,
+            )
+            .unwrap();
+        apply(&mut session, result);
+        (mode, session)
+    }
+
+    /// The bound timeout, read back through the production resolver rather
+    /// than re-hard-coded from the policy JSON.
+    fn bound_timeout_ms(session: &Session) -> i64 {
+        let timeout = HandoffMode::implicit_accept_timeout_ms(session);
+        assert_eq!(timeout, 100, "auto_accept_policy binds a 100ms timeout");
+        timeout
+    }
+
+    /// RFC-MACP-0010 §5.1(3): the synthetic accept becomes due exactly when
+    /// the offer's timeout has elapsed in *unsuspended* time, and its
+    /// `timestamp_unix_ms` is the computed deadline D — not the observation
+    /// time, and not the naive
+    /// `offered_at + timeout + banked_suspension_since_the_offer`.
+    ///
+    /// The last case is the one that separates the three: a pause that begins
+    /// **after** D must not move D at all, while both wrong implementations
+    /// move it.
+    #[test]
+    fn due_synthetic_envelope_emits_at_the_deadline() {
+        let (mode, session) = offered_session();
+        let timeout = bound_timeout_ms(&session);
+        let deadline = OFFER_TIME_MS + timeout;
+
+        // Not due one millisecond early.
+        assert!(mode
+            .due_synthetic_envelope(&session, deadline - 1)
+            .is_none());
+
+        // Due at D, and at every later observation — with the *same* envelope,
+        // because nothing in it may depend on when it was asked.
+        let at_deadline = mode
+            .due_synthetic_envelope(&session, deadline)
+            .expect("due at the deadline");
+        let much_later = mode
+            .due_synthetic_envelope(&session, deadline + 10_000)
+            .expect("still due long after the deadline");
+        assert_eq!(at_deadline, much_later);
+
+        // Field by field: the constants §5.1(3) fixes.
+        assert_eq!(at_deadline.macp_version, "1.0");
+        assert_eq!(at_deadline.mode, session.mode);
+        assert_eq!(at_deadline.session_id, session.session_id);
+        assert_eq!(at_deadline.message_type, "HandoffAccept");
+        assert_eq!(at_deadline.message_id, "implicit-accept:h1");
+        assert_eq!(at_deadline.sender, "target");
+        assert_eq!(at_deadline.timestamp_unix_ms, deadline);
+        let payload = HandoffAcceptPayload::decode(&*at_deadline.payload).unwrap();
+        assert_eq!(payload.handoff_id, "h1");
+        assert_eq!(payload.accepted_by, "target");
+        assert_eq!(payload.reason, IMPLICIT_ACCEPT_REASON);
+        assert!(payload.implicit);
+
+        // A pause *inside* the window pushes D out by its width (§5.1(1)):
+        // 50ms of live time, a 150ms pause, then the remaining 50ms.
+        let mut paused = session.clone();
+        paused.suspend(OFFER_TIME_MS + 50).unwrap();
+        paused.resume(OFFER_TIME_MS + 200).unwrap();
+        assert_eq!(paused.suspension_intervals, vec![(1_050, 1_200)]);
+        assert!(mode
+            .due_synthetic_envelope(&paused, OFFER_TIME_MS + 249)
+            .is_none());
+        assert_eq!(
+            mode.due_synthetic_envelope(&paused, OFFER_TIME_MS + 250)
+                .expect("due at the walked deadline")
+                .timestamp_unix_ms,
+            OFFER_TIME_MS + 250
+        );
+
+        // THE KILLER CASE — a pause that begins *after* D does not move D.
+        // §5.1(3) counts "suspended time within the window"; this pause is
+        // outside it. The offer's unsuspended time had already hit the timeout
+        // at D, so D is what permanent history must record no matter how long
+        // afterwards (or how many pauses later) the runtime gets round to
+        // looking.
+        let mut late_pause = session.clone();
+        late_pause.suspend(deadline + 50).unwrap();
+        late_pause.resume(deadline + 250).unwrap();
+        let observed_at = deadline + 400;
+        let late = mode
+            .due_synthetic_envelope(&late_pause, observed_at)
+            .expect("a pause after the deadline cannot un-due the accept");
+        assert_eq!(
+            late.timestamp_unix_ms, deadline,
+            "a pause beginning after D must not move D"
+        );
+        // The two wrong implementations this pins out, named so a future
+        // refactor cannot reintroduce either by accident:
+        assert_ne!(
+            late.timestamp_unix_ms, observed_at,
+            "observation time is not the deadline"
+        );
+        assert_eq!(late_pause.accumulated_suspended_ms, 200);
+        assert_ne!(
+            late.timestamp_unix_ms,
+            OFFER_TIME_MS + timeout + late_pause.accumulated_suspended_ms,
+            "the naive offered_at + timeout + banked-suspension formula counts \
+             pauses outside the window"
+        );
+    }
+
+    /// Everything that makes an implicit accept *not* due. Each arm is one
+    /// guard in `due_synthetic_envelope`.
+    #[test]
+    fn due_synthetic_envelope_returns_none_unless_an_offer_is_due() {
+        let (mode, session) = offered_session();
+        let deadline = OFFER_TIME_MS + bound_timeout_ms(&session);
+        let long_after = deadline + 1_000_000;
+
+        // Rev gate: legacy sessions never synthesize — they keep resolving
+        // through the interim in-`Commitment` path, so their histories replay
+        // to the outcome they were accepted with.
+        for rev in [0, 1] {
+            let mut legacy = session.clone();
+            legacy.semantics_rev = rev;
+            assert!(
+                mode.due_synthetic_envelope(&legacy, long_after).is_none(),
+                "rev {rev} must never synthesize"
+            );
+        }
+
+        // No policy bound at all.
+        let mut unbound = session.clone();
+        unbound.policy_definition = None;
+        assert!(mode.due_synthetic_envelope(&unbound, long_after).is_none());
+
+        // Policy bound but the feature switched off (timeout 0), and rules
+        // that do not parse — both degrade to "never", matching the interim
+        // path's `unwrap_or_default`.
+        for rules in [
+            serde_json::json!({ "acceptance": { "implicit_accept_timeout_ms": 0 } }),
+            serde_json::json!({ "acceptance": "not an object" }),
+        ] {
+            let mut off = session.clone();
+            off.policy_definition = Some(macp_core::policy::PolicyDefinition {
+                policy_id: "off".into(),
+                mode: "macp.mode.handoff.v1".into(),
+                description: "no implicit accept".into(),
+                rules,
+                schema_version: 1,
+            });
+            assert_eq!(HandoffMode::implicit_accept_timeout_ms(&off), 0);
+            assert!(mode.due_synthetic_envelope(&off, long_after).is_none());
+        }
+
+        // No offer yet (session start only), and undecodable `mode_state`.
+        let mut no_offer = session.clone();
+        no_offer.mode_state = HandoffMode::encode_state(&HandoffState::default());
+        assert!(mode.due_synthetic_envelope(&no_offer, long_after).is_none());
+        let mut empty = session.clone();
+        empty.mode_state = vec![];
+        assert!(mode.due_synthetic_envelope(&empty, long_after).is_none());
+        let mut garbage = session.clone();
+        garbage.mode_state = b"not json".to_vec();
+        assert!(mode.due_synthetic_envelope(&garbage, long_after).is_none());
+
+        // The offer is no longer outstanding.
+        for disposition in [HandoffDisposition::Accepted, HandoffDisposition::Declined] {
+            let mut settled = session.clone();
+            let mut state: HandoffState = serde_json::from_slice(&settled.mode_state).unwrap();
+            state.offers.get_mut("h1").unwrap().disposition = disposition;
+            settled.mode_state = serde_json::to_vec(&state).unwrap();
+            assert!(mode.due_synthetic_envelope(&settled, long_after).is_none());
+        }
+
+        // A legacy offer with no acceptance clock recorded (unreachable at
+        // rev >= 2, guarded anyway).
+        let mut clockless = session.clone();
+        let mut state: HandoffState = serde_json::from_slice(&clockless.mode_state).unwrap();
+        state.offers.get_mut("h1").unwrap().offered_at_ms = 0;
+        clockless.mode_state = serde_json::to_vec(&state).unwrap();
+        assert!(mode
+            .due_synthetic_envelope(&clockless, long_after)
+            .is_none());
+    }
+
+    /// The synthetic payload's prost encoding, pinned byte-for-byte. It is
+    /// written into permanent history, so a field reordering or a changed
+    /// `reason` would silently break byte-identical replay of every log that
+    /// carries one — and Phase 12's byte-identity criterion outright.
+    #[test]
+    fn synthetic_payload_bytes_are_pinned() {
+        let (mode, session) = offered_session();
+        let deadline = OFFER_TIME_MS + bound_timeout_ms(&session);
+        let synthetic = mode
+            .due_synthetic_envelope(&session, deadline)
+            .expect("due at the deadline");
+
+        let expected: Vec<u8> = [
+            b"\x0a\x02h1".as_slice(),             // 1: handoff_id
+            b"\x12\x06target",                    // 2: accepted_by
+            b"\x1a\x19implicit accept (timeout)", // 3: reason
+            b"\x20\x01",                          // 4: implicit = true
+        ]
+        .concat();
+        assert_eq!(synthetic.payload, expected);
+    }
+
+    /// Dispatch accepts the synthetic envelope at rev >= 2 — this is what
+    /// replay does with the recorded entry — and applies exactly the mutation
+    /// the interim in-`Commitment` path applies, so `mode_state` is
+    /// byte-identical either way.
+    ///
+    /// Rejected when malformed in any single field, and at rev 1.
+    #[test]
+    fn implicit_accept_dispatch_accepted_at_rev2() {
+        let (mode, session) = offered_session();
+        let deadline = OFFER_TIME_MS + bound_timeout_ms(&session);
+        let synthetic = mode
+            .due_synthetic_envelope(&session, deadline)
+            .expect("due at the deadline");
+        // Replay dispatches the entry with `accepted_at_ms == received_at_ms`,
+        // which for this entry is D.
+        let ctx = macp_core::mode::MessageContext::new(synthetic.timestamp_unix_ms);
+
+        let mut accepted = session.clone();
+        let resp = mode.on_message_at(&accepted, &synthetic, &ctx).unwrap();
+        apply(&mut accepted, resp);
+        let state: HandoffState = serde_json::from_slice(&accepted.mode_state).unwrap();
+        let offer = &state.offers["h1"];
+        assert_eq!(offer.disposition, HandoffDisposition::Accepted);
+        assert_eq!(offer.accepted_by.as_deref(), Some("target"));
+        assert_eq!(
+            offer.outcome_reason.as_deref(),
+            Some(IMPLICIT_ACCEPT_REASON)
+        );
+
+        // ... and the commitment the synthesis exists to unblock now resolves.
+        let commit = mode
+            .on_message_at(
+                &accepted,
+                &env("owner", "Commitment", commitment_payload()),
+                &macp_core::mode::MessageContext::new(deadline + 10),
+            )
+            .unwrap();
+        assert!(matches!(commit, ModeResponse::PersistAndResolve { .. }));
+
+        // Idempotent: nothing is due once the offer is settled, and the same
+        // entry cannot be applied twice.
+        assert!(mode
+            .due_synthetic_envelope(&accepted, deadline + 10_000)
+            .is_none());
+        assert!(matches!(
+            mode.on_message_at(&accepted, &synthetic, &ctx).unwrap_err(),
+            MacpError::InvalidPayload
+        ));
+
+        // One field off the synthetic shape is one rejection. Each of these
+        // would otherwise be an envelope a library caller could hand-build.
+        let mut wrong_sender = synthetic.clone();
+        wrong_sender.sender = "owner".into();
+        assert!(matches!(
+            mode.on_message_at(&session, &wrong_sender, &ctx)
+                .unwrap_err(),
+            MacpError::Forbidden
+        ));
+
+        let mut wrong_accepted_by = synthetic.clone();
+        wrong_accepted_by.payload = make_implicit_accept("h1", "owner");
+        assert!(matches!(
+            mode.on_message_at(&session, &wrong_accepted_by, &ctx)
+                .unwrap_err(),
+            MacpError::InvalidPayload
+        ));
+
+        let mut empty_accepted_by = synthetic.clone();
+        empty_accepted_by.payload = make_implicit_accept("h1", "");
+        assert!(
+            matches!(
+                mode.on_message_at(&session, &empty_accepted_by, &ctx)
+                    .unwrap_err(),
+                MacpError::InvalidPayload
+            ),
+            "stricter than the explicit arm: the synthetic always names the target"
+        );
+
+        let mut wrong_id = synthetic.clone();
+        wrong_id.message_id = "accept-1".into();
+        assert!(matches!(
+            mode.on_message_at(&session, &wrong_id, &ctx).unwrap_err(),
+            MacpError::InvalidPayload
+        ));
+
+        let mut unknown_offer = synthetic.clone();
+        unknown_offer.message_id = reserved_id("h2");
+        unknown_offer.payload = make_implicit_accept("h2", "target");
+        assert!(matches!(
+            mode.on_message_at(&session, &unknown_offer, &ctx)
+                .unwrap_err(),
+            MacpError::InvalidPayload
+        ));
+
+        // Rev 1 refuses the identical, perfectly-formed envelope.
+        let mut legacy = session.clone();
+        legacy.semantics_rev = 1;
+        assert!(matches!(
+            mode.on_message_at(&legacy, &synthetic, &ctx).unwrap_err(),
+            MacpError::InvalidPayload
+        ));
+    }
+
+    /// The negative rule of this phase, made killable instead of merely
+    /// absent: **dispatch must not re-verify the deadline arithmetic.**
+    ///
+    /// This reproduces the exact replay state that a re-check would fail on. A
+    /// pause runs from D+50 to D+250, *after* the deadline, so by the time the
+    /// synthetic entry is dispatched on replay the session has already banked
+    /// 200ms of suspension — because the `SessionSuspend`/`SessionResume`
+    /// entries sit earlier in the log than the synthetic entry does (whose
+    /// `received_at_ms` is D). Dispatch sees `accepted_at_ms = D` together with
+    /// `accumulated_suspended_ms = 200`, so
+    /// `implicit_accept_elapsed_ms(session, offer, D)` is **negative** — a
+    /// re-check would reject a correctly-emitted entry and fail replay of a
+    /// valid log.
+    ///
+    /// Add a time check to `dispatch_implicit_accept` and this test goes red.
+    #[test]
+    fn implicit_accept_dispatch_does_not_reverify_the_deadline() {
+        let (mode, session) = offered_session();
+        let timeout = bound_timeout_ms(&session);
+        let deadline = OFFER_TIME_MS + timeout;
+        let synthetic = mode
+            .due_synthetic_envelope(&session, deadline)
+            .expect("due at the deadline");
+        assert_eq!(synthetic.timestamp_unix_ms, deadline);
+
+        // The pause that lands after D, banked before the synthetic entry is
+        // replayed.
+        let mut replayed = session.clone();
+        replayed.suspend(deadline + 50).unwrap();
+        replayed.resume(deadline + 250).unwrap();
+        assert_eq!(replayed.accumulated_suspended_ms, 200);
+
+        // What a re-check would compute at the replay clock: less than nothing.
+        let state: HandoffState = serde_json::from_slice(&replayed.mode_state).unwrap();
+        assert!(
+            HandoffMode::implicit_accept_elapsed_ms(&replayed, &state.offers["h1"], deadline)
+                < timeout,
+            "the scalar is below the timeout here — that is the whole hazard"
+        );
+
+        // Dispatch accepts anyway, because it validates identity and shape
+        // only.
+        let ctx = macp_core::mode::MessageContext::new(synthetic.timestamp_unix_ms);
+        let resp = mode.on_message_at(&replayed, &synthetic, &ctx).unwrap();
+        apply(&mut replayed, resp);
+        let state: HandoffState = serde_json::from_slice(&replayed.mode_state).unwrap();
+        assert_eq!(
+            state.offers["h1"].disposition,
+            HandoffDisposition::Accepted,
+            "a correctly-emitted synthetic entry must replay through dispatch"
+        );
     }
 }
