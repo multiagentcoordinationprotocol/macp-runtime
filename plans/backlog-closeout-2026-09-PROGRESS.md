@@ -382,3 +382,425 @@ mutation-checked rather than trusted.
   by review rather than a red test, with the invariant stated in the surviving test's doc comment; and
   `synced`'s boundedness has no observable signal through the gRPC surface, resting on the
   single-publisher argument plus the exactly-once contract it must not break.
+
+---
+
+## Phase 9 — rev-2 scaffolding (G4) · 2026-09-11 · PASS, 1 verify round
+
+Commit `8e81481` on `feat/handoff-implicit-accept-rev2` (cut from `origin/main` @ `882beeb`), not
+pushed — accumulating toward G4's PR, per the verifier's explicit call. Executor Opus, verifier fresh
+Opus (no Fable at any tier, per the user's standing instruction; this phase is not a one-way door
+anyway — Phase 11 is the one that is, and it gets a fresh Opus too).
+
+Gate: **758 workspace passed / 0 failed** (751 baseline + 7 new), tier-1 119 + 8 JWT + 5 tier-2,
+`fmt`/`clippy -D warnings`/rustdoc clean, both lockfiles byte-unmoved. Three non-additive lines total:
+the const value, the record field, the call site. No existing test changed — the Edge-cases section's
+prediction that none would was correct, and its no-`== 1`-comparison claim was independently
+re-verified (four `semantics_rev` comparisons repo-wide, all `>= 1`).
+
+**Plan error #8 — a Files list that was an inventory presented as a work item.** The plan enumerated
+17 `LogEntry` literal sites to touch. They are a *correct* inventory of where `LogEntry` is
+constructed, and that is exactly why it misled: the new field belongs on `HandoffOfferRecord`, which
+lives inside the serialized `mode_state` blob, so **0 of the 17 needed any edit**. An executor
+following the Files list literally would have gone looking for a change with no reason to exist. This
+is the eighth of nine executed phases to find a real error in my plan.
+
+**A clippy lint made the planned shape inexpressible.** The plan asked for a `>= 2` branch "identical
+to `>= 1`" as the zero-risk scaffold. `clippy::if_same_then_else` under `-D warnings` rejects exactly
+that. The scaffolding became a single `rev2_elapsed_ms` helper returning the rev-1 arithmetic
+verbatim — which is structurally what the plan wanted (a seam Phase 10 edits in one place) and
+strictly better than a duplicated branch, but it is not what the plan said to write.
+
+**A pre-existing failure on a clean tree, and why the gate numbers are trustworthy anyway.**
+`macp-policy::registry::tests::enum_lists_match_the_canonical_schemas` fails on an unmodified
+`origin/main` in this environment: the test reads the sibling spec checkout, which sits on the
+unmerged `fix/issue-98-voting-semantics` branch (`392b961`), and that branch already moved
+`voting.threshold` from `minimum: 0` to `exclusiveMinimum: 0` while our hand-written mirror still
+asserts `minimum == 0`. **CI checks out spec `main`, so CI is green today** — the failure is local,
+not introduced by this phase. It is also a preview: this job reds the moment spec #98 merges, with no
+change on our side. Filed as macp-runtime issue #163, which also records that #98's draft introduces
+policy `schema_version` 3 — unplanned runtime work nobody had scoped. Every gate number above was
+re-run with `MACP_POLICY_SCHEMAS_DIR` pointed at spec `origin/main`'s schemas, so 758/0 is what CI
+will see rather than what this working copy sees.
+
+One expected-but-startling diff the executor was warned about and confirmed benign: adding a
+`#[serde(default)]` field to `HandoffOfferRecord` changes `mode_state` bytes, and
+`tests/conformance/handoff_reject_paths.json:62` carries an `expected_mode_state`. It passes because
+`conformance_loader.rs:516` compares by `assert_json_contains` (subset), not equality.
+
+**Next:** Phase 10 — suspension-correct timing. `rev2_elapsed_ms` is the exact seam it edits.
+
+---
+
+## Phase 10 — suspension-correct timing (G4) · 2026-09-11 · PASS after 1 gap round
+
+Commits `04d267d` (the change) + `810a0c3` (gap closure) on `feat/handoff-implicit-accept-rev2`,
+not pushed — **accumulating toward G4's single PR, deliberately**. Executor Opus, verifier fresh
+Opus, fixer fresh Opus, closure re-verify fresh Opus. Round 1 = GAPS (1 BLOCKER, 3 SHOULD-FIX,
+4 NICE-TO-HAVE); round 2 = PASS, all four in-scope items closed with no defects introduced.
+
+Gate, independently reproduced by the closure verifier: **766 passed / 0 failed** (758 → 763 → 766),
+tier-1 119 + 8 JWT + 5 tier-2 exactly at baseline, fmt/clippy/rustdoc clean, both lockfiles
+byte-unmoved, no mutation artifacts or stray backups left behind.
+
+### The change
+
+`rev2_elapsed_ms` — the seam Phase 9 left — became
+`(now - offered_at) - max(0, accumulated_suspended - snapshot_at_offer)`, both subtractions
+saturating. The rev `<= 1` arm is byte-identical to before. Verified by hand against a
+two-pause timeline: offer at 1000, pauses banking 250 and 170, commit at 1510 → 90 ms unsuspended
+against a 100 ms timeout, so rev 2 rejects where rev 1's raw 510 ms accepts.
+
+### Plan errors: two, both substantive, both mine
+
+**Error #9 — acceptance criterion 3 was undischargeable as written**, and for a deeper reason than
+the executor found. It required `assert_replay_equivalence` to pass "for a rev-1 history containing
+an implicit accept". That function (`tests/conformance_loader.rs:356`) has exactly one call site
+(`:520`), inside the vendored-fixture loop; no fixture exercises an implicit accept; and
+`tests/conformance/` is vendored and byte-diffed by the `conformance-oracle` job so one cannot be
+added here. The executor found all that. The verifier found the part that actually settles it:
+fixtures run through the live `Runtime`, and `Session::builder` unconditionally stamps
+`CURRENT_SEMANTICS_REV` with no override — so **a rev-1 history is not expressible in that harness
+at all**, implicit accepts aside. The criterion was impossible the moment it was written.
+Discharged by intent instead, through a differential legacy-log fixture on the real
+`replay_session` path (`src/replay.rs:1036,1063`).
+
+**Error #10 — the plan named the wrong guard for its own hard edge case.** It warned that changing
+`outcome_reason` "breaks byte-exact replay of rev-1 histories, which `assert_replay_equivalence`
+compares byte-for-byte." Wrong twice: that function is never reached with an implicit accept, **and**
+the thing that actually pins the string is `assert_implicitly_accepted` (`src/replay.rs:920-927`),
+which the plan never mentions. The verifier's mutation (one trailing space on the string) killed six
+tests and confirmed which guard fires.
+
+**A correction in the plan's favour, worth recording because I had accepted the executor's claim.**
+The executor reported the plan's `handoff.rs:298`/`:302` line cites as stale. The verifier checked
+`882beeb` — the commit the plan was written against — and found line 298 was exactly the raw
+`>= timeout` comparison and line 302 exactly the `outcome_reason` assignment. **Correct when
+written**, displaced later by Phase 9. Normal intra-plan drift, not a drafting error. So the count is
+two, not three.
+
+### The BLOCKER, which was not about Phase 10 at all
+
+`RUSTC_WRAPPER="" cargo semver-checks check-release --workspace` fails with
+`constructible_struct_adds_field` on `HandoffOfferRecord.suspended_ms_at_offer` — **Phase 9's**
+field, recorded nowhere until now. `release-plz.toml` sets `semver_check = true`, so it blocks the
+release PR, and one `version_group` moves all seven crates. I verified it directly rather than
+trusting the report. No route back to 0.7.x exists: `#[non_exhaustive]`, privatising the struct, and
+relocating the state are all equally breaking, and Phase 11 needs another field on the same struct.
+Repo owner's call, logged as `DECISIONS.md` **D7**: take **0.8.0** and spend the break on
+`#[non_exhaustive]`, matching the pattern `Session`, `MacpError`, `ModeResponse` and
+`PolicyFileOutcome` already follow. Lands in Phase 13 as its own commit.
+
+### The finding that grew on inspection
+
+The executor nominated the `make_internal_entry` double-`Utc::now()` skew as a follow-on, calling it
+sub-millisecond and pre-existing. The verifier agreed on magnitude but improved the argument — there
+is no `.await`, no lock acquisition and no I/O between the two reads, and the two errors **cancel**,
+being a difference of identically-shaped windows rather than a sum — then raised the consequence
+sharply: within 1 ms of the deadline a live-`Resolved` session **fails replay entirely**,
+`src/main.rs:385` logs "skipping", and the session silently vanishes on restart. One-line fix.
+Folded into Phase 11 (`follow_ons.md` item 10), which already touches `runtime.rs` and which makes
+this value gate a *synthesized log entry* rather than only an in-memory decision.
+
+### Honest notes on test strength
+
+The multi-suspension coverage added in the gap round is two tests, and **only one is a behavioural
+guard**. The fixer self-reported this and the closure verifier reproduced it: with the state
+assertions stripped and `resume` mutated, `rev2_handoff_history_accepts_on_unsuspended_time_across_two_pauses`
+still **passes** — more unsuspended time only makes an accept more likely — while
+`rev2_handoff_history_subtracts_every_suspension_pair` fails. The load-bearing multi-pause guard is
+the differential one; the other pins fixture state. Recorded so nobody later mistakes which is which.
+
+The requested mutation also could not be written where I asked for it: "subtract the suspension term
+once per session rather than accumulated" has no expression inside `rev2_elapsed_ms`, which reads one
+scalar and subtracts it once. The fixer relocated it to `Session::resume`'s `saturating_add`
+(`= banked`), which is the semantically equivalent single-pair-invisible mutation and in fact
+stronger, since it also breaks the cap check.
+
+**Next:** Phase 11, replanned by Fable at the user's instruction (reversing this run's
+no-Fable-at-any-tier constraint) because it is the one genuine one-way door. Its `Incoming` decision
+is now settled by RFC-MACP-0010 §5.1(2)'s explicit §7.5 analogy rather than by inference.
+
+## Phase 11b — DONE (2026-09-12)
+
+- **Verdict:** round 1 `GAPS` (4 SHOULD-FIX, 3 NIT, no blocker) → round 2 `PASS`. Two rounds.
+- **Tiering:** Opus executor, fresh Opus verifier, fresh Opus fixer, fresh Opus re-verifier.
+  Fable substituted with Opus at every tier per the standing user instruction; 11b is not itself
+  a one-way door (the door is 11e, which writes this phase's arithmetic into permanent history).
+- **Commits:** `15318d0` (implementation), `c5b82b4` (gap closure), plus an orchestrator commit
+  for the round-2 SHOULD-FIX and NITs.
+- **Files:** `crates/macp-core/src/session.rs` (3 production lines: push guard, run clamp, cursor
+  clamp; the rest rustdoc + tests), `crates/macp-storage/src/registry.rs` (`PersistedSession`
+  field + both `From` impls + `SessionBuilder` setter), `src/runtime.rs` (comment only),
+  `src/replay.rs` (tests only + the warn-only 4th consistency comparison),
+  `tests/integration_mode_lifecycle.rs`, `docs/deployment.md`, `ASSUMPTIONS.md`,
+  `plans/defer/follow_ons.md`.
+- **Accumulating** toward the G4 PR — explicitly NOT shipped alone. The verifier's reasoning,
+  adopted: 11b publishes five new public API items with no consumer (`MAX_SUSPENSION_CYCLES`,
+  `Session::unsuspended_deadline`, `Session::suspension_intervals`,
+  `SessionBuilder::suspension_intervals`, `PersistedSession::suspension_intervals`) and spends the
+  `PersistedSession` `constructible_struct_adds_field` major on a release delivering nothing
+  observable but a rev-2 cycle cap. If 11d's call site changes the walk's signature, that would be
+  a second published change to an API nobody ever used.
+
+### What the mutation discipline bought this phase
+
+Three things that passing tests alone would not have caught:
+
+1. **Acceptance criterion 3 was vacuous** — the checkpoint test never reached the checkpoint fast
+   path (silent bail to full replay on a bound `policy_version` with a `None` registry). Both
+   persistence mutations stayed green. Caught by the executor's own mandatory mutation pass.
+2. **The plan's own prescribed walk over-reported**, and the orchestrator's prescribed repair for
+   it was itself incomplete. Settled by fuzzing four variants, not by argument.
+3. **`replay_from_checkpoint_restores_state` has never tested a checkpoint** — a lying test name
+   hiding the fact that the mid-session fast path was wholly uncovered. Now follow-on 16.
+
+### Carried forward
+
+- Follow-on 16 points 2 and 3 remain open: a real matrix for the mid-session fast path, and an
+  audit of every other test with the bound-`policy_version` trap.
+- **`PersistedSession::seen_message_ids` snapshot order is nondeterministic** (`HashSet` →
+  `Vec<String>` via `.iter().cloned().collect()`, `crates/macp-storage/src/registry.rs:78`).
+  Pre-existing and harmless today, but **Phase 12's byte-identity criterion must be scoped to the
+  accepted-history log, not to `PersistedSession` bytes**, or it will flake. Pinned here because
+  Phase 12 is where it would bite.
+- The rev gate on the *force-expire* check is load-bearing but untested (removing it leaves the
+  workspace green, because the new push gate makes `len > cap` unreachable from an empty start).
+  Shipped behaviour is correct; coverage gap only.
+
+### Next
+
+Phase 11c — the client boundary (reject forged implicit accepts, reserve the `implicit-accept:`
+`message_id` namespace). Blocked on nothing.
+
+### Phase 11c — client boundary — 2026-09-12
+
+- **Verdict:** PASS (fresh Opus verifier, round 1). 1 SHOULD-FIX, 5 NITs, 0 blockers. All applied.
+- **Verifier tier:** fresh Opus, not Fable — per the user's standing no-Fable-at-any-tier
+  instruction, recorded as the substitution the skill asks for. 11c is not itself the one-way
+  door; 11e is.
+- **Rounds:** 1 verify round, but 2 executor passes — the first executor agent **stalled**
+  ("no progress for 600s") mid-edit and left the tree non-compiling (trait method added, `ModeRef`
+  forwarder missing). The orchestrator added the forwarder, checkpointed `b6eaa60`, and handed the
+  tests to a fresh agent. The gate mirror caught the breakage immediately.
+- **Commits:** `b6eaa60` (hook + rules + rustdoc), `d8e0f2f` (14 tests, 898 insertions / **0
+  deletions** — verified independently: every inserted line is inside the one pre-existing
+  `#[cfg(test)]` module in each of the 4 Rust files), `108f985` (verifier follow-ups, docs only).
+- **Gap summary:** the one SHOULD-FIX was a record-accuracy defect, not a code defect. Both the
+  test rustdoc and the ASSUMPTIONS entry overstated what the runtime-level tests pin: the
+  `implicit` rule has **no** runtime-level guard at all, because the reserved-prefix rule fires
+  first. Corrected in `108f985`.
+- **Mutations:** 9 run by the verifier independently, all killed; M1, M3 and M9 each by exactly
+  one test. One was necessarily over-wide (ADDING the hook to `replay_entry`), and was reported as
+  such rather than as a like-for-like reversion.
+- **Load-bearing claims, both independently confirmed:** (1) `d8e0f2f` changed no production line;
+  (2) the hook is unreachable from every replay and recovery path — `replay_entry` and
+  `replay_from_start` are the complete set of non-live dispatch sites and neither is hooked.
+- **11d/11e unblock:** reproduced on the nose. Deleting only `handoff.rs:394`'s `if payload.implicit`
+  arm makes the exact synthetic-shaped entry replay `Ok` to `Resolved`, `h1` `Accepted` by `bob`,
+  `outcome_reason` byte-identical to the rev-≤1 interim string. Both files restored.
+- **Files:** `crates/macp-modes/src/mode/mod.rs`, `mode/handoff.rs`, `mode_registry.rs`, `step.rs`,
+  `src/runtime.rs`, `src/replay.rs`, `ASSUMPTIONS.md`, `plans/defer/follow_ons.md`, the plan.
+- **Shipped?** No — accumulating toward G4, on the verifier's explicit recommendation.
+- **Next:** Phase 11d (mode synthesis contract), plan lines ~1160-1260.
+
+### Phase 11d — the synthesis contract in the mode — 2026-09-12
+
+- **Verdict:** PASS (fresh Opus verifier, round 1). 1 SHOULD-FIX, 3 NITs, 0 blockers. All applied.
+- **Verifier tier:** fresh Opus, not Fable — the standing no-Fable substitution. 11d is not the
+  one-way door; 11e is.
+- **Rounds:** 1 executor pass, 1 verify round.
+- **Commits:** `58a0d16` (trait method + strict rev-2 arm + 6 tests + the `src/replay.rs` flip),
+  and the follow-up applying the verifier's items (docs/records only, no production logic).
+- **Mutations:** executor ran 12, verifier independently re-ran 9. All killed, all like-for-like —
+  no over-wide mutation was needed anywhere in this phase. The two that mattered most:
+  - **M12** (ADD the forbidden deadline re-check) reds **exactly one** test, the fifth one the
+    executor added of its own accord. Without it the phase's most important rule had no coverage.
+  - **M2** (naive `offered_at + timeout + banked`) reds criterion 1, asserting `left: 1300,
+    right: 1100` on the pause-after-deadline case. `now_ms` (M1) reds it too.
+- **The SHOULD-FIX is the finding worth remembering:** a `debug_assert!` was carrying a
+  release-build-only correctness requirement. Both computations feeding the synthetic entry ignore
+  the in-flight pause by design, so asking a *suspended* session over-counts elapsed time and
+  under-computes `D` — a wrong `timestamp_unix_ms` baked into permanent history, silently, in
+  release. `debug_assert!` compiles out. The real enforcement is 11e's non-`Open` filter, so that
+  filter is now an explicit 11e acceptance criterion with its own test rather than hygiene. This is
+  the **second** time this session an `ASSUMPTIONS.md` "blast radius" understated the risk; both
+  were caught by a verifier reading the mechanism rather than the entry.
+- **Scope discipline confirmed independently:** `due_synthetic_envelope` has **zero** production
+  call sites (grepped across `src/`, `crates/`, `tests/`, `integration_tests/`); the interim
+  in-`Commitment` path still runs at every rev with no rev gate; `git diff` over `integration_tests/`
+  and `tests/` is empty, so no 11f work leaked in.
+- **"Server-visible behavior unchanged" verified as the accurate wording** — not "live behavior
+  unchanged". Both wire paths traced: the 11c hook refuses `implicit: true` and the reserved id
+  before dispatch, so no client envelope reaches the new accept path; but direct
+  `mode.on_message_at` library callers at rev >= 2 genuinely can now get one accepted. Release
+  notes must use the narrower phrase.
+- **Files:** `crates/macp-modes/src/mode/mod.rs`, `mode/handoff.rs`, `src/replay.rs`,
+  `ASSUMPTIONS.md` (+5 entries, all genuine), the plan.
+- **Shipped?** No — accumulating toward G4, executor and verifier independently agreed.
+- **Next:** Phase 11e — the cutover, and the plan's one genuine one-way door. Two requirements
+  were carried into its criteria from this round (criterion 11).
+
+### Phase 11e — the cutover (THE ONE-WAY DOOR) — 2026-09-13
+
+- **Verdict:** PASS (fresh Opus verifier, round 1). **0 blockers**, 1 SHOULD-FIX (PR-description
+  level, no code), 5 NITs. Applied: the ASSUMPTIONS correction; the rest recorded as follow-on 18.
+- **Verifier tier:** fresh Opus, not Fable — the standing no-Fable substitution, on the one phase
+  where the skill would have escalated. Recorded here as the skill requires.
+- **Rounds:** 2 executor attempts (the first **stalled during exploration**, tree left clean at
+  `ad4e428`, nothing lost — the second stall this session, and unlike the 11c one it made no
+  edits), 1 verify round.
+- **Commit:** `6d14e0b` — kernel wiring + interim rev-gate in ONE commit, as the plan's atomicity
+  requirement demands. 9 files, +1881/-53.
+- **The one-way door is verified final.** The verifier read RFC-MACP-0010 §5.1 verbatim from the
+  spec repo and the published `macp-proto-0.1.9` protos, and matched all 8 envelope fields and all
+  4 payload fields field-for-field. Verdict: "I would not change a single byte." The two places we
+  are stricter than the RFC (`timestamp_unix_ms = D` promoting a SHOULD to a MUST, and
+  `received_at_ms = D`) are both required for replay determinism.
+- **The executor's own brittleness call was overturned, in the safe direction.** It flagged the
+  `reason` string literal as the most brittle permanent commitment. It is the least:
+  `dispatch_implicit_accept` reads `outcome_reason` from the **payload**, not the constant, so
+  changing the constant later still replays existing logs to their recorded reason. The RFC does
+  not specify `reason` at all.
+- **The biggest catch of the phase — and of the plan.** Criterion 3, the byte-identity proof for a
+  one-way door, was **vacuous as the plan specified it**: replaying a resolved session's log
+  re-dispatches nothing, because resolution writes a checkpoint carrying the whole serialized
+  session. With the checkpoint left in, deleting `log_store.append` outright left the test green.
+  Caught by the executor's own mutation, independently reproduced by the verifier both ways. This
+  is the **sixth** vacuous acceptance criterion this session and the most consequential.
+- **Double-application traced rather than assumed:** removing the interim rev-gate does not break
+  the live path (the interim guards on `disposition == Offered`, already `Accepted` by then). The
+  gate's real load is replay — making a rev-2 log missing its synthetic fail loudly. No path
+  applies the accept twice.
+- **Criterion 11a proven the way that matters:** the non-`Open` filter mutation was run under
+  `RUSTFLAGS="-C debug-assertions=off"`, where 11d's `debug_assert!` is compiled out, and it still
+  reds on the real assertion. That is the proof the kernel filter — not the assert — is what ships.
+- **Upgrade hazard, explicitly answered:** a pre-commit rev-2 session with an outstanding offer
+  replays fine; one that already resolved through the interim replays to `Err`, which aborts
+  startup under `MACP_STRICT_RECOVERY=1`. **No released user is exposed** (main and v0.7.6 are rev
+  1); the blast radius is dev data from phases 11a–11d. Must be named in the G4 PR description.
+- **Conformance framing corrected upward:** lazy-only emission is not a tolerated shortfall. RFC
+  §5.1(2) makes eager observation a SHOULD and lazy a MUST; 11e ships the MUST in full.
+- **Shipped?** No — accumulating toward G4 with 11a–11d. The verifier judged it independently
+  shippable, but the G4 grouping is unchanged.
+- **Next:** Phase 11f — wire-level tier-1 coverage.
+
+## Phase 11f — wire-level proof: tier-1 coverage (2026-09-13)
+
+- **Commit:** `deb3bde`. Tests-only: one new file
+  (`integration_tests/tests/tier1_protocol/test_handoff_implicit_accept.rs`, 793 lines) plus its
+  one-line `mod.rs` registration. **No production code changed**;
+  `integration_tests/Cargo.lock` byte-unmoved, `cargo metadata --locked` passes.
+- **Verifier tier:** fresh Opus (per the standing no-Fable-at-any-tier instruction; the skill would
+  not have escalated here anyway — this phase is tests-only and reversible). **1 round, PASS**, 0
+  blockers, 4 findings. All four closed by a fixer round before commit.
+- **Every assertion mutation-checked.** Executor ran 8 mutations; the verifier independently
+  re-ran all 8 and added 2 of its own. No test is vacuous.
+- **The two findings the executor missed, both caught by the verifier's own mutations:**
+  - **M8 — the live broadcast was unproven at the wire.** Deleting `publish_accepted_envelope`
+    left all 124 tier-1 tests green: the only subscriber attached after the fact and read replay.
+    `CLAUDE.md`'s freeze-profile text claims these entries reach `StreamSession` subscribers; that
+    half had no wire coverage. Now a fifth test, red under that mutation.
+  - **The synthetic's timestamp was bounded nowhere at the wire.** The plan excluded *millisecond
+    equality* — right — but that left no bound at all, so an observation-time stamp (what §5.1(3)
+    forbids) was invisible to tier 1. Now bounded with a deliberate 300 ms pre-commit gap so the
+    violation overshoots by more than one RPC hop.
+- **One disclosed vacuity, correctly characterised this time.** `validate_client_envelope`'s
+  `implicit` rule is unreachable as a sole guard at the wire — `dispatch_implicit_accept`'s
+  deterministic-id check catches the non-reserved-id case one layer down, the reserved-prefix rule
+  catches the other, and both return `InvalidPayload`. Unlike 11c's disclosure (which was itself
+  wrong and understated the problem), the verifier re-derived this chain rather than accepting it.
+- **A mutation in the fixer brief was mis-aimed and the fixer caught it.** I flattened the verify
+  round's compound `M6b` into its stamp half alone; that half is a semantic **no-op for any
+  never-suspended session**. My error in the brief, not the verifier's report. The
+  deadline-vs-suspension arithmetic is covered in-process by
+  `handoff_implicit_accept_live.rs::synthetic_timestamp_excludes_a_pause_inside_the_window`.
+- **Timing built for a loaded runner.** Every sleep is an upper bound load only makes safer. The
+  one bound that was a *deadline* (suspend must land inside the window) was raised 1500 → 3000 ms
+  with proportional sleeps and re-proven non-vacuous. New file run 5× consecutively: 5/5,
+  18.45–18.54 s.
+- **Plan's port instruction correctly ignored.** Tier 1's `ServerManager::start` already picks a
+  free port and reaps only its own PIDs; hardcoding 50123 would add collision risk, not remove it.
+- **Test count 120 → 125** (plan predicted 119 → 123; the +4 delta was right, the baseline had
+  drifted, and the 5th test is the live-broadcast addition).
+- **CI gate mirror:** ALL GATES PASS.
+- **Shipped?** No — accumulating toward G4. The verifier was explicit that 11f **cannot** stand
+  alone: it tests `synthesize_due_accept`, which does not exist on `main`, so a standalone PR would
+  fail three of its own tests.
+- **Next:** Phase 12 — eager sweep.
+
+## Phase 12 — eager sweep (2026-09-13)
+
+- **Commit:** `cecd265`. 8 files, +935/-19: `src/runtime.rs` (new
+  `sweep_due_synthetic_accepts`, seam returns `bool`, checkpoint call), `src/main.rs` (fourth
+  maintenance call), 5 in-process tests + 1 unit test, 2 tier-1 tests, 4 doc files.
+- **Verifier tier:** fresh Opus (standing no-Fable instruction). **1 round, PASS**, 0 blockers,
+  2 undisclosed gaps + 2 notes; a fixer round closed all four before commit.
+- **The gap that mattered: a load-bearing invariant pinned by nothing.** Eager/lazy equivalence
+  rests on the sweep running after `cleanup_expired_sessions`. The verifier **inverted the two
+  calls and all 22 relevant tests stayed green.** Now pinned by a tier-1 test that reds on exactly
+  that swap — and it must be tier-1, since in-process tests do not compile `main.rs`. That is the
+  structural reason it went unnoticed, and it generalises: **anything whose only enforcement lives
+  in `main.rs` is invisible to the entire in-process suite.**
+- **The trap inside that fix.** Polling `GetSession` for `Expired` would have made the test green
+  under either order: `get_session_checked` lazily expires the session itself, settling the race
+  before the maintenance loop sees it. The test sleeps blind, then subscribes, and discriminates on
+  accepted history rather than session state.
+- **Second gap: the sweep skipped the checkpoint-interval check**, so a boundary crossed by a
+  synthetic entry was missed on the eager path and the modulus could stay permanently offset.
+  Benign, but a real equivalence delta criterion 2's test could not see. Fixed **inside the seam**
+  so both callers agree by construction, rather than in the sweep where they could drift again.
+- **Three worries I raised at dispatch, all resolved clean, each for a specific reason:**
+  - `Err` mid-pass is *not* a swallowed fatal append failure — every error source precedes any
+    mutation, so nothing is half-committed and nothing is acked. The fatal rule is about never
+    acking an unpersisted record; the sweep acks nothing.
+  - The TTL-vs-deadline precedence claim holds on both sides, verified against the code.
+  - The rejected-`Commitment` trigger is sound: it fails after synthesis and before its own append
+    and commit, leaving no residue. An accepted trigger was measuring itself.
+- **Criterion 3's disclosure corrected UPWARD** (twice, independently): under
+  `-C debug-assertions=off` the suspended test still reds on its own behavioural assertion, not on
+  a compiled-out `debug_assert!`. The executor undersold its own test.
+- **`docs/API.md` divergence upheld:** a top-level `## Background maintenance` section rather than
+  a sixth row in a table whose own text says "five bounds" and cross-references two other files.
+- **No new semver break** — `cargo semver-checks` on `macp-runtime` 196/196. G4's major stays
+  confined to `HandoffOfferRecord`.
+- **CI gate mirror:** ALL GATES PASS. Workspace 864/864, tier 1 127/127, JWT 8/8, tier 2 5/5.
+  Both new timing-sensitive tests flake-run 5/5.
+- **Shipped?** No — accumulating toward G4. No release PR can be cut until Phase 13 lands
+  `#[non_exhaustive]` and the 0.8.0 major, because `release-plz.toml` sets `semver_check = true`
+  and G4 already carries the `constructible_struct_adds_field` break.
+- **Next:** Phase 13 — G4 docs, API hygiene and close-out (the last phase in the plan).
+
+## Phase 13 — G4 docs, API hygiene and close-out (2026-09-13) — FINAL PHASE
+
+- **Commits:** `92b1088` (seal) + `bab1608` (docs), gaps closed in `44f993c` + `bb2bd6f`.
+  Kept as separate commits per the plan, so Phase 11's behaviour change stays bisectable from the
+  API change.
+- **Verifier tier:** fresh Opus (standing no-Fable instruction; this phase IS the one-way door the
+  skill would have escalated for). **Verdict GAPS, 4 items** — the only GAPS verdict in G4, and it
+  landed on exactly the phase that cannot be undone.
+- **What the one-way-door scrutiny actually bought:**
+  - A **false premise in `DECISIONS.md` D7 and the plan**, caught by reading the published 0.7.6
+    `.crate` sources rather than trusting the record: the two forced majors sit on two different
+    structs in two different crates, not both on `HandoffOfferRecord`.
+  - A constructor whose six positional fields **re-opened the door the seal had just closed.**
+  - The class **half-ended** — 7 sealed, 17 left, with `#[serde(default)]` proving the remainder
+    grows. Now 18 sealed; the next persisted field is additive instead of forcing 0.9.0.
+- **A verifier claim overturned by the fixer, empirically.** The verify round concluded
+  cargo-semver-checks v0.50.0 has no inherent-method arity lint and a future widening would ship
+  silently past the release gate. It had read `function_parameter_count_changed.ron`, which does
+  not traverse impls — but `method_parameter_count_changed` is a separate lint that does, proven
+  with a two-crate fixture. **I relayed the wrong version of this before it was checked.** The
+  narrowing stands on its other grounds.
+- **`macp-core`'s decision vocabulary left unsealed on evidence**, not caution: those five types are
+  `PolicyEvaluator` argument types, already literal-constructed across a crate boundary in
+  production, and `DecisionState` has no `Default` — sealing it without a constructor would strand
+  a downstream evaluator implementor with no way to build a test fixture.
+- **Criteria 1 and 3 are merge-time work.** Stock git-cliff template renders subject lines only,
+  never bodies, and the repo squash-merges — so the changelog line *is* the PR title.
+- **Merged `origin/main` through `49ba49e` (v0.7.6)** before the final runs; earlier semver readings
+  had been comparing 0.7.6 → 0.7.5, a downgrade.
+- **Gates:** ALL GATES PASS; tier 1 127/127; both lockfiles byte-unmoved; `cargo test --doc -p
+  macp-modes` run by hand (CI's `--all-targets` skips doctests).
+- **Next:** end-of-plan closeout — full regression, then `/reconcile` on the accumulated
+  `UNCONFIRMED` `ASSUMPTIONS.md` entries, then ship G4.

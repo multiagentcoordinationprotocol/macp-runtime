@@ -175,11 +175,19 @@ fn replay_entry(
 
 /// Warn-only replay/snapshot divergence check (D7, promoted from
 /// plans/defer/replay_validation.md). The log is authoritative and snapshots
-/// are best-effort, so a mismatch is diagnostic, never fatal — but state or
-/// dedup-count divergence between "what the log replays to" and "what the
-/// snapshot recorded" is exactly the class of bug the determinism guarantees
-/// (RFC-MACP-0003) forbid, so it must be visible. Returns the number of
-/// mismatched fields (0 = consistent).
+/// are best-effort, so a mismatch is diagnostic, never fatal — but divergence
+/// between "what the log replays to" and "what the snapshot recorded" is
+/// exactly the class of bug the determinism guarantees (RFC-MACP-0003) forbid,
+/// so it must be visible. Returns the number of mismatched fields
+/// (0 = consistent).
+///
+/// Compared: `state`, dedup count, `participants`, the bound versions
+/// (mode/configuration/policy, counted as one), `mode_state` (byte equality),
+/// `accumulated_suspended_ms` and `suspended_at_ms`.
+///
+/// Deliberately **warn-only**: making it fatal would turn a benign snapshot
+/// lag (a crash between the log append and the snapshot write) into a startup
+/// outage, even though the log — which is authoritative — is intact.
 pub fn validate_replay_consistency(
     session_id: &str,
     replayed: &Session,
@@ -216,6 +224,52 @@ pub fn validate_replay_consistency(
         tracing::warn!(
             session_id,
             "replay/snapshot bound-version mismatch (mode/configuration/policy)"
+        );
+    }
+    // Opaque per-mode state: compared byte-for-byte, since a mode's own
+    // accept/reject decisions are driven by it and the runtime cannot
+    // interpret it here.
+    if replayed.mode_state != snapshot.mode_state {
+        mismatches += 1;
+        tracing::warn!(
+            session_id,
+            replayed_len = replayed.mode_state.len(),
+            snapshot_len = snapshot.mode_state.len(),
+            "replay/snapshot mode_state mismatch"
+        );
+    }
+    // Suspension state (RFC-MACP-0001 §7.5). `accumulated_suspended_ms` feeds
+    // the TTL deadline and the handoff implicit-accept arithmetic, so a
+    // divergence here is a determinism bug even when `state` still agrees.
+    if replayed.accumulated_suspended_ms != snapshot.accumulated_suspended_ms {
+        mismatches += 1;
+        tracing::warn!(
+            session_id,
+            replayed_accumulated_suspended_ms = replayed.accumulated_suspended_ms,
+            snapshot_accumulated_suspended_ms = snapshot.accumulated_suspended_ms,
+            "replay/snapshot accumulated_suspended_ms mismatch"
+        );
+    }
+    if replayed.suspended_at_ms != snapshot.suspended_at_ms {
+        mismatches += 1;
+        tracing::warn!(
+            session_id,
+            replayed_suspended_at_ms = ?replayed.suspended_at_ms,
+            snapshot_suspended_at_ms = ?snapshot.suspended_at_ms,
+            "replay/snapshot suspended_at_ms mismatch"
+        );
+    }
+    // Completed suspend/resume pairs (Phase 11b). These feed the
+    // implicit-accept deadline walk (RFC-MACP-0010 §5.1(3)), so a snapshot
+    // that disagrees with the log about *when* a session was paused is the
+    // same class of determinism bug as disagreeing about how long.
+    if replayed.suspension_intervals != snapshot.suspension_intervals {
+        mismatches += 1;
+        tracing::warn!(
+            session_id,
+            replayed_suspension_cycles = replayed.suspension_intervals.len(),
+            snapshot_suspension_cycles = snapshot.suspension_intervals.len(),
+            "replay/snapshot suspension_intervals mismatch"
         );
     }
     mismatches
@@ -564,11 +618,34 @@ mod tests {
         assert_eq!(entry.macp_version, "");
     }
 
+    /// The checkpoint fast path carries dedup state (`seen_message_ids`) for
+    /// the entries it subsumes, and replays only the tail after it.
+    ///
+    /// The SessionStart payload here deliberately binds **no** policy version.
+    /// `try_replay_from_checkpoint` bails to a full replay whenever a
+    /// checkpoint has a bound `policy_version` but no serialized
+    /// `policy_definition`, and this test used `start_payload_bytes()` (which
+    /// binds `policy-1`) with `replay_session(.., None)` -- so it always took
+    /// the fallback, and its three dedup assertions were satisfied by a plain
+    /// full replay. The tripwire below now pins which path ran.
     #[test]
     fn replay_from_checkpoint_restores_state() {
         use crate::registry::PersistedSession;
 
         let registry = make_registry();
+        let start_payload = SessionStartPayload {
+            intent: "test".into(),
+            participants: vec!["agent://orchestrator".into(), "agent://fraud".into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            policy_version: String::new(),
+            ttl_ms: 60_000,
+            context_id: String::new(),
+            extensions: std::collections::HashMap::new(),
+            roots: vec![],
+            max_suspend_ms: 0,
+        }
+        .encode_to_vec();
 
         // Build a session via normal replay first
         let proposal = ProposalPayload {
@@ -584,7 +661,7 @@ mod tests {
                 "m1",
                 "SessionStart",
                 "agent://orchestrator",
-                start_payload_bytes(),
+                start_payload,
                 1000,
             ),
             incoming_entry(
@@ -598,7 +675,11 @@ mod tests {
         let full_session = replay_session("s1", &full_entries, &registry, None).unwrap();
 
         // Create a checkpoint from the replayed session state
-        let persisted = PersistedSession::from(&full_session);
+        let mut persisted = PersistedSession::from(&full_session);
+        // Tripwire: a value only the snapshot can supply. A fallback full
+        // replay would rebuild `intent` from the SessionStart payload ("test"),
+        // so this assertion is what proves the fast path ran.
+        persisted.intent = "restored-from-checkpoint".into();
         let checkpoint_payload = serde_json::to_vec(&persisted).unwrap();
         let checkpoint = LogEntry {
             message_id: String::new(),
@@ -635,10 +716,109 @@ mod tests {
 
         let session = replay_session("s1", &entries_with_checkpoint, &registry, None).unwrap();
         assert_eq!(session.state, SessionState::Open);
+        assert_eq!(
+            session.intent, "restored-from-checkpoint",
+            "the checkpoint fast path must have been taken, else this test \
+             proves nothing about the checkpoint"
+        );
         // Should have dedup from checkpoint (m1, m2) plus newly replayed m3
         assert!(session.seen_message_ids.contains("m1"));
         assert!(session.seen_message_ids.contains("m2"));
         assert!(session.seen_message_ids.contains("m3"));
+    }
+
+    /// Phase 11b acceptance criterion 3 — a checkpoint written *after* a
+    /// suspend/resume pair carries `suspension_intervals` through the
+    /// `PersistedSession` round-trip, so the checkpoint fast path (which
+    /// replays only the entries after the checkpoint, and therefore never
+    /// sees the earlier `SessionSuspend`/`SessionResume` entries) restores
+    /// the pause the deadline walk depends on.
+    ///
+    /// The SessionStart payload here deliberately binds **no** policy version:
+    /// `try_replay_from_checkpoint` falls back to a full replay whenever a
+    /// checkpoint has a bound `policy_version` but no serialized
+    /// `policy_definition`, and a full replay would rebuild the vec from the
+    /// pre-checkpoint entries — hiding the very round-trip under test.
+    #[test]
+    fn replay_from_checkpoint_restores_suspension_intervals() {
+        use crate::registry::PersistedSession;
+
+        let registry = make_registry();
+        let start_payload = SessionStartPayload {
+            intent: "test".into(),
+            participants: vec!["agent://orchestrator".into(), "agent://fraud".into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            policy_version: String::new(),
+            ttl_ms: 60_000,
+            context_id: String::new(),
+            extensions: std::collections::HashMap::new(),
+            roots: vec![],
+            max_suspend_ms: 0,
+        }
+        .encode_to_vec();
+
+        let prefix = vec![
+            incoming_entry(
+                "m1",
+                "SessionStart",
+                "agent://orchestrator",
+                start_payload,
+                1_000,
+            ),
+            internal_entry("SessionSuspend", 1_050),
+            internal_entry("SessionResume", 1_300),
+        ];
+        let before_checkpoint = replay_session("s1", &prefix, &registry, None).unwrap();
+        assert_eq!(before_checkpoint.suspension_intervals, vec![(1_050, 1_300)]);
+
+        let mut persisted = PersistedSession::from(&before_checkpoint);
+        // Tripwire: a value only the snapshot can supply, so the assertions
+        // below cannot silently be satisfied by a fallback full replay.
+        persisted.intent = "restored-from-checkpoint".into();
+        // Go through the wire format, not just the struct: `#[serde(default)]`
+        // must not be the thing that supplies the value here.
+        let checkpoint_payload = serde_json::to_vec(&persisted).unwrap();
+        let checkpoint = LogEntry {
+            message_id: String::new(),
+            received_at_ms: 1_400,
+            sender: "_runtime".into(),
+            message_type: "Checkpoint".into(),
+            raw_payload: checkpoint_payload,
+            entry_kind: EntryKind::Checkpoint,
+            session_id: "s1".into(),
+            mode: "macp.mode.decision.v1".into(),
+            macp_version: "1.0".into(),
+            timestamp_unix_ms: 1_400,
+            bound_mode_version: None,
+            semantics_rev: 0,
+            bound_max_suspend_ms: None,
+            compacted_incoming_ordinals: 0,
+        };
+
+        // The checkpoint fast path replays only what follows the checkpoint,
+        // so the pause can only survive via the snapshot.
+        let entries = vec![
+            prefix[0].clone(),
+            prefix[1].clone(),
+            prefix[2].clone(),
+            checkpoint,
+            internal_entry("SessionSuspend", 1_500),
+            internal_entry("SessionResume", 1_600),
+        ];
+        let session = replay_session("s1", &entries, &registry, None).unwrap();
+        assert_eq!(session.state, SessionState::Open);
+        assert_eq!(
+            session.intent, "restored-from-checkpoint",
+            "the checkpoint fast path must have been taken, else this test \
+             proves nothing about the snapshot round-trip"
+        );
+        assert_eq!(
+            session.suspension_intervals,
+            vec![(1_050, 1_300), (1_500, 1_600)],
+            "the pre-checkpoint pause must come from the snapshot and the \
+             post-checkpoint pause from the replayed tail"
+        );
     }
 
     #[test]
@@ -801,5 +981,701 @@ mod tests {
         b.state = SessionState::Resolved;
         b.seen_message_ids.insert("m1".into());
         assert_eq!(validate_replay_consistency("s1", &a, &b), 2);
+
+        // `mode_state` is compared byte-for-byte, on its own.
+        let mut c = a.clone();
+        c.mode_state = vec![7, 7, 7];
+        assert_eq!(validate_replay_consistency("s1", &a, &c), 1);
+
+        // Suspension state is counted per field: a session the log replays to
+        // "resumed after 5s" against a snapshot that recorded "still
+        // suspended, nothing banked" is two mismatches.
+        let mut d = a.clone();
+        d.accumulated_suspended_ms = 5_000;
+        assert_eq!(validate_replay_consistency("s1", &a, &d), 1);
+        d.suspended_at_ms = Some(1_000);
+        assert_eq!(validate_replay_consistency("s1", &a, &d), 2);
+        // Completed pairs are a third, independent suspension comparison.
+        d.suspension_intervals = vec![(1_000, 6_000)];
+        assert_eq!(validate_replay_consistency("s1", &a, &d), 3);
+
+        // All six at once, to pin that each comparison contributes exactly
+        // one count and none of them shadow another.
+        let mut e = b.clone();
+        e.mode_state = vec![7, 7, 7];
+        e.accumulated_suspended_ms = 5_000;
+        e.suspended_at_ms = Some(1_000);
+        e.suspension_intervals = vec![(1_000, 6_000)];
+        assert_eq!(validate_replay_consistency("s1", &a, &e), 6);
+    }
+
+    // ---------------------------------------------------------------------
+    // Legacy-log fixtures for `Session::semantics_rev` (CONTRIBUTING.md
+    // ground rule: a change to persisted-history semantics ships a fixture
+    // proving old logs still replay under their original semantics).
+    //
+    // All three fixtures below are the *same* three handoff entries; only the
+    // revision recorded on the SessionStart entry differs. The entries carry
+    // deliberately disagreeing envelope and acceptance timestamps, so the
+    // recorded revision alone decides whether the implicit-accept timeout
+    // fires — which makes each fixture a differential proof, not just a
+    // "replay does not crash" smoke test.
+    // ---------------------------------------------------------------------
+
+    const HANDOFF_TIMEOUT_MS: i64 = 100;
+
+    fn handoff_policy_registry() -> PolicyRegistry {
+        let registry = PolicyRegistry::new();
+        registry
+            .register(macp_core::policy::PolicyDefinition {
+                policy_id: "handoff-auto-accept".into(),
+                mode: "macp.mode.handoff.v1".into(),
+                description: "implicit accept after 100ms".into(),
+                rules: serde_json::json!({
+                    "acceptance": { "implicit_accept_timeout_ms": HANDOFF_TIMEOUT_MS },
+                    "commitment": { "authority": "initiator_only" }
+                }),
+                schema_version: 1,
+            })
+            .unwrap();
+        registry
+    }
+
+    fn handoff_entry(
+        message_id: &str,
+        message_type: &str,
+        payload: Vec<u8>,
+        envelope_ms: i64,
+        received_ms: i64,
+    ) -> LogEntry {
+        LogEntry {
+            message_id: message_id.into(),
+            received_at_ms: received_ms,
+            sender: "alice".into(),
+            message_type: message_type.into(),
+            raw_payload: payload,
+            entry_kind: EntryKind::Incoming,
+            session_id: "s1".into(),
+            mode: "macp.mode.handoff.v1".into(),
+            macp_version: "1.0".into(),
+            timestamp_unix_ms: envelope_ms,
+            bound_mode_version: None,
+            semantics_rev: 0,
+            bound_max_suspend_ms: None,
+            compacted_incoming_ordinals: 0,
+        }
+    }
+
+    /// The synthetic implicit accept a rev >= 2 runtime writes into accepted
+    /// history (RFC-MACP-0010 §5.1(2)), as a log entry.
+    ///
+    /// Every constant §5.1(3) fixes: sender and `accepted_by` = the offer's
+    /// target (`handoff_entry` hardcodes `alice`, so the sender is overridden),
+    /// `implicit = true`, the deterministic `implicit-accept:<handoff_id>` id,
+    /// and **both** clocks at the computed deadline `D` — never at the time
+    /// the runtime happened to observe it. `received_at_ms == D` is what
+    /// replay dispatches the entry with, so a fixture that stamped anything
+    /// else would not be a log this runtime could have written.
+    fn implicit_accept_entry(deadline_ms: i64) -> LogEntry {
+        let payload = crate::handoff_pb::HandoffAcceptPayload {
+            handoff_id: "h1".into(),
+            accepted_by: "bob".into(),
+            reason: "implicit accept (timeout)".into(),
+            implicit: true,
+        }
+        .encode_to_vec();
+        let mut entry = handoff_entry(
+            "implicit-accept:h1",
+            "HandoffAccept",
+            payload,
+            deadline_ms,
+            deadline_ms,
+        );
+        entry.sender = "bob".into();
+        entry
+    }
+
+    /// SessionStart + HandoffOffer + Commitment, with the offer/commitment
+    /// clocks supplied by the caller so a fixture can make the two clocks
+    /// disagree.
+    fn handoff_history(
+        semantics_rev: u32,
+        commit_envelope_ms: i64,
+        commit_received_ms: i64,
+    ) -> Vec<LogEntry> {
+        let start_payload = SessionStartPayload {
+            intent: "escalate".into(),
+            participants: vec!["alice".into(), "bob".into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            policy_version: "handoff-auto-accept".into(),
+            ttl_ms: 60_000,
+            context_id: String::new(),
+            extensions: std::collections::HashMap::new(),
+            roots: vec![],
+            max_suspend_ms: 0,
+        }
+        .encode_to_vec();
+        let offer = crate::handoff_pb::HandoffOfferPayload {
+            handoff_id: "h1".into(),
+            target_participant: "bob".into(),
+            scope: "support".into(),
+            reason: "escalate".into(),
+        }
+        .encode_to_vec();
+        let commitment = CommitmentPayload {
+            commitment_id: "c1".into(),
+            action: "handoff.accepted".into(),
+            authority_scope: "support".into(),
+            reason: "bound".into(),
+            mode_version: "1.0.0".into(),
+            policy_version: "handoff-auto-accept".into(),
+            configuration_version: "cfg-1".into(),
+            outcome_positive: true,
+            supersedes: None,
+        }
+        .encode_to_vec();
+
+        let mut start = handoff_entry("m1", "SessionStart", start_payload, 1_000, 1_000);
+        start.semantics_rev = semantics_rev;
+        vec![
+            start,
+            // Offer: both clocks agree at 1_000, so only the commitment's
+            // clock choice can move the outcome.
+            handoff_entry("m2", "HandoffOffer", offer, 1_000, 1_000),
+            handoff_entry(
+                "m3",
+                "Commitment",
+                commitment,
+                commit_envelope_ms,
+                commit_received_ms,
+            ),
+        ]
+    }
+
+    /// The outcome a fixture was originally accepted with: the offer is
+    /// implicitly accepted and the commitment resolves the session.
+    fn assert_implicitly_accepted(session: &Session) {
+        assert_eq!(session.state, SessionState::Resolved);
+        let state: serde_json::Value = serde_json::from_slice(&session.mode_state).unwrap();
+        let offer = &state["offers"]["h1"];
+        assert_eq!(offer["disposition"], "Accepted");
+        assert_eq!(offer["accepted_by"], "bob");
+        assert_eq!(offer["outcome_reason"], "implicit accept (timeout)");
+    }
+
+    /// Legacy (rev 0) history: the implicit-accept timeout was measured
+    /// against the client envelope timestamp. These entries only clear the
+    /// timeout on that clock (envelope: 300ms elapsed; acceptance: 50ms), so a
+    /// replay that resolves is a replay that used the legacy clock.
+    #[test]
+    fn legacy_rev0_handoff_history_replays_under_envelope_clock() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+        let entries = handoff_history(0, 1_300, 1_050);
+
+        let session = replay_session("s1", &entries, &registry, Some(&policies)).unwrap();
+        assert_eq!(session.semantics_rev, 0);
+        assert_implicitly_accepted(&session);
+
+        // Differential proof: the identical entries under any newer revision
+        // do NOT implicitly accept (50ms of acceptance time < 100ms), so the
+        // commitment is not ready and replay fails. Only the recorded
+        // revision keeps this history replayable.
+        for rev in [1, macp_core::session::CURRENT_SEMANTICS_REV] {
+            let mut newer = entries.clone();
+            newer[0].semantics_rev = rev;
+            assert!(
+                replay_session("s1", &newer, &registry, Some(&policies)).is_err(),
+                "rev {rev} must not reproduce the rev-0 outcome"
+            );
+        }
+    }
+
+    /// Rev-1 history: the timeout was measured against the runtime acceptance
+    /// clock. Mirror image of the rev-0 fixture — these entries only clear the
+    /// timeout on `received_at_ms` (acceptance: 300ms; envelope: 50ms).
+    #[test]
+    fn legacy_rev1_handoff_history_replays_under_acceptance_clock() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+        let entries = handoff_history(1, 1_050, 1_300);
+
+        let session = replay_session("s1", &entries, &registry, Some(&policies)).unwrap();
+        assert_eq!(session.semantics_rev, 1);
+        assert_implicitly_accepted(&session);
+
+        // Under the legacy clock the same entries do not reach the timeout.
+        let mut legacy = entries.clone();
+        legacy[0].semantics_rev = 0;
+        assert!(replay_session("s1", &legacy, &registry, Some(&policies)).is_err());
+    }
+
+    /// For a history with **no suspension**, the current revision replays to
+    /// exactly the rev-1 outcome, including the byte-level `mode_state`. Rev 2
+    /// is not behavior-neutral in general — it deliberately changed the
+    /// implicit-accept deadline (RFC-MACP-0010 §5.1(1)) — but the only term it
+    /// added is the suspension accrued since the offer, which is zero here. So
+    /// this pins the property that keeps unsuspended legacy histories
+    /// replaying identically. The suspended counterpart, where the revisions
+    /// diverge, is
+    /// `legacy_rev1_handoff_history_with_suspension_still_implicitly_accepts`.
+    ///
+    /// The two arms reach that outcome by **different mechanisms**, which is
+    /// what makes the `mode_state` comparison worth making: rev 1 infers the
+    /// accept inside `Commitment` handling and writes nothing down, while rev
+    /// 2 replays a recorded synthetic `HandoffAccept` entry through ordinary
+    /// dispatch. So this is a byte-identity proof that the synthetic path
+    /// reproduces the interim's `mode_state` exactly — `disposition`,
+    /// `accepted_by`, `outcome_reason`, `offered_at_ms` and
+    /// `suspended_ms_at_offer` all included.
+    #[test]
+    fn current_rev_handoff_history_replays_identically_to_rev1() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+
+        let rev1 = replay_session(
+            "s1",
+            &handoff_history(1, 1_050, 1_300),
+            &registry,
+            Some(&policies),
+        )
+        .unwrap();
+
+        // The rev-2 history carries the synthetic entry the rev-2 runtime
+        // would have appended: offer at 1_000 + the 100ms timeout, no
+        // suspension in the window, so D = 1_100.
+        let mut current_entries =
+            handoff_history(macp_core::session::CURRENT_SEMANTICS_REV, 1_050, 1_300);
+        let commitment = current_entries.pop().expect("commitment is last");
+        current_entries.push(implicit_accept_entry(1_100));
+        current_entries.push(commitment);
+
+        let current = replay_session("s1", &current_entries, &registry, Some(&policies)).unwrap();
+
+        assert_implicitly_accepted(&current);
+        assert_eq!(current.state, rev1.state);
+        assert_eq!(current.mode_state, rev1.mode_state);
+        assert_eq!(current.resolution, rev1.resolution);
+
+        // The legacy sibling: the same rev-1 entries stay replayable on their
+        // own terms, with no synthetic entry anywhere in the log.
+        assert_implicitly_accepted(&rev1);
+        assert!(!rev1.seen_message_ids.contains("implicit-accept:h1"));
+        // ...and the rev-2 arm reached its outcome through the recorded entry,
+        // not through the retired interim path.
+        assert!(current.seen_message_ids.contains("implicit-accept:h1"));
+    }
+
+    /// The cutover, as a replay claim: at rev 2 a `Commitment` on a history
+    /// that **lacks** the synthetic entry fails loudly, while the identical
+    /// entries at rev 1 still resolve through the interim path.
+    ///
+    /// This is the fail-loud choice made empirical. Leaving the interim
+    /// in-`Commitment` mutation active at rev >= 2 would let a foreign or
+    /// buggy rev-2 log — one whose runtime never wrote the synthetic entry —
+    /// silently resolve on replay, reproducing an outcome its own history does
+    /// not record. That is exactly the divergence `semantics_rev = 2` exists
+    /// to make impossible, so the absence of the entry must be an error, not
+    /// an inference.
+    #[test]
+    fn rev2_commitment_without_synthetic_entry_fails_replay() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+
+        // Offer at 1_000, commitment accepted at 1_300: 300ms elapsed against
+        // the 100ms timeout, so the accept was unambiguously due — and the
+        // history still does not record it.
+        let entries = handoff_history(macp_core::session::CURRENT_SEMANTICS_REV, 1_050, 1_300);
+        assert!(
+            replay_session("s1", &entries, &registry, Some(&policies)).is_err(),
+            "rev 2 must not infer an accept the history does not record"
+        );
+
+        // Control 1: the interim is preserved for legacy. The same entries at
+        // rev 1 resolve.
+        let mut legacy = entries.clone();
+        legacy[0].semantics_rev = 1;
+        let session = replay_session("s1", &legacy, &registry, Some(&policies))
+            .expect("rev 1 keeps the interim in-Commitment implicit accept");
+        assert_implicitly_accepted(&session);
+
+        // Control 2: it is the *missing entry* that fails, not rev 2 itself —
+        // add the synthetic and the same rev-2 history resolves.
+        let mut with_synthetic = entries.clone();
+        let commitment = with_synthetic.pop().expect("commitment is last");
+        with_synthetic.push(implicit_accept_entry(1_100));
+        with_synthetic.push(commitment);
+        let session = replay_session("s1", &with_synthetic, &registry, Some(&policies))
+            .expect("rev 2 resolves once the synthetic entry is in history");
+        assert_implicitly_accepted(&session);
+    }
+
+    /// The same three handoff entries with a suspend/resume pair spliced
+    /// between the offer and the commitment, so the replayed session banks
+    /// `accumulated_suspended_ms` from the recorded internal-entry timestamps
+    /// (RFC-MACP-0001 §7.5 / RFC-MACP-0003 §2).
+    fn handoff_history_with_suspension(
+        semantics_rev: u32,
+        suspend_at_ms: i64,
+        resume_at_ms: i64,
+        commit_ms: i64,
+    ) -> Vec<LogEntry> {
+        // Both commitment clocks agree here: the suspension term, not the
+        // clock choice, is what the revision changes.
+        let mut entries = handoff_history(semantics_rev, commit_ms, commit_ms);
+        let commit = entries.pop().expect("commitment is the last entry");
+        entries.push(internal_entry("SessionSuspend", suspend_at_ms));
+        entries.push(internal_entry("SessionResume", resume_at_ms));
+        entries.push(commit);
+        entries
+    }
+
+    /// Rev-1 history containing an implicit accept that only happened because
+    /// suspended time counted toward the deadline. It must keep replaying to
+    /// that accept: the log is authoritative and the session already resolved
+    /// on it.
+    ///
+    /// Offer at 1_000, suspended 1_050..1_300 (250ms), commitment at 1_300 —
+    /// 300ms elapsed, 50ms of it unsuspended, against a 100ms timeout. So the
+    /// recorded revision alone decides the outcome, which makes this a
+    /// differential proof rather than a smoke test.
+    #[test]
+    fn legacy_rev1_handoff_history_with_suspension_still_implicitly_accepts() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+        let entries = handoff_history_with_suspension(1, 1_050, 1_300, 1_300);
+
+        let session = replay_session("s1", &entries, &registry, Some(&policies)).unwrap();
+        assert_eq!(session.semantics_rev, 1);
+        assert_eq!(session.accumulated_suspended_ms, 250);
+        assert_implicitly_accepted(&session);
+
+        // Under rev 2 the identical entries do NOT implicitly accept
+        // (RFC-MACP-0010 §5.1(1)): only 50ms of unsuspended time elapsed, so
+        // no offer is accepted, the commitment is not ready, and replay fails.
+        let mut rev2 = entries.clone();
+        rev2[0].semantics_rev = macp_core::session::CURRENT_SEMANTICS_REV;
+        assert!(
+            replay_session("s1", &rev2, &registry, Some(&policies)).is_err(),
+            "rev 2 must not reproduce the rev-1 outcome"
+        );
+    }
+
+    /// The rev-2 side of the same fixture: once enough *unsuspended* time has
+    /// elapsed the implicit accept fires through the real replay path.
+    ///
+    /// Offer at 1_000, suspended 1_050..1_300 (250ms), commitment at 1_450 —
+    /// 450ms elapsed, 200ms of it unsuspended, past the 100ms timeout.
+    ///
+    /// The accept is a recorded entry from rev 2 on, so the history carries
+    /// the synthetic at the walked deadline: 50ms of unsuspended time before
+    /// the pause, then the remaining 50ms after it, i.e. D = 1_350. Note the
+    /// synthetic's `received_at_ms` (1_350) is **greater** than nothing that
+    /// follows it and **less** than the commitment's — but it sits after the
+    /// `SessionResume` entry stamped 1_300, so the log stays in emission
+    /// order. Nothing sorts by `received_at_ms` in any case; replay and
+    /// accepted ordinals are positional.
+    #[test]
+    fn rev2_handoff_history_implicitly_accepts_on_unsuspended_time() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+        let mut entries = handoff_history_with_suspension(
+            macp_core::session::CURRENT_SEMANTICS_REV,
+            1_050,
+            1_300,
+            1_450,
+        );
+        let commitment = entries.pop().expect("commitment is last");
+        entries.push(implicit_accept_entry(1_350));
+        entries.push(commitment);
+
+        let session = replay_session("s1", &entries, &registry, Some(&policies)).unwrap();
+        assert_eq!(session.accumulated_suspended_ms, 250);
+        assert_implicitly_accepted(&session);
+        assert!(session.seen_message_ids.contains("implicit-accept:h1"));
+    }
+
+    /// Sibling of [`handoff_history_with_suspension`] carrying **two**
+    /// suspend/resume pairs, so the replayed `accumulated_suspended_ms` is a
+    /// sum of banked pauses rather than a single one. (A sibling rather than a
+    /// second pair spliced into that fixture: its single 250ms pause is
+    /// load-bearing arithmetic for both of its callers.)
+    ///
+    /// Timeline — every stamp is the recorded `received_at_ms`, and the
+    /// timeout is the 100ms `implicit_accept_timeout_ms` from
+    /// [`handoff_policy_registry`]:
+    ///
+    /// ```text
+    /// 1_000  SessionStart + HandoffOffer     unsuspended run:  50ms
+    /// 1_050  SessionSuspend  ┐ banks 250ms
+    /// 1_300  SessionResume   ┘               unsuspended run:  30ms
+    /// 1_330  SessionSuspend  ┐ banks 170ms
+    /// 1_500  SessionResume   ┘               unsuspended run: commit_ms - 1_500
+    /// commit_ms  Commitment
+    /// ```
+    ///
+    /// So `accumulated_suspended_ms == 250 + 170 == 420`, the rev-2
+    /// unsuspended elapsed is `commit_ms - 1_000 - 420` (equivalently
+    /// `80 + (commit_ms - 1_500)`), and rev 1 ignores the pauses entirely at
+    /// `commit_ms - 1_000`. Both resumes also re-run the cumulative cap check
+    /// in `Session::resume` against the running total, not the latest pause.
+    fn handoff_history_with_two_suspensions(semantics_rev: u32, commit_ms: i64) -> Vec<LogEntry> {
+        let mut entries = handoff_history(semantics_rev, commit_ms, commit_ms);
+        let commit = entries.pop().expect("commitment is the last entry");
+        entries.push(internal_entry("SessionSuspend", 1_050));
+        entries.push(internal_entry("SessionResume", 1_300));
+        entries.push(internal_entry("SessionSuspend", 1_330));
+        entries.push(internal_entry("SessionResume", 1_500));
+        entries.push(commit);
+        entries
+    }
+
+    /// Multi-pause differential. Commitment at 1_510: 510ms since the offer,
+    /// of which only 90ms is unsuspended (50 + 30 + 10) against the 100ms
+    /// timeout. Rev 1 counts all 510ms and implicitly accepts; rev 2 counts
+    /// 90ms and does not, so the commitment has no resolved offer to bind and
+    /// replay fails.
+    ///
+    /// This is the determinism claim for a history with *multiple*
+    /// suspend/resume pairs: rev 2 subtracts the accumulated suspension, so
+    /// banking only the most recent pause (170ms) would leave 340ms of
+    /// apparent unsuspended time and wrongly accept — which a single-pair
+    /// fixture cannot distinguish.
+    #[test]
+    fn rev2_handoff_history_subtracts_every_suspension_pair() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+
+        let rev1 = handoff_history_with_two_suspensions(1, 1_510);
+        let session = replay_session("s1", &rev1, &registry, Some(&policies)).unwrap();
+        assert_eq!(session.semantics_rev, 1);
+        assert_eq!(session.accumulated_suspended_ms, 420);
+        assert_implicitly_accepted(&session);
+
+        let rev2 =
+            handoff_history_with_two_suspensions(macp_core::session::CURRENT_SEMANTICS_REV, 1_510);
+        assert!(
+            replay_session("s1", &rev2, &registry, Some(&policies)).is_err(),
+            "rev 2 must subtract both pauses (90ms unsuspended < 100ms timeout)"
+        );
+    }
+
+    /// The rev-2 positive path across two pauses. Commitment at 1_600: 600ms
+    /// since the offer, 180ms of it unsuspended (50 + 30 + 100), which clears
+    /// the 100ms timeout even after both pauses are excluded.
+    ///
+    /// D is the *walked* deadline across both pauses: 50ms before the first,
+    /// 30ms between them, 20ms after the second — so D = 1_520, not the naive
+    /// `1_000 + 100 + 420`.
+    #[test]
+    fn rev2_handoff_history_accepts_on_unsuspended_time_across_two_pauses() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+        let mut entries =
+            handoff_history_with_two_suspensions(macp_core::session::CURRENT_SEMANTICS_REV, 1_600);
+        let commitment = entries.pop().expect("commitment is last");
+        entries.push(implicit_accept_entry(1_520));
+        entries.push(commitment);
+
+        let session = replay_session("s1", &entries, &registry, Some(&policies)).unwrap();
+        assert_eq!(session.accumulated_suspended_ms, 420);
+        assert_implicitly_accepted(&session);
+    }
+
+    /// Phase 11b acceptance criterion 2 — replay rebuilds
+    /// `suspension_intervals` with **zero replay-code changes**, because the
+    /// `SessionSuspend`/`SessionResume` arms already drive
+    /// `Session::suspend`/`Session::resume` from the recorded
+    /// `received_at_ms` and `resume` is what records the pair.
+    ///
+    /// Asserted at both revisions: the vec is recorded everywhere (read only
+    /// at rev >= 2), so a rev gate on the *recording* would red this.
+    #[test]
+    fn replay_rebuilds_suspension_intervals_from_the_log() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+
+        let rev1 = handoff_history_with_two_suspensions(1, 1_510);
+        let session = replay_session("s1", &rev1, &registry, Some(&policies)).unwrap();
+        assert_eq!(
+            session.suspension_intervals,
+            vec![(1_050, 1_300), (1_330, 1_500)]
+        );
+
+        let mut rev2 =
+            handoff_history_with_two_suspensions(macp_core::session::CURRENT_SEMANTICS_REV, 1_600);
+        // Rev 2 needs the recorded synthetic accept for the commitment to
+        // resolve; D = 1_520, the walked deadline asserted below.
+        let commitment = rev2.pop().expect("commitment is last");
+        rev2.push(implicit_accept_entry(1_520));
+        rev2.push(commitment);
+        let session = replay_session("s1", &rev2, &registry, Some(&policies)).unwrap();
+        assert_eq!(
+            session.suspension_intervals,
+            vec![(1_050, 1_300), (1_330, 1_500)]
+        );
+        // And the walk reads them: an offer at 1_000 with a 100ms timeout
+        // lands past both pauses rather than at the naive 1_100.
+        // 50ms unsuspended before the first pause + 30ms between the pauses +
+        // 20ms after the second = the 100ms timeout, so D = 1_500 + 20.
+        assert_eq!(session.unsuspended_deadline(1_000, 100), 1_520);
+    }
+
+    // --- The client boundary is NOT on the replay path (Phase 11c) ---
+    //
+    // The whole Phase 11 design rests on it: `Mode::validate_client_envelope`
+    // must run on live client submissions and never on replay, because from
+    // 11e the runtime writes an envelope into permanent history that the
+    // boundary is required to reject as a *client* submission. If replay ever
+    // called the hook, every such history would become unreplayable — which is
+    // the failure mode the rejected alternative (a persisted `LogEntry`
+    // discriminator) was supposed to avoid, and the reason it was rejected is
+    // that its failure would be *silent* instead.
+    //
+    // These two tests make that empirical rather than asserted. The live
+    // counterparts are in `src/runtime.rs`
+    // (`reserved_message_id_namespace_is_rejected_at_rev2`,
+    // `reserved_message_id_is_rejected_on_the_session_start_path`): the same
+    // envelope shapes are rejected there and replay through here.
+
+    /// The same three entries as `handoff_history`, but with the reserved
+    /// `implicit-accept:` prefix on **both** the `SessionStart` id and the
+    /// `Commitment` id — one per live call site, so neither is covered only by
+    /// the other.
+    fn handoff_history_with_reserved_message_ids(semantics_rev: u32) -> Vec<LogEntry> {
+        // Envelope clock 1_050 / acceptance clock 1_300: clears the 100ms
+        // timeout on the acceptance clock, which is what rev >= 1 uses.
+        let mut entries = handoff_history(semantics_rev, 1_050, 1_300);
+        entries[0].message_id = "implicit-accept:squatted-at-start".into();
+        entries[2].message_id = squatted_commitment_id(semantics_rev).into();
+        if semantics_rev >= 2 {
+            // From rev 2 the commitment needs the recorded synthetic accept
+            // (D = 1_100) in front of it. That entry owns
+            // `implicit-accept:h1`, which is why the commitment squats a
+            // *different* suffix in the same reserved namespace at this
+            // revision: a log with two entries sharing one `message_id` is not
+            // a history any runtime could have written, since the synthetic's
+            // id holds the dedup slot before the commitment is ever processed.
+            let commitment = entries.pop().expect("commitment is last");
+            entries.push(implicit_accept_entry(1_100));
+            entries.push(commitment);
+        }
+        entries
+    }
+
+    /// The reserved-namespace id the squatting commitment carries, per
+    /// revision. See [`handoff_history_with_reserved_message_ids`].
+    fn squatted_commitment_id(semantics_rev: u32) -> &'static str {
+        if semantics_rev >= 2 {
+            "implicit-accept:squatted-at-commit"
+        } else {
+            "implicit-accept:h1"
+        }
+    }
+
+    /// A log whose entries carry ids the client boundary rejects replays
+    /// successfully **at every revision, including the current one** — proof
+    /// that `replay_entry`/`replay_from_start` do not call
+    /// `Mode::validate_client_envelope`.
+    ///
+    /// The reserved-namespace rule is the right probe precisely because its
+    /// error code (`InvalidEnvelope`) is one nothing on the replay path can
+    /// produce for these entries: if the hook were reachable from replay, both
+    /// revisions below would fail. Rev 1 is Phase 11c criterion 3's replay
+    /// half (legacy histories that already contain such an id stay
+    /// replayable); the current revision is the forward-looking half.
+    #[test]
+    fn reserved_prefix_entry_replays_at_every_rev() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+
+        for rev in [1, macp_core::session::CURRENT_SEMANTICS_REV] {
+            let entries = handoff_history_with_reserved_message_ids(rev);
+            let session = replay_session("s1", &entries, &registry, Some(&policies))
+                .unwrap_or_else(|e| panic!("rev {rev} must replay reserved ids, got {e}"));
+            assert_eq!(session.semantics_rev, rev);
+            assert_implicitly_accepted(&session);
+            // The ids are in dedup state, i.e. they were genuinely replayed as
+            // accepted history and not skipped.
+            assert!(session
+                .seen_message_ids
+                .contains("implicit-accept:squatted-at-start"));
+            assert!(session
+                .seen_message_ids
+                .contains(squatted_commitment_id(rev)));
+        }
+
+        // Control: the identical ids are rejected on the live path at the
+        // current revision (see `runtime::tests`), so replay's acceptance here
+        // is the *absence of the hook*, not the absence of the rule.
+        let mode = crate::mode::handoff::HandoffMode::new(std::sync::Arc::new(
+            macp_policy::DefaultPolicyEvaluator,
+        ));
+        let entries =
+            handoff_history_with_reserved_message_ids(macp_core::session::CURRENT_SEMANTICS_REV);
+        let session = replay_session("s1", &entries, &registry, Some(&policies)).unwrap();
+        for message_id in ["implicit-accept:squatted-at-start", "implicit-accept:h1"] {
+            let env = Envelope {
+                macp_version: "1.0".into(),
+                mode: session.mode.clone(),
+                message_type: "HandoffContext".into(),
+                message_id: message_id.into(),
+                session_id: "s1".into(),
+                sender: "alice".into(),
+                timestamp_unix_ms: 1_000,
+                payload: vec![],
+            };
+            assert!(matches!(
+                crate::mode::Mode::validate_client_envelope(&mode, &session, &env).unwrap_err(),
+                MacpError::InvalidEnvelope
+            ));
+        }
+    }
+
+    /// The exact envelope shape 11e will write into permanent history — a
+    /// `HandoffAccept` with `implicit = true` and the deterministic
+    /// `message_id`, on a current-revision session — reaches **dispatch** on
+    /// replay, and is accepted there.
+    ///
+    /// **Flipped by 11d from `Err(InvalidPayload)` to `Ok`, exactly as the
+    /// 11c version of this test instructed.** Until 11d, `handle_message`'s
+    /// `if payload.implicit` arm refused the shape unconditionally (11c left it
+    /// in place as belt and suspenders), and this test pinned the *source* of
+    /// that refusal — `InvalidPayload` from dispatch, never `InvalidEnvelope`
+    /// from the client boundary, which is the part 11c owned. 11d made the
+    /// rev >= 2 arm accept the well-formed shape, so the log now replays to a
+    /// `Resolved` session whose offer `h1` is `Accepted` by `bob`.
+    ///
+    /// The client boundary is still what keeps the shape out on the live path
+    /// (`runtime::tests::client_implicit_accept_rejected_through_the_runtime`);
+    /// the point here is that it is **not** on the replay path, so recorded
+    /// history is free to carry the entry.
+    ///
+    /// Note the replay clock: the entry is dispatched with
+    /// `accepted_at_ms == received_at_ms == 1_100`, the deadline it was emitted
+    /// at. Dispatch must not re-derive the timeout from that (see
+    /// `HandoffMode::dispatch_implicit_accept`).
+    #[test]
+    fn synthetic_shaped_entry_reaches_dispatch_not_the_client_boundary() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+
+        let mut entries = handoff_history(macp_core::session::CURRENT_SEMANTICS_REV, 1_050, 1_300);
+        // Insert the synthetic accept between the offer and the commitment,
+        // with every constant RFC-MACP-0010 §5.1(3) fixes: sender and
+        // `accepted_by` = the offer's target, `implicit = true`, the
+        // deterministic id, and both clocks at the computed deadline D (offer
+        // 1_000 + 100ms timeout, no suspension in the window).
+        let commitment = entries.pop().expect("commitment is the last entry");
+        entries.push(implicit_accept_entry(1_100));
+        entries.push(commitment);
+
+        let session = replay_session("s1", &entries, &registry, Some(&policies))
+            .expect("the synthetic entry must replay through dispatch at rev >= 2");
+        assert_implicitly_accepted(&session);
+        // Genuinely replayed as accepted history, not skipped: its
+        // deterministic id holds a dedup slot.
+        assert!(session.seen_message_ids.contains("implicit-accept:h1"));
     }
 }

@@ -18,7 +18,24 @@ pub enum BallotChoice {
     Abstain,
 }
 
+/// The accepted `ApprovalRequest` as it stands in serialized `mode_state`.
+///
+/// **`#[non_exhaustive]`** (0.8.0, `DECISIONS.md` D7), for the same reason as
+/// the handoff records: mode-state records are persisted coordination state
+/// that grows a field whenever a mode learns something new, and with all-`pub`
+/// fields and no seal each added field is a `constructible_struct_adds_field`
+/// major that `release-plz.toml`'s `semver_check = true` turns into a blocked
+/// release PR across all seven lockstep crates. Sealing it once makes future
+/// fields additive.
+///
+/// Unlike the handoff records this one **does** have a supported
+/// external construction path, because it is a parameter of the public
+/// [`QuorumMode::effective_threshold`]: start from [`Self::new`] and assign
+/// whichever remaining fields you care about. They are all `pub` and
+/// `#[non_exhaustive]` does not restrict field assignment — it refuses only
+/// the struct-literal form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ApprovalRequestRecord {
     pub request_id: String,
     pub action: String,
@@ -28,7 +45,56 @@ pub struct ApprovalRequestRecord {
     pub requested_by: String,
 }
 
+impl ApprovalRequestRecord {
+    /// Build a record carrying only the two fields a caller of
+    /// [`QuorumMode::effective_threshold`] must supply; assign any of the
+    /// remaining `pub` fields afterwards on a `mut` binding.
+    ///
+    /// ```
+    /// use macp_modes::mode::quorum::ApprovalRequestRecord;
+    /// let mut record = ApprovalRequestRecord::new("r1", 3);
+    /// record.action = "deploy.production".into();
+    /// ```
+    ///
+    /// The runtime builds these itself from an accepted `ApprovalRequest`
+    /// envelope; this exists so the request-level
+    /// [`QuorumMode::effective_threshold`] stays callable from another crate
+    /// now that the struct is `#[non_exhaustive]`. It takes
+    /// [`required_approvals`](Self::required_approvals) because that is the
+    /// only field threshold resolution reads, and
+    /// [`request_id`](Self::request_id) because a record that identifies no
+    /// request is not a meaningful one; the rest are carried for the record's
+    /// own sake and default to empty.
+    ///
+    /// # Stability contract
+    ///
+    /// **This constructor's arity never changes.** A field added to
+    /// [`ApprovalRequestRecord`] is additive — that is the whole point of the
+    /// `#[non_exhaustive]` seal (`DECISIONS.md` D7) — and it stays additive
+    /// only if the seal's one supported construction path stays additive too.
+    /// So a future field is reached by assignment, and if some future field
+    /// were ever genuinely mandatory it gets a **new** constructor rather than
+    /// a third parameter here. Widening this signature would be a
+    /// `method_parameter_count_changed` major (cargo-semver-checks does lint
+    /// inherent-method arity), i.e. it would block the release PR across all
+    /// seven lockstep crates — exactly the trap the seal was spent to escape.
+    pub fn new(request_id: impl Into<String>, required_approvals: u32) -> Self {
+        Self {
+            request_id: request_id.into(),
+            action: String::new(),
+            summary: String::new(),
+            details: Vec::new(),
+            required_approvals,
+            requested_by: String::new(),
+        }
+    }
+}
+
+/// One cast ballot as it stands in serialized `mode_state`.
+///
+/// `#[non_exhaustive]` for the reason on [`ApprovalRequestRecord`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct BallotRecord {
     pub request_id: String,
     pub choice: BallotChoice,
@@ -36,7 +102,14 @@ pub struct BallotRecord {
     pub reason: String,
 }
 
+/// The quorum mode's whole serialized `mode_state`.
+///
+/// `#[non_exhaustive]` for the reason on [`ApprovalRequestRecord`]. `Default`
+/// is still derived and still reachable from other crates
+/// (`QuorumState::default()`); `#[non_exhaustive]` refuses only the
+/// struct-literal form, including `QuorumState { ..Default::default() }`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub struct QuorumState {
     pub request: Option<ApprovalRequestRecord>,
     pub ballots: BTreeMap<String, BallotRecord>,

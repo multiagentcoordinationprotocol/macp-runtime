@@ -523,7 +523,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .serve_with_shutdown(addr, shutdown);
 
-    // Background cleanup task: expire TTL-exceeded sessions and evict stale ones.
+    // Background maintenance task: expire TTL-exceeded sessions, emit synthetic
+    // envelopes whose deadline has passed, and evict stale ones.
     let cleanup_interval_secs: u64 = std::env::var("MACP_CLEANUP_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -544,6 +545,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             interval.tick().await;
             cleanup_runtime.cleanup_expired_sessions().await;
+            // RFC-MACP-0010 §5.1(2)'s eager SHOULD: settle deadlines that have
+            // passed without waiting for the next session-scoped message.
+            // Deliberately AFTER the TTL sweep — a session whose TTL and
+            // implicit-accept deadline both lapsed unobserved expires rather
+            // than accepting, which is the precedence the lazy path already
+            // gives (`Precheck::Expired` returns before synthesis).
+            // `MACP_CLEANUP_INTERVAL_SECS` is therefore the observation-latency
+            // bound; the recorded timestamp is the computed deadline either way.
+            cleanup_runtime.sweep_due_synthetic_accepts().await;
             cleanup_runtime
                 .evict_stale_sessions(session_retention_secs)
                 .await;

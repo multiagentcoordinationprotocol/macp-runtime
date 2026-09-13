@@ -11,7 +11,28 @@ pub struct PersistedRoot {
     pub name: String,
 }
 
+/// A [`Session`] flattened for the storage backends and the checkpoint entry.
+///
+/// **`#[non_exhaustive]`** (0.8.0, `DECISIONS.md` D7 — extended here from the
+/// handoff and quorum mode-state records, which `plans/defer/follow_ons.md`
+/// item 12 flagged as an unaudited sibling of the same class — the audit found
+/// it was not a hypothetical sibling but **one of the two breaks 0.8.0 is
+/// already forced to take**). This is the fastest-growing persisted record in
+/// the workspace: `suspension_intervals` lands in 0.8.0, on top of
+/// `semantics_rev` and `max_suspend_ms` a release earlier, and every one of
+/// those is a `constructible_struct_adds_field` major against an external
+/// exhaustive struct literal.
+/// `cargo semver-checks check-release --workspace --baseline-version 0.7.6`
+/// reports exactly that for `suspension_intervals`. Sealing the struct here
+/// spends nothing extra and stops the *next* persisted field from forcing a
+/// major of its own.
+///
+/// Fields stay `pub`, readable and writable; only construction by struct
+/// literal from another crate is refused. The supported way in is
+/// `PersistedSession::from(&Session)` followed by field assignment — which is
+/// exactly what `src/replay.rs` and the storage backends already do.
 #[derive(serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct PersistedSession {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
@@ -42,6 +63,12 @@ pub struct PersistedSession {
     pub suspended_at_ms: Option<i64>,
     #[serde(default)]
     pub accumulated_suspended_ms: i64,
+    /// Completed `(suspended_at, resumed_at)` pairs on the session timeline
+    /// (see `macp_core::session::Session::suspension_intervals`). Snapshots
+    /// written before this field existed deserialize as empty, which is the
+    /// safe direction — the deadline walk only under-counts.
+    #[serde(default)]
+    pub suspension_intervals: Vec<(i64, i64)>,
     /// Session-semantics revision (see `macp_core::session::CURRENT_SEMANTICS_REV`).
     /// Legacy snapshots deserialize as 0 and keep legacy behavior.
     #[serde(default)]
@@ -88,6 +115,7 @@ impl From<&Session> for PersistedSession {
             policy_definition: session.policy_definition.clone(),
             suspended_at_ms: session.suspended_at_ms,
             accumulated_suspended_ms: session.accumulated_suspended_ms,
+            suspension_intervals: session.suspension_intervals.clone(),
             semantics_rev: session.semantics_rev,
             max_suspend_ms: session.max_suspend_ms,
         }
@@ -132,6 +160,7 @@ impl From<PersistedSession> for Session {
             .policy_definition(session.policy_definition)
             .suspended_at_ms(session.suspended_at_ms)
             .accumulated_suspended_ms(session.accumulated_suspended_ms)
+            .suspension_intervals(session.suspension_intervals)
             .semantics_rev(session.semantics_rev)
             .max_suspend_ms(session.max_suspend_ms)
             .build()

@@ -177,6 +177,24 @@ RFC-MACP-0007 §6.2 exempts an *objection-authorized* decline -- a negative `Com
 
 **No stored session's replay changes.** The commitment the old gates denied was *rejected*, and rejected messages never enter accepted history (RFC-MACP-0001 §8.3), so no stored history can contain one. §6.2 states this explicitly for this rule. What changes is live acceptance: a `finalize_decline` session that was previously reachable only by TTL expiry or an initiator `CancelSession` can now record a committed negative outcome, so an operator who was working around the strand -- leaving `require_vote_quorum` `false`, or soliciting a throwaway `ABSTAIN` to clear the participation floor -- can drop the workaround. See [Policy](policy.md#decision-mode) for the full rule and `tests/conformance/decision_finalize_decline_quorum_waiver.json` for the canonical discriminator.
 
+## Upgrading into suspension-interval recording
+
+### 1. Expect one-time `suspension_intervals mismatch` replay warnings on the first boot
+
+A session now records each completed `(suspended_at, resumed_at)` pair, so that time spent `Suspended` can be subtracted from the Handoff implicit-accept timeout (RFC-MACP-0010 §5.1). On the **first** boot after upgrading, startup recovery emits one warning per persisted session that was ever suspended and resumed:
+
+```
+WARN replay/snapshot suspension_intervals mismatch
+  session_id=... replayed_suspension_cycles=2 snapshot_suspension_cycles=0
+```
+
+**It is benign, and it does not recur.** The warning is the startup consistency check comparing two sources that necessarily disagree exactly once: the snapshot on disk was written by the *previous* release, which had no such field, so it deserializes as empty; replay rebuilds the pairs correctly from the `SessionSuspend`/`SessionResume` entries in the append-only log, which were always there. **Replay is the authority** -- the recovered session is the correct one, and it is what the runtime serves. Recovery then re-saves each replayed session, so the next boot's snapshot carries the intervals and the comparison agrees. Nothing is lost and no action is required.
+
+Two consequences worth knowing:
+
+- The warning is **advisory only**. It increments `recovery_replay_mismatches`, which is read zero-vs-nonzero, so a nonzero count on this one boot is expected and does not indicate a determinism bug. `MACP_STRICT_RECOVERY` does **not** turn these into startup failures -- it governs recovery *errors*, not consistency warnings.
+- A session whose recovery goes through a **mid-session checkpoint written before this release** replays with its pre-checkpoint pauses missing for good: the checkpoint fast path replays only the entries after the checkpoint, and a legacy checkpoint carries no intervals. That is deliberately the safe direction -- a short interval list can only make a newly computed implicit-accept deadline land *earlier*, never later, and it never changes a deadline already recorded in accepted history. There is no setting that avoids this for a checkpoint already on disk: `MACP_CHECKPOINT_INTERVAL` gates only whether *new* checkpoints are written, while the recovery fast path keys on a `Checkpoint` entry being present in the log and never consults the variable. Leaving it at `0` (the default) prevents *future* legacy-shaped gaps; it does not undo an existing one. The condition is also self-limiting -- every pause recorded from this release forward is in the log after the old checkpoint, so it replays normally.
+
 ## Environment variables
 
 | Variable | Default | Description |
@@ -203,7 +221,7 @@ RFC-MACP-0007 §6.2 exempts an *objection-authorized* decline -- a negative `Com
 | `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE` | `100` | `ListSessions` page size when the request sends `page_size = 0` |
 | `MACP_LIST_SESSIONS_MAX_PAGE_SIZE` | `1000` | Hard cap a requested `ListSessions` `page_size` is clamped to |
 | `MACP_CHECKPOINT_INTERVAL` | `0` (disabled) | Log entries between checkpoints |
-| `MACP_CLEANUP_INTERVAL_SECS` | `60` | Background TTL cleanup interval in seconds |
+| `MACP_CLEANUP_INTERVAL_SECS` | `60` | Background maintenance interval in seconds: TTL expiry, memory eviction, disk GC, and eager observation of mode-computed deadlines (the handoff implicit accept, RFC-MACP-0010 §5.1(2)) |
 | `MACP_SESSION_RETENTION_SECS` | `3600` | Age (from session start) at which terminal sessions are evicted from **memory**; their durable data is kept |
 | `MACP_SESSION_DISK_RETENTION_SECS` | `0` (keep forever) | Age (from session start) at which terminal sessions' **durable data** is deleted; `0` disables disk GC entirely |
 | `MACP_STRICT_RECOVERY` | off | Set to `1` to fail on any recovery error |
@@ -297,6 +315,8 @@ The runtime provides operational visibility through several mechanisms:
 **Logging** -- All significant events are logged to stderr: session creation, resolution, expiration, recovery results, persistence failures, and rate limit hits. Set `RUST_LOG` to `debug` for detailed request-level logging.
 
 **TTL enforcement** -- Sessions are expired both lazily (on next access) and proactively by a background task running every `MACP_CLEANUP_INTERVAL_SECS`. This ensures expired sessions are cleaned up even if no new messages arrive.
+
+**Mode deadlines** -- The same background task observes deadlines a mode computes, on the same interval. The one in the standards-track modes today is the handoff implicit accept (RFC-MACP-0010 §5.1(2)): an outstanding `HandoffOffer` past its `acceptance.implicit_accept_timeout_ms` is accepted by the runtime, which appends the `HandoffAccept` to accepted history and publishes it to `StreamSession` subscribers. `MACP_CLEANUP_INTERVAL_SECS` is therefore the observation-latency bound on that acceptance -- but only the latency: the recorded `timestamp_unix_ms` is the computed deadline whichever path emits it, so changing the interval never changes permanent history. The deadline is also observed on demand, ahead of the next session-scoped message, so no message is ever evaluated against a stale offer regardless of the interval. The sweep runs *after* TTL expiry within a pass: a session whose TTL and implicit-accept deadline both lapsed unobserved expires rather than accepting, matching the on-demand path's precedence.
 
 **Session eviction** -- Terminal sessions (resolved, expired, or cancelled) are evicted from memory once their age exceeds `MACP_SESSION_RETENTION_SECS` (default one hour), measured from session **start** rather than from when they became terminal. This is on by default and bounds memory usage. Their data remains on disk and can be replayed if needed. Deleting that durable data is a separate, opt-in step governed by `MACP_SESSION_DISK_RETENTION_SECS`, which defaults to `0` -- disk GC does not run at all unless you set it.
 

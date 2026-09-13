@@ -2,6 +2,8 @@
 
 This is the reference for all 24 gRPC RPCs exposed by the MACP Runtime on `macp.v1.MACPRuntimeService`. The default endpoint is `127.0.0.1:50051`, configurable via `MACP_BIND_ADDR`.
 
+Not every state transition a client observes comes from an RPC: [Background maintenance](#background-maintenance) covers the ones the runtime makes on its own timer.
+
 For protocol-level transport semantics, see the [protocol transports documentation](https://www.multiagentcoordinationprotocol.io/docs/transports).
 
 ## Protocol Handshake
@@ -71,7 +73,9 @@ rpc Send(SendRequest) returns (SendResponse)
 
 The runtime overrides `envelope.sender` with the authenticated identity. If the envelope contains a non-empty `sender` that does not match the authenticated identity, the request is rejected with `UNAUTHENTICATED`.
 
-**`SessionStart` requirements.** For every standards-track mode (and `ext.multi_round.v1`) the `SessionStartPayload` must bind `mode_version`, `configuration_version`, a `ttl_ms` in `1..=86400000`, and a `participants` list of at most 1000 distinct non-empty entries; `max_suspend_ms` must not be negative. A payload missing any of these is rejected with `INVALID_PAYLOAD` (or `INVALID_TTL`) and no session is created.
+**Reserved `message_id` namespace.** In a `macp.mode.handoff.v1` session started at `semantics_rev >= 2`, a client envelope whose `message_id` begins with the literal `implicit-accept:` is rejected with `INVALID_ENVELOPE`, whatever its `message_type` -- `SessionStart`, `Commitment` and `HandoffContext` included. The runtime mints its own implicit `HandoffAccept` under a deterministic id in that namespace (RFC-MACP-0010 §5.1(3), see [Handoff implicit accept](modes.md#implicit-accept-rfc-macp-0010-51)), and a client that squats the id a future offer would use would consume the runtime's dedup slot and strand the session short of commitment. The match is **case-sensitive**: `Implicit-Accept:h1` is an ordinary client id and is accepted. Sessions at `semantics_rev <= 1` are unaffected -- their wire behavior is byte-identical to earlier releases. In the same sessions, a `HandoffAccept` whose payload sets `implicit = true` is rejected with the same code; only the runtime may originate one.
+
+**`SessionStart` requirements.** For every standards-track mode (and `ext.multi_round.v1`) the `SessionStartPayload` must bind `mode_version`, `configuration_version`, a `ttl_ms` in `1..=86400000`, and a `participants` list of at most 1000 distinct non-empty entries; `max_suspend_ms` must not be negative. A payload missing any of these is rejected with `INVALID_ENVELOPE` and no session is created. (There is no distinct `INVALID_PAYLOAD` or `INVALID_TTL` code in the RFC vocabulary: `MacpError::InvalidPayload`, `InvalidTtl` and `InvalidModeState` all map to `INVALID_ENVELOPE` -- see `MacpError::error_code`.)
 
 `participants` must be **non-empty for every mode except `macp.mode.decision.v1`**, which accepts an empty list. RFC-MACP-0001 §7.1 requires the field only "when required by the Mode", and RFC-MACP-0007 makes the Decision initiator's authority role-based rather than membership-based. A zero-participant Decision session is accepted and **inert**: `Proposal`, `Evaluation`, `Objection` and `Vote` are authorized only for declared participants, so with none declared every one of them is refused with `FORBIDDEN` -- including from the initiator -- no proposal can ever be accepted, and therefore no `Commitment` can be sealed. Such a session can only expire or be cancelled. Do not start one expecting to add participants later; the roster is bound at `SessionStart` and never changes.
 
@@ -98,6 +102,8 @@ rpc GetSession(GetSessionRequest) returns (GetSessionResponse)
 ```
 
 Returns `SessionMetadata` with the session's mode, state, TTL deadline, bound versions, participants, per-participant activity summaries, and initiator identity. Only the session initiator and declared participants can query a session.
+
+**`participant_activity` counts messages a participant sent, not entries attributed to them.** The one entry the runtime originates on a participant's behalf -- the handoff implicit accept (see [Background maintenance](#background-maintenance)) -- deliberately does **not** advance the target's `message_count` or `last_seen`, so a session can hold an accepted `HandoffAccept` from a participant whose activity summary is still empty. Replay records activity for no entry kind, so crediting it live would make a rebuilt session disagree with the live one.
 
 ### ListSessions
 
@@ -204,6 +210,35 @@ rpc ResumeSession(ResumeSessionRequest) returns (ResumeSessionResponse)
 ```
 
 **Request fields**: `session_id` (string), `reason` (string, optional).
+
+## Background maintenance
+
+Some state transitions are not driven by a client message at all. The runtime
+runs a background maintenance pass whose period is set by one variable:
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `MACP_CLEANUP_INTERVAL_SECS` | interval between background maintenance passes: TTL expiry, terminal-session eviction, and eager observation of mode-computed deadlines | `60` |
+
+Two of those are protocol-visible to a client that is only watching:
+
+- **TTL expiry.** A session past its `ttl_ms` transitions to `EXPIRED` on the
+  next pass even if nobody sends anything, so `WatchSessions` reports it without
+  a triggering message.
+- **Mode deadlines.** Where a mode computes a deadline, the runtime observes it
+  on this timer. The case in the standards-track modes today is the handoff
+  implicit accept (RFC-MACP-0010 §5.1(2)): once
+  `acceptance.implicit_accept_timeout_ms` has elapsed on an outstanding
+  `HandoffOffer`, the runtime appends the `HandoffAccept` itself, as an ordinary
+  accepted history entry attributed to the offer's target. It consumes an
+  accepted ordinal and is published to `StreamSession` subscribers, so a client
+  can receive a message nobody sent.
+
+This interval bounds only *when the runtime looks*, never what it records: the
+synthetic envelope's `timestamp_unix_ms` is the computed deadline, not the time
+the pass noticed it, and the deadline is also observed on demand ahead of the
+next session-scoped message. Lowering the interval reduces observation latency;
+raising it does not change any recorded timestamp.
 
 ## Discovery
 

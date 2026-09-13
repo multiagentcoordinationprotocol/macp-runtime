@@ -6,9 +6,20 @@ released with all seven crates on crates.io.
 
 Closed since the 2026-07-05 review, and marked in place in `follow_ons.md`:
 item **7** (built-in recommended policies — shipped as the reserved
-`policy.std.` profiles in `crates/macp-policy/src/defaults.rs`) and item 8's
-tier-1 suspend/resume coverage bullet (`integration_tests/tests/tier1_protocol/test_suspend_resume.rs`).
-Items 1–6 and the rest of item 8 remain open and unblocked.
+`policy.std.` profiles in `crates/macp-policy/src/defaults.rs`), item 8's
+tier-1 suspend/resume coverage bullet (`integration_tests/tests/tier1_protocol/test_suspend_resume.rs`),
+item **1** (the handoff implicit-accept timer — shipped in G4 and released as
+0.8.0), item **2** (the `watch_sessions` initial-sync memory bound — its
+`list_sessions` half shipped earlier, its `watch_sessions` half in `882beeb` /
+#161, both re-verified against `src/server.rs` and `src/watch_sync.rs` on
+2026-09-13 and the item rewritten accordingly), and item **12** for the records
+it names — as of 0.8.0 **all 17** `macp-modes` mode-state records plus
+`PersistedSession` are `#[non_exhaustive]`, not only the handoff and quorum
+ones; the item's general rule and its named residue outside `macp-modes` stay
+open, notably the five `macp-core` decision types, which were considered and
+deliberately left unsealed (`DECISIONS.md` D7).
+
+Items 3–6 and the rest of item 8 remain open and unblocked.
 
 Two kinds of remaining work live here:
 

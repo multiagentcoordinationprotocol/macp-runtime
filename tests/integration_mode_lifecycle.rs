@@ -536,3 +536,107 @@ async fn multi_round_full_lifecycle_through_runtime() {
         .unwrap();
     assert_eq!(result.session_state, SessionState::Resolved);
 }
+
+/// One clock per internal log entry (Phase 11a / follow-on 10).
+///
+/// `suspend_session` and `resume_session` each read the wall clock exactly
+/// once and hand that same instant to both the `Session` mutation and
+/// `make_internal_entry`. That makes the live `accumulated_suspended_ms` and
+/// the value replay re-derives from the two entry timestamps identical *by
+/// construction* — which matters because since Phase 10 that value gates an
+/// accept/reject decision, so a sub-millisecond divergence could make a
+/// live-`Resolved` session fail replay outright.
+///
+/// Honest note on what this test can and cannot do: with the clock injected
+/// the equality holds deterministically, and before the fix it would only have
+/// broken when a millisecond tick happened to land between the two `Utc::now()`
+/// reads. So this pins the invariant rather than differentially proving the old
+/// bug; the injected-clock signature is the real guarantee.
+#[tokio::test]
+async fn suspend_resume_entries_share_the_session_mutation_clock() {
+    let storage: Arc<dyn macp_runtime::storage::StorageBackend> = Arc::new(MemoryBackend);
+    let registry = Arc::new(SessionRegistry::new());
+    let log_store = Arc::new(LogStore::new());
+    let rt = Runtime::new(storage, registry, Arc::clone(&log_store));
+
+    let mode = "macp.mode.decision.v1";
+    let sid = new_sid();
+    rt.process(
+        &envelope(
+            mode,
+            "SessionStart",
+            "m1",
+            &sid,
+            "agent://coordinator",
+            session_start(vec!["agent://coordinator".into(), "agent://alice".into()]),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+
+    rt.suspend_session(&sid, "pause", "agent://coordinator")
+        .await
+        .unwrap();
+    // Let a millisecond boundary pass so the banked duration is non-trivial;
+    // the assertion below is an exact equality either way.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    rt.resume_session(&sid, "carry on", "agent://coordinator")
+        .await
+        .unwrap();
+
+    let entries = log_store.get_log(&sid).await.unwrap();
+    let stamp_of = |message_type: &str| -> i64 {
+        let matching: Vec<&macp_runtime::log_store::LogEntry> = entries
+            .iter()
+            .filter(|e| e.message_type == message_type)
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "expected exactly one {message_type} entry, got {}",
+            matching.len()
+        );
+        matching[0].received_at_ms
+    };
+    let suspended_at = stamp_of("SessionSuspend");
+    let resumed_at = stamp_of("SessionResume");
+
+    let session = rt.get_session_checked(&sid).await.unwrap();
+    assert_eq!(session.state, SessionState::Open);
+    assert_eq!(
+        session.accumulated_suspended_ms,
+        resumed_at - suspended_at,
+        "live accumulated_suspended_ms must equal the span between the two \
+         internal log entries, or replay reconstructs a different value"
+    );
+    assert!(
+        session.accumulated_suspended_ms > 0,
+        "the suspension must have measured something, else the equality is vacuous"
+    );
+
+    // Phase 11b acceptance criterion 4 — live/replay agreement on the new
+    // `suspension_intervals` vec. The live session records the pair in
+    // `Session::resume`; replay reconstructs it by driving the same method
+    // from the two internal entries' recorded timestamps, so the two must be
+    // identical, not merely consistent.
+    assert_eq!(
+        session.suspension_intervals,
+        vec![(suspended_at, resumed_at)],
+        "the live session's completed-pause record must match the internal \
+         log entries it was derived from"
+    );
+    let replay_registry = macp_runtime::mode_registry::ModeRegistry::build_default(Arc::new(
+        macp_runtime::policy::DefaultPolicyEvaluator,
+    ));
+    let replayed = macp_runtime::replay::replay_session(&sid, &entries, &replay_registry, None)
+        .expect("replay must succeed");
+    assert_eq!(
+        replayed.suspension_intervals, session.suspension_intervals,
+        "replay must reconstruct the identical suspension intervals"
+    );
+    assert_eq!(
+        replayed.accumulated_suspended_ms,
+        session.accumulated_suspended_ms
+    );
+}

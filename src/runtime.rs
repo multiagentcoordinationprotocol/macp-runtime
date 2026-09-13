@@ -263,16 +263,32 @@ impl Runtime {
         }
     }
 
+    /// Build a runtime-authored (`EntryKind::Internal`) log entry stamped with
+    /// `at_ms`.
+    ///
+    /// The clock is **injected, never read here**, mirroring
+    /// [`Self::make_incoming_entry`]'s `received_at_ms`. Replay reconstructs
+    /// suspension state from these recorded stamps (`SessionSuspend` /
+    /// `SessionResume` in `replay::replay_entry`), so the entry must carry the
+    /// *same* instant the caller used to mutate the live `Session`. When this
+    /// helper read `Utc::now()` itself, `suspend_session` / `resume_session`
+    /// read the clock twice — once for `Session::suspend`/`resume`, once here —
+    /// and a tick landing between the two reads made the live
+    /// `accumulated_suspended_ms` differ from the replayed one by ~1 ms. That
+    /// value gates the handoff implicit-accept decision, so a flip within 1 ms
+    /// of the deadline could make a live-`Resolved` session fail replay
+    /// entirely and be skipped at startup (`src/main.rs`, "failed to replay
+    /// session; skipping"). One clock read per entry removes the whole class.
     fn make_internal_entry(
         message_type: &str,
         payload: &[u8],
         session_id: &str,
         mode: &str,
+        at_ms: i64,
     ) -> LogEntry {
-        let now = Utc::now().timestamp_millis();
         LogEntry {
             message_id: String::new(),
-            received_at_ms: now,
+            received_at_ms: at_ms,
             sender: "_runtime".into(),
             message_type: message_type.into(),
             raw_payload: payload.to_vec(),
@@ -280,7 +296,7 @@ impl Runtime {
             session_id: session_id.into(),
             mode: mode.into(),
             macp_version: "1.0".into(),
-            timestamp_unix_ms: now,
+            timestamp_unix_ms: at_ms,
             bound_mode_version: None,
             semantics_rev: 0,
             bound_max_suspend_ms: None,
@@ -309,7 +325,8 @@ impl Runtime {
         let expires = (session.state == SessionState::Open && now > session.ttl_expiry)
             || (session.state == SessionState::Suspended && session.suspend_cap_exceeded(now));
         if expires {
-            let entry = Self::make_internal_entry("TtlExpired", b"", session_id, &session.mode);
+            let entry =
+                Self::make_internal_entry("TtlExpired", b"", session_id, &session.mode, now);
             self.storage
                 .append_log_entry(session_id, &entry)
                 .await
@@ -474,6 +491,13 @@ impl Runtime {
             .build();
 
         let response = mode.on_session_start(&session, env)?;
+        // The client boundary, on the start path too: the reserved
+        // `message_id` namespace is squattable through `SessionStart`, whose
+        // id enters `seen_message_ids` below. Runs after `on_session_start`
+        // (so existing roster rejections keep their error) and well before the
+        // commit-point append, and before the registry reservation — so a
+        // rejection needs no rollback and leaves no session behind.
+        mode.validate_client_envelope(&session, env)?;
         let semantics_rev = session.semantics_rev;
 
         // Reserve the session id atomically (dedup + max_open TOCTOU safety),
@@ -609,6 +633,169 @@ impl Runtime {
         })
     }
 
+    /// Emit the mode's due synthetic envelope, if one is due, into accepted
+    /// history — the kernel half of [`macp_modes::mode::Mode::due_synthetic_envelope`]'s
+    /// contract (RFC-MACP-0010 §5.1(2) for handoff's implicit accept).
+    ///
+    /// Called from `process_message` *before* the triggering message is
+    /// dispatched, sharing the trigger's single clock read. The second caller
+    /// is [`Runtime::sweep_due_synthetic_accepts`], the eager sweep driven by
+    /// the background maintenance loop in `src/main.rs` (alongside
+    /// `cleanup_expired_sessions`, `evict_stale_sessions` and
+    /// `gc_disk_sessions`): it calls this for every open session so an offer is
+    /// settled on time rather than only when the next message happens to
+    /// arrive. Both callers must hold the session mutex.
+    ///
+    /// Returns `true` when an entry was appended — the sweep's emission count,
+    /// and the only honest one: every skip below is a silent `Ok`.
+    ///
+    /// # The non-`Open` filter is a correctness gate, not hygiene
+    ///
+    /// Both computations feeding the synthetic entry deliberately ignore an
+    /// *in-flight* pause: `Session::unsuspended_deadline` walks completed
+    /// intervals only, and `rev2_elapsed_ms` has no in-flight term. Asking a
+    /// `Suspended` session therefore over-counts elapsed time (the accept can
+    /// be judged due when it is not) and under-computes `D` (a wrong
+    /// `timestamp_unix_ms` baked into permanent history). The mode carries a
+    /// `debug_assert!` for this, which compiles out in release builds; this
+    /// filter is the enforcement that ships.
+    ///
+    /// # Clocks
+    ///
+    /// The entry is dispatched *and* stamped with the envelope's own
+    /// `timestamp_unix_ms` (the computed deadline `D`), never wall-clock:
+    /// `received_at_ms == timestamp_unix_ms == D`. Replay derives its dispatch
+    /// clock from `received_at_ms`, so any other value forks the live session
+    /// from what the log rebuilds.
+    ///
+    /// # No `step::commit`
+    ///
+    /// The commit here is `seen_message_ids` + `apply_mode_response` only.
+    /// `step::commit` would also call `record_participant_activity`, which
+    /// replay never does for any entry kind — so calling it live would
+    /// guarantee a live/replay divergence in `participant_message_counts` /
+    /// `participant_last_seen` — and crediting the target with activity they
+    /// did not perform would be false besides. The consequence is deliberate
+    /// and documented: the target's `message_count` in
+    /// `SessionMetadata.participant_activity` does not include the synthetic
+    /// accept.
+    ///
+    /// # The save is load-bearing
+    ///
+    /// `save_session_to_storage` is called *here*, not left to the caller: the
+    /// trigger's own save is downstream of its `on_message_at`, which returns
+    /// early when the mode rejects the trigger. Without this call, a synthesis
+    /// followed by a rejected trigger would leave the in-memory session
+    /// carrying new `mode_state` and a new dedup id that the on-disk snapshot
+    /// lacks — and `replay::validate_replay_consistency` would warn about it on
+    /// the next startup. The in-tree precedent is the `Precheck::Expired` arm
+    /// below, which saves before returning `Err` for the same reason.
+    ///
+    /// # Freeze-profile carve-out
+    ///
+    /// The tracked invariant "rejected messages don't consume dedup slots or
+    /// mutate history" (`CONTRIBUTING.md`) is amended, not broken, by this
+    /// method: a *rejected* trigger can now leave a runtime-originated entry in
+    /// accepted history. Three arguments, recorded here because this is what
+    /// stops the next reader from reverting it:
+    ///
+    /// 1. **The precedent is already shipped.** `Precheck::Expired` does all of
+    ///    this on a message it then rejects — `maybe_expire_session` appends a
+    ///    durable `TtlExpired` entry and mutates `session.state`, then
+    ///    `process_message` saves the snapshot and returns `Err`. The honest
+    ///    delta is only that this observation lands in **accepted** history
+    ///    (`EntryKind::Incoming`, so it consumes an accepted ordinal) and is
+    ///    **published to `StreamSession`** subscribers; `TtlExpired` is
+    ///    `EntryKind::Internal` and does neither.
+    /// 2. **The "conservative" alternative is the non-conformant one.**
+    ///    Synthesizing only for *accepted* triggers inverts RFC-MACP-0010
+    ///    §5.1(4): a late explicit `HandoffAccept` would then be validated
+    ///    against a still-unaccepted offer, pass, be accepted — and the
+    ///    synthetic would never be emitted at all. §5.1(2) requires the
+    ///    synthetic in history *before* any subsequent message is evaluated
+    ///    against the offer's acceptance state.
+    /// 3. **The dedup half is preserved exactly.** The rejected trigger's own
+    ///    `message_id` is never inserted — only the synthetic's deterministic
+    ///    id is — so re-sending a corrected message with that same id is still
+    ///    accepted. No existing dedup-invariant test needed weakening.
+    async fn synthesize_due_accept(
+        &self,
+        session_id: &str,
+        session: &mut Session,
+        now_ms: i64,
+    ) -> Result<bool, MacpError> {
+        if session.state != SessionState::Open {
+            return Ok(false);
+        }
+        let Some(mode) = self.mode_registry.get_mode(&session.mode) else {
+            return Ok(false);
+        };
+        let Some(syn) = mode.due_synthetic_envelope(session, now_ms) else {
+            return Ok(false);
+        };
+        // Idempotence backstop. The mode's own contract already returns `None`
+        // once the envelope has been applied; this makes a mode that forgets
+        // append a duplicate entry impossible rather than merely unlikely.
+        if session.seen_message_ids.contains(&syn.message_id) {
+            return Ok(false);
+        }
+        // Mirrors replay, which authorizes every `Incoming` entry. The target
+        // is a declared participant by offer validation, so this always passes
+        // for handoff — but the seam is general.
+        mode.authorize_sender(session, &syn)?;
+        let response = mode.on_message_at(
+            session,
+            &syn,
+            &macp_core::mode::MessageContext::new(syn.timestamp_unix_ms),
+        )?;
+
+        // COMMIT POINT: nothing above has mutated the session, so a failed
+        // append rejects the *triggering* message with `StorageFailed` before
+        // it consumed a dedup slot. RFC-MACP-0010 §5.1(2) forbids evaluating
+        // that message without the accept in history, and this runtime never
+        // acknowledges what it could not persist.
+        let entry = Self::make_incoming_entry(&syn, syn.timestamp_unix_ms);
+        self.storage
+            .append_log_entry(session_id, &entry)
+            .await
+            .map_err(|_| MacpError::StorageFailed)?;
+        self.log_store.append(session_id, entry).await;
+
+        session.seen_message_ids.insert(syn.message_id.clone());
+        session.apply_mode_response(response);
+        self.metrics.record_message_accepted(&session.mode);
+
+        tracing::info!(
+            session_id = %session_id,
+            message_type = %syn.message_type,
+            message_id = %syn.message_id,
+            sender = %syn.sender,
+            deadline_ms = syn.timestamp_unix_ms,
+            "synthetic envelope appended to accepted history"
+        );
+
+        self.save_session_to_storage(session).await;
+        // The checkpoint-interval check belongs to *the append*, not to the
+        // caller. It lives inside this seam rather than in either caller so the
+        // two paths cannot drift: a synthetic entry advances `log_len` exactly
+        // the same way from `process_message` and from
+        // `sweep_due_synthetic_accepts`, so it must cross an interval boundary
+        // the same way too. Put it in the sweep instead and the eager path
+        // would silently skip every boundary a synthetic crossed — checkpoints
+        // are only a replay optimization, but the divergence would be real and
+        // invisible.
+        //
+        // No double-checkpoint on the lazy path. `process_message` runs its own
+        // `maybe_insert_checkpoint` after appending the triggering message, by
+        // which point the log is at least one entry longer than it is here, so
+        // the two calls never test the same `log_len`. The check is a pure
+        // function of that length, so re-asking at a different length is not a
+        // repeat.
+        self.maybe_insert_checkpoint(session_id, session).await;
+        self.publish_accepted_envelope(&syn);
+        Ok(true)
+    }
+
     /// Process a session-scoped message following the RFC-MACP-0001 Section 7.3
     /// terminal-state transition order:
     /// 1. Check session OPEN
@@ -664,9 +851,30 @@ impl Runtime {
             .get_mode(&session.mode)
             .ok_or(MacpError::UnknownMode)?;
         mode.authorize_sender(session, env)?;
+        // The client boundary (RFC-MACP-0010 §5.1(3)): shapes that are legal
+        // as recorded history but illegal as client submissions. Called here
+        // and NEVER on replay — replay re-reads entries that already passed
+        // this check when they were first accepted, and a runtime-synthesized
+        // envelope is not a client submission either. Placed after
+        // `authorize_sender` so the pre-existing Forbidden-before-InvalidPayload
+        // ordering is unchanged. This call is not optional plumbing: the
+        // runtime deliberately bypasses `macp_modes::step::validate_message`
+        // (which also calls the hook) so it can interpose the durable append
+        // between validation and commit, so without this line the runtime
+        // would have no client boundary at all.
+        mode.validate_client_envelope(session, env)?;
         // One acceptance clock for both the mode call and the log entry, so
         // replay (which re-reads received_at_ms) observes the identical time.
         let accepted_at_ms = Utc::now().timestamp_millis();
+        // RFC-MACP-0010 §5.1(2): anything the mode says is already due MUST
+        // enter accepted history BEFORE this message is evaluated against the
+        // state it changes. Lazy emission — the same clock reading the trigger
+        // is about to be dispatched with. Deliberately after the prechecks (a
+        // duplicate, TTL-expired, suspended or unauthorized trigger
+        // synthesizes nothing) and after the client boundary, so a forged
+        // envelope can never provoke an append.
+        self.synthesize_due_accept(&env.session_id, session, accepted_at_ms)
+            .await?;
         let response = mode.on_message_at(
             session,
             env,
@@ -816,6 +1024,7 @@ impl Runtime {
 
         // RFC-MACP-0001: runtime encodes a proper SessionCancelPayload with
         // `cancelled_by` set to the authenticated sender identity.
+        let now_ms = Utc::now().timestamp_millis();
         let cancel_payload = crate::pb::SessionCancelPayload {
             reason: reason.to_string(),
             cancelled_by: cancelled_by.to_string(),
@@ -825,6 +1034,7 @@ impl Runtime {
             &prost::Message::encode_to_vec(&cancel_payload),
             session_id,
             &session.mode,
+            now_ms,
         );
         self.storage
             .append_log_entry(session_id, &cancel_entry)
@@ -884,6 +1094,7 @@ impl Runtime {
             &prost::Message::encode_to_vec(&payload),
             session_id,
             &session.mode,
+            now_ms,
         );
         self.storage
             .append_log_entry(session_id, &entry)
@@ -928,6 +1139,17 @@ impl Runtime {
         }
 
         let now_ms = chrono::Utc::now().timestamp_millis();
+        // `banked_ms` on the wire payload is **informational only**. Both this
+        // value and the `SessionResume` entry's `received_at_ms` now come from
+        // the single `now_ms` read above, so it is exactly
+        // `resume_entry.received_at_ms - suspend_entry.received_at_ms` — i.e.
+        // equal to the value replay derives by construction. Replay still
+        // ignores it and re-derives the banked duration from the two entry
+        // timestamps (see the `SessionSuspend`/`SessionResume` arms of
+        // `replay::replay_entry`). Keep it that way: starting to consume
+        // `banked_ms` would change how *legacy* logs replay, because entries
+        // written before this change recorded a second, independently-read
+        // clock and their `banked_ms` can disagree with their timestamps.
         let banked_before = session
             .suspended_at_ms
             .map(|at| (now_ms - at).max(0))
@@ -942,6 +1164,7 @@ impl Runtime {
             &prost::Message::encode_to_vec(&payload),
             session_id,
             &session.mode,
+            now_ms,
         );
         self.storage
             .append_log_entry(session_id, &entry)
@@ -966,7 +1189,11 @@ impl Runtime {
                 })
             }
             Err(_) => {
-                // MAX_SUSPEND_MS exceeded: the session is now Expired.
+                // A suspension cap was exceeded — either MAX_SUSPEND_MS
+                // (cumulative suspended duration) or, at semantics_rev >= 2,
+                // MAX_SUSPENSION_CYCLES (completed suspend/resume cycles).
+                // Both take the same posture in `Session::resume`: the
+                // session is now Expired.
                 self.save_session_to_storage(session).await;
                 self.metrics.record_session_expired(&session.mode);
                 let _ = self
@@ -1069,6 +1296,14 @@ impl Runtime {
     }
 
     /// Insert a checkpoint entry if the log has reached the configured interval.
+    ///
+    /// Called after **every** append that can cross a boundary: the tail of
+    /// `process_message`, and [`Runtime::synthesize_due_accept`] for the
+    /// synthetic entry it writes. The second call site is what keeps the eager
+    /// sweep and the lazy trigger placing checkpoints identically — see the
+    /// note at that call. The decision is a pure function of the current
+    /// `log_len`, so asking twice within one `process_message` (at two
+    /// different lengths) is not a repeat.
     async fn maybe_insert_checkpoint(&self, session_id: &str, session: &Session) {
         if self.checkpoint_interval == 0 {
             return;
@@ -1110,7 +1345,8 @@ impl Runtime {
             if session.state != SessionState::Open || now <= session.ttl_expiry {
                 continue;
             }
-            let entry = Self::make_internal_entry("TtlExpired", b"", &session_id, &session.mode);
+            let entry =
+                Self::make_internal_entry("TtlExpired", b"", &session_id, &session.mode, now);
             if let Err(e) = self.storage.append_log_entry(&session_id, &entry).await {
                 tracing::warn!(
                     session_id,
@@ -1138,6 +1374,124 @@ impl Runtime {
         if expired_count > 0 {
             tracing::info!(count = expired_count, "background cleanup expired sessions");
         }
+    }
+
+    /// Emit every synthetic envelope that has become due, across all open
+    /// sessions — RFC-MACP-0010 §5.1(2)'s **eager** observation of the
+    /// implicit-accept deadline.
+    ///
+    /// Lazy observation (`process_message` -> `synthesize_due_accept`) is the
+    /// MUST and ships on its own: it guarantees no message is ever evaluated
+    /// against a stale offer. This is the SHOULD on top of it — without it a
+    /// session where nobody speaks again keeps an accepted offer out of history
+    /// indefinitely, and `GetSession` / `StreamSession` show an offer that the
+    /// protocol says was accepted at `D`. Called from the background
+    /// maintenance loop in `src/main.rs`, so `MACP_CLEANUP_INTERVAL_SECS` is
+    /// the latency bound on the observation (never on the recorded timestamp,
+    /// which is `D` whichever path emits — see below).
+    ///
+    /// # Not a variant of `cleanup_expired_sessions`
+    ///
+    /// Different predicate (a mode-computed deadline inside `mode_state`, not
+    /// `ttl_expiry`) and a different product: an `EntryKind::Incoming` entry
+    /// that consumes an accepted ordinal and is published to `StreamSession`,
+    /// where `TtlExpired` is `Internal` and is published to neither. It is
+    /// deliberately ordered *after* `cleanup_expired_sessions` in that loop so
+    /// a TTL-expired session is already non-`Open` when the sweep reaches it —
+    /// which is exactly the precedence the lazy path gives (`Precheck::Expired`
+    /// returns before `synthesize_due_accept` is ever called), so the two paths
+    /// cannot disagree about a session whose TTL and implicit-accept deadline
+    /// both passed unobserved.
+    ///
+    /// # Locking
+    ///
+    /// The registry map lock is held only for the snapshot of `(id, Arc)` pairs
+    /// and is released before any session mutex is taken or any I/O happens —
+    /// the lock-ordering contract on `SessionRegistry`. The snapshot fixes the
+    /// *set*, not the state.
+    ///
+    /// # Why no snapshot-to-append race can leave an orphan entry
+    ///
+    /// A session can resolve, cancel or expire between the snapshot and the
+    /// moment this loop reaches it, and the `Arc` keeps it alive (and writable)
+    /// regardless. Nothing here reads state at snapshot time: every decision is
+    /// made *under the session mutex*, which is the same mutex every writer —
+    /// `process_message`, `cancel_session`, `suspend_session`, `resume_session`,
+    /// `cleanup_expired_sessions` — holds across its own validate-append-commit.
+    /// So the `state != Open` re-check inside `synthesize_due_accept` observes
+    /// the session as the last writer left it, and a session that terminated
+    /// after the snapshot is skipped. Two further guards make it belt and
+    /// braces: the mode returns `None` once the offer's disposition is no
+    /// longer `Offered` (so an explicit `HandoffAccept` that won the race
+    /// disarms the synthesis), and the deterministic `message_id` is already in
+    /// `seen_message_ids` after any emission. Eviction cannot orphan one
+    /// either: `evict_stale_sessions` and `gc_disk_sessions` only ever drop
+    /// *terminal* sessions, which fail the `Open` check.
+    ///
+    /// # Cost
+    ///
+    /// One `mode_state` decode per open session whose mode implements the hook
+    /// and whose policy binds a timeout, per tick; everything else short-circuits
+    /// before decoding (`Mode::due_synthetic_envelope`'s own cost note).
+    ///
+    /// Returns the number of synthetic entries appended.
+    pub async fn sweep_due_synthetic_accepts(&self) -> usize {
+        let now = Utc::now().timestamp_millis();
+        // Snapshot the shared handles under a brief map read; never hold the
+        // map lock across per-session locks or storage I/O. Mirrors
+        // `cleanup_expired_sessions`.
+        let candidates: Vec<(String, crate::registry::SharedSession)> = {
+            let guard = self.registry.sessions.read().await;
+            guard
+                .iter()
+                .map(|(id, arc)| (id.clone(), std::sync::Arc::clone(arc)))
+                .collect()
+        };
+
+        let mut emitted = 0usize;
+        for (session_id, shared) in candidates {
+            let mut session = shared.lock().await;
+            // `Suspended` (and every other non-`Open` state) is skipped here
+            // *and* inside `synthesize_due_accept`. Measured: removing this
+            // check alone changes no behaviour — the seam's own filter still
+            // declines — so treat it as the documented precondition of the
+            // call below rather than as the enforcement. The enforcement
+            // matters: both computations behind the synthetic entry ignore an
+            // in-flight pause, so asking about a paused session over-counts
+            // elapsed time and bakes a wrong `D` into permanent history, and
+            // this is the only caller that can ever be handed one (no message
+            // path reaches a non-`Open` session at all).
+            if session.state != SessionState::Open {
+                continue;
+            }
+            match self
+                .synthesize_due_accept(&session_id, &mut session, now)
+                .await
+            {
+                Ok(true) => emitted += 1,
+                Ok(false) => {}
+                // No triggering message to reject: a failed append (or a mode
+                // that refused its own synthetic) is logged and the offer stays
+                // outstanding, to be retried on the next tick or settled by the
+                // lazy path. The same posture `cleanup_expired_sessions` takes
+                // on a failed `TtlExpired` append.
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %e,
+                        "eager sweep could not emit a due synthetic envelope"
+                    );
+                }
+            }
+        }
+
+        if emitted > 0 {
+            tracing::info!(
+                count = emitted,
+                "eager sweep appended due synthetic envelopes"
+            );
+        }
+        emitted
     }
 
     /// Delete terminal sessions' durable data older than `retention_secs`
@@ -2704,5 +3058,730 @@ mod tests {
         assert!(!result.duplicate);
         // The session exists and is usable.
         assert!(rt.get_session_checked(&sid).await.is_some());
+    }
+
+    // --- The client boundary at the kernel's two live entry points (11c) ---
+    //
+    // RFC-MACP-0010 §5.1(3). These are the runtime-level halves; the
+    // mode-level rules are unit-tested in
+    // `crates/macp-modes/src/mode/handoff.rs`, `step::validate_message` in
+    // `crates/macp-modes/src/step.rs`, and the proof that the hook is NOT on
+    // the replay path in `src/replay.rs`
+    // (`reserved_prefix_entry_replays_at_every_rev`).
+    //
+    // Both entry points matter independently: `process_message` and
+    // `process_session_start` each call the hook themselves, because the
+    // runtime deliberately bypasses `macp_modes::step::validate_message` (it
+    // interposes its durable append between validation and commit), so neither
+    // call site is covered by the other.
+
+    const HANDOFF_MODE: &str = "macp.mode.handoff.v1";
+    const OWNER: &str = "agent://owner";
+    const TARGET: &str = "agent://target";
+
+    fn reserved_id(handoff_id: &str) -> String {
+        format!(
+            "{}{handoff_id}",
+            crate::mode::handoff::IMPLICIT_ACCEPT_MESSAGE_ID_PREFIX
+        )
+    }
+
+    fn handoff_start_payload() -> Vec<u8> {
+        session_start(vec![OWNER.into(), TARGET.into()])
+    }
+
+    /// A `Commitment` that echoes the versions `handoff_session_with_offer`
+    /// binds, so the only thing left to reject it is the `message_id`.
+    fn handoff_commitment_payload() -> Vec<u8> {
+        CommitmentPayload {
+            commitment_id: "c1".into(),
+            action: "handoff.accepted".into(),
+            authority_scope: "support".into(),
+            reason: "bound".into(),
+            mode_version: "1.0.0".into(),
+            policy_version: "policy.default".into(),
+            configuration_version: "cfg-1".into(),
+            outcome_positive: true,
+            supersedes: None,
+        }
+        .encode_to_vec()
+    }
+
+    fn handoff_offer(handoff_id: &str) -> Vec<u8> {
+        crate::handoff_pb::HandoffOfferPayload {
+            handoff_id: handoff_id.into(),
+            target_participant: TARGET.into(),
+            scope: "support".into(),
+            reason: "escalate".into(),
+        }
+        .encode_to_vec()
+    }
+
+    fn handoff_context(handoff_id: &str) -> Vec<u8> {
+        crate::handoff_pb::HandoffContextPayload {
+            handoff_id: handoff_id.into(),
+            content_type: "text/plain".into(),
+            context: b"background".to_vec(),
+        }
+        .encode_to_vec()
+    }
+
+    fn handoff_accept(handoff_id: &str, implicit: bool) -> Vec<u8> {
+        crate::handoff_pb::HandoffAcceptPayload {
+            handoff_id: handoff_id.into(),
+            accepted_by: TARGET.into(),
+            reason: "ready".into(),
+            implicit,
+        }
+        .encode_to_vec()
+    }
+
+    /// An Open handoff session at the current semantics revision with one
+    /// outstanding offer `h1`. Returns the session id.
+    async fn handoff_session_with_offer(rt: &Runtime) -> String {
+        let sid = new_sid();
+        rt.process(
+            &env(
+                HANDOFF_MODE,
+                "SessionStart",
+                "start-1",
+                &sid,
+                OWNER,
+                handoff_start_payload(),
+            ),
+            None,
+        )
+        .await
+        .expect("handoff session start");
+        rt.process(
+            &env(
+                HANDOFF_MODE,
+                "HandoffOffer",
+                "offer-1",
+                &sid,
+                OWNER,
+                handoff_offer("h1"),
+            ),
+            None,
+        )
+        .await
+        .expect("handoff offer");
+        assert_eq!(
+            rt.get_session_checked(&sid).await.unwrap().semantics_rev,
+            macp_core::session::CURRENT_SEMANTICS_REV
+        );
+        sid
+    }
+
+    /// Phase 11c criterion 1, message path: at the current revision a client
+    /// envelope whose `message_id` is in the reserved `implicit-accept:`
+    /// namespace is rejected `InvalidEnvelope`, and the rejection mutates
+    /// nothing — neither accepted history nor `seen_message_ids` (CLAUDE.md §8
+    /// dedup invariant).
+    ///
+    /// `HandoffContext` is the interesting carrier: it is the one mode message
+    /// the offerer may send at any disposition, and it is rejected here
+    /// **before** dispatch, which is why the check cannot live in the mode's
+    /// own rules. `Commitment` is included because the initiator can squat the
+    /// id that way too, and because it proves the reservation is not scoped to
+    /// `HandoffAccept`.
+    #[tokio::test]
+    async fn reserved_message_id_namespace_is_rejected_at_rev2() {
+        let rt = make_runtime();
+        let sid = handoff_session_with_offer(&rt).await;
+
+        let history_before = rt.log_store.get_log(&sid).await.unwrap().len();
+        let dedup_before = rt
+            .get_session_checked(&sid)
+            .await
+            .unwrap()
+            .seen_message_ids
+            .clone();
+
+        for (message_type, sender, payload) in [
+            ("HandoffContext", OWNER, handoff_context("h1")),
+            ("Commitment", OWNER, handoff_commitment_payload()),
+            ("HandoffAccept", TARGET, handoff_accept("h1", false)),
+        ] {
+            let err = rt
+                .process(
+                    &env(
+                        HANDOFF_MODE,
+                        message_type,
+                        &reserved_id("h1"),
+                        &sid,
+                        sender,
+                        payload,
+                    ),
+                    None,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, MacpError::InvalidEnvelope),
+                "{message_type} with a reserved id must be InvalidEnvelope, got {err}"
+            );
+        }
+
+        // Nothing was appended and no dedup slot was consumed.
+        let session = rt.get_session_checked(&sid).await.unwrap();
+        assert_eq!(
+            rt.log_store.get_log(&sid).await.unwrap().len(),
+            history_before
+        );
+        assert_eq!(session.seen_message_ids, dedup_before);
+        assert!(!session.seen_message_ids.contains(&reserved_id("h1")));
+        assert_eq!(session.state, SessionState::Open);
+
+        // Control: the same `HandoffContext` with an ordinary id is accepted,
+        // so the rejections above are the id's doing and not the payload's.
+        rt.process(
+            &env(
+                HANDOFF_MODE,
+                "HandoffContext",
+                "ctx-1",
+                &sid,
+                OWNER,
+                handoff_context("h1"),
+            ),
+            None,
+        )
+        .await
+        .expect("an ordinary id is accepted");
+        assert_eq!(
+            rt.log_store.get_log(&sid).await.unwrap().len(),
+            history_before + 1
+        );
+    }
+
+    /// Phase 11c criterion 1, start path. This call site exists precisely
+    /// because the namespace is squattable through `SessionStart`, whose
+    /// `message_id` enters `seen_message_ids` at the commit point — after
+    /// which the runtime's own later synthesis would be silently skipped.
+    ///
+    /// The rejection must leave **no** trace: no session in the registry, no
+    /// session log, and no reservation of the session id — proved by starting
+    /// the same session id again with a clean `message_id` and having it
+    /// succeed (`SessionAlreadyExists` would be the failure signature of a
+    /// leaked reservation).
+    #[tokio::test]
+    async fn reserved_message_id_is_rejected_on_the_session_start_path() {
+        let rt = make_runtime();
+        let sid = new_sid();
+
+        let err = rt
+            .process(
+                &env(
+                    HANDOFF_MODE,
+                    "SessionStart",
+                    &reserved_id("h1"),
+                    &sid,
+                    OWNER,
+                    handoff_start_payload(),
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MacpError::InvalidEnvelope),
+            "reserved id on SessionStart must be InvalidEnvelope, got {err}"
+        );
+
+        // No session, no log, nothing to roll back.
+        assert!(rt.get_session_checked(&sid).await.is_none());
+        assert!(rt.log_store.get_log(&sid).await.is_none());
+        assert!(!rt.registry.sessions.read().await.contains_key(&sid));
+
+        // The session id was never reserved and the id never consumed a dedup
+        // slot: the same session starts cleanly.
+        rt.process(
+            &env(
+                HANDOFF_MODE,
+                "SessionStart",
+                "start-1",
+                &sid,
+                OWNER,
+                handoff_start_payload(),
+            ),
+            None,
+        )
+        .await
+        .expect("a rejected SessionStart must not reserve the session id");
+        let session = rt.get_session_checked(&sid).await.unwrap();
+        assert!(session.seen_message_ids.contains("start-1"));
+        assert!(!session.seen_message_ids.contains(&reserved_id("h1")));
+    }
+
+    /// Phase 11c criterion 2, runtime path: a client `HandoffAccept` carrying
+    /// `implicit = true` never enters history.
+    ///
+    /// Two envelopes, as the criterion requires:
+    /// (a) `implicit = true` with an ordinary `message_id` — `InvalidPayload`.
+    ///     **This assertion is double-guarded today** and so does not isolate
+    ///     the hook: `handle_message` rejects the same envelope with the same
+    ///     code (deliberately kept until 11d restructures that arm). What it
+    ///     does pin is the criterion's actual requirement — that the rev-2
+    ///     error *surface* through `Send` is unchanged — and it becomes the
+    ///     only guard once 11d teaches dispatch to accept the shape.
+    /// (b) `implicit = true` with the **reserved** `message_id` and the
+    ///     correct sender — `InvalidEnvelope`, which only the boundary can
+    ///     produce (dispatch would say `InvalidPayload`). The envelope is
+    ///     byte-shaped exactly like the one the runtime will synthesize
+    ///     from 11e.
+    ///
+    /// Measured, **neither half pins the `implicit` rule**: (b) is killed by
+    /// the *reserved-prefix* rule, which fires first and returns
+    /// `InvalidEnvelope` whatever the flag says, so deleting the `implicit`
+    /// rule leaves this whole test green. The `implicit` rule's only
+    /// non-vacuous guard is the mode-level unit test
+    /// `handoff::tests::client_implicit_accept_rejected_at_the_boundary`.
+    /// What this test pins is the runtime-level *error surface* at rev 2 —
+    /// which is the criterion's requirement, and which 11d must keep in view
+    /// when it restructures the dispatch arm.
+    #[tokio::test]
+    async fn client_implicit_accept_rejected_through_the_runtime() {
+        let rt = make_runtime();
+        let sid = handoff_session_with_offer(&rt).await;
+        let history_before = rt.log_store.get_log(&sid).await.unwrap().len();
+
+        // (a) ordinary id.
+        let err = rt
+            .process(
+                &env(
+                    HANDOFF_MODE,
+                    "HandoffAccept",
+                    "accept-1",
+                    &sid,
+                    TARGET,
+                    handoff_accept("h1", true),
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MacpError::InvalidPayload), "got {err}");
+
+        // (b) the runtime's own synthetic shape, submitted by the target.
+        let err = rt
+            .process(
+                &env(
+                    HANDOFF_MODE,
+                    "HandoffAccept",
+                    &reserved_id("h1"),
+                    &sid,
+                    TARGET,
+                    handoff_accept("h1", true),
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MacpError::InvalidEnvelope), "got {err}");
+
+        // The offer is still outstanding and history is untouched.
+        let session = rt.get_session_checked(&sid).await.unwrap();
+        assert_eq!(
+            rt.log_store.get_log(&sid).await.unwrap().len(),
+            history_before
+        );
+        assert!(session.seen_message_ids.is_disjoint(
+            &["accept-1".to_string(), reserved_id("h1")]
+                .into_iter()
+                .collect()
+        ));
+        let mode_state: serde_json::Value = serde_json::from_slice(&session.mode_state).unwrap();
+        assert_eq!(mode_state["offers"]["h1"]["disposition"], "Offered");
+
+        // Control: the explicit accept (`implicit = false`, ordinary id) is
+        // accepted, so the rejections above are not the envelope's other
+        // fields.
+        rt.process(
+            &env(
+                HANDOFF_MODE,
+                "HandoffAccept",
+                "accept-2",
+                &sid,
+                TARGET,
+                handoff_accept("h1", false),
+            ),
+            None,
+        )
+        .await
+        .expect("an explicit accept is still accepted");
+    }
+
+    /// Error-code ordering at the kernel is unchanged by the phase: an
+    /// envelope that is **both** unauthorized and carries a reserved id
+    /// reports `Forbidden`, because the hook is called after
+    /// `mode.authorize_sender`. Rev <= 1's Forbidden-before-payload ordering
+    /// therefore does not shift at rev 2.
+    #[tokio::test]
+    async fn client_boundary_error_ordering_is_unchanged_at_rev2() {
+        let rt = make_runtime();
+        let sid = handoff_session_with_offer(&rt).await;
+
+        // `agent://stranger` is not a declared participant.
+        let err = rt
+            .process(
+                &env(
+                    HANDOFF_MODE,
+                    "HandoffAccept",
+                    &reserved_id("h1"),
+                    &sid,
+                    "agent://stranger",
+                    handoff_accept("h1", true),
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MacpError::Forbidden),
+            "authorization must be reported before the client boundary, got {err}"
+        );
+
+        // Same envelope from the authorized sender: now the boundary speaks.
+        let err = rt
+            .process(
+                &env(
+                    HANDOFF_MODE,
+                    "HandoffAccept",
+                    &reserved_id("h1"),
+                    &sid,
+                    TARGET,
+                    handoff_accept("h1", true),
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MacpError::InvalidEnvelope), "got {err}");
+    }
+
+    // --- The synthesis seam's own guards (11e) ---
+
+    /// A handoff session with a bound `implicit_accept_timeout_ms` and an
+    /// outstanding offer. Unlike [`handoff_session_with_offer`] this one binds
+    /// a policy, so an implicit accept can actually become due.
+    async fn handoff_session_with_timed_offer(rt: &Runtime, timeout_ms: i64) -> String {
+        rt.register_policy(macp_core::policy::PolicyDefinition {
+            policy_id: "handoff-timed".into(),
+            mode: HANDOFF_MODE.into(),
+            description: "implicit accept".into(),
+            rules: serde_json::json!({
+                "acceptance": { "implicit_accept_timeout_ms": timeout_ms },
+                "commitment": { "authority": "initiator_only" }
+            }),
+            schema_version: 1,
+        })
+        .expect("policy registers");
+
+        let sid = new_sid();
+        let start = SessionStartPayload {
+            intent: "escalate".into(),
+            participants: vec![OWNER.into(), TARGET.into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            policy_version: "handoff-timed".into(),
+            ttl_ms: 60_000,
+            context_id: String::new(),
+            extensions: std::collections::HashMap::new(),
+            roots: vec![],
+            max_suspend_ms: 0,
+        }
+        .encode_to_vec();
+        rt.process(
+            &env(HANDOFF_MODE, "SessionStart", "start-1", &sid, OWNER, start),
+            None,
+        )
+        .await
+        .expect("session start");
+        rt.process(
+            &env(
+                HANDOFF_MODE,
+                "HandoffOffer",
+                "offer-1",
+                &sid,
+                OWNER,
+                handoff_offer("h1"),
+            ),
+            None,
+        )
+        .await
+        .expect("offer");
+        sid
+    }
+
+    /// Phase 11e criterion 11, first half: `synthesize_due_accept` must refuse
+    /// to synthesize for a session that is not `Open`.
+    ///
+    /// This is a **correctness** gate, not hygiene, and it is the only one
+    /// that ships. Both computations behind the synthetic entry ignore an
+    /// in-flight pause by design — `Session::unsuspended_deadline` walks
+    /// completed intervals only, and `HandoffMode::rev2_elapsed_ms` has no
+    /// in-flight term — so asking a `Suspended` session over-counts elapsed
+    /// time (the accept can be judged due when it is not) and under-computes
+    /// `D` (a wrong `timestamp_unix_ms` baked into permanent history, in
+    /// silence). The mode carries a `debug_assert!` for the same thing, which
+    /// compiles out in release builds and therefore guards nothing where it
+    /// matters.
+    ///
+    /// The method is called directly because no message path can reach it with
+    /// a suspended session — `step::check_preconditions` rejects every message
+    /// to a non-`Open` session first. Phase 12's eager sweep is the caller that
+    /// *will* see suspended sessions, which is exactly why the filter has to
+    /// be in the seam rather than at its current call site.
+    #[tokio::test]
+    async fn synthesis_is_skipped_for_a_non_open_session() {
+        let rt = make_runtime();
+        let sid = handoff_session_with_timed_offer(&rt, 20).await;
+        rt.suspend_session(&sid, "hold", OWNER)
+            .await
+            .expect("suspend");
+
+        let shared = rt.registry.get_shared(&sid).await.unwrap();
+        let mut guard = shared.lock().await;
+        let session = &mut *guard;
+        assert_eq!(session.state, SessionState::Suspended);
+        assert!(session.suspended_at_ms.is_some());
+
+        // Far past the deadline on wall time — the only thing stopping a
+        // synthesis here is the state filter.
+        let long_after = session.suspended_at_ms.unwrap() + 10_000;
+        let log_before = rt.log_store.get_log(&sid).await.unwrap_or_default().len();
+        let dedup_before = session.seen_message_ids.len();
+        let mode_state_before = session.mode_state.clone();
+
+        rt.synthesize_due_accept(&sid, session, long_after)
+            .await
+            .expect("the filter is a skip, not an error");
+
+        assert_eq!(
+            rt.log_store.get_log(&sid).await.unwrap_or_default().len(),
+            log_before,
+            "a suspended session must not gain a synthetic entry"
+        );
+        assert_eq!(session.seen_message_ids.len(), dedup_before);
+        assert_eq!(session.mode_state, mode_state_before);
+
+        // Control: the filter is what declined, not the arithmetic — and what
+        // it kept out of history was wrong, not merely early.
+        //
+        // The mode cannot be asked about the genuinely suspended session in a
+        // debug build: `due_synthetic_envelope` carries a `debug_assert!` on
+        // `suspended_at_ms.is_none()` and would panic. So the probe is a clone
+        // that differs *only* by that tripwire — same offer, same banked
+        // suspension (none: the pause is still in flight and banks on resume),
+        // same clock. That is exactly the state the mode would see if the
+        // kernel filter were removed and the assertion compiled out, which is
+        // what a release build does.
+        let mut without_the_tripwire = session.clone();
+        without_the_tripwire.state = SessionState::Open;
+        without_the_tripwire.suspended_at_ms = None;
+        let mode = rt.mode_registry.get_mode(&session.mode).unwrap();
+        let would_have_emitted = mode
+            .due_synthetic_envelope(&without_the_tripwire, long_after)
+            .expect("the mode would have synthesized; only the kernel filter stopped it");
+        // The harm, concretely: the D it would have recorded falls *inside* the
+        // pause that is still running — a moment at which the session was not
+        // ticking at all. `unsuspended_deadline` walks completed intervals
+        // only, and this pause is not completed, so it is invisible to the
+        // walk. Recorded, that timestamp would be permanent and wrong.
+        let suspended_at = session.suspended_at_ms.unwrap();
+        assert!(
+            would_have_emitted.timestamp_unix_ms >= suspended_at
+                && would_have_emitted.timestamp_unix_ms < long_after,
+            "D {} must fall inside the still-open pause starting at {suspended_at}",
+            would_have_emitted.timestamp_unix_ms
+        );
+
+        // And once the session is Open again the seam works normally, so the
+        // filter is a skip rather than a permanent disable.
+        drop(guard);
+        rt.resume_session(&sid, "go", OWNER).await.expect("resume");
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        let shared = rt.registry.get_shared(&sid).await.unwrap();
+        let mut guard = shared.lock().await;
+        let session = &mut *guard;
+        let now = Utc::now().timestamp_millis();
+        rt.synthesize_due_accept(&sid, session, now).await.unwrap();
+        assert!(session.seen_message_ids.contains(&reserved_id("h1")));
+    }
+
+    /// Phase 11e criterion 11, second half: the appended entry stamps
+    /// `received_at_ms` with the envelope's own `timestamp_unix_ms` (the
+    /// deadline `D`), never wall-clock.
+    ///
+    /// Asserted on the stamped value directly, at the seam, rather than
+    /// inferred from a replay — a replay would pass under a wall-clock stamp
+    /// too, because handoff's accept arm is time-blind. The contract is
+    /// general: replay derives its dispatch clock from `received_at_ms`, so
+    /// the next mode to use this hook would silently diverge.
+    #[tokio::test]
+    async fn synthetic_entry_stamps_received_at_with_the_deadline() {
+        let rt = make_runtime();
+        let sid = handoff_session_with_timed_offer(&rt, 20).await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        let offer_received_at = rt
+            .log_store
+            .get_log(&sid)
+            .await
+            .unwrap()
+            .iter()
+            .find(|e| e.message_type == "HandoffOffer")
+            .expect("offer entry")
+            .received_at_ms;
+        let expected_d = offer_received_at + 20;
+
+        let shared = rt.registry.get_shared(&sid).await.unwrap();
+        let mut guard = shared.lock().await;
+        let session = &mut *guard;
+        // Observed far later than D, so a wall-clock stamp would be obvious.
+        let observed = Utc::now().timestamp_millis();
+        assert!(observed > expected_d);
+        rt.synthesize_due_accept(&sid, session, observed)
+            .await
+            .unwrap();
+        drop(guard);
+
+        let entry = rt
+            .log_store
+            .get_log(&sid)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|e| e.message_id == reserved_id("h1"))
+            .expect("the synthetic entry");
+        assert_eq!(entry.timestamp_unix_ms, expected_d, "envelope clock is D");
+        assert_eq!(entry.received_at_ms, expected_d, "entry clock is D");
+        assert_ne!(
+            entry.received_at_ms, observed,
+            "received_at_ms must not be the observation time"
+        );
+        assert_eq!(entry.entry_kind, EntryKind::Incoming);
+    }
+
+    /// The synthetic accept is deliberately NOT credited as participant
+    /// activity: `replay_entry` never records activity for any entry kind, so
+    /// calling `record_participant_activity` live would guarantee a
+    /// live/replay divergence in `participant_message_counts` — and the target
+    /// did not, in fact, send anything.
+    ///
+    /// The consequence is user-visible (`SessionMetadata.participant_activity`
+    /// via `server::session_to_metadata`), so it is pinned rather than left as
+    /// a comment.
+    #[tokio::test]
+    async fn synthetic_accept_is_not_credited_as_participant_activity() {
+        let rt = make_runtime();
+        let sid = handoff_session_with_timed_offer(&rt, 20).await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        let shared = rt.registry.get_shared(&sid).await.unwrap();
+        let mut guard = shared.lock().await;
+        let session = &mut *guard;
+        let before = session.participant_message_counts.get(TARGET).copied();
+        rt.synthesize_due_accept(&sid, session, Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+        assert!(session.seen_message_ids.contains(&reserved_id("h1")));
+        assert_eq!(
+            session.participant_message_counts.get(TARGET).copied(),
+            before,
+            "the target must not be credited with a message they did not send"
+        );
+    }
+    /// The checkpoint-interval check belongs to the *append*, so the eager
+    /// sweep and a lazy trigger place the same checkpoint in the same
+    /// position.
+    ///
+    /// `maybe_insert_checkpoint` used to be called only from the tail of
+    /// `process_message`. A synthetic entry advances `log_len` without ever
+    /// reaching it: the lazy path checked only the length *after* the
+    /// trigger's own append (one greater), and the eager path — where
+    /// `sweep_due_synthetic_accepts` is the whole call — checked nothing at
+    /// all. With `MACP_CHECKPOINT_INTERVAL > 0` that is a genuine eager/lazy
+    /// divergence: identical accepted histories, different checkpoint
+    /// placement, and a boundary the synthetic crossed silently skipped.
+    /// Calling it from inside `synthesize_due_accept` makes the two agree by
+    /// construction, which is what this pins.
+    ///
+    /// Checkpoints are a replay optimization rather than a correctness
+    /// property, which is exactly why this needs a test: nothing else would
+    /// ever notice.
+    ///
+    /// `checkpoint_interval` is set on the struct rather than through
+    /// `MACP_CHECKPOINT_INTERVAL`, because that variable is read once in
+    /// `Runtime::with_registries` and this binary runs its tests in parallel —
+    /// setting it here would leak into every other runtime built concurrently.
+    ///
+    /// Interval 3, with `SessionStart` + `HandoffOffer` already logged, puts
+    /// the synthetic accept exactly on the boundary: the skipped case.
+    #[tokio::test]
+    async fn a_synthetic_entry_on_the_checkpoint_boundary_checkpoints_either_path() {
+        async fn shape(rt: &Runtime, sid: &str) -> Vec<(EntryKind, String)> {
+            rt.log_store
+                .get_log(sid)
+                .await
+                .expect("log")
+                .iter()
+                .map(|e| (e.entry_kind.clone(), e.message_type.clone()))
+                .collect()
+        }
+
+        // Eager: the sweep is the only thing that touches the session.
+        let mut eager = make_runtime();
+        eager.checkpoint_interval = 3;
+        let eager_sid = handoff_session_with_timed_offer(&eager, 20).await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert_eq!(
+            eager.sweep_due_synthetic_accepts().await,
+            1,
+            "sweep emitted"
+        );
+
+        // Lazy: a trigger message arrives instead. `HandoffContext` is the one
+        // mode message the offerer may send at any disposition, so it provokes
+        // the synthesis without being an accept itself.
+        let mut lazy = make_runtime();
+        lazy.checkpoint_interval = 3;
+        let lazy_sid = handoff_session_with_timed_offer(&lazy, 20).await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        lazy.process(
+            &env(
+                HANDOFF_MODE,
+                "HandoffContext",
+                "ctx-1",
+                &lazy_sid,
+                OWNER,
+                handoff_context("h1"),
+            ),
+            None,
+        )
+        .await
+        .expect("context accepted");
+
+        let expected = vec![
+            (EntryKind::Incoming, "SessionStart".to_string()),
+            (EntryKind::Incoming, "HandoffOffer".to_string()),
+            (EntryKind::Incoming, "HandoffAccept".to_string()),
+            (EntryKind::Checkpoint, "Checkpoint".to_string()),
+        ];
+        assert_eq!(shape(&eager, &eager_sid).await, expected, "eager sweep");
+
+        let lazy_shape = shape(&lazy, &lazy_sid).await;
+        assert_eq!(
+            lazy_shape[..4],
+            expected[..],
+            "the lazy path must checkpoint in the same place as the eager one"
+        );
+        // ... and exactly once: `process_message` runs its own check after
+        // appending the trigger, at a length the synthesis never tested.
+        assert_eq!(
+            lazy_shape[4..],
+            [(EntryKind::Incoming, "HandoffContext".to_string())],
+            "no second checkpoint for the trigger's own append"
+        );
     }
 }

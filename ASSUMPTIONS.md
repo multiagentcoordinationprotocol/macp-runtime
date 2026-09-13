@@ -148,6 +148,257 @@
 - **Blast radius if wrong:** Additive only — `cargo semver-checks check-release` on `macp-core`, `macp-modes` and `macp-runtime` is clean (exit 0, no major lints). The cost of being wrong is API churn: narrowing `Result<Option<_>, _>` later, or adding an `ApprovalThreshold` variant, is a breaking change, though `enum_variant_added` and signature lints are majors that `release-plz.toml`'s `semver_check = true` blocks on rather than shipping silently. If a third outcome for the session-level form ever appears, it belongs in a new `Ok` variant, not in a new error.
 - **Status:** UNCONFIRMED (2026-09-11)
 
+## The rev-2 scaffolding branch cannot be *literally* identical to the rev-1 branch
+- **Plan:** `plans/backlog-closeout-2026-09.md` (Phase 9, "a `>= 2` branch identical to `>= 1`")
+- **Assumed:** The phase is specified as adding a `session.semantics_rev >= 2` branch whose body is
+  identical to the existing one, so that the behavior change is a separate commit. Written literally
+  — `if rev >= 2 { now - offered_at } else { now - offered_at }` — that is a `clippy::if_same_then_else`
+  error under the repo's `-D warnings` gate, so the instruction is not directly expressible. (The
+  same gate's `clippy::assertions_on_constants` also refuses `assert!(CURRENT_SEMANTICS_REV >= 2)`
+  in a test.)
+- **Chose:** Put the rev gate in a named function, `HandoffMode::implicit_accept_elapsed_ms`, whose
+  `>= 2` arm delegates to a second named function, `rev2_elapsed_ms`, that today returns the same raw
+  difference the `<= 1` arm computes inline. Syntactically distinct, so clippy is satisfied; the
+  seam is a single small function the suspension-correction term is subtracted inside, which is a
+  smaller diff than an inline branch would be. The constant check became
+  `const _: () = assert!(..)`, i.e. a compile-time assertion rather than a runtime one.
+  `HandoffOfferRecord.suspended_ms_at_offer` is recorded on **every** offer, not only rev >= 2 ones:
+  the field is serialized regardless of value (so rev-gating would not preserve the old
+  `mode_state` bytes anyway) and it is read only under the rev >= 2 arm, so recording it everywhere
+  is behavior-neutral and keeps the value trustworthy wherever it is later consulted.
+- **Alternatives:** `#[allow(clippy::if_same_then_else)]` on an inline identical branch (honest about
+  the intent, but parks a suppression in a hot path and the next editor has to decide whether it is
+  still needed); a rev-2 arm that subtracts an explicitly-zero named term (same lint, one indirection
+  later); or skipping the branch entirely and landing it with the semantics change (rejected — that
+  is exactly the un-bisectable bundle this phase exists to avoid).
+- **Blast radius if wrong:** None observable. Both functions are private, the arithmetic is identical
+  on every input, and three replay fixtures plus a rev-1-vs-rev-2 differential test pin that
+  equivalence; the cost of being wrong is one extra function to inline later.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## Discharging Phase 10's acceptance criterion 3 when no conformance fixture exists
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 10)
+- **Assumed:** the criterion's intent is "a rev-1 history containing an implicit accept still replays
+  byte-faithfully", not literally "the function named `assert_replay_equivalence` executes over such
+  a history". The criterion as written is **unsatisfiable**: `assert_replay_equivalence`
+  (`tests/conformance_loader.rs:356`) is called only from the vendored-fixture loop at `:520`, and no
+  fixture in `tests/conformance/` exercises an implicit accept — and `tests/conformance/` is vendored
+  from the spec repo and byte-diffed by the `conformance-oracle` CI job, so one cannot be added here.
+- **Chose:** discharge the intent through the real `replay_session` path instead — a differential
+  legacy-log fixture (`src/replay.rs:1010,1036,1063`) splicing real-shaped `SessionSuspend`/
+  `SessionResume` `Internal` entries around an implicit accept, asserting a rev-1 history still
+  implicitly accepts and the same entries at rev 2 do not. The pre-existing
+  `current_rev_handoff_history_replays_identically_to_rev1` continues to cover byte-level `mode_state`
+  equality for unsuspended histories.
+- **Alternatives:** (a) add a `tests/conformance/` fixture — blocked, vendored and CI-byte-diffed;
+  (b) declare the criterion undischargeable and stop the phase — rejected, the criterion's *intent* is
+  both meaningful and testable, and the third of three plan errors this phase found is a drafting
+  error in my own acceptance criterion, not a gap in the work.
+- **Blast radius if wrong:** test-only. Satisfying the criterion literally requires a fixture PR in
+  the spec repo, which is read + issues only under the current authorization.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## Updating `CURRENT_SEMANTICS_REV`'s rev-2 doc bullet outside Phase 10's Files list
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 10)
+- **Assumed:** leaving Phase 9's now-false wording ("currently identical to revision 1 — nothing
+  observable differs") in `crates/macp-core/src/session.rs:28` is worse than touching one file the
+  phase's Files list does not name. That bullet list is the **only** place semantics revisions are
+  documented, so a stale entry there is the single most misleading place for one.
+- **Chose:** rewrote the rev-2 bullet in the same commit as the behaviour change. No code change in
+  that crate; `cargo doc` clean, no API change.
+- **Alternatives:** defer to Phase 13 (the G4 docs phase) — rejected, because Phase 13's Files list
+  scopes to `docs/` and `CLAUDE.md`, so a slip or a narrow reading there ships a doc that contradicts
+  the code.
+- **Blast radius if wrong:** doc comment only.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## Omitting the in-flight suspension term while the implicit-accept check is lazy-only
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 10)
+- **Assumed:** `session.accumulated_suspended_ms` alone is complete for the lazy path, and an
+  in-flight term (`now_ms - suspended_at_ms` for a currently-suspended session) would be dead code.
+  The reason is `macp_modes::step::check_preconditions` (`crates/macp-modes/src/step.rs:57-58`),
+  which returns `SessionNotOpen` for **any** message when `state != Open` — so by the time
+  `implicit_accept_elapsed_ms` runs, every pause that has occurred is already banked by
+  `Session::resume` (`session.rs:189`). The plan states the formula but never states this reason.
+- **Chose:** omit the term; document the reason at the site and leave a forward pointer to
+  `Session::suspend_cap_exceeded` (`session.rs:213-221`), which is the existing precedent for adding
+  an in-flight term when a caller *can* observe a suspended session.
+- **Alternatives:** add the term now for symmetry — rejected: it is untestable today, and untested
+  arithmetic inside a security-relevant deadline is worse than a documented omission.
+- **Blast radius if wrong:** **Phase 12 (eager sweep) must resolve this.** A sweep running outside
+  the message path *can* observe a suspended session, at which point either the in-flight term is
+  added or the sweep must skip suspended sessions entirely. RFC-MACP-0010 §5.1(1) arguably implies
+  the latter is correct. The doc comment says so at the site so the constraint travels with the code.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## Synthetic accept stands even when the triggering message is later rejected
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11e)
+- **Assumed:** appending the synthetic `HandoffAccept` to accepted history while the message that
+  *triggered* its observation is then rejected does not violate the freeze-profile invariant
+  "rejected messages must not mutate accepted history or dedup state" (`CONTRIBUTING.md:41-44`,
+  tracked; `CLAUDE.md:74`, gitignored).
+- **Chose:** proceed, on three grounds established by an independent Opus reverify rather than by
+  assertion. (1) **In-tree precedent:** `Precheck::Expired` (`src/runtime.rs:641-651`) already
+  appends a durable `TtlExpired` entry, mutates `session.state`, saves the snapshot (`:649`), and
+  *then* returns `Err` — a rejected message already causes a runtime-observation append plus a state
+  mutation, shipped and blessed. The genuine delta is only that this observation lands in **accepted
+  history** (`EntryKind::Incoming`, consuming an accepted ordinal per `log_store.rs:125-134`) and is
+  **published to `StreamSession`**. (2) **The obvious alternative is non-conformant:** restricting
+  synthesis to accepted triggers inverts RFC-MACP-0010 §5.1(4) — a late explicit `HandoffAccept`
+  would be validated against an unaccepted offer and accepted, with the synthetic never emitted,
+  while §5.1(2) requires the synthetic before evaluating *any* subsequent message against the
+  offer's acceptance state. (3) **The dedup half is preserved exactly and no test needs weakening** —
+  verified against `runtime.rs:1347`, `step.rs:282`, `coordination_library.rs:113` and
+  `runtime.rs:1874`, all of which are in-memory-only and never observe the log.
+- **Alternatives:** synthesize only for accepted triggers (rejected — non-conformant, above);
+  defer synthesis to the eager sweep only (rejected — §5.1(2) makes lazy the MUST and eager the
+  SHOULD).
+- **Blast radius if wrong:** a client submitting a malformed message observes accepted history
+  change as a side effect, and so does every `StreamSession` subscriber. The rejection class is
+  **wide**, not an edge case: a late explicit accept, an unknown `handoff_id`, a mismatched
+  `mode_version`, a duplicate offer. Mitigations required by the plan: `CONTRIBUTING.md` must be
+  amended in the same PR to name the carve-out, and an acceptance criterion asserts the rejected
+  trigger consumes **no** dedup slot and can be retried successfully.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## Persisted suspension intervals, with a cycle cap, rather than a derived deadline
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b)
+- **Assumed:** the synthetic accept's timestamp must be the *exact* deadline, computed by an interval
+  walk. RFC-MACP-0010 §5.1(3) states the walk itself — "offer acceptance time + timeout + suspended
+  time **within the window**" — so the naive `offered_at + timeout + banked_at_observation` is wrong
+  whenever a suspend/resume pair lands *after* the true deadline but *before* observation. That is
+  reachable: suspend/resume are RPCs (`src/runtime.rs:851`, `:905`), not session-scoped messages, so
+  `step::check_preconditions`' non-`Open` rejection does not gate them. No existing state can express
+  the walk, because the checkpoint fast path replays only `&log_entries[idx + 1..]` (`replay.rs:77`)
+  and so cannot see pre-checkpoint pauses.
+- **Chose:** a persisted interval list on `Session`/`PersistedSession`, recorded in `resume()`,
+  rebuilt free by replay, plus a new `SessionBuilder::suspension_intervals` setter (required because
+  `Session` is `#[non_exhaustive]` and `macp-storage` restores fields through the builder,
+  `registry.rs:97-138`) — **and a `MAX_SUSPENSION_CYCLES` count cap enforced in `Session::resume`,
+  gated `semantics_rev >= 2`.**
+- **Alternatives:** unbounded list (rejected — see blast radius); log scan (rejected —
+  checkpoint-blind); per-offer incremental deadline (rejected, and the reverify confirmed the
+  rejection sound: `resume_session` and replay's `SessionResume` arm both mutate the session without
+  mode dispatch, so it needs a new `Mode::on_resume` seam wired in live and replay lockstep plus a
+  new `mode_state` writer on a non-message event); naive formula (rejected — forecloses Phase 12's
+  byte-identity permanently).
+- **Blast radius if wrong:** the cap exists because the unbounded version is an **amplification
+  class, not noise**. `SuspendSession`/`ResumeSession` are entirely un-rate-limited
+  (`src/server.rs:983-1006`, `:1045-1066` — auth and authority only, unlike `send` at `:249-251`);
+  `MAX_SUSPEND_MS` bounds accumulated **duration** only (`session.rs:183-198`), so N one-millisecond
+  cycles accrue ~0 against a 7-day budget and no cycle counter exists; and each cycle already writes
+  two full `PersistedSession` snapshots (`storage/file.rs:61-66`, `to_vec_pretty`), so an in-snapshot
+  vec turns constant-size writes into O(N), i.e. **O(N²) total bytes, triggerable by the session's
+  own initiator.** A cap that force-expires corrupts nothing — it is the posture `Session::resume`
+  already takes at `session.rs:191-194`. Note 11b therefore **cannot** claim "zero behaviour change".
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## The `implicit` payload flag as discriminator, guarded by a mode-trait boundary hook
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11c/11d)
+- **Assumed:** because replay re-dispatches the `Incoming` synthetic entry into the handoff mode —
+  which must therefore *accept* well-formed implicit accepts at rev ≥ 2 — the payload's own
+  `implicit` flag can serve as the provenance discriminator, made trustworthy by a defaulted
+  `Mode::validate_client_envelope` hook that rejects client-submitted ones at rev ≥ 2. No persisted
+  `LogEntry` discriminator is added.
+- **Chose:** the hook. The reverify judged this **correct and decisive** on downgrade posture:
+  `src/replay.rs`'s `_ => {}` arm makes an *unrecognized persisted discriminator* replay as a
+  **silent no-op**, whereas an old binary meeting an unexpected `implicit: true` fails **loudly**
+  through `replay_entry`'s `?`. Self-describing data loses here precisely because the reader is the
+  thing that is stale.
+- **Alternatives:** a persisted `EntryKind`/`LogEntry` discriminator with a forked replay arm
+  (rejected — silent-no-op downgrade, above); `EntryKind::Internal` (foreclosed by RFC-MACP-0010
+  §5.1(2), which requires accepted history by "the same construction as" the §7.5 envelopes).
+- **Blast radius if wrong:** smaller than first framed. The reverify established that a bypassed
+  hook grants **no authority** — the accept arm still requires `env.sender ==
+  offer.target_participant`, and `authorize_sender` already gates senders, so a forger must already
+  *be* the target, who could accept explicitly anyway. **The `implicit` flag is a provenance label,
+  not a capability.** The real residual: `step::validate_message` is **not** on the runtime's own
+  path (`process_message` calls `authorize_sender` and `on_message_at` directly), so the canonical
+  durable-consumer example bypasses the hook by construction with no compile-time forcing. Both live
+  entry points are covered (`Send` → `server.rs:868`, `StreamSession` → `:449`), and replay only
+  re-reads entries that already passed the hook, so the guarantee holds for *this* runtime. The
+  rustdoc hazard must therefore use the runtime itself as the worked example, not "a library
+  consumer".
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## Retiring the interim implicit-accept path fail-loud rather than fail-open
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11e)
+- **Assumed:** gating the interim in-commitment-handler check to `semantics_rev < 2` is safe, so a
+  rev-2 history lacking the synthetic entry **fails replay** rather than silently resolving.
+- **Chose:** fail loud. Safe *only* because phases 10–13 ship as one PR and one release, so no rev-2
+  histories exist in the wild — every session on published 0.7.5 is rev 1. This is also why Phase 10
+  was judged not independently shippable: releasing it alone would publish a `semantics_rev = 2`
+  whose meaning Phase 11 then changes, leaving one revision number with two meanings.
+- **Alternatives:** keep the interim live at rev 2 as a fallback (rejected — two code paths could
+  resolve the same session differently, and the fallback would mask a missing synthetic entry, which
+  is the one thing replay must not hide).
+- **Blast radius if wrong:** if any rev-2 history escapes before 11e lands, it becomes unreplayable —
+  `replay_session` errors and `src/main.rs:386-391` skips the session entirely. Bounded by the
+  single-release constraint, which must therefore be honoured.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## The synthetic commit deliberately skips `record_participant_activity`
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11e)
+- **Assumed:** the target performed no activity, so the synthetic accept should not count as theirs.
+- **Chose:** skip it, mirroring replay exactly — verified: `replay_entry` (`src/replay.rs:92-137`)
+  never calls it for any entry kind, so skipping makes the synthetic entry's live and replay
+  behaviour identical.
+- **Alternatives:** record it (rejected — live and replay would then diverge, which is the failure
+  class 11a exists to close).
+- **Blast radius if wrong:** the sole consumer is informational — `SessionMetadata.participant_activity`
+  (`src/server.rs:165-177`); nothing gates TTL, liveness or authorization on it. Consequence to note
+  in the changelog: the target's `message_count` will not include the synthetic accept.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## Counting granularity of the widened `validate_replay_consistency`
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11a)
+- **Assumed:** the two suspension fields count as two separate mismatches, not one grouped mismatch.
+  The plan is **internally inconsistent** here: its Approach says "three warn-only comparisons"
+  (→ separate) while criterion 2 says "a suspension-state mismatch", singular (→ grouped).
+- **Chose:** the Approach field's wording — three independent `if` blocks, three independent
+  increments, three distinct warn lines, for finer diagnostics. The existing bound-versions
+  comparison is grouped, so this is a departure from the neighbouring style, taken deliberately.
+- **Alternatives:** group `accumulated_suspended_ms` + `suspended_at_ms` into one counted mismatch,
+  matching the bound-versions precedent. The new test asserts exact counts, so switching later costs
+  one test line.
+- **Blast radius if wrong:** none that decides anything. `recovery_replay_mismatches`
+  (`src/main.rs:350`) is a log field plus a metric (`record_replay_mismatch`); nothing branches on
+  the number and no test in `tests/` or `integration_tests/` asserts on it. Grouping changes a
+  reported magnitude, never an outcome.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## `cancel_session` reads a clock solely to stamp its log entry
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11a)
+- **Assumed:** unlike suspend/resume, `cancel_session` has no session-mutation clock its log entry
+  must agree with — `Session::cancel()` takes no timestamp — so the new read exists only to stamp
+  the entry, and one read placed after the terminal-state early return is the right shape.
+- **Chose:** a single `Utc::now()` immediately before the payload build, so a no-op cancel on an
+  already-terminal session does not read the clock at all.
+- **Alternatives:** thread the clock down from `maybe_expire_session`'s existing read (it is called
+  from `cancel_session`, so one read could serve both) — rejected as a wider refactor than 11a
+  authorizes, and it would change the expiry predicate's relationship to its own clock.
+- **Blast radius if wrong:** one extra `Utc::now()` per `CancelSession` RPC. `SessionCancel` replay
+  only sets terminal state (`src/replay.rs:145-147`), reading neither timestamp, so nothing
+  downstream observes the value.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## A real 5 ms sleep in `suspend_resume_entries_share_the_session_mutation_clock`
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11a)
+- **Assumed:** a real sleep is acceptable in a `tests/` integration test to make the banked span
+  non-zero, because the alternative needs a clock-injection seam this phase may not add.
+- **Chose:** `tokio::time::sleep(5ms)` plus `assert!(accumulated_suspended_ms > 0)` so the equality
+  cannot pass vacuously as `0 == 0` — the specific vacuity trap this plan has hit three times.
+- **Alternatives:** no sleep (the equality holds at zero but proves nothing about the arithmetic);
+  `tokio::time::pause()` with a virtual clock — rejected because `suspend_session`/`resume_session`
+  call `chrono::Utc::now()` directly, which tokio's test clock does not virtualize, so it would
+  require a clock-injection seam outside 11a's scope.
+- **Blast radius if wrong:** 5 ms on one test; the file's measured runtime is unchanged at 0.01 s.
+  Worth noting the honest limit of what this test proves: it pins the invariant deterministically,
+  but as a *differential* signal against the pre-fix code it only fires when a millisecond tick
+  lands between the two clock reads — measured at ~0.3-0.5% (1 red in 300 runs), with 800/800
+  passing once fixed. **The injected-clock signature, not the test, is the real guarantee**, and the
+  plan's claim that the test "could only fail on a clock tick" was right in kind but understated:
+  it undersold a signal that does exist, rather than overselling one that does not.
 ## `MACP_POLICY_SCHEMAS_DIR` documented in the operator-facing env table
 - **Plan:** plans/spec-99-schema-version-3.md (Phase 1)
 - **Assumed:** the plan wants this var in `docs/deployment.md`'s table for discoverability, not because
@@ -179,6 +430,100 @@
   an empty `weights` map being wrongly refused, for rules the Decision schema does not govern.
 - **Status:** UNCONFIRMED (2026-09-11)
 
+## `suspension_intervals` added to `validate_replay_consistency` (11b's "optional fourth comparison")
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b, criterion 4: "11a's widened consistency
+  check would flag a divergence here if the vec is later added to it (optional fourth comparison;
+  take it if cheap)")
+- **Assumed:** "take it if cheap" means take it now, since the comparison is five lines and the vec
+  is exactly the kind of state whose live/replay divergence the check exists to surface.
+- **Chose:** added a sixth warn-only comparison in `validate_replay_consistency`
+  (`src/replay.rs`) and extended `replay_consistency_flags_state_and_dedup_divergence` so the
+  all-at-once case now asserts 6 mismatches instead of 5.
+- **Alternatives:** defer to 11e (the check would then be blind to the field for three sub-phases,
+  exactly while 11c-11e are building on it); leave it out permanently (loses the tripwire).
+- **Blast radius if wrong:** warn-only; `recovery_replay_mismatches` is only ever read as
+  zero-vs-nonzero (`src/main.rs`), so at worst a snapshot lag logs one extra warn line. No
+  behavior change.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## Criterion 3's checkpoint fixture binds no `policy_version`
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b, criterion 3: "extend
+  `replay_from_checkpoint_restores_state` or a sibling so a checkpoint written after a pause restores
+  the vec")
+- **Assumed:** the criterion intends the **checkpoint fast path** to be the thing under test. Written
+  the obvious way — reusing `start_payload_bytes()`, which binds `policy_version: "policy-1"` — it is
+  not: `try_replay_from_checkpoint` (`src/replay.rs:61-68`) bails to a full replay whenever a
+  checkpoint has a bound `policy_version` but no serialized `policy_definition`, which is exactly
+  what a `replay_session(..., None)`-built snapshot produces. Mutation-proven: with the reused
+  payload, deleting the field from **both** `PersistedSession` `From` impls left the test green.
+- **Chose:** a sibling test (`replay_from_checkpoint_restores_suspension_intervals`) that binds an
+  empty `policy_version`, plus a tripwire — the snapshot's `intent` is overwritten with a value no
+  full replay can produce and asserted on — so the test can never again pass via the fallback.
+- **Alternatives:** extend the existing `replay_from_checkpoint_restores_state` (same trap, and that
+  test's own checkpoint assertions look vacuous for the same reason — flagged to the orchestrator,
+  not fixed here); pass a populated `PolicyRegistry` so the definition resolves (more machinery for
+  no extra coverage).
+- **Blast radius if wrong:** test-only. The production round-trip is the same either way; the
+  assumption only governs whether the test can see it.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## `Session::resume`'s stray doc comment re-attached
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b, Docs bullet)
+- **Assumed:** the pre-existing merge of `resume`'s rustdoc into `effective_max_suspend_ms`'s
+  (`crates/macp-core/src/session.rs`, where the "Resume a `Suspended` session..." paragraph sat above
+  the wrong function and `resume` itself was undocumented) is a typo, not intent — so documenting the
+  new cap meant fixing it rather than adding a third paragraph to the wrong item.
+- **Chose:** moved the paragraph onto `resume` and extended it to name both caps and the
+  record-before-check ordering; `effective_max_suspend_ms` keeps its own one-liner.
+- **Alternatives:** leave the misattachment and document the cap on `MAX_SUSPENSION_CYCLES` only
+  (the rendered docs would keep pointing readers at the wrong function).
+- **Blast radius if wrong:** rustdoc only; no signature or behavior change.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## A degenerate suspension pair (`e < s`) counts as a zero-width pause at `s`
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b, verifier GAP 1 — the walk can over-report
+  on a non-monotone pair)
+- **Assumed:** the GAP's prescribed clamp (`cur = e.max(cur)`) closes over-reporting but leaves the
+  opposite error: on a backwards pair the walk consumes the run up to `s` without advancing the
+  cursor past it, so `[(1_050, 1_000)]` from `1_000` for `100` returned **1_050** — a deadline
+  *before* `from_ms + duration_ms`, i.e. a timeout that fires before it nominally elapsed. Assumed
+  that is unintended: the under-count invariant is about not over-reporting suspended time, not a
+  licence to return a deadline earlier than the no-pause baseline.
+- **Chose:** `cur = e.max(s).max(cur)` — one term beyond the prescription. A pair whose `e` precedes
+  its `s` is treated as a zero-width pause at `s`, which keeps the walk's contribution inside
+  `[0, sum(max(e - s, 0))]` (asserted directly in
+  `unsuspended_deadline_never_over_reports_on_adversarial_pairs`). Mutation-proven load-bearing: the
+  prescribed `e.max(cur)` alone leaves that case RED at 1_050 vs 1_100.
+- **Alternatives:** the prescribed `e.max(cur)` verbatim (returns an early deadline on a backwards
+  pair); skip degenerate pairs in the `filter` (silently discards a pair whose `s` is legitimate and
+  whose `e` is merely clock-stepped, and changes nothing else — equivalent here, more code).
+- **Blast radius if wrong:** confined to pairs `Utc::now()` recorded non-monotonically or a library
+  consumer supplied through `SessionBuilder::suspension_intervals`. Either way the result stays
+  `>= from_ms + duration_ms` and `<=` the true union-corrected deadline, so 11d's planned
+  `debug_assert!(D <= now_ms)` holds.
+- **Status:** UNCONFIRMED (2026-09-11)
+
+## Nothing below `semantics_rev` 2 reads `suspension_intervals`, so dropping the overflow is invisible
+- **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b, verifier GAP 2 — the cycle cap does not
+  cover the sessions it was justified for)
+- **Assumed:** `Session::unsuspended_deadline` is the only reader of the vec, and every caller of it
+  is gated on `semantics_rev >= 2`. So a rev <= 1 session that stops recording past
+  `MAX_SUSPENSION_CYCLES` replays bit-identically to one that recorded every cycle — verified by
+  grep: the only non-test reads are the `PersistedSession` round-trip
+  (`crates/macp-storage/src/registry.rs`), which is pure transport, and the warn-only consistency
+  check (`src/replay.rs`).
+- **Chose:** at rev <= 1, stop pushing once the vec reaches the cap; keep the rev >= 2 force-expire
+  untouched. A legacy session is reachable through the same un-rate-limited
+  `SuspendSession`/`ResumeSession` RPCs as a current one, so its vec has to be bounded — but it must
+  not be force-expired by a rule postdating its acceptance.
+- **Alternatives:** force-expire at every revision (changes legacy acceptance semantics — the thing
+  the rev gate exists to prevent); rotate/drop the oldest instead of the newest (rewrites pairs
+  already persisted, so a snapshot and its log would disagree about a pause that did happen); leave
+  it unbounded (the O(N²) snapshot amplification the cap exists to close stays open on exactly the
+  sessions that were replayed from legacy logs).
+- **Blast radius if wrong:** if some future rev <= 1 path did read the vec, it would see the first
+  `MAX_SUSPENSION_CYCLES` pauses and none after. Bounded, and the recorded prefix is never mutated.
+- **Status:** UNCONFIRMED (2026-09-11)
 ## Hoisting the critical-objection scan above check 1 rather than filtering deny reasons
 - **Plan:** spec #126 alignment (RFC-MACP-0007 §6.2, closing this runtime's spec issue #117)
 - **Assumed:** §6.2's waiver now reaches two gates that run on *opposite sides* of the
@@ -219,3 +564,321 @@
   breaks (true, but the whole point of the section is that item 9 documents a widening too).
 - **Blast radius if wrong:** docs only.
 - **Status:** UNCONFIRMED (2026-09-12)
+
+## Committing a replay test that pins today's *pre-11d* refusal of the synthetic shape
+- **Plan:** Phase 11c of `plans/backlog-closeout-2026-09.md` (the client boundary)
+- **Assumed:** the phase's load-bearing claim is that `Mode::validate_client_envelope` never runs
+  on replay, and the strongest available evidence is empirical. But the exact envelope 11e will
+  write into history (`implicit = true`, `message_id = implicit-accept:<handoff_id>`, rev-2
+  session) cannot replay `Ok` yet: 11c deliberately leaves `handle_message`'s
+  `if payload.implicit` arm in place (`crates/macp-modes/src/mode/handoff.rs:394`), and 11d owns
+  restructuring it. So a green "it replays" test is not writable in this sub-phase.
+- **Chose:** commit `synthetic_shaped_entry_reaches_dispatch_not_the_client_boundary`
+  (`src/replay.rs:1513`) asserting the *source* of the refusal — `InvalidPayload` from dispatch,
+  never `InvalidEnvelope` from the boundary — which is exactly the part 11c is responsible for,
+  and is mutation-killed only by adding the hook to `replay_entry`. The stronger claim was
+  verified out-of-tree instead: with that one `handle_message` arm deleted and nothing else
+  changed, the identical log replays `Ok` to a `Resolved` session whose offer `h1` is `Accepted`
+  by `bob` with `outcome_reason = "implicit accept (timeout)"`. Recorded in the test's rustdoc,
+  including the instruction that **11d must flip the assertion from `Err` to `Ok`**.
+- **Alternatives:** assert nothing about the synthetic shape until 11d (loses the proof that the
+  boundary is not what refuses it, which is the only 11c-owned half); or pull 11d's mode
+  restructure forward to make the test green now (out of scope, and it would make the boundary
+  the sole guard one sub-phase early).
+- **Blast radius if wrong:** one test. If 11d forgets it, the assertion fails loudly at that
+  commit rather than silently passing — which is the intended failure direction.
+- **Status:** UNCONFIRMED (2026-09-12)
+
+## Keeping a runtime-level assertion that is double-guarded (and saying so) rather than dropping it
+- **Plan:** Phase 11c of `plans/backlog-closeout-2026-09.md` (the client boundary)
+- **Assumed:** 11c criterion 2 asks for the `implicit: true` rejection "plus the runtime-level
+  path". Measured, **the whole runtime-level assertion is vacuous for the `implicit` rule** —
+  not merely its ordinary-`message_id` half, as this entry first recorded. Deleting the hook's
+  `implicit` rule (the verifier's mutation M6) leaves every runtime-level test green: the
+  ordinary-id half because `handle_message` rejects the same envelope with the same
+  `InvalidPayload`, and the reserved-id half because the *reserved-prefix* rule fires first and
+  returns `InvalidEnvelope` regardless of the flag. The `implicit` rule's only non-vacuous guard
+  anywhere is the mode-level unit test `client_implicit_accept_rejected_at_the_boundary`.
+- **Chose:** keep it, and label the vacuity accurately in the test's own rustdoc, because what it
+  pins is the criterion's actual requirement (the rev-2 error *surface* through `Send` does not
+  shift) and because it is the tripwire on exactly the dispatch arm 11d is specified to rewrite.
+  The first version of this entry called the reserved-id half "the mutation-sensitive half"; that
+  was wrong, and the rustdoc said so too. Both are corrected.
+- **Alternatives:** delete the ordinary-id assertion as vacuous (loses the error-surface pin and
+  the 11d tripwire); or fake isolation with a test-only mode override (tests the override, not the
+  runtime).
+- **Blast radius if wrong:** one assertion; the mode-level unit test
+  `client_implicit_accept_rejected_at_the_boundary` isolates the rule non-vacuously either way.
+- **Status:** UNCONFIRMED (2026-09-12)
+
+## Flipping an `src/replay.rs` test in a phase whose file list names only the mode crate
+- **Plan:** Phase 11d of `plans/backlog-closeout-2026-09.md` (the synthesis contract in the mode)
+- **Assumed:** 11d's **Files** line lists `crates/macp-modes/src/mode/mod.rs` and
+  `crates/macp-modes/src/mode/handoff.rs` only, and its acceptance criteria are all described as
+  "`macp-modes` unit tests". But 11c landed `synthetic_shaped_entry_reaches_dispatch_not_the_client_boundary`
+  (`src/replay.rs:1513`) whose own rustdoc says, verbatim, "**11d must flip this test from
+  `Err(InvalidPayload)` to `Ok`.** It is written to fail loudly then" — and it does fail the moment
+  the rev-2 accept arm lands, because that log replays to `Resolved`.
+- **Chose:** flip it (assert `Ok` + `assert_implicitly_accepted` + the dedup slot) and rewrite its
+  rustdoc to describe the post-11d state, treating 11d's file list as incomplete rather than
+  authoritative. The plan is a document; the failing test is the fact.
+- **Alternatives:** leave the file untouched (impossible — the gate is red); or `#[ignore]` it until
+  11e (loses the only replay-path proof that the synthetic entry is accepted as data, which is the
+  half of 11d that 11e depends on).
+- **Blast radius if wrong:** one test in a file the plan did not enumerate. It is the strongest
+  evidence 11d works end-to-end through `replay_session`, so the risk of keeping it is lower than
+  the risk of deferring it.
+- **Status:** UNCONFIRMED (2026-09-12)
+
+## One shared `IMPLICIT_ACCEPT_REASON` const instead of two copies of the literal
+- **Plan:** Phase 11d of `plans/backlog-closeout-2026-09.md`
+- **Assumed:** the plan fixes `payload.reason = "implicit accept (timeout)"` for the synthetic
+  accept *specifically* so it stays byte-identical to the interim in-`Commitment` path's
+  `outcome_reason`, and 11d is otherwise told not to touch that interim arm. Duplicating the
+  literal is what the plan's wording implies; it also leaves the byte-identity requirement
+  unenforced by anything except two independent tests.
+- **Chose:** a private `const IMPLICIT_ACCEPT_REASON` (`crates/macp-modes/src/mode/handoff.rs:36`)
+  used by both the synthesizer and the interim arm — a one-token change inside the interim arm
+  (literal -> const), behavior-identical, and it makes drift impossible rather than merely detected.
+  Verified by mutation: changing the const reds `synthetic_payload_bytes_are_pinned`,
+  `legacy_offer_mode_state_without_suspension_snapshot_replays_unchanged`, and eight
+  `src/replay.rs` history tests together, which is the proof the two paths really do share it.
+- **Alternatives:** repeat the literal (the plan's literal reading — two places to keep in sync
+  across the 11e retirement); or make the const `pub` (a semver-minor surface commitment nothing
+  outside the crate needs yet).
+- **Blast radius if wrong:** the string is frozen either way; a wrong const value breaks replay of
+  every rev <= 1 history that implicitly accepted, loudly, in-tree, at the workspace gate.
+- **Status:** UNCONFIRMED (2026-09-12)
+
+## Error codes and check order inside the rev-2 implicit-accept arm
+- **Plan:** Phase 11d of `plans/backlog-closeout-2026-09.md` (the strict accept arm)
+- **Assumed:** the plan enumerates *what* the arm validates (offer exists, `disposition == Offered`,
+  `env.sender == offer.target_participant`, `payload.accepted_by == offer.target_participant`, the
+  deterministic `message_id`) but fixes neither the error code per failure nor the order of the
+  checks. Criterion 4 nevertheless depends on both: the surviving test asserts `InvalidPayload`
+  for an envelope that is correct in every respect *except* its `message_id`.
+- **Chose:** wrong sender -> `Forbidden` (the same code the explicit accept arm returns for the same
+  condition, so the error surface does not depend on the flag); every other failure ->
+  `InvalidPayload`. Order: offer lookup, sender, `accepted_by`, `message_id`, disposition — which is
+  what makes the renamed criterion-4 test report `InvalidPayload` from the `message_id` check.
+  Also chosen: `accepted_by` must equal the target **exactly**, where the explicit arm tolerates an
+  empty string — the synthetic envelope always names the target, so an empty one is not an envelope
+  this runtime emits.
+- **Alternatives:** `InvalidPayload` for the sender mismatch too (uniform, but it shifts the code
+  for a condition the explicit arm already answers `Forbidden`); or tolerate an empty `accepted_by`
+  for symmetry with the explicit arm (widens what replay will accept as a synthetic entry for no
+  gain).
+- **Blast radius if wrong:** the codes are only observable through replay failures and direct
+  library callers until 11e; no wire surface changes in this phase.
+- **Status:** UNCONFIRMED (2026-09-12)
+
+## A fifth test, beyond the four acceptance criteria, to make the phase's negative rule killable
+- **Plan:** Phase 11d of `plans/backlog-closeout-2026-09.md` ("the mode MUST NOT re-verify the
+  deadline arithmetic in this arm ... the single most important negative rule in the phase")
+- **Assumed:** the plan asks for that rule as a *comment*, and none of its four criteria can fail
+  if a future refactor adds a time check back — the rule would be green by construction, i.e.
+  guarded by nothing. The four criteria all dispatch the synthetic at a clock where a re-check
+  would happen to pass.
+- **Chose:** add `implicit_accept_dispatch_does_not_reverify_the_deadline`, which reproduces the
+  exact replay state that breaks a re-check (a pause from D+50 to D+250 banked before the entry is
+  dispatched at `accepted_at_ms = D`, making the scalar *negative*), and assert dispatch accepts
+  anyway. Mutation-verified: threading the clock in and adding
+  `implicit_accept_elapsed_ms(...) < timeout` reds this test and **only** this test — the flipped
+  `src/replay.rs` history has no pause after D, so it does not catch it. Also added
+  `due_synthetic_envelope_returns_none_unless_an_offer_is_due` for the plan's edge-case list (rev
+  gate, no policy, timeout 0, unparseable rules, no offer, settled offer, `offered_at_ms == 0`),
+  since criterion 1 covers only the due/not-due boundary.
+- **Alternatives:** ship the comment alone as written (the rule then survives only as prose); or
+  wait for 11e's live harness to cover it (leaves the mode contract untested at the commit that
+  introduces it).
+- **Blast radius if wrong:** two extra unit tests. If the invariant is ever deliberately reversed,
+  they fail loudly and name the reason.
+- **Status:** UNCONFIRMED (2026-09-12)
+
+## `debug_assert!(suspended_at_ms.is_none())` placed inside `due_synthetic_envelope`
+- **Plan:** Phase 11b of `plans/backlog-closeout-2026-09.md` ("`debug_assert!(session.suspended_at_ms.is_none())`
+  at the 11d call site") and 11d's `debug_assert!(D <= now_ms)`
+- **Assumed:** "the 11d call site" means the place 11d calls `unsuspended_deadline`, which is inside
+  `HandoffMode::due_synthetic_envelope` — not the kernel call site, which does not exist until 11e.
+- **Chose:** both `debug_assert!`s live in `due_synthetic_envelope`, immediately before and after the
+  walk. Consequence to be aware of: a *library* caller that asks a suspended session for a due
+  envelope panics in a debug build rather than returning `None`. That is intended — a suspended
+  session ticks no unsuspended time, so the question is malformed — and 11e's kernel must skip
+  non-`Open` sessions anyway (the same filter as the TTL sweep).
+- **Alternatives:** return `None` for a suspended session (silently absorbs a caller bug the assert
+  is meant to surface); or drop the assert (loses the 11b invariant's only in-tree check).
+- **Blast radius if wrong:** **history correctness, silently, in release builds** — not the debug-only
+  inconvenience this entry first recorded. The mechanism, traced by the phase verifier: both
+  computations ignore the in-flight pause by design (`unsuspended_deadline` walks *completed*
+  intervals only, `crates/macp-core/src/session.rs:369-372`; `rev2_elapsed_ms` has no in-flight term,
+  `crates/macp-modes/src/mode/handoff.rs:219-227`). So if a release-build caller ever asks a
+  *suspended* session, elapsed time is **over**-counted (the in-flight pause is not subtracted) so the
+  accept can be judged due when it is not, and `D` is **under**-computed so a wrong
+  `timestamp_unix_ms` is baked into permanent history. `debug_assert!` cannot prevent that. It follows
+  that **11e's non-`Open` session filter is load-bearing, not hygiene, and needs its own test** —
+  recorded in 11e's acceptance criteria.
+- **Status:** UNCONFIRMED (2026-09-12)
+
+## Four handoff-mode tests broke that the plan's "complete" sweep had cleared, and two replay tests besides
+- **Plan:** Phase 11e of `plans/backlog-closeout-2026-09.md` ("**A full sweep of every
+  implicit-accept test in the tree was done at `3c44791` and the list below is complete — do not
+  redo it.**")
+- **Assumed:** the plan's break-list was exhaustive. It is not. Six tests outside it went red on
+  gating the interim in-`Commitment` path at `semantics_rev >= 2`:
+  `implicit_accept_ignores_forged_envelope_timestamp_on_rev1` and
+  `implicit_accept_ignores_backdated_offer_timestamp_on_rev1` (the sweep cleared both as "rev 0/1
+  and keep the interim" — but neither *sets* a revision: both build with `base_session()`, which
+  stamps `CURRENT_SEMANTICS_REV == 2`, and merely `assert!(semantics_rev >= 1)`, so the `on_rev1`
+  in their names describes the claim, not the fixture);
+  `legacy_offer_mode_state_without_suspension_snapshot_replays_unchanged` (same cause, not in the
+  list at all); and in `src/replay.rs`, `replay_rebuilds_suspension_intervals_from_the_log` and
+  `reserved_prefix_entry_replays_at_every_rev`, whose rev-2 arms both drive a `Commitment` through
+  a history with no synthetic entry.
+- **Chose:** resolve each by the plan's own stated rule (pin to rev 1 only where the claim is
+  revision-agnostic or legacy; migrate to the hook flow where the claim is rev-2-specific). The
+  three mode tests are pinned to `semantics_rev = 1` — their claims are the rev-0→1 clock change
+  and a pre-rev-2 `mode_state` shape — and the two forged-timestamp ones gained a rev-2 arm
+  asserting the same forgery is closed through `due_synthetic_envelope`, so the pin does not
+  silently drop coverage at the current revision. The two replay fixtures gained the synthetic
+  entry at their walked deadlines (1_520 and 1_100). `reserved_prefix_entry_replays_at_every_rev`'s
+  rev-2 arm also had to move its squatting `Commitment` off `implicit-accept:h1`, because that id
+  now belongs to the synthetic and a log with two entries sharing one `message_id` is not a history
+  any runtime could write.
+- **Alternatives:** pin all six to rev 1 (cheapest, but `rev2_subtracts_only_suspension_accrued_after_the_offer`
+  and the two replay arms would then pass for the wrong reason — the plan names this hazard
+  explicitly); or delete them (loses legacy coverage the semantics-rev design exists to provide).
+- **Blast radius if wrong:** a rev-2-specific claim silently downgraded to a rev-1 one is exactly
+  the silent-weakening failure 11d criterion 4 was corrected for. If any of the three pins is
+  wrong, the current revision's behavior for that claim is untested and a regression there would
+  ship green. The two forged-timestamp tests are the ones to re-examine first: their rev-2 arms are
+  new and shorter than the rev-1 bodies they sit under.
+- **Status:** UNCONFIRMED (2026-09-13)
+
+## A terminal checkpoint made the live-replay criterion pass with the synthetic entry deleted
+- **Plan:** Phase 11e of `plans/backlog-closeout-2026-09.md`, acceptance criterion 3
+  (`live_history_replays_byte_identically`)
+- **Assumed:** replaying `rt.log_store.get_log(sid)` after the flow re-dispatches the recorded
+  entries. It does not, for a *resolved* session: resolution writes a checkpoint carrying the whole
+  serialized session (`force_insert_checkpoint`, or a compacting backend's single replacement
+  entry), and `replay_session` resumes from the newest checkpoint — deserializing the answer rather
+  than rebuilding it. Measured during mutation verification: with the checkpoint left in, deleting
+  `log_store.append` from `synthesize_due_accept` entirely left criterion 3 **green**.
+- **Chose:** `replay_live_log` strips `EntryKind::Checkpoint` entries before replaying whenever a
+  `SessionStart` survives the strip, and falls back to the log as-is when it does not (a compacting
+  backend's terminal log is one checkpoint and nothing else). After the change the same mutation
+  reds criterion 3.
+- **Alternatives:** assert on the log captured before the resolving message (would not cover the
+  commitment entry); or disable checkpointing in the harness (`MACP_CHECKPOINT_INTERVAL` does not
+  gate the terminal checkpoint, so there is no switch).
+- **Blast radius if wrong:** this is the determinism criterion. If the strip is wrong the criterion
+  is vacuous again and a live/replay fork in `mode_state` — the exact thing `semantics_rev = 2`
+  exists to prevent — would ship green. The fallback branch is the part to re-examine: on a
+  `FileBackend` the resolved-session assertions still run through a checkpoint, so
+  `rejected_trigger_leaves_dedup_intact_and_snapshot_current`'s final replay is checkpoint-based.
+  Its pre-resolution assertions are not, which is why they are made first.
+- **Status:** UNCONFIRMED (2026-09-13)
+
+## Two storage backends in the live harness, chosen for what each one cannot do
+- **Plan:** Phase 11e of `plans/backlog-closeout-2026-09.md`, acceptance criteria 1-9
+- **Assumed:** one harness would serve every criterion. It cannot. `MemoryBackend::save_session` is
+  a no-op and `load_session` always returns `None` (`crates/macp-storage/src/storage/memory.rs:11-16`),
+  so criterion 9(c) cannot be proven against it. **Correction from the phase verifier:** this entry
+  first said the criterion "passes vacuously" on `MemoryBackend`. It does not — the shipped test
+  calls `.expect("a snapshot must exist")`, so it would *hard-fail* there, not silently pass. The
+  backend split is still correct and mutation M6 proves it load-bearing; only the stated failure
+  mode was wrong, and it was wrong in the safe direction;
+  but `MemoryBackend` also lacks `replace_log`, so terminal compaction fails and the full entry
+  list survives resolution, which is what every ordering assertion needs. A `FileBackend` is the
+  mirror image: real snapshots, and a resolved session's log compacted to one checkpoint.
+- **Chose:** `make_harness()` (MemoryBackend) for the log-shape criteria, `make_durable_harness()`
+  (FileBackend over a tempdir) for the two snapshot criteria, and an `assert_log_is_uncompacted`
+  tripwire inside the `incoming()` helper so a future test that picks the wrong one fails with the
+  reason rather than with an empty vec.
+- **Alternatives:** FileBackend everywhere plus capturing the log before each resolving message
+  (fragile, and it cannot cover the commitment entry); or a purpose-built test backend (more code
+  than the tripwire, and it would not match what ships).
+- **Blast radius if wrong:** criterion 9(c) is the one that fails if `synthesize_due_accept`'s
+  `save_session_to_storage` is dropped. Running it on the wrong backend makes the durable-save
+  argument unguarded, and the omission would then surface only as an 11a `mode_state` warn at some
+  later startup.
+- **Status:** UNCONFIRMED (2026-09-13)
+
+## `ModeRef::due_synthetic_envelope` returns `None` for a mode that has vanished
+- **Plan:** Phase 11e of `plans/backlog-closeout-2026-09.md`, Approach (`mode.due_synthetic_envelope(session, now_ms)`)
+- **Assumed:** the kernel could call the hook through its existing mode handle. 11d added the trait
+  method but no `ModeRef` forwarder, so the call did not compile; every other forwarder returns
+  `Result` and propagates `UnknownMode` from `ModeRef::factory`.
+- **Chose:** the forwarder returns `Option<Envelope>` and maps a missing factory to `None` —
+  "nothing is due" is the right answer for a mode that no longer exists, and it matches
+  `synthesize_due_accept`'s own early return for an unregistered mode. `synthesize_due_accept` also
+  returns `Ok(())` rather than `Err(UnknownMode)` when the mode is gone, because `process_message`
+  resolves the mode itself immediately afterwards and would produce that error anyway, with better
+  ordering.
+- **Alternatives:** `Result<Option<Envelope>, MacpError>` (propagates a race that only happens when
+  a mode is unregistered mid-message, and would turn it into a message rejection instead of a
+  no-synthesis).
+- **Blast radius if wrong:** an unregistered-mid-message mode silently skips a due synthesis for
+  that one message; the next message to the same session synthesizes normally, or the session is
+  already unusable because `process_message` will reject on `UnknownMode`.
+- **Status:** UNCONFIRMED (2026-09-13)
+
+## The freeze-profile invariant amended in `CONTRIBUTING.md`, with the carve-out spelled out
+- **Plan:** Phase 11e of `plans/backlog-closeout-2026-09.md`, acceptance criterion 10
+- **Assumed:** naming the carve-out is enough. The risk the plan identifies is the opposite one —
+  a reader who sees the amended rule and treats the carve-out as a bug to be closed.
+- **Chose:** amend the tracked `CONTRIBUTING.md` bullet to "rejected messages don't consume dedup
+  slots, and the only history a rejected message can cause is a **runtime-originated entry that was
+  already due independently of it**", followed by a paragraph carrying all three verified arguments
+  (the shipped `TtlExpired` precedent and the honest delta from it; why "synthesize only for
+  accepted triggers" is the RFC-violating option, not the cautious one; and that the dedup half is
+  preserved exactly). The same three arguments are in `Runtime::synthesize_due_accept`'s rustdoc.
+  The local `CLAUDE.md` mirror is amended too — it is gitignored (`.gitignore:20`), so that edit
+  appears in no diff.
+- **Alternatives:** leave the invariant as written and rely on the code comment (the plan's stated
+  failure mode: the next agent reads the rule, sees code that violates it, and reverts the work).
+- **Blast radius if wrong:** this is the durable half of the change and it has no executable guard
+  — no test can fail if the wording drifts back. If the carve-out is ever judged wrong, reverting
+  it means removing `synthesize_due_accept`'s call site, which strands rev-2 sessions with no
+  implicit accept at all; the interim gate must come back in the same commit.
+- **Status:** UNCONFIRMED (2026-09-13)
+
+## Tier-1 bounds the synthetic's deadline timestamp rather than leaving it unasserted
+- **Plan:** Phase 11f of `plans/backlog-closeout-2026-09.md`, verify-round finding 2
+- **Assumed:** the plan's exclusion of *millisecond equality* at the wire was meant to keep tier 1
+  free of clock-sensitive assertions, **not** to leave the timestamp unasserted entirely. The
+  measured consequence of the literal reading: a runtime stamping the observation time instead of
+  the computed deadline — what RFC-MACP-0010 §5.1(3) forbids, and what 11e's kernel contract needs
+  for byte-identical replay — was invisible to every tier-1 test.
+- **Chose:** a *bounded* assertion, `offer_sent_ms + timeout_ms <= synthetic.timestamp_unix_ms <=
+  commit_sent_ms`, with a deliberate 300 ms pause inserted before the commitment. The gap is the
+  load-bearing part: without it an observation-time stamp exceeds the upper bound by only one RPC
+  hop (sub-millisecond after truncation) and the proof is marginal. With it the violating mutation
+  (`deadline := now_ms`) overshoots by 305 ms. The lower bound is exact; the upper carries ~1.4 s
+  of slack for correct behaviour.
+- **Alternatives:** (a) assert nothing, per the literal exclusion — rejected, it leaves a §5.1(3)
+  violation wire-invisible; (b) assert equality against a client-derived deadline — rejected, the
+  offer's *server-side* acceptance clock is not observable to a client, so this reduces to
+  re-deriving it from wall clock, exactly the flake the plan forbids.
+- **Blast radius if wrong:** the 300 ms gap adds 300 ms to every CI run of this suite. If the
+  bound is ever too tight it fails as a hard error with a diagnostic naming the overshoot, not as a
+  silent pass — the safe direction. The millisecond-equality proof remains where the plan put it,
+  in 11e's in-process `tests/handoff_implicit_accept_live.rs`.
+- **Status:** UNCONFIRMED (2026-09-13)
+
+## Phase 11f ships five tier-1 tests where the plan specified four
+- **Plan:** Phase 11f of `plans/backlog-closeout-2026-09.md`, acceptance criteria 1-4
+- **Assumed:** the plan's four-criterion list is a floor, not a ceiling, where the verify round
+  finds a wire-observable claim the four leave unpinned.
+- **Chose:** add `synthetic_envelope_reaches_live_stream_subscribers`. Criterion 2 says the
+  synthetic is *replayed* to a passive subscriber, and the test written for it subscribes after the
+  fact — so deleting `publish_accepted_envelope(&syn)` (`src/runtime.rs:775`) left **all 124**
+  tier-1 tests green. `CLAUDE.md`'s freeze-profile text asserts these entries reach `StreamSession`
+  subscribers; the live half now has wire coverage and reds under that mutation.
+- **Alternatives:** (a) leave it to 11e's in-process `stream_integration.rs`, which does catch the
+  mutation — rejected, the freeze-profile claim is about the transport boundary and deserves a
+  test at it; (b) record it as a follow-on — rejected, the test is deterministic (the stream is
+  attached and caught up a full 2 s before anything is due) and passed 7/7 with no variance.
+- **Blast radius if wrong:** one extra tier-1 test (~2 s) on every PR. If it ever proves flaky the
+  in-process coverage still holds, so deleting it loses the boundary proof but no correctness
+  guarantee.
+- **Status:** UNCONFIRMED (2026-09-13)
