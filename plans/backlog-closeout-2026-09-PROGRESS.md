@@ -603,3 +603,40 @@ Phase 11c — the client boundary (reject forged implicit accepts, reserve the `
   `src/runtime.rs`, `src/replay.rs`, `ASSUMPTIONS.md`, `plans/defer/follow_ons.md`, the plan.
 - **Shipped?** No — accumulating toward G4, on the verifier's explicit recommendation.
 - **Next:** Phase 11d (mode synthesis contract), plan lines ~1160-1260.
+
+### Phase 11d — the synthesis contract in the mode — 2026-09-12
+
+- **Verdict:** PASS (fresh Opus verifier, round 1). 1 SHOULD-FIX, 3 NITs, 0 blockers. All applied.
+- **Verifier tier:** fresh Opus, not Fable — the standing no-Fable substitution. 11d is not the
+  one-way door; 11e is.
+- **Rounds:** 1 executor pass, 1 verify round.
+- **Commits:** `58a0d16` (trait method + strict rev-2 arm + 6 tests + the `src/replay.rs` flip),
+  and the follow-up applying the verifier's items (docs/records only, no production logic).
+- **Mutations:** executor ran 12, verifier independently re-ran 9. All killed, all like-for-like —
+  no over-wide mutation was needed anywhere in this phase. The two that mattered most:
+  - **M12** (ADD the forbidden deadline re-check) reds **exactly one** test, the fifth one the
+    executor added of its own accord. Without it the phase's most important rule had no coverage.
+  - **M2** (naive `offered_at + timeout + banked`) reds criterion 1, asserting `left: 1300,
+    right: 1100` on the pause-after-deadline case. `now_ms` (M1) reds it too.
+- **The SHOULD-FIX is the finding worth remembering:** a `debug_assert!` was carrying a
+  release-build-only correctness requirement. Both computations feeding the synthetic entry ignore
+  the in-flight pause by design, so asking a *suspended* session over-counts elapsed time and
+  under-computes `D` — a wrong `timestamp_unix_ms` baked into permanent history, silently, in
+  release. `debug_assert!` compiles out. The real enforcement is 11e's non-`Open` filter, so that
+  filter is now an explicit 11e acceptance criterion with its own test rather than hygiene. This is
+  the **second** time this session an `ASSUMPTIONS.md` "blast radius" understated the risk; both
+  were caught by a verifier reading the mechanism rather than the entry.
+- **Scope discipline confirmed independently:** `due_synthetic_envelope` has **zero** production
+  call sites (grepped across `src/`, `crates/`, `tests/`, `integration_tests/`); the interim
+  in-`Commitment` path still runs at every rev with no rev gate; `git diff` over `integration_tests/`
+  and `tests/` is empty, so no 11f work leaked in.
+- **"Server-visible behavior unchanged" verified as the accurate wording** — not "live behavior
+  unchanged". Both wire paths traced: the 11c hook refuses `implicit: true` and the reserved id
+  before dispatch, so no client envelope reaches the new accept path; but direct
+  `mode.on_message_at` library callers at rev >= 2 genuinely can now get one accepted. Release
+  notes must use the narrower phrase.
+- **Files:** `crates/macp-modes/src/mode/mod.rs`, `mode/handoff.rs`, `src/replay.rs`,
+  `ASSUMPTIONS.md` (+5 entries, all genuine), the plan.
+- **Shipped?** No — accumulating toward G4, executor and verifier independently agreed.
+- **Next:** Phase 11e — the cutover, and the plan's one genuine one-way door. Two requirements
+  were carried into its criteria from this round (criterion 11).

@@ -122,6 +122,13 @@ pub trait Mode: Send + Sync {
     /// 1. dispatch the returned envelope through [`Mode::on_message_at`] with
     ///    `accepted_at_ms` equal to the envelope's own `timestamp_unix_ms`,
     /// 2. append it durably as an ordinary accepted (`Incoming`) history entry,
+    ///    stamping `received_at_ms` with the envelope's own
+    ///    `timestamp_unix_ms` — **not** wall-clock. Replay derives its dispatch
+    ///    clock from `received_at_ms` (`src/replay.rs`), so stamping anything
+    ///    else desynchronizes the live and replayed clocks for this entry and
+    ///    breaks byte-identical rebuild of `mode_state`. Harmless for handoff
+    ///    specifically, whose accept arm is time-blind, but the contract is
+    ///    general and the next mode to use this hook may not be.
     /// 3. commit the resulting session state and insert the envelope's
     ///    `message_id` into the dedup set,
     /// 4. publish it to the session's subscribers,

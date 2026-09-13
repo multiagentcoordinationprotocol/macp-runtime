@@ -707,5 +707,14 @@
   non-`Open` sessions anyway (the same filter as the TTL sweep).
 - **Alternatives:** return `None` for a suspended session (silently absorbs a caller bug the assert
   is meant to surface); or drop the assert (loses the 11b invariant's only in-tree check).
-- **Blast radius if wrong:** debug builds only; `debug_assert!` compiles out in release.
+- **Blast radius if wrong:** **history correctness, silently, in release builds** — not the debug-only
+  inconvenience this entry first recorded. The mechanism, traced by the phase verifier: both
+  computations ignore the in-flight pause by design (`unsuspended_deadline` walks *completed*
+  intervals only, `crates/macp-core/src/session.rs:369-372`; `rev2_elapsed_ms` has no in-flight term,
+  `crates/macp-modes/src/mode/handoff.rs:219-227`). So if a release-build caller ever asks a
+  *suspended* session, elapsed time is **over**-counted (the in-flight pause is not subtracted) so the
+  accept can be judged due when it is not, and `D` is **under**-computed so a wrong
+  `timestamp_unix_ms` is baked into permanent history. `debug_assert!` cannot prevent that. It follows
+  that **11e's non-`Open` session filter is load-bearing, not hygiene, and needs its own test** —
+  recorded in 11e's acceptance criteria.
 - **Status:** UNCONFIRMED (2026-09-12)

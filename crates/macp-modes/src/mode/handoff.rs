@@ -36,10 +36,16 @@ pub const IMPLICIT_ACCEPT_MESSAGE_ID_PREFIX: &str = "implicit-accept:";
 /// `reason` carried by the implicit accept, and therefore the offer's
 /// `outcome_reason` once it is applied.
 ///
-/// **Byte-frozen.** It lives in serialized `mode_state`, which
-/// `tests/conformance_loader.rs`'s `assert_replay_equivalence` compares
-/// byte-for-byte, so changing it breaks replay of every rev <= 1 history that
-/// implicitly accepted. It is also what keeps the synthesized accept
+/// **Byte-frozen.** It lives in serialized `mode_state`, so changing it breaks
+/// replay of every already-persisted rev <= 1 history that implicitly
+/// accepted — those logs were written by a binary carrying the old literal and
+/// cannot be rewritten. The guards that actually catch a change are the
+/// hand-built histories in `src/replay.rs`'s test module (eight of them) plus
+/// `synthetic_payload_bytes_are_pinned` below. Note it is **not**
+/// `assert_replay_equivalence` in `tests/conformance_loader.rs`, as this note
+/// first claimed: that compares live against replayed *within one binary*, so
+/// both sides move together and a changed literal slips through it. It is also
+/// what keeps the synthesized accept
 /// (RFC-MACP-0010 §5.1(2)) and the interim in-`Commitment` path below
 /// indistinguishable in `mode_state` — the reason both share this one const
 /// rather than repeating the literal.
@@ -684,10 +690,18 @@ impl HandoffMode {
         if offer.disposition != HandoffDisposition::Offered {
             return Err(MacpError::InvalidPayload);
         }
-        // Exactly the mutation an explicit accept applies (and exactly the one
-        // the interim in-`Commitment` path applies, `IMPLICIT_ACCEPT_REASON`
-        // included), so a history carrying the synthetic entry rebuilds
-        // byte-identical `mode_state`.
+        // Exactly the mutation an explicit accept applies, and exactly the one
+        // the interim in-`Commitment` path applies — so a history carrying the
+        // synthetic entry rebuilds byte-identical `mode_state`.
+        //
+        // That byte-identity is guaranteed by `due_synthetic_envelope`, which
+        // is what supplies `IMPLICIT_ACCEPT_REASON`; this arm takes whatever
+        // `reason` the payload carries, because RFC-MACP-0010 makes the
+        // payload authoritative. A direct library caller at rev >= 2 can
+        // therefore hand-build a well-formed implicit accept with some other
+        // `reason` and land non-canonical `mode_state`. Unreachable through
+        // the wire (the 11c client boundary refuses the reserved id), and not
+        // this arm's job to police.
         offer.disposition = HandoffDisposition::Accepted;
         offer.accepted_by = Some(offer.target_participant.clone());
         offer.outcome_reason = Some(payload.reason);

@@ -1202,7 +1202,34 @@ this list.
 
 #### Phase 11d — the synthesis contract in the mode (wired to nothing yet)
 
-- **Status:** TODO
+- **Status:** DONE (2026-09-12) — `58a0d16`. Fresh-Opus verify: **PASS**, 1 SHOULD-FIX + 3 NITs,
+  all applied in the follow-up commit. Divergences from the plan as written:
+  1. **This phase's `Files` list was incomplete.** It named only the two `macp-modes` files, but
+     11c deliberately committed a test at `src/replay.rs` whose own rustdoc said *11d must flip
+     this from `Err(InvalidPayload)` to `Ok`* — and it does go red the moment the rev-2 arm lands.
+     Flipped, with substantive assertions (`assert_implicitly_accepted` + the dedup slot), not
+     `is_ok()`. Zero production lines in that file changed.
+  2. **The phase's most important rule shipped with no test, as specified.** The plan asks for the
+     no-deadline-re-verification rule as *a comment only*. The executor made it killable by adding
+     a fifth test beyond the four criteria. This was the right call and it is load-bearing: the
+     only possible mutation is to **add** the forbidden check, and the flipped replay history does
+     **not** catch it (no pause after `D`), so without that test the rule had zero coverage. The
+     verifier confirmed the arm takes no clock parameter at all — structurally incapable of a time
+     check, which is stronger than a comment — and that the test really does construct a pause
+     after `D` where a re-checking implementation rejects.
+  3. **The plan fixed no error code or check order for the strict rev-2 arm**, yet criterion 4
+     depends on both. Chosen and recorded in `ASSUMPTIONS.md` rather than left implicit.
+  4. **The plan's own criterion-4 text is self-superseding** — its "no edit required" line is
+     overridden by its own following two action bullets (rename + re-comment, add a rev-1 arm).
+     The executor read it correctly. The trio's third leg already existed under 11c and was cited,
+     not duplicated.
+  5. **A `debug_assert!` was doing work only a release-build check can do** — see the SHOULD-FIX,
+     now carried into 11e as criterion 11. The assumption's recorded blast radius understated it
+     as debug-only; it is in fact silent history corruption.
+  6. Stale line citations throughout (`:728-756`, `:440-451`); the traced reasoning was exact.
+  7. **Not independently shippable** — accumulates toward G4. It ships a public trait method with
+     zero call sites, and 11e is explicitly the atomic commit, so a release boundary here lands
+     immediately before an atomicity requirement.
 - **Delivers:** `HandoffMode` can (a) say when a synthetic accept is due and produce the exact
   envelope, and (b) accept a well-formed implicit accept arriving through dispatch (live synthesis
   in 11e, and replay) at rev ≥ 2. **Server-visible behavior unchanged** — deliberately not "live
@@ -1594,6 +1621,22 @@ this list.
       as written, the next agent reads it, sees code that violates it, and reverts this work. The
       amendment is the durable half of the change; a code comment and a changelog line are not
       reachable from where the rule is read.
+  11. **Carried forward from the 11d verify round — two requirements 11e owns, both load-bearing:**
+      - **The non-`Open` session filter needs its own named test.** It is *not* hygiene. Both
+        computations feeding the synthetic entry ignore the in-flight pause by design
+        (`unsuspended_deadline` walks completed intervals only,
+        `crates/macp-core/src/session.rs:369-372`; `rev2_elapsed_ms` has no in-flight term,
+        `crates/macp-modes/src/mode/handoff.rs:219-227`). Asking a **suspended** session therefore
+        over-counts elapsed time (the accept can be judged due when it is not) and under-computes
+        `D` (a wrong `timestamp_unix_ms` is baked into permanent history). 11d guards this with a
+        `debug_assert!`, which **compiles out in release** and so guards nothing where it matters.
+        The filter in the kernel is the only real enforcement, so it must be asserted, not assumed.
+      - **The appended entry MUST stamp `received_at_ms = D`**, i.e. the envelope's own
+        `timestamp_unix_ms`, never wall-clock. Replay derives its dispatch clock from
+        `received_at_ms` (`src/replay.rs:127-132`), so any other value desynchronizes the live and
+        replayed clocks for that entry and breaks Phase 12's byte-identity. Harmless for handoff
+        specifically (its accept arm is time-blind) but the trait contract is general. Assert the
+        stamped value directly rather than inferring it from a replay that would pass either way.
 - **Tests:** the ten above plus the migrated fixtures; full workspace gate green
   (`RUSTC_WRAPPER=""`, `MACP_POLICY_SCHEMAS_DIR` pointed at spec `origin/main` — issue #163).
 - **Docs:** rewrite the rev-2 bullet in `crates/macp-core/src/session.rs:18-35` (the bullet at
