@@ -806,3 +806,349 @@ async fn snapshot_is_current_immediately_after_the_rejected_trigger() {
     assert_eq!(replayed.mode_state, snapshot.mode_state);
     assert_replay_matches(&live, &replayed);
 }
+
+// ===========================================================================
+// Phase 12 — the eager sweep (RFC-MACP-0010 §5.1(2)'s SHOULD).
+//
+// Everything above drives synthesis through `process_message`, i.e. lazily,
+// off the back of a triggering message. These drive
+// `Runtime::sweep_due_synthetic_accepts` instead — the background maintenance
+// path — and no session-scoped message is sent after the offer in any of them.
+//
+// What only the tier-1 suite can add is that `src/main.rs` actually calls the
+// sweep on a timer; see `integration_tests/tests/tier1_protocol/
+// test_handoff_implicit_accept.rs::eager_sweep_settles_the_offer_with_no_further_message`.
+// ===========================================================================
+
+/// Seed a fresh harness with an existing session's state and log — exactly the
+/// two writes startup recovery performs (`insert_recovered_session` +
+/// `replace_session_log`).
+///
+/// This is what lets the byte-identity test below run two *different* code
+/// paths over bytes that are identical rather than merely equivalent: the
+/// session (and therefore the `offered_at_ms` inside `mode_state`, the bound
+/// policy and the session id) is a clone, not a re-derivation.
+async fn seed_from_fixture(h: &Harness, sid: &str, session: &Session, log: &[LogEntry]) {
+    h.rt.registry
+        .insert_recovered_session(sid.to_string(), session.clone())
+        .await;
+    h.rt.log_store.replace_session_log(sid, log.to_vec()).await;
+}
+
+// ---------------------------------------------------------------------------
+// Criterion 1 — the deadline is observed with no further message.
+// ---------------------------------------------------------------------------
+
+/// The offer passes its deadline and nobody says anything else. The lazy path
+/// cannot fire — it has no trigger — so the accept is either in history because
+/// the sweep put it there, or it is not in history at all.
+///
+/// The "before" assertions are the load-bearing half: they establish that
+/// history is still `SessionStart`, `HandoffOffer` at the moment the sweep is
+/// called, so nothing but the sweep can account for the third entry.
+#[tokio::test]
+async fn sweep_settles_the_offer_with_no_further_message() {
+    let h = make_harness();
+    let sid = session_with_offer(&h.rt).await;
+    sleep_past_the_deadline().await;
+
+    // Before: two accepted entries, no synthetic, and no message has been sent
+    // since the offer.
+    let before = log_of(&h.rt, &sid).await;
+    let ids_before: Vec<&str> = incoming(&before)
+        .iter()
+        .map(|e| e.message_id.as_str())
+        .collect();
+    assert_eq!(
+        ids_before,
+        vec!["start-1", "offer-1"],
+        "the deadline must still be unobserved before the sweep runs"
+    );
+
+    assert_eq!(
+        h.rt.sweep_due_synthetic_accepts().await,
+        1,
+        "the sweep must report the one entry it appended"
+    );
+
+    let after = log_of(&h.rt, &sid).await;
+    let ids_after: Vec<&str> = incoming(&after)
+        .iter()
+        .map(|e| e.message_id.as_str())
+        .collect();
+    assert_eq!(
+        ids_after,
+        vec!["start-1", "offer-1", SYNTHETIC_ID],
+        "the sweep must append the synthetic accept, and nothing else"
+    );
+    assert_eq!(synthetic_of(&after).entry_kind, EntryKind::Incoming);
+
+    let live = h.rt.get_session_checked(&sid).await.unwrap();
+    assert!(
+        live.seen_message_ids.contains(SYNTHETIC_ID),
+        "the synthetic's deterministic id must hold its dedup slot"
+    );
+    assert_eq!(
+        live.state,
+        SessionState::Open,
+        "synthesis is not resolution — the session stays open for its Commitment"
+    );
+    assert_replay_matches(&live, &replay_live_log(&h, &sid).await);
+
+    // Idempotent: a second tick over the same session emits nothing. Without
+    // this, a 60 s session with a 60 ms timeout would collect one duplicate
+    // entry per cleanup interval for the rest of its life.
+    assert_eq!(
+        h.rt.sweep_due_synthetic_accepts().await,
+        0,
+        "a second sweep must be a no-op"
+    );
+    assert_eq!(log_of(&h.rt, &sid).await.len(), after.len());
+
+    // And the accept is real, not cosmetic: the Commitment that the offer's
+    // acceptance gates now passes, still with no explicit HandoffAccept ever
+    // sent.
+    h.rt.process(
+        &env("Commitment", "commit-1", &sid, OWNER, commitment("1.0.0")),
+        None,
+    )
+    .await
+    .expect("the swept accept must satisfy commitment_ready");
+}
+
+/// The sweep must not emit for an offer whose deadline has *not* passed — the
+/// control that stops the test above from passing for a sweep that accepts
+/// every outstanding offer it can find.
+#[tokio::test]
+async fn sweep_leaves_an_offer_alone_before_its_deadline() {
+    let h = make_harness();
+    let sid = session_with_offer(&h.rt).await;
+
+    // No sleep: the 60 ms timeout has not elapsed.
+    assert_eq!(h.rt.sweep_due_synthetic_accepts().await, 0);
+    let entries = log_of(&h.rt, &sid).await;
+    assert!(
+        !entries.iter().any(|e| e.message_id == SYNTHETIC_ID),
+        "an offer inside its window must survive a sweep"
+    );
+
+    // And it is only the clock holding it back.
+    sleep_past_the_deadline().await;
+    assert_eq!(h.rt.sweep_due_synthetic_accepts().await, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Criterion 2 — eager and lazy write the same bytes.
+// ---------------------------------------------------------------------------
+
+/// Both emitters run over **one fixture** — the same session bytes and the
+/// same log prefix, cloned into two independent runtimes — and the log entry
+/// they append is compared byte for byte.
+///
+/// Scoped to the `LogEntry`, deliberately. A whole-`PersistedSession`
+/// comparison would be flaky by construction: `seen_message_ids` is a set whose
+/// serialization order is not stable, so such a test would fail on set
+/// iteration order rather than on anything about synthesis. The entry is the
+/// thing that becomes permanent history, and `serde_json::to_string` is
+/// literally what `FileBackend::append_log_entry` writes for it
+/// (`crates/macp-storage/src/storage/file.rs:120`).
+///
+/// The two paths observe the deadline at measurably different wall-clock
+/// times — enforced by the sleep between them — so an entry stamped with the
+/// observation instead of the computed deadline `D` cannot pass.
+#[tokio::test]
+async fn eager_and_lazy_synthesis_write_byte_identical_entries() {
+    // The fixture, captured before either path has run.
+    let origin = make_harness();
+    let sid = session_with_offer(&origin.rt).await;
+    let fixture_session = origin.rt.get_session_checked(&sid).await.unwrap();
+    let fixture_log = log_of(&origin.rt, &sid).await;
+    assert!(
+        !fixture_log.iter().any(|e| e.message_id == SYNTHETIC_ID),
+        "the fixture must be captured before anything synthesizes"
+    );
+    sleep_past_the_deadline().await;
+
+    // Path A — the eager sweep. No message is sent to this runtime at all.
+    let eager = make_harness();
+    seed_from_fixture(&eager, &sid, &fixture_session, &fixture_log).await;
+    let observed_by_sweep = chrono::Utc::now().timestamp_millis();
+    assert_eq!(eager.rt.sweep_due_synthetic_accepts().await, 1);
+    let from_sweep = synthetic_of(&log_of(&eager.rt, &sid).await).clone();
+
+    // A gap the size of the whole timeout, so the two observations cannot be
+    // confused for each other at millisecond resolution.
+    tokio::time::sleep(std::time::Duration::from_millis(TIMEOUT_MS as u64)).await;
+
+    // Path B — the lazy path, driven by a trigger, over the same fixture.
+    //
+    // The trigger is a *rejected* `Commitment` (wrong bound `mode_version`), and
+    // that choice is load-bearing rather than perverse: RFC-MACP-0010 §5.1(2)
+    // synthesizes ahead of the trigger's own evaluation either way, but an
+    // accepted trigger would also apply its own `ModeResponse` — a
+    // `HandoffContext` appends to `contexts`, a good `Commitment` resolves the
+    // session — and the `mode_state` comparison at the end of this test would
+    // then be measuring the trigger, not the synthesis. A rejected trigger
+    // leaves exactly the synthesis behind.
+    let lazy = make_harness();
+    seed_from_fixture(&lazy, &sid, &fixture_session, &fixture_log).await;
+    let observed_by_trigger = chrono::Utc::now().timestamp_millis();
+    lazy.rt
+        .process(
+            &env("Commitment", "commit-1", &sid, OWNER, commitment("9.9.9")),
+            None,
+        )
+        .await
+        .expect_err("the trigger is rejected; the synthesis ahead of it is not");
+    let from_lazy = synthetic_of(&log_of(&lazy.rt, &sid).await).clone();
+
+    assert!(
+        observed_by_trigger - observed_by_sweep >= TIMEOUT_MS,
+        "the two observations must be far enough apart to be distinguishable"
+    );
+
+    assert_eq!(
+        serde_json::to_string(&from_sweep).expect("entry serializes"),
+        serde_json::to_string(&from_lazy).expect("entry serializes"),
+        "the eager and lazy paths must write the same history bytes"
+    );
+
+    // Spelled out, so a failure says which field moved rather than dumping two
+    // JSON blobs, and so the clock claim is asserted rather than implied.
+    assert_eq!(from_sweep.message_id, from_lazy.message_id);
+    assert_eq!(from_sweep.sender, from_lazy.sender);
+    assert_eq!(from_sweep.raw_payload, from_lazy.raw_payload);
+    assert_eq!(from_sweep.entry_kind, from_lazy.entry_kind);
+    let expected_d = offer_received_at(&fixture_log) + TIMEOUT_MS;
+    assert_eq!(from_sweep.timestamp_unix_ms, expected_d);
+    assert_eq!(from_sweep.received_at_ms, expected_d);
+    assert!(
+        expected_d < observed_by_sweep,
+        "D must precede both observations, or this proves nothing"
+    );
+
+    // The state the two entries produce agrees too — the same claim one level
+    // up from the bytes.
+    let eager_session = eager.rt.get_session_checked(&sid).await.unwrap();
+    let lazy_session = lazy.rt.get_session_checked(&sid).await.unwrap();
+    assert_eq!(
+        eager_session.mode_state, lazy_session.mode_state,
+        "mode_state must be byte-identical across the two paths"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Criterion 3 — suspended sessions are skipped.
+// ---------------------------------------------------------------------------
+
+/// The sweep is the *only* caller that can ever be handed a suspended session
+/// (`step::check_preconditions` rejects every message to a non-`Open` session
+/// before synthesis is reached), which is why the filter has to hold here.
+///
+/// It matters because both computations behind the synthetic entry ignore an
+/// in-flight pause by design: `Session::unsuspended_deadline` walks completed
+/// intervals only and `HandoffMode::rev2_elapsed_ms` has no in-flight term. A
+/// sweep that asked a paused session would over-count elapsed time and bake a
+/// `D` that falls inside the pause into permanent history — silently, in a
+/// release build, where the mode's own `debug_assert!` is compiled out.
+///
+/// Note on what this pins: the sweep's `state != Open` `continue` and the
+/// `state != Open` early return inside `synthesize_due_accept` are
+/// belt-and-braces for each other, so this test reds only when **both** are
+/// removed, not when either is removed alone.
+#[tokio::test]
+async fn sweep_skips_a_suspended_session() {
+    let h = make_harness();
+    let sid = session_with_offer(&h.rt).await;
+    h.rt.suspend_session(&sid, "hold", OWNER)
+        .await
+        .expect("suspend");
+
+    // Well past the deadline on wall time — the only thing that can decline is
+    // the state filter.
+    sleep_past_the_deadline().await;
+    sleep_past_the_deadline().await;
+
+    assert_eq!(
+        h.rt.sweep_due_synthetic_accepts().await,
+        0,
+        "a suspended session must not be swept"
+    );
+    let entries = log_of(&h.rt, &sid).await;
+    assert!(
+        !entries.iter().any(|e| e.message_id == SYNTHETIC_ID),
+        "a suspended session must not gain a synthetic entry"
+    );
+    let paused = h.rt.get_session_checked(&sid).await.unwrap();
+    assert_eq!(paused.state, SessionState::Suspended);
+    assert!(!paused.seen_message_ids.contains(SYNTHETIC_ID));
+
+    // The skip is a deferral, not a permanent disable: once resumed, the very
+    // next sweep settles it — and because the pause is now a *completed*
+    // interval, it is excluded from the elapsed time, so the accept is due only
+    // after the timeout has elapsed again in unsuspended time.
+    h.rt.resume_session(&sid, "go", OWNER)
+        .await
+        .expect("resume");
+    assert_eq!(
+        h.rt.sweep_due_synthetic_accepts().await,
+        0,
+        "the suspended interval must not count toward the timeout"
+    );
+    sleep_past_the_deadline().await;
+    assert_eq!(h.rt.sweep_due_synthetic_accepts().await, 1);
+
+    let live = h.rt.get_session_checked(&sid).await.unwrap();
+    assert!(live.seen_message_ids.contains(SYNTHETIC_ID));
+    assert_replay_matches(&live, &replay_live_log(&h, &sid).await);
+}
+
+/// Terminal sessions are skipped too — the other half of the `Open` filter, and
+/// the thing that makes a session resolving between the sweep's snapshot and
+/// its append harmless: every decision the sweep makes is taken under the
+/// session mutex, so it observes the session as the last writer left it.
+///
+/// Driven here by resolving the session first and then sweeping, which is the
+/// same observation the race produces.
+#[tokio::test]
+async fn sweep_skips_a_terminal_session() {
+    let h = make_harness();
+    let sid = session_with_offer(&h.rt).await;
+    sleep_past_the_deadline().await;
+
+    // Resolve it the lazy way — which synthesizes, then commits.
+    h.rt.process(
+        &env("Commitment", "commit-1", &sid, OWNER, commitment("1.0.0")),
+        None,
+    )
+    .await
+    .expect("resolves");
+    let resolved_len = log_of(&h.rt, &sid).await.len();
+
+    assert_eq!(
+        h.rt.sweep_due_synthetic_accepts().await,
+        0,
+        "a resolved session must not be swept"
+    );
+    assert_eq!(
+        log_of(&h.rt, &sid).await.len(),
+        resolved_len,
+        "the sweep must not append to a terminal session's history"
+    );
+
+    // Cancelled is terminal too, and a cancelled session can still be carrying
+    // an outstanding offer past its deadline.
+    let sid2 = session_with_offer(&h.rt).await;
+    h.rt.cancel_session(&sid2, "done", OWNER)
+        .await
+        .expect("cancel");
+    sleep_past_the_deadline().await;
+    assert_eq!(h.rt.sweep_due_synthetic_accepts().await, 0);
+    assert!(
+        !log_of(&h.rt, &sid2)
+            .await
+            .iter()
+            .any(|e| e.message_id == SYNTHETIC_ID),
+        "a cancelled session must not gain a synthetic entry"
+    );
+}

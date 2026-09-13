@@ -638,13 +638,16 @@ impl Runtime {
     /// contract (RFC-MACP-0010 §5.1(2) for handoff's implicit accept).
     ///
     /// Called from `process_message` *before* the triggering message is
-    /// dispatched, sharing the trigger's single clock read. Phase 12's eager
-    /// sweep is the second caller: the background maintenance loop in
-    /// `src/main.rs` (alongside `cleanup_expired_sessions`,
-    /// `evict_stale_sessions` and `gc_disk_sessions`) will call this for every
-    /// open session so an offer is settled on time rather than only when the
-    /// next message happens to arrive. Both callers must hold the session
-    /// mutex.
+    /// dispatched, sharing the trigger's single clock read. The second caller
+    /// is [`Runtime::sweep_due_synthetic_accepts`], the eager sweep driven by
+    /// the background maintenance loop in `src/main.rs` (alongside
+    /// `cleanup_expired_sessions`, `evict_stale_sessions` and
+    /// `gc_disk_sessions`): it calls this for every open session so an offer is
+    /// settled on time rather than only when the next message happens to
+    /// arrive. Both callers must hold the session mutex.
+    ///
+    /// Returns `true` when an entry was appended — the sweep's emission count,
+    /// and the only honest one: every skip below is a silent `Ok`.
     ///
     /// # The non-`Open` filter is a correctness gate, not hygiene
     ///
@@ -720,21 +723,21 @@ impl Runtime {
         session_id: &str,
         session: &mut Session,
         now_ms: i64,
-    ) -> Result<(), MacpError> {
+    ) -> Result<bool, MacpError> {
         if session.state != SessionState::Open {
-            return Ok(());
+            return Ok(false);
         }
         let Some(mode) = self.mode_registry.get_mode(&session.mode) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(syn) = mode.due_synthetic_envelope(session, now_ms) else {
-            return Ok(());
+            return Ok(false);
         };
         // Idempotence backstop. The mode's own contract already returns `None`
         // once the envelope has been applied; this makes a mode that forgets
         // append a duplicate entry impossible rather than merely unlikely.
         if session.seen_message_ids.contains(&syn.message_id) {
-            return Ok(());
+            return Ok(false);
         }
         // Mirrors replay, which authorizes every `Incoming` entry. The target
         // is a declared participant by offer validation, so this always passes
@@ -772,8 +775,25 @@ impl Runtime {
         );
 
         self.save_session_to_storage(session).await;
+        // The checkpoint-interval check belongs to *the append*, not to the
+        // caller. It lives inside this seam rather than in either caller so the
+        // two paths cannot drift: a synthetic entry advances `log_len` exactly
+        // the same way from `process_message` and from
+        // `sweep_due_synthetic_accepts`, so it must cross an interval boundary
+        // the same way too. Put it in the sweep instead and the eager path
+        // would silently skip every boundary a synthetic crossed — checkpoints
+        // are only a replay optimization, but the divergence would be real and
+        // invisible.
+        //
+        // No double-checkpoint on the lazy path. `process_message` runs its own
+        // `maybe_insert_checkpoint` after appending the triggering message, by
+        // which point the log is at least one entry longer than it is here, so
+        // the two calls never test the same `log_len`. The check is a pure
+        // function of that length, so re-asking at a different length is not a
+        // repeat.
+        self.maybe_insert_checkpoint(session_id, session).await;
         self.publish_accepted_envelope(&syn);
-        Ok(())
+        Ok(true)
     }
 
     /// Process a session-scoped message following the RFC-MACP-0001 Section 7.3
@@ -1276,6 +1296,14 @@ impl Runtime {
     }
 
     /// Insert a checkpoint entry if the log has reached the configured interval.
+    ///
+    /// Called after **every** append that can cross a boundary: the tail of
+    /// `process_message`, and [`Runtime::synthesize_due_accept`] for the
+    /// synthetic entry it writes. The second call site is what keeps the eager
+    /// sweep and the lazy trigger placing checkpoints identically — see the
+    /// note at that call. The decision is a pure function of the current
+    /// `log_len`, so asking twice within one `process_message` (at two
+    /// different lengths) is not a repeat.
     async fn maybe_insert_checkpoint(&self, session_id: &str, session: &Session) {
         if self.checkpoint_interval == 0 {
             return;
@@ -1346,6 +1374,124 @@ impl Runtime {
         if expired_count > 0 {
             tracing::info!(count = expired_count, "background cleanup expired sessions");
         }
+    }
+
+    /// Emit every synthetic envelope that has become due, across all open
+    /// sessions — RFC-MACP-0010 §5.1(2)'s **eager** observation of the
+    /// implicit-accept deadline.
+    ///
+    /// Lazy observation (`process_message` -> `synthesize_due_accept`) is the
+    /// MUST and ships on its own: it guarantees no message is ever evaluated
+    /// against a stale offer. This is the SHOULD on top of it — without it a
+    /// session where nobody speaks again keeps an accepted offer out of history
+    /// indefinitely, and `GetSession` / `StreamSession` show an offer that the
+    /// protocol says was accepted at `D`. Called from the background
+    /// maintenance loop in `src/main.rs`, so `MACP_CLEANUP_INTERVAL_SECS` is
+    /// the latency bound on the observation (never on the recorded timestamp,
+    /// which is `D` whichever path emits — see below).
+    ///
+    /// # Not a variant of `cleanup_expired_sessions`
+    ///
+    /// Different predicate (a mode-computed deadline inside `mode_state`, not
+    /// `ttl_expiry`) and a different product: an `EntryKind::Incoming` entry
+    /// that consumes an accepted ordinal and is published to `StreamSession`,
+    /// where `TtlExpired` is `Internal` and is published to neither. It is
+    /// deliberately ordered *after* `cleanup_expired_sessions` in that loop so
+    /// a TTL-expired session is already non-`Open` when the sweep reaches it —
+    /// which is exactly the precedence the lazy path gives (`Precheck::Expired`
+    /// returns before `synthesize_due_accept` is ever called), so the two paths
+    /// cannot disagree about a session whose TTL and implicit-accept deadline
+    /// both passed unobserved.
+    ///
+    /// # Locking
+    ///
+    /// The registry map lock is held only for the snapshot of `(id, Arc)` pairs
+    /// and is released before any session mutex is taken or any I/O happens —
+    /// the lock-ordering contract on `SessionRegistry`. The snapshot fixes the
+    /// *set*, not the state.
+    ///
+    /// # Why no snapshot-to-append race can leave an orphan entry
+    ///
+    /// A session can resolve, cancel or expire between the snapshot and the
+    /// moment this loop reaches it, and the `Arc` keeps it alive (and writable)
+    /// regardless. Nothing here reads state at snapshot time: every decision is
+    /// made *under the session mutex*, which is the same mutex every writer —
+    /// `process_message`, `cancel_session`, `suspend_session`, `resume_session`,
+    /// `cleanup_expired_sessions` — holds across its own validate-append-commit.
+    /// So the `state != Open` re-check inside `synthesize_due_accept` observes
+    /// the session as the last writer left it, and a session that terminated
+    /// after the snapshot is skipped. Two further guards make it belt and
+    /// braces: the mode returns `None` once the offer's disposition is no
+    /// longer `Offered` (so an explicit `HandoffAccept` that won the race
+    /// disarms the synthesis), and the deterministic `message_id` is already in
+    /// `seen_message_ids` after any emission. Eviction cannot orphan one
+    /// either: `evict_stale_sessions` and `gc_disk_sessions` only ever drop
+    /// *terminal* sessions, which fail the `Open` check.
+    ///
+    /// # Cost
+    ///
+    /// One `mode_state` decode per open session whose mode implements the hook
+    /// and whose policy binds a timeout, per tick; everything else short-circuits
+    /// before decoding (`Mode::due_synthetic_envelope`'s own cost note).
+    ///
+    /// Returns the number of synthetic entries appended.
+    pub async fn sweep_due_synthetic_accepts(&self) -> usize {
+        let now = Utc::now().timestamp_millis();
+        // Snapshot the shared handles under a brief map read; never hold the
+        // map lock across per-session locks or storage I/O. Mirrors
+        // `cleanup_expired_sessions`.
+        let candidates: Vec<(String, crate::registry::SharedSession)> = {
+            let guard = self.registry.sessions.read().await;
+            guard
+                .iter()
+                .map(|(id, arc)| (id.clone(), std::sync::Arc::clone(arc)))
+                .collect()
+        };
+
+        let mut emitted = 0usize;
+        for (session_id, shared) in candidates {
+            let mut session = shared.lock().await;
+            // `Suspended` (and every other non-`Open` state) is skipped here
+            // *and* inside `synthesize_due_accept`. Measured: removing this
+            // check alone changes no behaviour — the seam's own filter still
+            // declines — so treat it as the documented precondition of the
+            // call below rather than as the enforcement. The enforcement
+            // matters: both computations behind the synthetic entry ignore an
+            // in-flight pause, so asking about a paused session over-counts
+            // elapsed time and bakes a wrong `D` into permanent history, and
+            // this is the only caller that can ever be handed one (no message
+            // path reaches a non-`Open` session at all).
+            if session.state != SessionState::Open {
+                continue;
+            }
+            match self
+                .synthesize_due_accept(&session_id, &mut session, now)
+                .await
+            {
+                Ok(true) => emitted += 1,
+                Ok(false) => {}
+                // No triggering message to reject: a failed append (or a mode
+                // that refused its own synthetic) is logged and the offer stays
+                // outstanding, to be retried on the next tick or settled by the
+                // lazy path. The same posture `cleanup_expired_sessions` takes
+                // on a failed `TtlExpired` append.
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %e,
+                        "eager sweep could not emit a due synthetic envelope"
+                    );
+                }
+            }
+        }
+
+        if emitted > 0 {
+            tracing::info!(
+                count = emitted,
+                "eager sweep appended due synthetic envelopes"
+            );
+        }
+        emitted
     }
 
     /// Delete terminal sessions' durable data older than `retention_secs`
@@ -3544,6 +3690,98 @@ mod tests {
             session.participant_message_counts.get(TARGET).copied(),
             before,
             "the target must not be credited with a message they did not send"
+        );
+    }
+    /// The checkpoint-interval check belongs to the *append*, so the eager
+    /// sweep and a lazy trigger place the same checkpoint in the same
+    /// position.
+    ///
+    /// `maybe_insert_checkpoint` used to be called only from the tail of
+    /// `process_message`. A synthetic entry advances `log_len` without ever
+    /// reaching it: the lazy path checked only the length *after* the
+    /// trigger's own append (one greater), and the eager path — where
+    /// `sweep_due_synthetic_accepts` is the whole call — checked nothing at
+    /// all. With `MACP_CHECKPOINT_INTERVAL > 0` that is a genuine eager/lazy
+    /// divergence: identical accepted histories, different checkpoint
+    /// placement, and a boundary the synthetic crossed silently skipped.
+    /// Calling it from inside `synthesize_due_accept` makes the two agree by
+    /// construction, which is what this pins.
+    ///
+    /// Checkpoints are a replay optimization rather than a correctness
+    /// property, which is exactly why this needs a test: nothing else would
+    /// ever notice.
+    ///
+    /// `checkpoint_interval` is set on the struct rather than through
+    /// `MACP_CHECKPOINT_INTERVAL`, because that variable is read once in
+    /// `Runtime::with_registries` and this binary runs its tests in parallel —
+    /// setting it here would leak into every other runtime built concurrently.
+    ///
+    /// Interval 3, with `SessionStart` + `HandoffOffer` already logged, puts
+    /// the synthetic accept exactly on the boundary: the skipped case.
+    #[tokio::test]
+    async fn a_synthetic_entry_on_the_checkpoint_boundary_checkpoints_either_path() {
+        async fn shape(rt: &Runtime, sid: &str) -> Vec<(EntryKind, String)> {
+            rt.log_store
+                .get_log(sid)
+                .await
+                .expect("log")
+                .iter()
+                .map(|e| (e.entry_kind.clone(), e.message_type.clone()))
+                .collect()
+        }
+
+        // Eager: the sweep is the only thing that touches the session.
+        let mut eager = make_runtime();
+        eager.checkpoint_interval = 3;
+        let eager_sid = handoff_session_with_timed_offer(&eager, 20).await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert_eq!(
+            eager.sweep_due_synthetic_accepts().await,
+            1,
+            "sweep emitted"
+        );
+
+        // Lazy: a trigger message arrives instead. `HandoffContext` is the one
+        // mode message the offerer may send at any disposition, so it provokes
+        // the synthesis without being an accept itself.
+        let mut lazy = make_runtime();
+        lazy.checkpoint_interval = 3;
+        let lazy_sid = handoff_session_with_timed_offer(&lazy, 20).await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        lazy.process(
+            &env(
+                HANDOFF_MODE,
+                "HandoffContext",
+                "ctx-1",
+                &lazy_sid,
+                OWNER,
+                handoff_context("h1"),
+            ),
+            None,
+        )
+        .await
+        .expect("context accepted");
+
+        let expected = vec![
+            (EntryKind::Incoming, "SessionStart".to_string()),
+            (EntryKind::Incoming, "HandoffOffer".to_string()),
+            (EntryKind::Incoming, "HandoffAccept".to_string()),
+            (EntryKind::Checkpoint, "Checkpoint".to_string()),
+        ];
+        assert_eq!(shape(&eager, &eager_sid).await, expected, "eager sweep");
+
+        let lazy_shape = shape(&lazy, &lazy_sid).await;
+        assert_eq!(
+            lazy_shape[..4],
+            expected[..],
+            "the lazy path must checkpoint in the same place as the eager one"
+        );
+        // ... and exactly once: `process_message` runs its own check after
+        // appending the trigger, at a length the synthesis never tested.
+        assert_eq!(
+            lazy_shape[4..],
+            [(EntryKind::Incoming, "HandoffContext".to_string())],
+            "no second checkpoint for the trigger's own append"
         );
     }
 }

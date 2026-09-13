@@ -20,6 +20,7 @@
 use std::time::Duration;
 
 use macp_integration_tests::helpers::*;
+use macp_integration_tests::server_manager::ServerManager;
 use macp_runtime::pb::macp_runtime_service_client::MacpRuntimeServiceClient;
 use macp_runtime::pb::stream_session_response::Response as StreamResp;
 use macp_runtime::pb::{
@@ -40,6 +41,8 @@ const STATE_RESOLVED: i32 = 2;
 const STATE_SUSPENDED: i32 = 4;
 /// `SESSION_STATE_OPEN`.
 const STATE_OPEN: i32 = 1;
+/// `SESSION_STATE_EXPIRED`.
+const STATE_EXPIRED: i32 = 3;
 
 /// The reserved synthetic `message_id` namespace
 /// (`macp_modes::mode::handoff::IMPLICIT_ACCEPT_MESSAGE_ID_PREFIX`). Spelled
@@ -86,14 +89,23 @@ async fn register_handoff_policy(
     policy_id
 }
 
-fn handoff_start_payload(owner: &str, target: &str, policy_version: &str) -> Vec<u8> {
+/// The `SessionStartPayload` every handoff session here opens with. `ttl_ms`
+/// is a parameter only because the ordering test at the bottom of this file
+/// needs a TTL short enough to lapse mid-test; every other caller passes one
+/// that cannot interfere.
+fn handoff_start_payload_with_ttl(
+    owner: &str,
+    target: &str,
+    policy_version: &str,
+    ttl_ms: i64,
+) -> Vec<u8> {
     SessionStartPayload {
         intent: "handoff implicit accept".into(),
         participants: vec![owner.into(), target.into()],
         mode_version: MODE_VERSION.into(),
         configuration_version: CONFIG_VERSION.into(),
         policy_version: policy_version.into(),
-        ttl_ms: 120_000,
+        ttl_ms,
         context_id: String::new(),
         extensions: std::collections::HashMap::new(),
         roots: vec![],
@@ -135,6 +147,18 @@ async fn open_handoff_with_offer(
     policy_version: &str,
     handoff_id: &str,
 ) -> String {
+    open_handoff_with_offer_ttl(client, owner, target, policy_version, handoff_id, 120_000).await
+}
+
+/// [`open_handoff_with_offer`] with an explicit session TTL.
+async fn open_handoff_with_offer_ttl(
+    client: &mut MacpRuntimeServiceClient<Channel>,
+    owner: &str,
+    target: &str,
+    policy_version: &str,
+    handoff_id: &str,
+    ttl_ms: i64,
+) -> String {
     let sid = new_session_id();
     let ack = send_as(
         client,
@@ -145,7 +169,7 @@ async fn open_handoff_with_offer(
             &new_message_id(),
             &sid,
             owner,
-            handoff_start_payload(owner, target, policy_version),
+            handoff_start_payload_with_ttl(owner, target, policy_version, ttl_ms),
         ),
     )
     .await
@@ -790,4 +814,268 @@ async fn suspended_time_does_not_tick_on_the_wire() {
         "the commitment must succeed once unsuspended time clears the timeout: {:?}",
         ack.error
     );
+}
+
+// ── 6. the eager sweep, on a timer, through the binary ──────────────────
+
+fn test_binary() -> String {
+    std::env::var("MACP_TEST_BINARY").unwrap_or_else(|_| "../target/debug/macp-runtime".into())
+}
+
+/// RFC-MACP-0010 §5.1(2)'s eager SHOULD, end to end: the runtime observes the
+/// implicit-accept deadline **on its own timer**, with no further
+/// session-scoped message of any kind.
+///
+/// Everything above this section proves the *lazy* MUST — the synthesis fires
+/// because a message arrived. This test sends nothing after the `HandoffOffer`.
+/// The only client action between the offer and the assertion is opening a
+/// `StreamSession` subscription, which is read-only and enters no history, so
+/// the accept that shows up on that stream can only have come from
+/// `Runtime::sweep_due_synthetic_accepts` being called by the background
+/// maintenance loop in `src/main.rs`.
+///
+/// Its own server, because the shared one runs the default 60 s cleanup
+/// interval; `MACP_CLEANUP_INTERVAL_SECS=1` makes the latency bound testable.
+/// `ServerManager` picks its own free port and kills only the child it spawned.
+///
+/// The control session is what stops this from passing for a sweep that
+/// accepts every outstanding offer it finds: same server, same ticks, a 60 s
+/// timeout, and nothing may be emitted for it.
+#[tokio::test]
+async fn eager_sweep_settles_the_offer_with_no_further_message() {
+    let manager =
+        ServerManager::start_with_env(&test_binary(), &[("MACP_CLEANUP_INTERVAL_SECS", "1")])
+            .await
+            .expect("server must start");
+    let mut client = MacpRuntimeServiceClient::connect(manager.endpoint.clone())
+        .await
+        .expect("connect");
+
+    let owner = "agent://sweep-owner";
+    let target = "agent://sweep-target";
+    let timeout_ms: i64 = 600;
+
+    // Control: 60 s, so no number of 1 s ticks reaches it during this test.
+    let slow_policy = register_handoff_policy(&mut client, owner, 60_000).await;
+    let slow_sid = open_handoff_with_offer(&mut client, owner, target, &slow_policy, "hs").await;
+
+    let policy = register_handoff_policy(&mut client, owner, timeout_ms as u64).await;
+    let offer_sent_at = now_unix_ms();
+    let sid = open_handoff_with_offer(&mut client, owner, target, &policy, "h6").await;
+
+    // Attach after the offer and drain the replay, so anything that follows is
+    // a live publication rather than history.
+    let (tx, mut stream) = open_stream(&mut client, target).await;
+    tx.send(subscribe_frame(&sid, 0))
+        .await
+        .expect("send subscribe");
+    assert_eq!(
+        next_envelope(&mut stream).await.message_type,
+        "SessionStart"
+    );
+    assert_eq!(
+        next_envelope(&mut stream).await.message_type,
+        "HandoffOffer"
+    );
+
+    // No Send call is made from here on. `next_envelope` waits up to 5 s, which
+    // is >= 4 cleanup ticks past the 600 ms deadline; without the sweep wired
+    // into the maintenance loop nothing is ever published and this times out.
+    let live = next_envelope(&mut stream).await;
+    let observed_at = now_unix_ms();
+    assert_eq!(
+        live.message_type, "HandoffAccept",
+        "expected the swept accept live on the stream, got {} ({})",
+        live.message_type, live.message_id
+    );
+    assert_eq!(live.message_id, format!("{IMPLICIT_ACCEPT_PREFIX}h6"));
+    assert_eq!(live.sender, target);
+
+    // The recorded clock is the computed deadline, not the tick that noticed
+    // it. Bounded rather than exact — wall clock over a socket is noisy — but
+    // the upper bound is the point: a tick-stamped entry would land at or after
+    // the observation, which is at least one whole interval later.
+    assert!(
+        live.timestamp_unix_ms >= offer_sent_at + timeout_ms,
+        "D {} must be at or after offer + timeout ({})",
+        live.timestamp_unix_ms,
+        offer_sent_at + timeout_ms
+    );
+    assert!(
+        live.timestamp_unix_ms < observed_at,
+        "D {} must precede the sweep that observed it ({observed_at})",
+        live.timestamp_unix_ms
+    );
+
+    // Synthesis is not resolution: the session is still Open, waiting for its
+    // Commitment.
+    let meta = get_session_as(&mut client, owner, &sid)
+        .await
+        .expect("GetSession transport")
+        .metadata
+        .expect("metadata present");
+    assert_eq!(
+        meta.state, STATE_OPEN,
+        "the swept accept must not resolve the session"
+    );
+
+    // The control offer, on the same server and the same ticks, is untouched.
+    let (tx2, mut slow_stream) = open_stream(&mut client, target).await;
+    tx2.send(subscribe_frame(&slow_sid, 0))
+        .await
+        .expect("send subscribe");
+    assert_eq!(
+        next_envelope(&mut slow_stream).await.message_type,
+        "SessionStart"
+    );
+    assert_eq!(
+        next_envelope(&mut slow_stream).await.message_type,
+        "HandoffOffer"
+    );
+    let quiet = tokio::time::timeout(Duration::from_millis(1_500), slow_stream.message()).await;
+    assert!(
+        quiet.is_err(),
+        "an offer inside its window must not be swept: {quiet:?}"
+    );
+
+    drop(tx);
+    drop(tx2);
+}
+
+// ── 7. the maintenance loop's ordering, pinned ──────────────────────────
+
+/// `MACP_CLEANUP_INTERVAL_SECS` for the ordering test. Any value works; this
+/// one only has to be short enough to keep the test quick.
+const ORDERING_TICK_SECS: i64 = 2;
+
+/// Bound as BOTH the session `ttl_ms` and the policy's
+/// `implicit_accept_timeout_ms`, so the two deadlines land within one offer
+/// round trip of each other. See the test's own doc comment for why that
+/// coincidence is the entire point.
+const ORDERING_TTL_MS: i64 = 2_500;
+
+/// The one line in `src/main.rs` that Phase 12's eager/lazy equivalence rests
+/// on: `sweep_due_synthetic_accepts` is called **after**
+/// `cleanup_expired_sessions`, never before.
+///
+/// This is a tier-1 test on purpose. `src/main.rs` is the binary's entry point
+/// and is not compiled into any in-process test, so the maintenance loop's
+/// call order is only observable through a spawned server — which is exactly
+/// how the invariant went unpinned.
+///
+/// # Why the two deadlines must be simultaneous
+///
+/// The precedence only exists for a session whose TTL **and** implicit-accept
+/// deadline have both lapsed unobserved, and it is only decided when one tick
+/// finds both due. If the TTL lapsed a whole tick earlier, the session is
+/// already `Expired` before the deadline arrives and either call order gives
+/// the same answer — a green test proving nothing. So:
+///
+/// * `implicit_accept_timeout_ms == ttl_ms`, and the offer is accepted
+///   strictly after the `SessionStart` envelope's own `timestamp_unix_ms`
+///   (which is what `ttl_expiry` is computed from, RFC-MACP-0003 §2). `D` is
+///   therefore >= `ttl_expiry` by exactly the offer's round trip — a few
+///   milliseconds, asserted below — so no tick can realistically fall between
+///   them, and the one that finds either finds both;
+/// * `D >= ttl_expiry` rather than the other way round is the safe asymmetry.
+///   A tick landing in the gap would see the TTL lapsed and the deadline not,
+///   which both call orders resolve to "expired, no accept" — vacuous but
+///   green. The inverse gap would red a correct runtime.
+///
+/// # Expected outcome
+///
+/// Correct order: `cleanup_expired_sessions` expires the session, the sweep
+/// then declines it for being non-`Open`, and accepted history ends at the
+/// offer. That is the precedence the lazy path already gives, where
+/// `Precheck::Expired` returns before `synthesize_due_accept` is reached.
+///
+/// Inverted order: the sweep still sees an `Open` session with a lapsed
+/// deadline, appends the synthetic `HandoffAccept`, and only then does cleanup
+/// expire it — so the accept shows up in the replay below and this test reds.
+#[tokio::test]
+async fn a_tick_finding_both_deadlines_due_expires_rather_than_accepting() {
+    let manager = ServerManager::start_with_env(
+        &test_binary(),
+        &[(
+            "MACP_CLEANUP_INTERVAL_SECS",
+            &ORDERING_TICK_SECS.to_string(),
+        )],
+    )
+    .await
+    .expect("server must start");
+    let mut client = MacpRuntimeServiceClient::connect(manager.endpoint.clone())
+        .await
+        .expect("connect");
+
+    let owner = "agent://ordering-owner";
+    let target = "agent://ordering-target";
+
+    let policy = register_handoff_policy(&mut client, owner, ORDERING_TTL_MS as u64).await;
+    let t0 = now_unix_ms();
+    let sid =
+        open_handoff_with_offer_ttl(&mut client, owner, target, &policy, "h7", ORDERING_TTL_MS)
+            .await;
+    let offer_acked_at = now_unix_ms();
+
+    // Non-vacuity guard, not a performance assertion: `offer_acked_at - t0` is
+    // an upper bound on the gap between the two deadlines. A machine so loaded
+    // that this exceeds half a tick could put a tick inside the gap, at which
+    // point the test no longer discriminates and should say so out loud rather
+    // than pass.
+    let gap_bound_ms = offer_acked_at - t0;
+    assert!(
+        gap_bound_ms < ORDERING_TICK_SECS * 500,
+        "setup took {gap_bound_ms} ms, which is too wide a gap between ttl_expiry \
+         and the implicit-accept deadline for this test to discriminate"
+    );
+
+    // Nothing may touch this session until the sweep has had its tick.
+    // `GetSession` and the `StreamSession` subscribe frame both go through
+    // `Runtime::get_session_checked`, which expires a lapsed session itself —
+    // observing early would settle the race before the maintenance loop ever
+    // saw it, and hand back a green test either way round.
+    let wake_at = t0 + ORDERING_TTL_MS + ORDERING_TICK_SECS * 1_000 + 2_500;
+    tokio::time::sleep(Duration::from_millis(
+        (wake_at - now_unix_ms()).max(0) as u64
+    ))
+    .await;
+
+    // Accepted history, in full. The synthetic accept is an ordinary
+    // `Incoming` entry, so if the sweep emitted one it is right here; the
+    // `TtlExpired` entry is `Internal` and never appears on this stream.
+    let (tx, mut stream) = open_stream(&mut client, owner).await;
+    tx.send(subscribe_frame(&sid, 0))
+        .await
+        .expect("send subscribe");
+    let mut history: Vec<String> = Vec::new();
+    while let Ok(frame) = tokio::time::timeout(Duration::from_millis(1_500), stream.message()).await
+    {
+        match frame {
+            Ok(Some(resp)) => match resp.response.expect("response variant") {
+                StreamResp::Envelope(env) => history.push(env.message_type),
+                StreamResp::Error(err) => panic!("stream error: {err:?}"),
+            },
+            // Stream ended: whatever was replayed is all there is.
+            Ok(None) | Err(_) => break,
+        }
+    }
+    assert_eq!(
+        history,
+        vec!["SessionStart".to_string(), "HandoffOffer".to_string()],
+        "a TTL that lapsed alongside the implicit-accept deadline must leave no \
+         synthetic accept in history — the sweep ran before cleanup"
+    );
+
+    let meta = get_session_as(&mut client, owner, &sid)
+        .await
+        .expect("GetSession transport")
+        .metadata
+        .expect("metadata present");
+    assert_eq!(
+        meta.state, STATE_EXPIRED,
+        "session must be Expired, got state {}",
+        meta.state
+    );
+
+    drop(tx);
 }

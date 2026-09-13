@@ -208,7 +208,7 @@ The runtime processes different sessions in parallel but serializes access withi
 
 - **Stream bus**: Each session has a `tokio::sync::broadcast` channel (capacity 256) for delivering accepted envelopes to `StreamSession` subscribers. A separate global broadcast channel handles ambient signals via `WatchSignals`, and a third broadcast channel (capacity 64) carries session lifecycle events (`Created`, `Resolved`, `Expired`) for `WatchSessions` subscribers.
 
-- **Background tasks**: A periodic cleanup task runs every 60 seconds (configurable via `MACP_CLEANUP_INTERVAL_SECS`) to expire sessions that have exceeded their TTL and evict terminal sessions from memory after a retention period.
+- **Background tasks**: A periodic maintenance task runs every 60 seconds (configurable via `MACP_CLEANUP_INTERVAL_SECS`) to expire sessions that have exceeded their TTL, emit mode-computed synthetic envelopes whose deadline has passed (the handoff implicit accept, RFC-MACP-0010 §5.1(2)), and evict terminal sessions from memory after a retention period.
 
 ## Mode registry
 

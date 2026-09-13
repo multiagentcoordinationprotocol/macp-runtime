@@ -221,7 +221,7 @@ Two consequences worth knowing:
 | `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE` | `100` | `ListSessions` page size when the request sends `page_size = 0` |
 | `MACP_LIST_SESSIONS_MAX_PAGE_SIZE` | `1000` | Hard cap a requested `ListSessions` `page_size` is clamped to |
 | `MACP_CHECKPOINT_INTERVAL` | `0` (disabled) | Log entries between checkpoints |
-| `MACP_CLEANUP_INTERVAL_SECS` | `60` | Background TTL cleanup interval in seconds |
+| `MACP_CLEANUP_INTERVAL_SECS` | `60` | Background maintenance interval in seconds: TTL expiry, memory eviction, disk GC, and eager observation of mode-computed deadlines (the handoff implicit accept, RFC-MACP-0010 §5.1(2)) |
 | `MACP_SESSION_RETENTION_SECS` | `3600` | Age (from session start) at which terminal sessions are evicted from **memory**; their durable data is kept |
 | `MACP_SESSION_DISK_RETENTION_SECS` | `0` (keep forever) | Age (from session start) at which terminal sessions' **durable data** is deleted; `0` disables disk GC entirely |
 | `MACP_STRICT_RECOVERY` | off | Set to `1` to fail on any recovery error |
@@ -315,6 +315,8 @@ The runtime provides operational visibility through several mechanisms:
 **Logging** -- All significant events are logged to stderr: session creation, resolution, expiration, recovery results, persistence failures, and rate limit hits. Set `RUST_LOG` to `debug` for detailed request-level logging.
 
 **TTL enforcement** -- Sessions are expired both lazily (on next access) and proactively by a background task running every `MACP_CLEANUP_INTERVAL_SECS`. This ensures expired sessions are cleaned up even if no new messages arrive.
+
+**Mode deadlines** -- The same background task observes deadlines a mode computes, on the same interval. The one in the standards-track modes today is the handoff implicit accept (RFC-MACP-0010 §5.1(2)): an outstanding `HandoffOffer` past its `acceptance.implicit_accept_timeout_ms` is accepted by the runtime, which appends the `HandoffAccept` to accepted history and publishes it to `StreamSession` subscribers. `MACP_CLEANUP_INTERVAL_SECS` is therefore the observation-latency bound on that acceptance -- but only the latency: the recorded `timestamp_unix_ms` is the computed deadline whichever path emits it, so changing the interval never changes permanent history. The deadline is also observed on demand, ahead of the next session-scoped message, so no message is ever evaluated against a stale offer regardless of the interval. The sweep runs *after* TTL expiry within a pass: a session whose TTL and implicit-accept deadline both lapsed unobserved expires rather than accepting, matching the on-demand path's precedence.
 
 **Session eviction** -- Terminal sessions (resolved, expired, or cancelled) are evicted from memory once their age exceeds `MACP_SESSION_RETENTION_SECS` (default one hour), measured from session **start** rather than from when they became terminal. This is on by default and bounds memory usage. Their data remains on disk and can be replayed if needed. Deleting that durable data is a separate, opt-in step governed by `MACP_SESSION_DISK_RETENTION_SECS`, which defaults to `0` -- disk GC does not run at all unless you set it.
 

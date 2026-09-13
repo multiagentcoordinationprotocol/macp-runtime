@@ -138,6 +138,7 @@ Unless `MACP_MEMORY_ONLY=1` is set, the runtime persists session and log snapsho
 | `MACP_BIND_ADDR` | bind address | `127.0.0.1:50051` |
 | `MACP_DATA_DIR` | persistence directory | `.macp-data` |
 | `MACP_MEMORY_ONLY` | disable persistence when set to `1` | unset |
+| `MACP_CLEANUP_INTERVAL_SECS` | background maintenance interval: TTL expiry, eviction, and the eager observation of mode deadlines such as the handoff implicit accept (RFC-MACP-0010 §5.1(2)) | `60` |
 | `RUST_LOG` | `tracing` log level filter (e.g. `info`, `debug`) | unset |
 | `MACP_ALLOW_INSECURE` | allow plaintext transport when set to `1` | unset |
 | `MACP_TLS_CERT_PATH` | PEM certificate for TLS | unset |
