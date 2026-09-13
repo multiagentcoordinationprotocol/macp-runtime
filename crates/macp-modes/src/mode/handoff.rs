@@ -58,7 +58,28 @@ pub enum HandoffDisposition {
     Declined,
 }
 
+/// One handoff offer as it stands in the session's serialized `mode_state`.
+///
+/// **`#[non_exhaustive]`** (0.8.0, `DECISIONS.md` D7). This is persisted
+/// coordination state, and every release that teaches the handoff mode
+/// something new adds a field to it: 0.8.0 adds
+/// [`suspended_ms_at_offer`](Self::suspended_ms_at_offer), one release after
+/// [`offered_at_ms`](Self::offered_at_ms). With all-`pub` fields and no seal,
+/// each of those is a `constructible_struct_adds_field` major break against
+/// any external exhaustive struct literal — and
+/// `cargo semver-checks check-release --workspace --baseline-version 0.7.6`
+/// reports exactly that for `suspended_ms_at_offer`. `release-plz.toml`'s
+/// `semver_check = true` turns it into a blocked release PR for all seven
+/// lockstep crates. Sealing the struct once makes every future field
+/// additive.
+///
+/// Fields stay `pub` and readable; only construction by struct literal from
+/// another crate is refused. Within the workspace nothing changes. The
+/// records are produced by the mode from accepted envelopes — there is no
+/// supported way for a caller to mint one, which is why no constructor is
+/// offered in its place.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct HandoffOfferRecord {
     pub handoff_id: String,
     pub target_participant: String,
@@ -87,14 +108,25 @@ pub struct HandoffOfferRecord {
     pub suspended_ms_at_offer: i64,
 }
 
+/// One `HandoffContext` message as it stands in serialized `mode_state`.
+///
+/// `#[non_exhaustive]` for the reason on [`HandoffOfferRecord`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct HandoffContextRecord {
     pub content_type: String,
     pub context: Vec<u8>,
     pub sender: String,
 }
 
+/// The handoff mode's whole serialized `mode_state`.
+///
+/// `#[non_exhaustive]` for the reason on [`HandoffOfferRecord`]. `Default` is
+/// still derived and still reachable from other crates
+/// (`HandoffState::default()`), because `#[non_exhaustive]` refuses only the
+/// struct-literal form — including `HandoffState { ..Default::default() }`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub struct HandoffState {
     pub offers: BTreeMap<String, HandoffOfferRecord>,
     pub contexts: BTreeMap<String, Vec<HandoffContextRecord>>,

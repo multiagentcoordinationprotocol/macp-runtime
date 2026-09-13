@@ -18,7 +18,21 @@ pub enum BallotChoice {
     Abstain,
 }
 
+/// The accepted `ApprovalRequest` as it stands in serialized `mode_state`.
+///
+/// **`#[non_exhaustive]`** (0.8.0, `DECISIONS.md` D7), for the same reason as
+/// the handoff records: mode-state records are persisted coordination state
+/// that grows a field whenever a mode learns something new, and with all-`pub`
+/// fields and no seal each added field is a `constructible_struct_adds_field`
+/// major that `release-plz.toml`'s `semver_check = true` turns into a blocked
+/// release PR across all seven lockstep crates. Sealing it once makes future
+/// fields additive.
+///
+/// Unlike the handoff records this one **does** have a supported
+/// external construction path, because it is a parameter of the public
+/// [`QuorumMode::effective_threshold`]: use [`Self::new`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ApprovalRequestRecord {
     pub request_id: String,
     pub action: String,
@@ -28,7 +42,39 @@ pub struct ApprovalRequestRecord {
     pub requested_by: String,
 }
 
+impl ApprovalRequestRecord {
+    /// Build a record from its fields.
+    ///
+    /// The runtime builds these itself from an accepted `ApprovalRequest`
+    /// envelope; this exists so the request-level
+    /// [`QuorumMode::effective_threshold`] stays callable from another crate
+    /// now that the struct is `#[non_exhaustive]`. Only
+    /// [`required_approvals`](Self::required_approvals) participates in
+    /// threshold resolution — the rest are carried for the record's own sake.
+    pub fn new(
+        request_id: impl Into<String>,
+        action: impl Into<String>,
+        summary: impl Into<String>,
+        details: Vec<u8>,
+        required_approvals: u32,
+        requested_by: impl Into<String>,
+    ) -> Self {
+        Self {
+            request_id: request_id.into(),
+            action: action.into(),
+            summary: summary.into(),
+            details,
+            required_approvals,
+            requested_by: requested_by.into(),
+        }
+    }
+}
+
+/// One cast ballot as it stands in serialized `mode_state`.
+///
+/// `#[non_exhaustive]` for the reason on [`ApprovalRequestRecord`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct BallotRecord {
     pub request_id: String,
     pub choice: BallotChoice,
@@ -36,7 +82,14 @@ pub struct BallotRecord {
     pub reason: String,
 }
 
+/// The quorum mode's whole serialized `mode_state`.
+///
+/// `#[non_exhaustive]` for the reason on [`ApprovalRequestRecord`]. `Default`
+/// is still derived and still reachable from other crates
+/// (`QuorumState::default()`); `#[non_exhaustive]` refuses only the
+/// struct-literal form, including `QuorumState { ..Default::default() }`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub struct QuorumState {
     pub request: Option<ApprovalRequestRecord>,
     pub ballots: BTreeMap<String, BallotRecord>,
