@@ -572,3 +572,34 @@ Three things that passing tests alone would not have caught:
 
 Phase 11c — the client boundary (reject forged implicit accepts, reserve the `implicit-accept:`
 `message_id` namespace). Blocked on nothing.
+
+### Phase 11c — client boundary — 2026-09-12
+
+- **Verdict:** PASS (fresh Opus verifier, round 1). 1 SHOULD-FIX, 5 NITs, 0 blockers. All applied.
+- **Verifier tier:** fresh Opus, not Fable — per the user's standing no-Fable-at-any-tier
+  instruction, recorded as the substitution the skill asks for. 11c is not itself the one-way
+  door; 11e is.
+- **Rounds:** 1 verify round, but 2 executor passes — the first executor agent **stalled**
+  ("no progress for 600s") mid-edit and left the tree non-compiling (trait method added, `ModeRef`
+  forwarder missing). The orchestrator added the forwarder, checkpointed `b6eaa60`, and handed the
+  tests to a fresh agent. The gate mirror caught the breakage immediately.
+- **Commits:** `b6eaa60` (hook + rules + rustdoc), `d8e0f2f` (14 tests, 898 insertions / **0
+  deletions** — verified independently: every inserted line is inside the one pre-existing
+  `#[cfg(test)]` module in each of the 4 Rust files), `108f985` (verifier follow-ups, docs only).
+- **Gap summary:** the one SHOULD-FIX was a record-accuracy defect, not a code defect. Both the
+  test rustdoc and the ASSUMPTIONS entry overstated what the runtime-level tests pin: the
+  `implicit` rule has **no** runtime-level guard at all, because the reserved-prefix rule fires
+  first. Corrected in `108f985`.
+- **Mutations:** 9 run by the verifier independently, all killed; M1, M3 and M9 each by exactly
+  one test. One was necessarily over-wide (ADDING the hook to `replay_entry`), and was reported as
+  such rather than as a like-for-like reversion.
+- **Load-bearing claims, both independently confirmed:** (1) `d8e0f2f` changed no production line;
+  (2) the hook is unreachable from every replay and recovery path — `replay_entry` and
+  `replay_from_start` are the complete set of non-live dispatch sites and neither is hooked.
+- **11d/11e unblock:** reproduced on the nose. Deleting only `handoff.rs:394`'s `if payload.implicit`
+  arm makes the exact synthetic-shaped entry replay `Ok` to `Resolved`, `h1` `Accepted` by `bob`,
+  `outcome_reason` byte-identical to the rev-≤1 interim string. Both files restored.
+- **Files:** `crates/macp-modes/src/mode/mod.rs`, `mode/handoff.rs`, `mode_registry.rs`, `step.rs`,
+  `src/runtime.rs`, `src/replay.rs`, `ASSUMPTIONS.md`, `plans/defer/follow_ons.md`, the plan.
+- **Shipped?** No — accumulating toward G4, on the verifier's explicit recommendation.
+- **Next:** Phase 11d (mode synthesis contract), plan lines ~1160-1260.
