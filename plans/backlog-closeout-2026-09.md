@@ -1698,7 +1698,55 @@ this list.
 
 #### Phase 11f — wire-level proof: tier-1 coverage
 
-- **Status:** TODO
+- **Status:** DONE (2026-09-13) — `deb3bde`. Fresh-Opus verify: **PASS**, 0 blockers, 4 findings,
+  all four closed before commit. The verifier independently re-ran all eight of the executor's
+  mutations and added two of its own; **no test is vacuous.** Divergences:
+  1. **Five tests, not four.** The plan's fourth criterion set was met, but the verify round found
+     the **live** broadcast unproven: deleting `publish_accepted_envelope(&syn)`
+     (`src/runtime.rs:775`) left **all 124 tier-1 tests green**, because the only subscriber
+     attached after the fact and read replay. Criterion 2 does say "replays", so the scope split
+     was defensible — but `CLAUDE.md`'s freeze-profile text claims these entries reach
+     `StreamSession` subscribers, and no wire test backed that half. Added
+     `synthetic_envelope_reaches_live_stream_subscribers`; it reds under that mutation. No race:
+     the stream is attached and caught up a full 2 s before anything is due.
+  2. **The synthetic's timestamp was asserted NOWHERE at the wire.** The plan excluded
+     *millisecond equality* — correctly — but that left no bound at all, so a runtime stamping the
+     **observation time** instead of the computed deadline (exactly what RFC-MACP-0010 §5.1(3)
+     forbids, and what 11e's kernel contract needs for replay determinism) was invisible to all of
+     tier 1. Now bounded: `offer_sent + timeout <= ts <= commit_sent`, with a deliberate 300 ms gap
+     before the commitment so an observation-time stamp overshoots by more than one RPC hop rather
+     than sub-millisecond. Mutation `deadline := now_ms` reds it by 305 ms.
+  3. **One disclosed vacuity, and it is a redundancy in production, not in the test.** Deleting
+     `validate_client_envelope`'s `implicit` rule alone (`handoff.rs:258-262`) changes nothing
+     observable at the wire: a client implicit accept with a non-reserved `message_id` is refused
+     one layer down by `dispatch_implicit_accept`'s deterministic-id check, and one with a reserved
+     id is already caught by the reserved-prefix rule — both returning `InvalidPayload`, so even
+     the error surface is identical. The rule is **unreachable as a sole guard at the wire**. The
+     behavioural assertion holds (it reds when both guards go); it just cannot be attributed to
+     that one line. Unlike 11c's disclosure, this one is not understated — the verifier re-derived
+     the chain rather than accepting it.
+  4. **The plan's "scratch port 50123" instruction does not apply to tier 1** and was correctly
+     ignored. `ServerManager::start` (`integration_tests/src/server_manager.rs`) already calls
+     `find_free_port()` and reaps only its own PIDs through an atexit hook; hardcoding a port would
+     *introduce* a collision risk across concurrent runs rather than remove one. No server is
+     spawned by this file at all — it uses the shared per-binary harness.
+  5. **Test count is 120 → 125, not the predicted 119 → 123.** The +4 delta the plan predicted was
+     right; the baseline had drifted by one from an earlier phase. The fifth test is divergence 1.
+  6. **One timing bound pointed the wrong way and was hardened.** Every sleep in the file is an
+     *upper* bound that CI load only makes safer, but test 4's `timeout_ms` was a **deadline** —
+     the `SuspendSession` RPC had to land inside it — so load made that one worse, failing hard
+     rather than flakily. Raised 1500 → 3000 ms with proportional sleeps, and re-proven non-vacuous
+     at the larger bound.
+  7. **A mutation carried into the fix round was mis-aimed, and the fixer caught it.** The verify
+     round's `M6b` is a *compound* mutation whose due-ness half does the killing; its stamp half
+     (`unsuspended_deadline(...)` → `offered_at + timeout`) is a semantic **no-op for any
+     never-suspended session** and can never fail a wire assertion however written. The
+     deadline-vs-suspension arithmetic is genuinely covered, in-process, by
+     `handoff_implicit_accept_live.rs::synthetic_timestamp_excludes_a_pause_inside_the_window` —
+     which is where the plan's millisecond-equality exclusion puts it. No coverage hole.
+  8. **`record_participant_activity`'s deliberate omission is now pinned.** It is wire-observable
+     via `SessionMetadata.participant_activity` and deterministic, and Phase 13's changelog is
+     committed to asserting it in prose — it would have shipped as an untested documented claim.
 - **Delivers:** the behavior proven through the real gRPC boundary, in the suite CI runs on every
   PR.
 - **Depends on:** 11e.

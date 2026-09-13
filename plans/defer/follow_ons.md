@@ -357,3 +357,33 @@ nowhere. None is a defect; each is a tripwire we do not have.
    `mode_state` — but the blast surface moved into the id namespace.
 
 Worth doing if someone touches this area again; not worth a commit on its own.
+
+## 19. `integration_tests/` is covered by neither the `fmt` nor the `clippy` CI gate
+
+**Found:** 2026-09-13, during Phase 11f of `plans/backlog-closeout-2026-09.md`.
+
+`ci.yml:131` runs `cargo fmt --all -- --check` and `ci.yml:158` runs
+`cargo clippy --all-targets -- -D warnings`, both from the repo root. `--all` and
+`--all-targets` mean *the root workspace*, and the root manifest **excludes**
+`integration_tests/` (it is a separate cargo workspace with its own `Cargo.lock`). So an entire
+test crate — 23 tier-1 files, plus tiers 2 and 3 and the `macp_integration_tests` helper lib — is
+formatted and linted by nobody.
+
+This is not hypothetical: `cargo fmt --check` inside `integration_tests/` already reports drift in
+`tests/tier1_protocol/test_policy_registry.rs:1016` and `tests/tier1_protocol/test_session_lifecycle.rs:206`
+on `feat/handoff-implicit-accept-rev2`. Neither has ever reddened CI.
+
+Deliberately **not** fixed in Phase 11f: that phase is tests-only and scoped to one new file, and
+sweeping formatting drift across two unrelated files would have polluted a diff whose whole value
+is being auditable. The fix is its own small PR:
+
+1. `cargo fmt --manifest-path integration_tests/Cargo.toml --all -- --check` as a step in the
+   `fmt` job (or the `integration` job, which already has the toolchain warm).
+2. Same for clippy — note this one needs the runtime binary built first, so the `integration` job
+   is the cheaper home.
+3. Fix the two existing diffs in the same PR, since step 1 reds without it.
+
+**Watch for:** the `integration` job is also where `integration_tests/Cargo.lock` is guarded by
+`cargo metadata --locked` (`ci.yml:533`). Adding lint steps there must not reorder or shadow that
+guard — it is the only thing standing between a stale lock and the misleading compile errors
+documented in follow-on 8's history.

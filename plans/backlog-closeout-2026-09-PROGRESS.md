@@ -684,3 +684,47 @@ Phase 11c — the client boundary (reject forged implicit accepts, reserve the `
 - **Shipped?** No — accumulating toward G4 with 11a–11d. The verifier judged it independently
   shippable, but the G4 grouping is unchanged.
 - **Next:** Phase 11f — wire-level tier-1 coverage.
+
+## Phase 11f — wire-level proof: tier-1 coverage (2026-09-13)
+
+- **Commit:** `deb3bde`. Tests-only: one new file
+  (`integration_tests/tests/tier1_protocol/test_handoff_implicit_accept.rs`, 793 lines) plus its
+  one-line `mod.rs` registration. **No production code changed**;
+  `integration_tests/Cargo.lock` byte-unmoved, `cargo metadata --locked` passes.
+- **Verifier tier:** fresh Opus (per the standing no-Fable-at-any-tier instruction; the skill would
+  not have escalated here anyway — this phase is tests-only and reversible). **1 round, PASS**, 0
+  blockers, 4 findings. All four closed by a fixer round before commit.
+- **Every assertion mutation-checked.** Executor ran 8 mutations; the verifier independently
+  re-ran all 8 and added 2 of its own. No test is vacuous.
+- **The two findings the executor missed, both caught by the verifier's own mutations:**
+  - **M8 — the live broadcast was unproven at the wire.** Deleting `publish_accepted_envelope`
+    left all 124 tier-1 tests green: the only subscriber attached after the fact and read replay.
+    `CLAUDE.md`'s freeze-profile text claims these entries reach `StreamSession` subscribers; that
+    half had no wire coverage. Now a fifth test, red under that mutation.
+  - **The synthetic's timestamp was bounded nowhere at the wire.** The plan excluded *millisecond
+    equality* — right — but that left no bound at all, so an observation-time stamp (what §5.1(3)
+    forbids) was invisible to tier 1. Now bounded with a deliberate 300 ms pre-commit gap so the
+    violation overshoots by more than one RPC hop.
+- **One disclosed vacuity, correctly characterised this time.** `validate_client_envelope`'s
+  `implicit` rule is unreachable as a sole guard at the wire — `dispatch_implicit_accept`'s
+  deterministic-id check catches the non-reserved-id case one layer down, the reserved-prefix rule
+  catches the other, and both return `InvalidPayload`. Unlike 11c's disclosure (which was itself
+  wrong and understated the problem), the verifier re-derived this chain rather than accepting it.
+- **A mutation in the fixer brief was mis-aimed and the fixer caught it.** I flattened the verify
+  round's compound `M6b` into its stamp half alone; that half is a semantic **no-op for any
+  never-suspended session**. My error in the brief, not the verifier's report. The
+  deadline-vs-suspension arithmetic is covered in-process by
+  `handoff_implicit_accept_live.rs::synthetic_timestamp_excludes_a_pause_inside_the_window`.
+- **Timing built for a loaded runner.** Every sleep is an upper bound load only makes safer. The
+  one bound that was a *deadline* (suspend must land inside the window) was raised 1500 → 3000 ms
+  with proportional sleeps and re-proven non-vacuous. New file run 5× consecutively: 5/5,
+  18.45–18.54 s.
+- **Plan's port instruction correctly ignored.** Tier 1's `ServerManager::start` already picks a
+  free port and reaps only its own PIDs; hardcoding 50123 would add collision risk, not remove it.
+- **Test count 120 → 125** (plan predicted 119 → 123; the +4 delta was right, the baseline had
+  drifted, and the 5th test is the live-broadcast addition).
+- **CI gate mirror:** ALL GATES PASS.
+- **Shipped?** No — accumulating toward G4. The verifier was explicit that 11f **cannot** stand
+  alone: it tests `synthesize_due_accept`, which does not exist on `main`, so a standalone PR would
+  fail three of its own tests.
+- **Next:** Phase 12 — eager sweep.

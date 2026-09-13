@@ -841,3 +841,44 @@
   it means removing `synthesize_due_accept`'s call site, which strands rev-2 sessions with no
   implicit accept at all; the interim gate must come back in the same commit.
 - **Status:** UNCONFIRMED (2026-09-13)
+
+## Tier-1 bounds the synthetic's deadline timestamp rather than leaving it unasserted
+- **Plan:** Phase 11f of `plans/backlog-closeout-2026-09.md`, verify-round finding 2
+- **Assumed:** the plan's exclusion of *millisecond equality* at the wire was meant to keep tier 1
+  free of clock-sensitive assertions, **not** to leave the timestamp unasserted entirely. The
+  measured consequence of the literal reading: a runtime stamping the observation time instead of
+  the computed deadline — what RFC-MACP-0010 §5.1(3) forbids, and what 11e's kernel contract needs
+  for byte-identical replay — was invisible to every tier-1 test.
+- **Chose:** a *bounded* assertion, `offer_sent_ms + timeout_ms <= synthetic.timestamp_unix_ms <=
+  commit_sent_ms`, with a deliberate 300 ms pause inserted before the commitment. The gap is the
+  load-bearing part: without it an observation-time stamp exceeds the upper bound by only one RPC
+  hop (sub-millisecond after truncation) and the proof is marginal. With it the violating mutation
+  (`deadline := now_ms`) overshoots by 305 ms. The lower bound is exact; the upper carries ~1.4 s
+  of slack for correct behaviour.
+- **Alternatives:** (a) assert nothing, per the literal exclusion — rejected, it leaves a §5.1(3)
+  violation wire-invisible; (b) assert equality against a client-derived deadline — rejected, the
+  offer's *server-side* acceptance clock is not observable to a client, so this reduces to
+  re-deriving it from wall clock, exactly the flake the plan forbids.
+- **Blast radius if wrong:** the 300 ms gap adds 300 ms to every CI run of this suite. If the
+  bound is ever too tight it fails as a hard error with a diagnostic naming the overshoot, not as a
+  silent pass — the safe direction. The millisecond-equality proof remains where the plan put it,
+  in 11e's in-process `tests/handoff_implicit_accept_live.rs`.
+- **Status:** UNCONFIRMED (2026-09-13)
+
+## Phase 11f ships five tier-1 tests where the plan specified four
+- **Plan:** Phase 11f of `plans/backlog-closeout-2026-09.md`, acceptance criteria 1-4
+- **Assumed:** the plan's four-criterion list is a floor, not a ceiling, where the verify round
+  finds a wire-observable claim the four leave unpinned.
+- **Chose:** add `synthetic_envelope_reaches_live_stream_subscribers`. Criterion 2 says the
+  synthetic is *replayed* to a passive subscriber, and the test written for it subscribes after the
+  fact — so deleting `publish_accepted_envelope(&syn)` (`src/runtime.rs:775`) left **all 124**
+  tier-1 tests green. `CLAUDE.md`'s freeze-profile text asserts these entries reach `StreamSession`
+  subscribers; the live half now has wire coverage and reds under that mutation.
+- **Alternatives:** (a) leave it to 11e's in-process `stream_integration.rs`, which does catch the
+  mutation — rejected, the freeze-profile claim is about the transport boundary and deserves a
+  test at it; (b) record it as a follow-on — rejected, the test is deterministic (the stream is
+  attached and caught up a full 2 s before anything is due) and passed 7/7 with no variance.
+- **Blast radius if wrong:** one extra tier-1 test (~2 s) on every PR. If it ever proves flaky the
+  in-process coverage still holds, so deleting it loses the boundary proof but no correctness
+  guarantee.
+- **Status:** UNCONFIRMED (2026-09-13)
