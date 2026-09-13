@@ -61,13 +61,28 @@ pub const MAX_SUSPENSION_CYCLES: usize = 1024;
 ///   envelope timestamp.
 /// - 1 — Handoff implicit-accept times against the runtime acceptance clock
 ///   (`MessageContext::accepted_at_ms`).
-/// - 2 — suspension-corrected Handoff implicit-accept deadline
-///   (RFC-MACP-0010 §5.1(1)): time the session spends `Suspended` no longer
-///   counts toward `implicit_accept_timeout_ms`. The offer record snapshots
-///   `accumulated_suspended_ms` at offer time and the timeout arithmetic
-///   subtracts the suspension accrued since the offer. Revisions 0 and 1 keep
-///   counting suspended time, so their histories replay to the outcome they
-///   were accepted with.
+/// - 2 — the Handoff implicit accept becomes a **recorded event** rather than
+///   an inference, and its deadline excludes suspended time (RFC-MACP-0010
+///   §5.1). Two changes, one revision:
+///   - *The synthetic entry.* Once an outstanding offer's
+///     `implicit_accept_timeout_ms` has elapsed, the runtime appends a
+///     synthetic `HandoffAccept` envelope to accepted history — sender = the
+///     offer's target, `implicit = true`, deterministic `message_id`
+///     `implicit-accept:<handoff_id>`, and both clocks
+///     (`timestamp_unix_ms` / the entry's `received_at_ms`) fixed at the
+///     computed deadline `D`, never at observation time — *before* evaluating
+///     any subsequent message against the offer's acceptance state (§5.1(2)).
+///     Clients may not submit that shape: the reserved id namespace and
+///     `implicit = true` are rejected at the client boundary (§5.1(3)).
+///     Revisions 0 and 1 record no such entry and instead infer the accept
+///     inside `Commitment` handling, so their histories replay to the outcome
+///     they were accepted with; at rev >= 2 a `Commitment` on a history
+///     lacking the synthetic entry fails loudly instead.
+///   - *The suspension-corrected deadline* (§5.1(1)): time the session spends
+///     `Suspended` no longer counts toward `implicit_accept_timeout_ms`. The
+///     offer record snapshots `accumulated_suspended_ms` at offer time and the
+///     timeout arithmetic subtracts the suspension accrued since the offer.
+///     Revisions 0 and 1 keep counting suspended time.
 pub const CURRENT_SEMANTICS_REV: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

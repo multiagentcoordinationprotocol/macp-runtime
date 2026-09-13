@@ -46,9 +46,27 @@ MACP_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test -p macp-storage --features
   of persisted histories — a legacy-log fixture proving old logs still replay
   under their original semantics (see `Session::semantics_rev`).
 - **Never weaken these invariants**: rejected messages don't consume dedup
-  slots or mutate history; authenticated identity derives `sender`; log
-  append is the commit point (acked implies durable on file/RocksDB);
-  signals never touch session state.
+  slots, and the only history a rejected message can cause is a
+  **runtime-originated entry that was already due independently of it**;
+  authenticated identity derives `sender`; log append is the commit point
+  (acked implies durable on file/RocksDB); signals never touch session state.
+
+  That second clause is a deliberate carve-out, not a loophole — read it before
+  "fixing" code that appears to violate it. The dedup half is absolute: a
+  rejected message's own `message_id` is never consumed, so re-sending a
+  corrected message under that id is still accepted. What a rejected message
+  can do is *reveal* something the runtime already owed: the `TtlExpired`
+  internal entry (long-standing — `Precheck::Expired` appends it and mutates
+  `session.state` on a message it then rejects), and from RFC-MACP-0010 §5.1(2)
+  the handoff **synthetic implicit accept**, which the kernel must append to
+  *accepted* history before evaluating any message against the offer's
+  acceptance state. The synthetic is new in kind — it is `EntryKind::Incoming`,
+  so it consumes an accepted ordinal and is published to `StreamSession`
+  subscribers, neither of which `TtlExpired` does — and the seemingly
+  conservative alternative (synthesize only for accepted triggers) is the
+  spec-violating one, because a late explicit `HandoffAccept` would then be
+  evaluated against a still-unaccepted offer and the synthetic would never be
+  emitted at all. See `Runtime::synthesize_due_accept`.
 - **Construct `Session` via `Session::builder`** — core public types are
   `#[non_exhaustive]`.
 - Policy decisions are fail-closed: only an explicit `Allow` proceeds.

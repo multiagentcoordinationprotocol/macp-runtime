@@ -718,3 +718,121 @@
   that **11e's non-`Open` session filter is load-bearing, not hygiene, and needs its own test** —
   recorded in 11e's acceptance criteria.
 - **Status:** UNCONFIRMED (2026-09-12)
+
+## Four handoff-mode tests broke that the plan's "complete" sweep had cleared, and two replay tests besides
+- **Plan:** Phase 11e of `plans/backlog-closeout-2026-09.md` ("**A full sweep of every
+  implicit-accept test in the tree was done at `3c44791` and the list below is complete — do not
+  redo it.**")
+- **Assumed:** the plan's break-list was exhaustive. It is not. Six tests outside it went red on
+  gating the interim in-`Commitment` path at `semantics_rev >= 2`:
+  `implicit_accept_ignores_forged_envelope_timestamp_on_rev1` and
+  `implicit_accept_ignores_backdated_offer_timestamp_on_rev1` (the sweep cleared both as "rev 0/1
+  and keep the interim" — but neither *sets* a revision: both build with `base_session()`, which
+  stamps `CURRENT_SEMANTICS_REV == 2`, and merely `assert!(semantics_rev >= 1)`, so the `on_rev1`
+  in their names describes the claim, not the fixture);
+  `legacy_offer_mode_state_without_suspension_snapshot_replays_unchanged` (same cause, not in the
+  list at all); and in `src/replay.rs`, `replay_rebuilds_suspension_intervals_from_the_log` and
+  `reserved_prefix_entry_replays_at_every_rev`, whose rev-2 arms both drive a `Commitment` through
+  a history with no synthetic entry.
+- **Chose:** resolve each by the plan's own stated rule (pin to rev 1 only where the claim is
+  revision-agnostic or legacy; migrate to the hook flow where the claim is rev-2-specific). The
+  three mode tests are pinned to `semantics_rev = 1` — their claims are the rev-0→1 clock change
+  and a pre-rev-2 `mode_state` shape — and the two forged-timestamp ones gained a rev-2 arm
+  asserting the same forgery is closed through `due_synthetic_envelope`, so the pin does not
+  silently drop coverage at the current revision. The two replay fixtures gained the synthetic
+  entry at their walked deadlines (1_520 and 1_100). `reserved_prefix_entry_replays_at_every_rev`'s
+  rev-2 arm also had to move its squatting `Commitment` off `implicit-accept:h1`, because that id
+  now belongs to the synthetic and a log with two entries sharing one `message_id` is not a history
+  any runtime could write.
+- **Alternatives:** pin all six to rev 1 (cheapest, but `rev2_subtracts_only_suspension_accrued_after_the_offer`
+  and the two replay arms would then pass for the wrong reason — the plan names this hazard
+  explicitly); or delete them (loses legacy coverage the semantics-rev design exists to provide).
+- **Blast radius if wrong:** a rev-2-specific claim silently downgraded to a rev-1 one is exactly
+  the silent-weakening failure 11d criterion 4 was corrected for. If any of the three pins is
+  wrong, the current revision's behavior for that claim is untested and a regression there would
+  ship green. The two forged-timestamp tests are the ones to re-examine first: their rev-2 arms are
+  new and shorter than the rev-1 bodies they sit under.
+- **Status:** UNCONFIRMED (2026-09-13)
+
+## A terminal checkpoint made the live-replay criterion pass with the synthetic entry deleted
+- **Plan:** Phase 11e of `plans/backlog-closeout-2026-09.md`, acceptance criterion 3
+  (`live_history_replays_byte_identically`)
+- **Assumed:** replaying `rt.log_store.get_log(sid)` after the flow re-dispatches the recorded
+  entries. It does not, for a *resolved* session: resolution writes a checkpoint carrying the whole
+  serialized session (`force_insert_checkpoint`, or a compacting backend's single replacement
+  entry), and `replay_session` resumes from the newest checkpoint — deserializing the answer rather
+  than rebuilding it. Measured during mutation verification: with the checkpoint left in, deleting
+  `log_store.append` from `synthesize_due_accept` entirely left criterion 3 **green**.
+- **Chose:** `replay_live_log` strips `EntryKind::Checkpoint` entries before replaying whenever a
+  `SessionStart` survives the strip, and falls back to the log as-is when it does not (a compacting
+  backend's terminal log is one checkpoint and nothing else). After the change the same mutation
+  reds criterion 3.
+- **Alternatives:** assert on the log captured before the resolving message (would not cover the
+  commitment entry); or disable checkpointing in the harness (`MACP_CHECKPOINT_INTERVAL` does not
+  gate the terminal checkpoint, so there is no switch).
+- **Blast radius if wrong:** this is the determinism criterion. If the strip is wrong the criterion
+  is vacuous again and a live/replay fork in `mode_state` — the exact thing `semantics_rev = 2`
+  exists to prevent — would ship green. The fallback branch is the part to re-examine: on a
+  `FileBackend` the resolved-session assertions still run through a checkpoint, so
+  `rejected_trigger_leaves_dedup_intact_and_snapshot_current`'s final replay is checkpoint-based.
+  Its pre-resolution assertions are not, which is why they are made first.
+- **Status:** UNCONFIRMED (2026-09-13)
+
+## Two storage backends in the live harness, chosen for what each one cannot do
+- **Plan:** Phase 11e of `plans/backlog-closeout-2026-09.md`, acceptance criteria 1-9
+- **Assumed:** one harness would serve every criterion. It cannot. `MemoryBackend::save_session` is
+  a no-op and `load_session` always returns `None`, so criterion 9(c) passes vacuously against it;
+  but `MemoryBackend` also lacks `replace_log`, so terminal compaction fails and the full entry
+  list survives resolution, which is what every ordering assertion needs. A `FileBackend` is the
+  mirror image: real snapshots, and a resolved session's log compacted to one checkpoint.
+- **Chose:** `make_harness()` (MemoryBackend) for the log-shape criteria, `make_durable_harness()`
+  (FileBackend over a tempdir) for the two snapshot criteria, and an `assert_log_is_uncompacted`
+  tripwire inside the `incoming()` helper so a future test that picks the wrong one fails with the
+  reason rather than with an empty vec.
+- **Alternatives:** FileBackend everywhere plus capturing the log before each resolving message
+  (fragile, and it cannot cover the commitment entry); or a purpose-built test backend (more code
+  than the tripwire, and it would not match what ships).
+- **Blast radius if wrong:** criterion 9(c) is the one that fails if `synthesize_due_accept`'s
+  `save_session_to_storage` is dropped. Running it on the wrong backend makes the durable-save
+  argument unguarded, and the omission would then surface only as an 11a `mode_state` warn at some
+  later startup.
+- **Status:** UNCONFIRMED (2026-09-13)
+
+## `ModeRef::due_synthetic_envelope` returns `None` for a mode that has vanished
+- **Plan:** Phase 11e of `plans/backlog-closeout-2026-09.md`, Approach (`mode.due_synthetic_envelope(session, now_ms)`)
+- **Assumed:** the kernel could call the hook through its existing mode handle. 11d added the trait
+  method but no `ModeRef` forwarder, so the call did not compile; every other forwarder returns
+  `Result` and propagates `UnknownMode` from `ModeRef::factory`.
+- **Chose:** the forwarder returns `Option<Envelope>` and maps a missing factory to `None` —
+  "nothing is due" is the right answer for a mode that no longer exists, and it matches
+  `synthesize_due_accept`'s own early return for an unregistered mode. `synthesize_due_accept` also
+  returns `Ok(())` rather than `Err(UnknownMode)` when the mode is gone, because `process_message`
+  resolves the mode itself immediately afterwards and would produce that error anyway, with better
+  ordering.
+- **Alternatives:** `Result<Option<Envelope>, MacpError>` (propagates a race that only happens when
+  a mode is unregistered mid-message, and would turn it into a message rejection instead of a
+  no-synthesis).
+- **Blast radius if wrong:** an unregistered-mid-message mode silently skips a due synthesis for
+  that one message; the next message to the same session synthesizes normally, or the session is
+  already unusable because `process_message` will reject on `UnknownMode`.
+- **Status:** UNCONFIRMED (2026-09-13)
+
+## The freeze-profile invariant amended in `CONTRIBUTING.md`, with the carve-out spelled out
+- **Plan:** Phase 11e of `plans/backlog-closeout-2026-09.md`, acceptance criterion 10
+- **Assumed:** naming the carve-out is enough. The risk the plan identifies is the opposite one —
+  a reader who sees the amended rule and treats the carve-out as a bug to be closed.
+- **Chose:** amend the tracked `CONTRIBUTING.md` bullet to "rejected messages don't consume dedup
+  slots, and the only history a rejected message can cause is a **runtime-originated entry that was
+  already due independently of it**", followed by a paragraph carrying all three verified arguments
+  (the shipped `TtlExpired` precedent and the honest delta from it; why "synthesize only for
+  accepted triggers" is the RFC-violating option, not the cautious one; and that the dedup half is
+  preserved exactly). The same three arguments are in `Runtime::synthesize_due_accept`'s rustdoc.
+  The local `CLAUDE.md` mirror is amended too — it is gitignored (`.gitignore:20`), so that edit
+  appears in no diff.
+- **Alternatives:** leave the invariant as written and rely on the code comment (the plan's stated
+  failure mode: the next agent reads the rule, sees code that violates it, and reverts the work).
+- **Blast radius if wrong:** this is the durable half of the change and it has no executable guard
+  — no test can fail if the wording drifts back. If the carve-out is ever judged wrong, reverting
+  it means removing `synthesize_due_accept`'s call site, which strands rev-2 sessions with no
+  implicit accept at all; the interim gate must come back in the same commit.
+- **Status:** UNCONFIRMED (2026-09-13)

@@ -705,6 +705,23 @@ impl<'a> ModeRef<'a> {
         let mode = self.factory()?.create();
         mode.validate_client_envelope(session, env)
     }
+
+    /// The synthesis seam. Forwards to
+    /// [`crate::mode::Mode::due_synthetic_envelope`]; see that method for the
+    /// contract a caller owes the returned envelope.
+    ///
+    /// A mode that has vanished from the registry between lookup and call
+    /// yields `None` rather than an error: "nothing is due" is the correct
+    /// answer for a mode that no longer exists, and the kernel's caller
+    /// already treats an unknown mode as nothing-to-synthesize.
+    pub fn due_synthetic_envelope(
+        &self,
+        session: &macp_core::session::Session,
+        now_ms: i64,
+    ) -> Option<macp_pb::pb::Envelope> {
+        let mode = self.factory().ok()?.create();
+        mode.due_synthetic_envelope(session, now_ms)
+    }
 }
 
 #[cfg(test)]

@@ -1066,6 +1066,35 @@ mod tests {
         }
     }
 
+    /// The synthetic implicit accept a rev >= 2 runtime writes into accepted
+    /// history (RFC-MACP-0010 §5.1(2)), as a log entry.
+    ///
+    /// Every constant §5.1(3) fixes: sender and `accepted_by` = the offer's
+    /// target (`handoff_entry` hardcodes `alice`, so the sender is overridden),
+    /// `implicit = true`, the deterministic `implicit-accept:<handoff_id>` id,
+    /// and **both** clocks at the computed deadline `D` — never at the time
+    /// the runtime happened to observe it. `received_at_ms == D` is what
+    /// replay dispatches the entry with, so a fixture that stamped anything
+    /// else would not be a log this runtime could have written.
+    fn implicit_accept_entry(deadline_ms: i64) -> LogEntry {
+        let payload = crate::handoff_pb::HandoffAcceptPayload {
+            handoff_id: "h1".into(),
+            accepted_by: "bob".into(),
+            reason: "implicit accept (timeout)".into(),
+            implicit: true,
+        }
+        .encode_to_vec();
+        let mut entry = handoff_entry(
+            "implicit-accept:h1",
+            "HandoffAccept",
+            payload,
+            deadline_ms,
+            deadline_ms,
+        );
+        entry.sender = "bob".into();
+        entry
+    }
+
     /// SessionStart + HandoffOffer + Commitment, with the offer/commitment
     /// clocks supplied by the caller so a fixture can make the two clocks
     /// disagree.
@@ -1191,6 +1220,15 @@ mod tests {
     /// replaying identically. The suspended counterpart, where the revisions
     /// diverge, is
     /// `legacy_rev1_handoff_history_with_suspension_still_implicitly_accepts`.
+    ///
+    /// The two arms reach that outcome by **different mechanisms**, which is
+    /// what makes the `mode_state` comparison worth making: rev 1 infers the
+    /// accept inside `Commitment` handling and writes nothing down, while rev
+    /// 2 replays a recorded synthetic `HandoffAccept` entry through ordinary
+    /// dispatch. So this is a byte-identity proof that the synthetic path
+    /// reproduces the interim's `mode_state` exactly — `disposition`,
+    /// `accepted_by`, `outcome_reason`, `offered_at_ms` and
+    /// `suspended_ms_at_offer` all included.
     #[test]
     fn current_rev_handoff_history_replays_identically_to_rev1() {
         let registry = make_registry();
@@ -1203,18 +1241,74 @@ mod tests {
             Some(&policies),
         )
         .unwrap();
-        let current = replay_session(
-            "s1",
-            &handoff_history(macp_core::session::CURRENT_SEMANTICS_REV, 1_050, 1_300),
-            &registry,
-            Some(&policies),
-        )
-        .unwrap();
+
+        // The rev-2 history carries the synthetic entry the rev-2 runtime
+        // would have appended: offer at 1_000 + the 100ms timeout, no
+        // suspension in the window, so D = 1_100.
+        let mut current_entries =
+            handoff_history(macp_core::session::CURRENT_SEMANTICS_REV, 1_050, 1_300);
+        let commitment = current_entries.pop().expect("commitment is last");
+        current_entries.push(implicit_accept_entry(1_100));
+        current_entries.push(commitment);
+
+        let current = replay_session("s1", &current_entries, &registry, Some(&policies)).unwrap();
 
         assert_implicitly_accepted(&current);
         assert_eq!(current.state, rev1.state);
         assert_eq!(current.mode_state, rev1.mode_state);
         assert_eq!(current.resolution, rev1.resolution);
+
+        // The legacy sibling: the same rev-1 entries stay replayable on their
+        // own terms, with no synthetic entry anywhere in the log.
+        assert_implicitly_accepted(&rev1);
+        assert!(!rev1.seen_message_ids.contains("implicit-accept:h1"));
+        // ...and the rev-2 arm reached its outcome through the recorded entry,
+        // not through the retired interim path.
+        assert!(current.seen_message_ids.contains("implicit-accept:h1"));
+    }
+
+    /// The cutover, as a replay claim: at rev 2 a `Commitment` on a history
+    /// that **lacks** the synthetic entry fails loudly, while the identical
+    /// entries at rev 1 still resolve through the interim path.
+    ///
+    /// This is the fail-loud choice made empirical. Leaving the interim
+    /// in-`Commitment` mutation active at rev >= 2 would let a foreign or
+    /// buggy rev-2 log — one whose runtime never wrote the synthetic entry —
+    /// silently resolve on replay, reproducing an outcome its own history does
+    /// not record. That is exactly the divergence `semantics_rev = 2` exists
+    /// to make impossible, so the absence of the entry must be an error, not
+    /// an inference.
+    #[test]
+    fn rev2_commitment_without_synthetic_entry_fails_replay() {
+        let registry = make_registry();
+        let policies = handoff_policy_registry();
+
+        // Offer at 1_000, commitment accepted at 1_300: 300ms elapsed against
+        // the 100ms timeout, so the accept was unambiguously due — and the
+        // history still does not record it.
+        let entries = handoff_history(macp_core::session::CURRENT_SEMANTICS_REV, 1_050, 1_300);
+        assert!(
+            replay_session("s1", &entries, &registry, Some(&policies)).is_err(),
+            "rev 2 must not infer an accept the history does not record"
+        );
+
+        // Control 1: the interim is preserved for legacy. The same entries at
+        // rev 1 resolve.
+        let mut legacy = entries.clone();
+        legacy[0].semantics_rev = 1;
+        let session = replay_session("s1", &legacy, &registry, Some(&policies))
+            .expect("rev 1 keeps the interim in-Commitment implicit accept");
+        assert_implicitly_accepted(&session);
+
+        // Control 2: it is the *missing entry* that fails, not rev 2 itself —
+        // add the synthetic and the same rev-2 history resolves.
+        let mut with_synthetic = entries.clone();
+        let commitment = with_synthetic.pop().expect("commitment is last");
+        with_synthetic.push(implicit_accept_entry(1_100));
+        with_synthetic.push(commitment);
+        let session = replay_session("s1", &with_synthetic, &registry, Some(&policies))
+            .expect("rev 2 resolves once the synthetic entry is in history");
+        assert_implicitly_accepted(&session);
     }
 
     /// The same three handoff entries with a suspend/resume pair spliced
@@ -1273,20 +1367,33 @@ mod tests {
     ///
     /// Offer at 1_000, suspended 1_050..1_300 (250ms), commitment at 1_450 —
     /// 450ms elapsed, 200ms of it unsuspended, past the 100ms timeout.
+    ///
+    /// The accept is a recorded entry from rev 2 on, so the history carries
+    /// the synthetic at the walked deadline: 50ms of unsuspended time before
+    /// the pause, then the remaining 50ms after it, i.e. D = 1_350. Note the
+    /// synthetic's `received_at_ms` (1_350) is **greater** than nothing that
+    /// follows it and **less** than the commitment's — but it sits after the
+    /// `SessionResume` entry stamped 1_300, so the log stays in emission
+    /// order. Nothing sorts by `received_at_ms` in any case; replay and
+    /// accepted ordinals are positional.
     #[test]
     fn rev2_handoff_history_implicitly_accepts_on_unsuspended_time() {
         let registry = make_registry();
         let policies = handoff_policy_registry();
-        let entries = handoff_history_with_suspension(
+        let mut entries = handoff_history_with_suspension(
             macp_core::session::CURRENT_SEMANTICS_REV,
             1_050,
             1_300,
             1_450,
         );
+        let commitment = entries.pop().expect("commitment is last");
+        entries.push(implicit_accept_entry(1_350));
+        entries.push(commitment);
 
         let session = replay_session("s1", &entries, &registry, Some(&policies)).unwrap();
         assert_eq!(session.accumulated_suspended_ms, 250);
         assert_implicitly_accepted(&session);
+        assert!(session.seen_message_ids.contains("implicit-accept:h1"));
     }
 
     /// Sibling of [`handoff_history_with_suspension`] carrying **two**
@@ -1357,12 +1464,19 @@ mod tests {
     /// The rev-2 positive path across two pauses. Commitment at 1_600: 600ms
     /// since the offer, 180ms of it unsuspended (50 + 30 + 100), which clears
     /// the 100ms timeout even after both pauses are excluded.
+    ///
+    /// D is the *walked* deadline across both pauses: 50ms before the first,
+    /// 30ms between them, 20ms after the second — so D = 1_520, not the naive
+    /// `1_000 + 100 + 420`.
     #[test]
     fn rev2_handoff_history_accepts_on_unsuspended_time_across_two_pauses() {
         let registry = make_registry();
         let policies = handoff_policy_registry();
-        let entries =
+        let mut entries =
             handoff_history_with_two_suspensions(macp_core::session::CURRENT_SEMANTICS_REV, 1_600);
+        let commitment = entries.pop().expect("commitment is last");
+        entries.push(implicit_accept_entry(1_520));
+        entries.push(commitment);
 
         let session = replay_session("s1", &entries, &registry, Some(&policies)).unwrap();
         assert_eq!(session.accumulated_suspended_ms, 420);
@@ -1389,8 +1503,13 @@ mod tests {
             vec![(1_050, 1_300), (1_330, 1_500)]
         );
 
-        let rev2 =
+        let mut rev2 =
             handoff_history_with_two_suspensions(macp_core::session::CURRENT_SEMANTICS_REV, 1_600);
+        // Rev 2 needs the recorded synthetic accept for the commitment to
+        // resolve; D = 1_520, the walked deadline asserted below.
+        let commitment = rev2.pop().expect("commitment is last");
+        rev2.push(implicit_accept_entry(1_520));
+        rev2.push(commitment);
         let session = replay_session("s1", &rev2, &registry, Some(&policies)).unwrap();
         assert_eq!(
             session.suspension_intervals,
@@ -1429,8 +1548,30 @@ mod tests {
         // timeout on the acceptance clock, which is what rev >= 1 uses.
         let mut entries = handoff_history(semantics_rev, 1_050, 1_300);
         entries[0].message_id = "implicit-accept:squatted-at-start".into();
-        entries[2].message_id = "implicit-accept:h1".into();
+        entries[2].message_id = squatted_commitment_id(semantics_rev).into();
+        if semantics_rev >= 2 {
+            // From rev 2 the commitment needs the recorded synthetic accept
+            // (D = 1_100) in front of it. That entry owns
+            // `implicit-accept:h1`, which is why the commitment squats a
+            // *different* suffix in the same reserved namespace at this
+            // revision: a log with two entries sharing one `message_id` is not
+            // a history any runtime could have written, since the synthetic's
+            // id holds the dedup slot before the commitment is ever processed.
+            let commitment = entries.pop().expect("commitment is last");
+            entries.push(implicit_accept_entry(1_100));
+            entries.push(commitment);
+        }
         entries
+    }
+
+    /// The reserved-namespace id the squatting commitment carries, per
+    /// revision. See [`handoff_history_with_reserved_message_ids`].
+    fn squatted_commitment_id(semantics_rev: u32) -> &'static str {
+        if semantics_rev >= 2 {
+            "implicit-accept:squatted-at-commit"
+        } else {
+            "implicit-accept:h1"
+        }
     }
 
     /// A log whose entries carry ids the client boundary rejects replays
@@ -1460,7 +1601,9 @@ mod tests {
             assert!(session
                 .seen_message_ids
                 .contains("implicit-accept:squatted-at-start"));
-            assert!(session.seen_message_ids.contains("implicit-accept:h1"));
+            assert!(session
+                .seen_message_ids
+                .contains(squatted_commitment_id(rev)));
         }
 
         // Control: the identical ids are rejected on the live path at the
@@ -1525,22 +1668,7 @@ mod tests {
         // deterministic id, and both clocks at the computed deadline D (offer
         // 1_000 + 100ms timeout, no suspension in the window).
         let commitment = entries.pop().expect("commitment is the last entry");
-        let synthetic = crate::handoff_pb::HandoffAcceptPayload {
-            handoff_id: "h1".into(),
-            accepted_by: "bob".into(),
-            reason: "implicit accept (timeout)".into(),
-            implicit: true,
-        }
-        .encode_to_vec();
-        let mut entry = handoff_entry(
-            "implicit-accept:h1",
-            "HandoffAccept",
-            synthetic,
-            1_100,
-            1_100,
-        );
-        entry.sender = "bob".into();
-        entries.push(entry);
+        entries.push(implicit_accept_entry(1_100));
         entries.push(commitment);
 
         let session = replay_session("s1", &entries, &registry, Some(&policies))

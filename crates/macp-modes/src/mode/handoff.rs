@@ -585,15 +585,34 @@ impl HandoffMode {
                         // log-recorded, so replay is deterministic either way.
                         let now_ms = clock_ms;
                         let timeout = rules.acceptance.implicit_accept_timeout_ms as i64;
-                        for offer in state.offers.values_mut() {
-                            if offer.disposition == HandoffDisposition::Offered
-                                && offer.offered_at_ms > 0
-                                && Self::implicit_accept_elapsed_ms(session, offer, now_ms)
-                                    >= timeout
-                            {
-                                offer.disposition = HandoffDisposition::Accepted;
-                                offer.accepted_by = Some(offer.target_participant.clone());
-                                offer.outcome_reason = Some(IMPLICIT_ACCEPT_REASON.into());
+                        // The interim path, retired at rev >= 2. From rev 2 the
+                        // kernel synthesizes the accept into accepted history
+                        // (`Runtime::synthesize_due_accept`) before this
+                        // `Commitment` is ever dispatched, so the offer is
+                        // already `Accepted` in `state` by the time we get
+                        // here; applying it a second time here would make the
+                        // live session's `mode_state` depend on a mutation
+                        // replay cannot reproduce.
+                        //
+                        // The consequence at rev >= 2 is deliberately
+                        // fail-loud: a `Commitment` on a history that *lacks*
+                        // the synthetic entry now falls through to
+                        // `commitment_ready` below and is rejected
+                        // `InvalidPayload`. Leaving the interim active would
+                        // instead let replay of a foreign or buggy rev-2 log
+                        // silently resolve — hiding exactly the divergence
+                        // this revision exists to make impossible.
+                        if session.semantics_rev < 2 {
+                            for offer in state.offers.values_mut() {
+                                if offer.disposition == HandoffDisposition::Offered
+                                    && offer.offered_at_ms > 0
+                                    && Self::implicit_accept_elapsed_ms(session, offer, now_ms)
+                                        >= timeout
+                                {
+                                    offer.disposition = HandoffDisposition::Accepted;
+                                    offer.accepted_by = Some(offer.target_participant.clone());
+                                    offer.outcome_reason = Some(IMPLICIT_ACCEPT_REASON.into());
+                                }
                             }
                         }
                     }
@@ -1614,12 +1633,24 @@ mod tests {
         );
     }
 
+    /// The **interim** in-`Commitment` implicit accept, pinned at the last
+    /// revision that has it.
+    ///
+    /// "Timeout set + enough time elapsed ⇒ auto-accepted at commitment" is
+    /// the interim path's claim, and it stays exactly true at rev <= 1. At
+    /// rev >= 2 the accept is a recorded event synthesized by the kernel
+    /// *before* the commitment is dispatched
+    /// (`Runtime::synthesize_due_accept`), and the interim mutation is gated
+    /// off — so the rev-2 successor of this test is the live-runtime
+    /// `lazy_synthesis_enters_history_before_the_trigger`, plus
+    /// `implicit_accept_outcome_via_hook` at this level.
     #[test]
     fn implicit_accept_timeout_fires() {
         // RFC-MACP-0010: when implicit_accept_timeout_ms policy is set and
         // sufficient time has elapsed, the offer is auto-accepted at commitment.
         let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
         let mut session = base_session();
+        session.semantics_rev = 1;
         session.participants = vec!["owner".into(), "target".into()];
         session.policy_definition = Some(macp_core::policy::PolicyDefinition {
             policy_id: "auto-accept".into(),
@@ -1661,14 +1692,20 @@ mod tests {
         }
     }
 
-    /// Semantics rev >= 1: the implicit-accept timeout is measured against the
+    /// Semantics rev 1: the implicit-accept timeout is measured against the
     /// runtime acceptance clock, so an initiator post-dating the Commitment
     /// envelope can no longer finalize an offer the target never accepted.
+    ///
+    /// Pinned to rev 1 because the interim in-`Commitment` path this drives is
+    /// gated off at rev >= 2. The same forgery is closed at rev 2 by a
+    /// different mechanism — the kernel, not the envelope, supplies `now_ms`
+    /// to `due_synthetic_envelope` — which the rev-2 arm at the end asserts so
+    /// the claim is not silently dropped by the pin.
     #[test]
     fn implicit_accept_ignores_forged_envelope_timestamp_on_rev1() {
         let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
         let mut session = base_session();
-        assert!(session.semantics_rev >= 1, "builder default is current rev");
+        session.semantics_rev = 1;
         session.participants = vec!["owner".into(), "target".into()];
         session.policy_definition = Some(auto_accept_policy());
         let result = mode
@@ -1695,6 +1732,21 @@ mod tests {
         let ctx = macp_core::mode::MessageContext::new(offer_time + 200);
         let commit = mode.on_message_at(&session, &commit_env, &ctx).unwrap();
         assert!(matches!(commit, ModeResponse::PersistAndResolve { .. }));
+
+        // Rev 2: the same forgery, closed by the synthesis seam instead. The
+        // envelope clock is nowhere in `due_synthetic_envelope`'s inputs, so
+        // the far-future `commit_env.timestamp_unix_ms` above cannot make the
+        // accept due; only the kernel-supplied `now_ms` can.
+        let mut rev2 = session.clone();
+        rev2.semantics_rev = 2;
+        assert!(
+            mode.due_synthetic_envelope(&rev2, offer_time + 50)
+                .is_none(),
+            "50ms of kernel time must not make the accept due, whatever the envelope claims"
+        );
+        assert!(mode
+            .due_synthetic_envelope(&rev2, offer_time + 200)
+            .is_some());
     }
 
     /// Legacy sessions (rev 0) keep the envelope-timestamp clock through the
@@ -1731,11 +1783,15 @@ mod tests {
     /// offer time is the runtime acceptance clock, so BACK-dating the
     /// HandoffOffer envelope no longer forges elapsed time past the
     /// implicit-accept timeout.
+    ///
+    /// Pinned to rev 1 for the same reason as its commitment-side twin: the
+    /// interim path is gated off at rev >= 2. The rev-2 arm at the end keeps
+    /// the claim covered through the synthesis seam.
     #[test]
     fn implicit_accept_ignores_backdated_offer_timestamp_on_rev1() {
         let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
         let mut session = base_session();
-        assert!(session.semantics_rev >= 1);
+        session.semantics_rev = 1;
         session.participants = vec!["owner".into(), "target".into()];
         session.policy_definition = Some(auto_accept_policy());
         let result = mode
@@ -1763,6 +1819,20 @@ mod tests {
         let ctx = macp_core::mode::MessageContext::new(now + 200);
         let commit = mode.on_message_at(&session, &commit_env, &ctx).unwrap();
         assert!(matches!(commit, ModeResponse::PersistAndResolve { .. }));
+
+        // Rev 2: the recorded `offered_at_ms` is still the acceptance clock,
+        // so the back-dated offer envelope cannot make the synthetic accept
+        // due early either.
+        let mut rev2 = session.clone();
+        rev2.semantics_rev = 2;
+        assert!(mode.due_synthetic_envelope(&rev2, now + 50).is_none());
+        assert_eq!(
+            mode.due_synthetic_envelope(&rev2, now + 200)
+                .expect("due once 100ms of kernel time has elapsed")
+                .timestamp_unix_ms,
+            now + 100,
+            "the deadline is measured from the acceptance clock, not the forged envelope"
+        );
     }
 
     /// The offer snapshots the session's cumulative suspension so the rev >= 2
@@ -1797,6 +1867,11 @@ mod tests {
     /// existed must still decode (serde default) and must still reach the
     /// outcome it was accepted with — the implicit-accept timeout fires off
     /// the recorded `offered_at_ms` exactly as before.
+    ///
+    /// Driven at `semantics_rev = 1`, which is what such a `mode_state`
+    /// actually belongs to: the field was added by rev 2, so no rev-2 session
+    /// can have written this shape. The commitment half therefore exercises
+    /// the interim path, which is exactly the path that wrote it.
     #[test]
     fn legacy_offer_mode_state_without_suspension_snapshot_replays_unchanged() {
         let legacy_state = serde_json::json!({
@@ -1825,6 +1900,7 @@ mod tests {
         // commitment resolves.
         let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
         let mut session = base_session();
+        session.semantics_rev = 1;
         session.policy_definition = Some(auto_accept_policy());
         session.mode_state = serde_json::to_vec(&legacy_state).unwrap();
         let commit_env = env("owner", "Commitment", commitment_payload());
@@ -1899,6 +1975,67 @@ mod tests {
             .map_err(|e| e.to_string())
     }
 
+    /// The rev-2 sibling of [`implicit_accept_outcome`]: the same sequence,
+    /// but with the kernel's synthesis step in front of the commitment.
+    ///
+    /// It is a faithful in-mode model of `Runtime::synthesize_due_accept` —
+    /// ask `due_synthetic_envelope` with the trigger's clock, and if something
+    /// is due, authorize it and dispatch it through `on_message_at` with
+    /// `accepted_at_ms` equal to the envelope's own `timestamp_unix_ms` —
+    /// minus the durable append, which has no meaning at this level. The live
+    /// kernel wiring is proved end-to-end in
+    /// `tests/handoff_implicit_accept_live.rs`.
+    ///
+    /// Returning the *same* `Result<bool, String>` shape as
+    /// [`implicit_accept_outcome`] is deliberate: the rev-2 rows of a table
+    /// can then be compared against the rev-1 rows directly.
+    fn implicit_accept_outcome_via_hook(
+        suspended_after_offer_ms: i64,
+        commit_at: i64,
+    ) -> Result<bool, String> {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = base_session();
+        session.semantics_rev = 2;
+        session.policy_definition = Some(auto_accept_policy());
+        let result = mode
+            .on_session_start(&session, &env("owner", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+
+        let mut offer_env = env("owner", "HandoffOffer", make_offer("h1", "target"));
+        offer_env.timestamp_unix_ms = OFFER_TIME_MS;
+        let offer_ctx = macp_core::mode::MessageContext::new(OFFER_TIME_MS);
+        let result = mode
+            .on_message_at(&session, &offer_env, &offer_ctx)
+            .unwrap();
+        apply(&mut session, result);
+
+        if suspended_after_offer_ms > 0 {
+            session.suspend(OFFER_TIME_MS).unwrap();
+            session
+                .resume(OFFER_TIME_MS + suspended_after_offer_ms)
+                .unwrap();
+        }
+
+        // The synthesis seam, in the kernel's order: before the trigger.
+        if let Some(syn) = mode.due_synthetic_envelope(&session, commit_at) {
+            mode.authorize_sender(&session, &syn)
+                .map_err(|e| e.to_string())?;
+            let syn_ctx = macp_core::mode::MessageContext::new(syn.timestamp_unix_ms);
+            let response = mode
+                .on_message_at(&session, &syn, &syn_ctx)
+                .map_err(|e| e.to_string())?;
+            apply(&mut session, response);
+        }
+
+        let mut commit_env = env("owner", "Commitment", commitment_payload());
+        commit_env.timestamp_unix_ms = commit_at;
+        let ctx = macp_core::mode::MessageContext::new(commit_at);
+        mode.on_message_at(&session, &commit_env, &ctx)
+            .map(|r| matches!(r, ModeResponse::PersistAndResolve { .. }))
+            .map_err(|e| e.to_string())
+    }
+
     /// RFC-MACP-0010 §5.1(1): time the session spends `Suspended` must not
     /// count toward `implicit_accept_timeout_ms`. Rev 2 honors that; revs 0
     /// and 1 kept counting it and MUST keep counting it, or histories they
@@ -1930,6 +2067,13 @@ mod tests {
     /// every revision agrees, and a suspension that still leaves the timeout
     /// cleared on live time alone accepts under rev 2 as well — including
     /// exactly at the boundary, since the comparison stays `>=`.
+    ///
+    /// The rev-2 rows run through [`implicit_accept_outcome_via_hook`], not
+    /// the plain helper: from rev 2 the accept is only ever reached by the
+    /// kernel's synthesis step, so the table is a claim about the hook's
+    /// arithmetic. The plain helper is kept alongside as the cutover
+    /// assertion — at rev 2, *without* the synthetic entry, the commitment
+    /// never resolves, whatever the arithmetic says.
     #[test]
     fn rev2_matches_legacy_arithmetic_when_nothing_was_suspended() {
         for (suspended, commit_at, expected) in [
@@ -1942,9 +2086,18 @@ mod tests {
             (201, OFFER_TIME_MS + 300, Err("InvalidPayload".to_string())),
         ] {
             assert_eq!(
-                implicit_accept_outcome(2, suspended, commit_at),
+                implicit_accept_outcome_via_hook(suspended, commit_at),
                 expected,
-                "rev 2 (suspended={suspended}, commit_at={commit_at})"
+                "rev 2 via the synthesis hook (suspended={suspended}, commit_at={commit_at})"
+            );
+            // The cutover: the interim in-`Commitment` mutation is gone at
+            // rev 2, so the identical sequence WITHOUT the hook never resolves
+            // — including the rows the hook accepts.
+            assert_eq!(
+                implicit_accept_outcome(2, suspended, commit_at),
+                Err("InvalidPayload".to_string()),
+                "rev 2 must not implicitly accept without the synthetic entry \
+                 (suspended={suspended}, commit_at={commit_at})"
             );
             if suspended == 0 {
                 assert_eq!(
@@ -1983,7 +2136,25 @@ mod tests {
             .unwrap();
         apply(&mut session, result);
 
-        // 200ms of live time, nothing suspended since the offer: accepts.
+        // 200ms of live time, nothing suspended since the offer: the accept is
+        // due. Driven through the synthesis seam because that is the only
+        // place the rev-2 accept happens now — pinning this to rev 1 instead
+        // would make it pass for the wrong reason (rev 1 subtracts nothing at
+        // all, so `suspended_ms_at_offer` — the field this test exists to
+        // justify — would stop being exercised).
+        let syn = mode
+            .due_synthetic_envelope(&session, OFFER_TIME_MS + 200)
+            .expect("the 5s pause ended before the offer and must not push the deadline out");
+        assert_eq!(
+            syn.timestamp_unix_ms,
+            OFFER_TIME_MS + 100,
+            "the pre-offer pause must not move the deadline"
+        );
+        let syn_ctx = macp_core::mode::MessageContext::new(syn.timestamp_unix_ms);
+        let response = mode.on_message_at(&session, &syn, &syn_ctx).unwrap();
+        apply(&mut session, response);
+
+        // ...and with it in history the commitment resolves.
         let commit_env = env("owner", "Commitment", commitment_payload());
         let ctx = macp_core::mode::MessageContext::new(OFFER_TIME_MS + 200);
         let commit = mode.on_message_at(&session, &commit_env, &ctx).unwrap();
