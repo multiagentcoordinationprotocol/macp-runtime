@@ -3028,9 +3028,19 @@ mod tests {
     ///     only guard once 11d teaches dispatch to accept the shape.
     /// (b) `implicit = true` with the **reserved** `message_id` and the
     ///     correct sender — `InvalidEnvelope`, which only the boundary can
-    ///     produce (dispatch would say `InvalidPayload`). That is the
-    ///     mutation-sensitive half, and the envelope is byte-shaped exactly
-    ///     like the one the runtime will synthesize from 11e.
+    ///     produce (dispatch would say `InvalidPayload`). The envelope is
+    ///     byte-shaped exactly like the one the runtime will synthesize
+    ///     from 11e.
+    ///
+    /// Measured, **neither half pins the `implicit` rule**: (b) is killed by
+    /// the *reserved-prefix* rule, which fires first and returns
+    /// `InvalidEnvelope` whatever the flag says, so deleting the `implicit`
+    /// rule leaves this whole test green. The `implicit` rule's only
+    /// non-vacuous guard is the mode-level unit test
+    /// `handoff::tests::client_implicit_accept_rejected_at_the_boundary`.
+    /// What this test pins is the runtime-level *error surface* at rev 2 —
+    /// which is the criterion's requirement, and which 11d must keep in view
+    /// when it restructures the dispatch arm.
     #[tokio::test]
     async fn client_implicit_accept_rejected_through_the_runtime() {
         let rt = make_runtime();

@@ -592,15 +592,18 @@
 ## Keeping a runtime-level assertion that is double-guarded (and saying so) rather than dropping it
 - **Plan:** Phase 11c of `plans/backlog-closeout-2026-09.md` (the client boundary)
 - **Assumed:** 11c criterion 2 asks for the `implicit: true` rejection "plus the runtime-level
-  path". Measured, the ordinary-`message_id` half of that runtime assertion is **vacuous for the
-  hook** today: mutation M2 (deleting the hook's `implicit` rule) leaves
-  `client_implicit_accept_rejected_through_the_runtime` green, because `handle_message` rejects
-  the same envelope with the same `InvalidPayload`.
-- **Chose:** keep it, and label the vacuity in the test's own rustdoc, because what it pins is the
-  criterion's actual requirement (the rev-2 error *surface* through `Send` does not shift) and it
-  becomes the only guard the moment 11d teaches dispatch to accept the shape. The
-  mutation-sensitive half lives in the same test: the reserved-`message_id` variant reports
-  `InvalidEnvelope`, which only the boundary can produce.
+  path". Measured, **the whole runtime-level assertion is vacuous for the `implicit` rule** —
+  not merely its ordinary-`message_id` half, as this entry first recorded. Deleting the hook's
+  `implicit` rule (the verifier's mutation M6) leaves every runtime-level test green: the
+  ordinary-id half because `handle_message` rejects the same envelope with the same
+  `InvalidPayload`, and the reserved-id half because the *reserved-prefix* rule fires first and
+  returns `InvalidEnvelope` regardless of the flag. The `implicit` rule's only non-vacuous guard
+  anywhere is the mode-level unit test `client_implicit_accept_rejected_at_the_boundary`.
+- **Chose:** keep it, and label the vacuity accurately in the test's own rustdoc, because what it
+  pins is the criterion's actual requirement (the rev-2 error *surface* through `Send` does not
+  shift) and because it is the tripwire on exactly the dispatch arm 11d is specified to rewrite.
+  The first version of this entry called the reserved-id half "the mutation-sensitive half"; that
+  was wrong, and the rustdoc said so too. Both are corrected.
 - **Alternatives:** delete the ordinary-id assertion as vacuous (loses the error-surface pin and
   the 11d tripwire); or fake isolation with a test-only mode override (tests the override, not the
   runtime).

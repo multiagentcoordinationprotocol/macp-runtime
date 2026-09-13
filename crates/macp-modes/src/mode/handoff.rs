@@ -25,6 +25,12 @@ use std::collections::BTreeMap;
 /// own synthesis would be silently skipped and the session could never reach a
 /// `Commitment`. The parties able to do it are the session's own initiator and
 /// the offerer, so this is fail-fast conformance, not attack mitigation.
+///
+/// The match is **case-sensitive**, which is sufficient rather than sloppy: the
+/// synthesized id is always built lowercase from this const plus the client's
+/// own `handoff_id`, so a differently-cased squat (`Implicit-Accept:h1`) can
+/// never collide with the id the runtime will later insert and so can never
+/// consume its dedup slot. It is accepted as an ordinary client id.
 pub const IMPLICIT_ACCEPT_MESSAGE_ID_PREFIX: &str = "implicit-accept:";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

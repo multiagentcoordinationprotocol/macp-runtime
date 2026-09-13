@@ -1036,7 +1036,34 @@ this list.
 
 #### Phase 11c — the client boundary: reject forged implicit accepts and reserve the id namespace
 
-- **Status:** TODO
+- **Status:** DONE (2026-09-12) — `b6eaa60` (hook + rules) and `d8e0f2f` (tests, zero production
+  lines). Fresh-Opus verify: **PASS**, 1 SHOULD-FIX + 5 NITs, all applied in the follow-up commit.
+  Divergences from the plan as written:
+  1. **Criterion 1 was split into two tests, not one.** The plan specified a single
+     reserved-namespace test; the executor added a second for the `process_session_start` call
+     site. Verifier mutation M1 (deleting only that call site) reds *only* that test, so the
+     split is what makes the start-path hook non-vacuously covered. Keep the split.
+  2. **The runtime-level `implicit` assertion is entirely vacuous, not half vacuous.** The plan
+     assumed the reserved-id variant would isolate the hook. It does not: the reserved-prefix
+     rule fires first and returns `InvalidEnvelope` whatever the flag says, so deleting the
+     `implicit` rule leaves every runtime test green. The rule's only non-vacuous guard is the
+     mode-level unit test. The assertion is kept as the rev-2 error-surface pin and as the 11d
+     tripwire; the test rustdoc and `ASSUMPTIONS.md` now state this accurately (they first
+     overstated it).
+  3. **`step::validate_message` — call site (3) protects nothing in this binary.** It was added
+     per the plan, but `step()` has zero non-test callers here, so it is a library-consumer
+     courtesy, not a runtime boundary. The only live boundary is the two explicit `Runtime` call
+     sites. Stated in the trait rustdoc.
+  4. **11d/11e confirmed unblocked, empirically.** Deleting only the `if payload.implicit` arm at
+     `handoff.rs:394` makes the exact synthetic-shaped log entry 11e will write replay `Ok` to a
+     `Resolved` session, with `outcome_reason` byte-identical to the rev-≤1 interim string.
+     Reproduced independently by the verifier; both files restored.
+  5. A 14th test (`phases_compose_like_step_for_durable_consumers`) landed beyond the 13 the
+     commit message enumerates, and no mutation kills it. Harmless scope creep in a tests-only
+     commit; recorded rather than reverted.
+  6. **Not independently shipped** — accumulates toward G4, per the verifier. It commits a test
+     that deliberately asserts a known-wrong-direction outcome 11d must flip, has zero wire
+     coverage until 11f, and would otherwise split one `Mode` trait change across two releases.
 - **Delivers:** at rev ≥ 2, no client-originated envelope can carry `implicit: true` or a
   `message_id` in the `implicit-accept:` namespace. This is an **RFC MUST** (RFC-MACP-0010 §5.1(3):
   "A client-submitted `HandoffAccept` carrying `implicit: true` MUST be rejected") and cheap
@@ -1135,6 +1162,15 @@ this list.
   - Scope is handoff sessions only (the hook lives on the mode): a decision-mode client using an
     `implicit-accept:` id is unaffected — squatting is per-session, so cross-mode reservation buys
     nothing.
+  - A reserved-id `SessionStart` aimed at an **already existing** session returns
+    `SessionAlreadyExists`, not `InvalidEnvelope`, because the duplicate-start early return
+    (`src/runtime.rs:427-433`) precedes the hook at `:500`. Same accepted-oddity class as the
+    dedup-before-hook case above: it mutates nothing, and reordering would change rev ≤ 1
+    duplicate-start semantics. (Found by the phase verifier, not the plan.)
+  - The prefix match is **case-sensitive**, and that is sufficient rather than an oversight: the
+    synthetic id is always built lowercase from the const plus the client's `handoff_id`, so a
+    differently-cased squat cannot collide with the id the runtime will insert and cannot consume
+    its dedup slot. Documented on the const rather than tested.
   - The mode's in-`handle_message` rejection (`crates/macp-modes/src/mode/handoff.rs:331-337`)
     **stays untouched in this sub-phase** (belt and suspenders until 11d restructures it).
 - **Acceptance criteria:**

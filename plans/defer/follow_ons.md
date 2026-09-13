@@ -315,3 +315,20 @@ Worth doing, in rough priority order:
    claimed* rather than incidentally.
 3. Audit every other test whose name claims checkpoint coverage for the same trap —
    a bound `policy_version` with a `None` registry is silent, not an error.
+
+## 17. `process_message` instantiates the mode three times per envelope
+
+Found by the Phase 11c verifier (NIT-5). `authorize_sender`, `validate_client_envelope`
+and `on_message_at` each go through `ModeRef`, and each call does its own
+`factory()?.create()` (`crates/macp-modes/src/mode_registry.rs:682`, `:692`, `:706`) —
+so an accepted message now builds three mode instances where it previously built two.
+
+This is a pre-existing pattern, not something 11c introduced; 11c only made the count
+one higher. Mode construction is cheap (no I/O, no allocation beyond the struct), so
+this is not a live performance problem, and no benchmark shows it. But it is free to
+fix: hoist one instance in `Runtime::process_message` and pass it to all three, or give
+`ModeRef` an internal cached instance.
+
+Deliberately **not** done inside G4 — it touches the hot path for a non-functional
+reason, and G4's diff is already carrying a trait change plus a one-way door. Do it as
+its own commit with its own before/after measurement, or not at all.
