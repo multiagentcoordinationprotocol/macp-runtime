@@ -2,6 +2,25 @@
 
 This page documents the runtime's implementation of each coordination mode -- the internal state machines, phase progression rules, and implementation-specific behavior. For mode specifications, message types, authority matrices, and protocol-level semantics, see the [protocol modes documentation](https://www.multiagentcoordinationprotocol.io/docs/modes) and the individual mode RFCs.
 
+## Mode-state records are sealed
+
+Each mode keeps its working state in `session.mode_state`, a serialized blob whose Rust shape is a small set of `pub` records. Those records are **`#[non_exhaustive]` as of 0.8.0**, so a crate outside `macp-modes` can read and match their fields but cannot construct one by struct literal:
+
+| Crate | Sealed records |
+|---|---|
+| `macp-modes` | `HandoffOfferRecord`, `HandoffContextRecord`, `HandoffState`, `ApprovalRequestRecord`, `BallotRecord`, `QuorumState` |
+| `macp-storage` | `PersistedSession` |
+
+This is a **breaking change for external callers** that built any of these by exhaustive struct literal, and it was taken deliberately. It is not, however, what makes 0.8.0 a major release: 0.8.0 was **already** forced to be one. These records grow a field whenever a mode learns something new, and with all-`pub` fields and no seal each addition is a `constructible_struct_adds_field` major break of its own. Against the published 0.7.6, `cargo semver-checks check-release --workspace` reports exactly two such breaks in this release -- `HandoffOfferRecord.suspended_ms_at_offer` and `PersistedSession.suspension_intervals` -- and neither is avoidable: they are the state the suspension-corrected implicit-accept deadline has to persist. Since `release-plz.toml` sets `semver_check = true` and all seven crates move in one `version_group`, either one alone blocks the release PR for the whole family.
+
+Given a major was being spent regardless, it was spent once to end the class rather than twice on the same two fields: sealing the records makes every future mode-state field additive.
+
+What still works unchanged: reading fields, mutating fields on a value you were handed, pattern-matching with `..`, `Default::default()` on `HandoffState` and `QuorumState`, and `PersistedSession::from(&Session)` followed by field assignment. What does not: `HandoffState { offers, contexts }` and its siblings, including the `{ ..Default::default() }` form.
+
+One record has a supported replacement, because it is a parameter of a public API rather than pure serialization detail: build an `ApprovalRequestRecord` with `ApprovalRequestRecord::new(..)`, which keeps `QuorumMode::effective_threshold(&Session, &ApprovalRequestRecord)` callable from another crate. The rest are produced by the runtime from accepted envelopes and have no supported construction path.
+
+The enums in the same modules -- `HandoffDisposition`, `BallotChoice`, `ApprovalThreshold` -- are deliberately **not** sealed. A `#[non_exhaustive]` enum forces a `_` arm in every external `match`, which would silently reinterpret a future variant as one of today's; for a governance bar that is the exact defect class issue #145 was. Adding a variant is already the major lint `enum_variant_added`, so the release PR catches it either way.
+
 ## Decision Mode
 
 **Source**: `crates/macp-modes/src/mode/decision.rs` | **Identifier**: `macp.mode.decision.v1`
@@ -55,6 +74,47 @@ The handoff mode manages responsibility transfer through serial offers. Its inte
 
 **Late context**: `HandoffContext` messages are accepted even after the offer they reference has been accepted or declined. The protocol allows this as supplementary documentation -- additional context that may be useful to the accepting agent after the transfer.
 
+### Implicit accept (RFC-MACP-0010 §5.1)
+
+When the session's bound policy sets `acceptance.implicit_accept_timeout_ms` to a positive value, an outstanding offer that goes unanswered for that long is accepted **by the runtime**, on the target's behalf. This is a **deliberate semantics change**, not a bugfix, and it is gated on the session's `semantics_rev` -- see [Revision gating](#revision-gating) below.
+
+At `semantics_rev >= 2` the accept is a **recorded event**, not an inference. The runtime appends a synthetic `HandoffAccept` envelope to accepted history:
+
+| Field | Value |
+|---|---|
+| `sender` | the offer's `target_participant` |
+| `message_type` | `HandoffAccept` |
+| `message_id` | `implicit-accept:<handoff_id>` -- deterministic, not random |
+| `payload.implicit` | `true` |
+| `payload.reason` | `implicit accept (timeout)` |
+| `timestamp_unix_ms` | the **computed deadline**, never the time the runtime noticed it |
+
+Four consequences a client must be ready for:
+
+- **It is ordinary accepted history.** The entry consumes an accepted ordinal and is published to `StreamSession` subscribers, so a client can receive a message that no participant sent. It also replays: rebuilding the session from the log produces the same entry at the same ordinal.
+- **Suspended time does not count.** Time the session spends `SUSPENDED` is excluded from the timeout (§5.1(1)). The offer record snapshots the session's accumulated suspended time when the offer is made, and the deadline walk subtracts the pauses that fall inside the window -- not the pauses that began after it, which is why a `SuspendSession` issued after the deadline cannot move a timestamp already fixed.
+- **It lands before the message that revealed it.** The deadline is observed on the background maintenance pass (see [Background maintenance](API.md#background-maintenance)) *and* on demand, immediately before the next session-scoped message is evaluated. §5.1(2) requires the synthetic entry to be in history before any later message is judged against the offer's acceptance state -- so a late explicit `HandoffAccept` (or `HandoffDecline`) meets an offer already in `Accepted` disposition and is refused with `INVALID_ENVELOPE`, rather than quietly succeeding against an offer the runtime had not got around to settling. This holds **even when that later message is itself rejected**: the synthetic entry was due independently of it. The trigger's own `message_id` is still not consumed, so re-sending a corrected message under the same id is accepted normally.
+- **`participant_activity` does not move.** `SessionMetadata.participant_activity` reports the target's `message_count` and `last_seen` unchanged, deliberately. The runtime does not credit a participant with activity they did not perform, and replay never records activity for any entry kind -- crediting it live would fork the live session from what the log rebuilds.
+
+**Clients may not forge one.** At `semantics_rev >= 2` two rules apply at the client boundary, before the mode sees the message:
+
+1. any client envelope in the handoff session whose `message_id` starts with `implicit-accept:` is rejected with `INVALID_ENVELOPE` -- **every** message type, including `SessionStart`, `Commitment` and `HandoffContext`, because squatting the id a future offer would use would consume the runtime's own dedup slot and strand the session short of commitment. The match is case-sensitive; `Implicit-Accept:h1` is an ordinary client id and can never collide with the lowercase id the runtime builds;
+2. a `HandoffAccept` whose payload decodes with `implicit = true` is rejected (§5.1(3)).
+
+Both carry the wire code `INVALID_ENVELOPE`. The runtime distinguishes the two internally (`MacpError::InvalidEnvelope` vs. `MacpError::InvalidPayload`) but there is no distinct `INVALID_PAYLOAD` code in the RFC vocabulary -- both map to `INVALID_ENVELOPE`, so a client cannot tell them apart by code alone.
+
+### Revision gating
+
+Every session records the `semantics_rev` it was started under, and the runtime honors that revision for the session's whole life so an already-persisted history replays to the outcome it was accepted with (RFC-MACP-0003 §1). The revision is bound at `SessionStart`; there is no way to move an existing session forward.
+
+| `semantics_rev` | Implicit-accept behavior |
+|---|---|
+| `0` | Inferred inside `Commitment` handling, timed against the client-supplied `Envelope.timestamp_unix_ms`. Suspended time counts. |
+| `1` | Same inference, timed against the runtime's acceptance clock instead of the client's timestamp. Suspended time counts. |
+| `2` (current) | The synthetic history entry described above. Suspended time is excluded. Client-submitted implicit accepts and reserved ids are refused. |
+
+Sessions started by this release are rev 2. Sessions restored from a log written by an earlier release keep their recorded revision and continue to resolve through the interim in-`Commitment` path, with no synthetic entry and no reserved-id restriction. **Rollback is not a revert**: once a rev-2 session has written a synthetic accept, an older binary replays that history differently, so the recovery path for a bad 0.8.0 deployment is to roll forward.
+
 ## Quorum Mode
 
 **Source**: `crates/macp-modes/src/mode/quorum.rs` | **Identifier**: `macp.mode.quorum.v1`
@@ -69,6 +129,8 @@ The quorum mode tracks approval requests and ballots against a threshold. Its in
 |----------|---------|
 | `QuorumMode::effective_threshold_for_session(&Session)` | `Result<Option<ApprovalThreshold>, MacpError>` |
 | `QuorumMode::effective_threshold(&Session, &ApprovalRequestRecord)` | `ApprovalThreshold` |
+
+Prefer the session-level form. The request-level form exists for a caller that already holds a record; build one with `ApprovalRequestRecord::new(request_id, action, summary, details, required_approvals, requested_by)` -- as of 0.8.0 the record is `#[non_exhaustive]` (see [Mode-state records are sealed](#mode-state-records-are-sealed)) and the struct-literal form no longer compiles outside `macp-modes`.
 
 The session-level form decodes the accepted request out of `session.mode_state` itself. Each layer of its return type answers exactly one question:
 

@@ -6,9 +6,17 @@ released with all seven crates on crates.io.
 
 Closed since the 2026-07-05 review, and marked in place in `follow_ons.md`:
 item **7** (built-in recommended policies — shipped as the reserved
-`policy.std.` profiles in `crates/macp-policy/src/defaults.rs`) and item 8's
-tier-1 suspend/resume coverage bullet (`integration_tests/tests/tier1_protocol/test_suspend_resume.rs`).
-Items 1–6 and the rest of item 8 remain open and unblocked.
+`policy.std.` profiles in `crates/macp-policy/src/defaults.rs`), item 8's
+tier-1 suspend/resume coverage bullet (`integration_tests/tests/tier1_protocol/test_suspend_resume.rs`),
+item **1** (the handoff implicit-accept timer — shipped in G4 and released as
+0.8.0), and item **12** for the records it names (the handoff and quorum
+mode-state records plus `PersistedSession` are `#[non_exhaustive]` as of
+0.8.0; the item's general rule and its named residue stay open).
+
+Items 3–6 and the rest of item 8 remain open and unblocked. **Item 2's record
+is stale and has not been rewritten**: its `watch_sessions` half was shipped by
+`perf(server): bound the WatchSessions initial sync` (#161), which the item's
+text predates — re-check it against `src/server.rs` before picking it up.
 
 Two kinds of remaining work live here:
 

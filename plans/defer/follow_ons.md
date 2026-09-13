@@ -7,16 +7,46 @@ release. Distinct from `README.md`'s hard-blocked table.
 
 Ordered by value:
 
-## 1. Handoff implicit-accept timer (runtime implementation)
-Spec contract merged (RFC-0010 §5.1, spec PR #50); `macp-proto` 0.1.6 ships
-`HandoffAcceptPayload.implicit`. Implement the synthetic accept: timing from
-the offer's recorded acceptance time excluding suspended time, eager
-sweep + lazy-before-commitment emission into accepted history,
-runtime-emitted envelope (sender = target, `implicit: true`, deterministic
-`message_id` `implicit-accept:<handoff_id>`), reject client-submitted
-implicit accepts. Replaces the A6 interim in-commitment-handler check; gate
-on a new `semantics_rev` (=2) per the established migration pattern so
-rev≤1 histories replay under the interim semantics. Master plan §2.5.
+## 1. Handoff implicit-accept timer (runtime implementation) — **DONE** (2026-09-13)
+Shipped in G4 (`plans/backlog-closeout-2026-09.md` phases 9–13, released as
+0.8.0). Every clause below landed as written:
+
+- **Synthetic accept in accepted history** — `Runtime::synthesize_due_accept`
+  (`src/runtime.rs`) appends an `EntryKind::Incoming` entry, so it consumes an
+  accepted ordinal and is published to `StreamSession` subscribers.
+- **Timing from the offer's recorded acceptance time, excluding suspended
+  time** — `HandoffOfferRecord.offered_at_ms` plus
+  `suspended_ms_at_offer`, with the deadline walked through
+  `Session::unsuspended_deadline` so a pause *after* the deadline cannot move
+  a timestamp already fixed.
+- **Eager sweep + lazy emission** — `Runtime::sweep_due_synthetic_accepts` on
+  the background maintenance loop (`src/main.rs`, ordered *after*
+  `cleanup_expired_sessions` so TTL expiry keeps precedence), plus the
+  before-dispatch call in `process_message`. Not "before commitment"
+  specifically: before **any** session-scoped message, per §5.1(2).
+- **Runtime-emitted envelope** — sender = the offer's target, `implicit: true`,
+  `message_id` = `implicit-accept:<handoff_id>`, `timestamp_unix_ms` and the
+  entry's `received_at_ms` both fixed at the computed deadline.
+- **Client-submitted implicit accepts rejected** —
+  `HandoffMode::validate_client_envelope` refuses `implicit = true`
+  (`InvalidPayload`) and reserves the whole `implicit-accept:` `message_id`
+  prefix for every message type (`InvalidEnvelope`).
+- **`semantics_rev = 2` gate** — `macp_core::session::CURRENT_SEMANTICS_REV`;
+  rev ≤ 1 sessions keep the A6 interim in-`Commitment` inference and their
+  wire behavior is byte-identical to earlier releases.
+
+Two consequences that are deliberate and documented rather than oversights, so
+they are not re-opened as defects: the target's `message_count` in
+`SessionMetadata.participant_activity` does **not** advance for the synthetic
+entry (replay records activity for no entry kind, so crediting it live would
+fork live from replay), and a *rejected* trigger message can now leave a
+runtime-originated entry in accepted history — the freeze-profile carve-out
+argued in full on `Runtime::synthesize_due_accept`. The dedup half of that
+invariant is untouched: the rejected message's own `message_id` stays free.
+
+Docs: `docs/modes.md` (Handoff → Implicit accept, Revision gating),
+`docs/API.md` (Send → reserved `message_id` namespace; Background
+maintenance), `docs/deployment.md`, `docs/architecture.md`.
 
 ## 2. `watch_sessions` initial-sync memory bound
 Narrowed. The `list_sessions` half of this item **shipped**: `page_size`
@@ -183,19 +213,56 @@ Phase 11 of `plans/backlog-closeout-2026-09.md` already flags this as
 theoretical one, and item 10 above is a concrete path to it. Worth closing with
 Phase 11 rather than deferring again.
 
-## 12. Mode-state records are exhaustively constructible public API
-Being resolved in G4 as part of the 0.8.0 release — see `DECISIONS.md` D7.
-Recorded here so the general rule survives that one release: **any new field on
-a `pub` mode-state record is a major semver break**, because these structs have
-all-pub fields and (until D7) no `#[non_exhaustive]`. `release-plz.toml` sets
-`semver_check = true`, so this blocks the release PR rather than failing
-quietly, and the single `version_group` moves all seven crates together.
+## 12. Mode-state records are exhaustively constructible public API — **RESOLVED for the sealed set** (2026-09-13, 0.8.0)
+Resolved in G4 as part of the 0.8.0 release — see `DECISIONS.md` D7.
+**The general rule is recorded here because it still governs every record not
+in the table below**: any new field on a `pub` record with all-pub fields and
+no `#[non_exhaustive]` is a `constructible_struct_adds_field` **major** semver
+break. `release-plz.toml` sets `semver_check = true`, so it blocks the release
+PR rather than failing quietly, and the single `version_group` moves all seven
+crates together.
 
-After D7 lands, the handoff and quorum records carry `#[non_exhaustive]` and
-future fields are additive. `macp-storage`'s `PersistedSession` and the
-remaining mode-state records were **not** audited as part of D7 — worth a sweep
-with `cargo semver-checks check-release --workspace` before the next release
-that adds persisted state anywhere.
+Sealed in 0.8.0 (`#[non_exhaustive]`), so **fields added to these from 0.8.0
+forward are additive**:
+
+| Crate | Records |
+|---|---|
+| `macp-modes` | `HandoffOfferRecord`, `HandoffContextRecord`, `HandoffState`, `ApprovalRequestRecord`, `BallotRecord`, `QuorumState` |
+| `macp-storage` | `PersistedSession` |
+
+`PersistedSession` was the "not audited as part of D7" sibling this item
+flagged. **The audit in Phase 13 found it was not a sibling at all — it is one
+of the two breaks 0.8.0 was already forced to take.** Against the published
+0.7.6, `cargo semver-checks check-release --workspace --baseline-version 0.7.6`
+reports exactly two `constructible_struct_adds_field` failures:
+
+```
+macp-modes    field HandoffOfferRecord.suspended_ms_at_offer  crates/macp-modes/src/mode/handoff.rs:87
+macp-storage  field PersistedSession.suspension_intervals     crates/macp-storage/src/registry.rs:50
+```
+
+D7 was written believing both were on `HandoffOfferRecord`. Sealing
+`PersistedSession` therefore spends nothing extra — the major it would have
+forced is the major already being taken — and it removes the *next* one.
+
+**Still open — the residue, deliberately left:**
+
+- `macp-storage`'s `PersistedRoot` (`registry.rs`) is unsealed. It mirrors the
+  proto `Root` message, which is `{uri, name}` and has not changed, so it is
+  not in the growing class. Seal it if a third field ever appears.
+- The **enums** in the sealed modules — `HandoffDisposition`, `BallotChoice`,
+  `ApprovalThreshold` — are unsealed **on purpose**, not by omission. A
+  `#[non_exhaustive]` enum forces a `_` arm in external `match`es, which
+  silently reinterprets a future variant as one of today's; for
+  `ApprovalThreshold` that is the exact defect class issue #145 was. Adding a
+  variant is already the major lint `enum_variant_added`. Do not "finish the
+  sweep" by sealing these.
+- The decision, proposal, task and multi_round mode-state records were **not**
+  swept. They did not gain fields in 0.8.0, so no break was forced and none was
+  spent on them; the next release that adds persisted state to one of them will
+  face the choice this item describes. Re-run
+  `RUSTC_WRAPPER="" cargo semver-checks check-release --workspace
+  --baseline-version <last published>` before that release.
 
 ## 13. `validate_replay_consistency` still ignores `ttl_expiry` and `resolution`
 Narrowed by Phase 11a of `plans/backlog-closeout-2026-09.md`, which added
