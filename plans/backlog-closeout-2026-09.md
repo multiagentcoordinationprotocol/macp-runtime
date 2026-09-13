@@ -1871,7 +1871,65 @@ this list.
 
 ### Phase 13 — G4 docs, API hygiene and close-out
 
-- **Status:** TODO
+- **Status:** DONE (2026-09-13) — `92b1088` + `bab1608`, gaps closed in `44f993c` + `bb2bd6f`.
+  Fresh-Opus verify: **GAPS** (4 items), all closed. Divergences:
+  1. **The plan's and D7's premise that both forced majors sit on `HandoffOfferRecord` is FALSE.**
+     Verified twice independently against the published 0.7.6 `.crate` sources: `macp-modes 0.7.6`
+     already carries `offered_at_ms`, `macp-storage 0.7.6` already carries `semantics_rev` and
+     `max_suspend_ms`. This branch adds exactly **one** field to each of **two different structs in
+     two different crates** — `HandoffOfferRecord.suspended_ms_at_offer` and
+     `PersistedSession.suspension_intervals`. Sealing `PersistedSession` was never optional reach;
+     its major is one of the two 0.8.0 is already taking. D7 amended in place.
+  2. **Sealing alone would have made a documented public API uncallable.**
+     `QuorumMode::effective_threshold` takes an `&ApprovalRequestRecord`, and
+     `tests/quorum_threshold_public_api.rs` exists to pin its external reachability (issue #146 — a
+     downstream runtime had re-implemented it because it was private, and a mirror of a governance
+     rule drifts). That test lives in `macp-runtime` and built the record by exhaustive literal.
+     Hence `ApprovalRequestRecord::new`.
+  3. **That constructor's first shape re-opened the door the seal had just closed** — six
+     positional fields, so the struct became additive but the only supported external construction
+     path did not. Narrowed to `(request_id, required_approvals)`; the rest stay `pub` and are
+     assigned on a `mut` binding, which `#[non_exhaustive]` does not restrict. A builder was
+     rejected: six more public methods, each its own semver commitment needing a sibling per future
+     field, re-creating on the builder the exact growth surface the seal removed from the struct,
+     for a record with no cross-field invariants. A `# Stability contract` doc pins the arity.
+  4. **The class was half-ended, which is the worst of both.** D7's own argument is that spending
+     the break once to *end* the class beats spending it again. The first pass sealed 7 and left 17
+     in the same class — and `ProposalState.rejections`, `ProposalState.phase`,
+     `MultiRoundState.convergence_type` and `.converged` all carry `#[serde(default)]`, proving the
+     class grows and that each would be a major today. Sealed the remaining 11 `macp-modes`
+     records (7 → 18) at no extra cost, since 0.8.0 is already taken. Audited first: `git grep`
+     across the workspace, `tests/` and the separate `integration_tests/` workspace (a path-dep
+     consumer — the true external-caller position) finds construction only inside the defining file.
+  5. **`macp-core`'s five decision types deliberately NOT sealed**, on evidence rather than
+     caution: they are argument types of the public `PolicyEvaluator` trait — the seam a consumer
+     driving `macp-core` + `macp-modes` with its own evaluator sits on — and they are already
+     literal-constructed **across a crate boundary in production code**
+     (`decision.rs:31,165,191,214,239`). `DecisionState` derives no `Default`, so sealing it with
+     no constructor would leave a downstream implementor unable to build a fixture for their own
+     trait impl. A constructor design task, not a free sweep. Recorded as open in D7 and item 12.
+  6. **Enums stay unsealed** — verified correct. A `#[non_exhaustive]` enum forces a `_` arm that
+     silently reinterprets a future variant, which for a governance bar is issue #145's defect
+     class exactly, and `enum_variant_added` is already a major that `semver_check = true` blocks.
+  7. **Criteria 1 and 3 cannot be satisfied by this diff at all.** `release-plz.toml` has no
+     `[changelog]` section, no `commit_parsers` and no `cliff.toml`, so the stock git-cliff template
+     is in force — and it renders **subject lines only**, never commit bodies. The repo
+     squash-merges (no merge commits on `main` since #63; PR #159 renders as one line). So the
+     changelog text **is the PR title**, and these criteria are satisfied at merge time. Recorded
+     in the PROGRESS entry with the exact titles.
+  8. **A verifier claim was overturned empirically by the fixer.** The verify round said
+     cargo-semver-checks v0.50.0 has no inherent-method arity lint (reading
+     `function_parameter_count_changed.ron`, which indeed does not traverse impls) and that a future
+     arity widening would ship silently. A two-crate fixture proved otherwise:
+     **`method_parameter_count_changed` exists and fires.** The narrowing stands on its other two
+     grounds; the recorded reasoning was corrected rather than inherited.
+  9. **`cargo semver-checks` exits 100, not 1**, and `cmd | tail` reports `tail`'s status — which
+     is why two earlier runs read as exit 0. CI must assert the **failure list**, unpiped or under
+     `set -o pipefail`. Final state: exit 100, one lint only, `struct_marked_non_exhaustive`, 18
+     structs, nothing else; the other five crates report no update required.
+  10. **Branch merged with `origin/main` through `49ba49e` (v0.7.6) before the final runs.** The
+      earlier semver readings compared 0.7.6 → 0.7.5, a version *downgrade*. Merge, not rebase —
+      this branch already carries merges from main and nothing needed force-pushing.
 - **Delivers:** docs, changelog, `follow_ons.md` item 1 closed, `#[non_exhaustive]` on the
   mode-state records, release cut **as 0.8.0**.
 - **Depends on:** Phase 12.

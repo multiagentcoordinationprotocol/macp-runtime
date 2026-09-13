@@ -770,3 +770,37 @@ Phase 11c — the client boundary (reject forged implicit accepts, reserve the `
   `#[non_exhaustive]` and the 0.8.0 major, because `release-plz.toml` sets `semver_check = true`
   and G4 already carries the `constructible_struct_adds_field` break.
 - **Next:** Phase 13 — G4 docs, API hygiene and close-out (the last phase in the plan).
+
+## Phase 13 — G4 docs, API hygiene and close-out (2026-09-13) — FINAL PHASE
+
+- **Commits:** `92b1088` (seal) + `bab1608` (docs), gaps closed in `44f993c` + `bb2bd6f`.
+  Kept as separate commits per the plan, so Phase 11's behaviour change stays bisectable from the
+  API change.
+- **Verifier tier:** fresh Opus (standing no-Fable instruction; this phase IS the one-way door the
+  skill would have escalated for). **Verdict GAPS, 4 items** — the only GAPS verdict in G4, and it
+  landed on exactly the phase that cannot be undone.
+- **What the one-way-door scrutiny actually bought:**
+  - A **false premise in `DECISIONS.md` D7 and the plan**, caught by reading the published 0.7.6
+    `.crate` sources rather than trusting the record: the two forced majors sit on two different
+    structs in two different crates, not both on `HandoffOfferRecord`.
+  - A constructor whose six positional fields **re-opened the door the seal had just closed.**
+  - The class **half-ended** — 7 sealed, 17 left, with `#[serde(default)]` proving the remainder
+    grows. Now 18 sealed; the next persisted field is additive instead of forcing 0.9.0.
+- **A verifier claim overturned by the fixer, empirically.** The verify round concluded
+  cargo-semver-checks v0.50.0 has no inherent-method arity lint and a future widening would ship
+  silently past the release gate. It had read `function_parameter_count_changed.ron`, which does
+  not traverse impls — but `method_parameter_count_changed` is a separate lint that does, proven
+  with a two-crate fixture. **I relayed the wrong version of this before it was checked.** The
+  narrowing stands on its other grounds.
+- **`macp-core`'s decision vocabulary left unsealed on evidence**, not caution: those five types are
+  `PolicyEvaluator` argument types, already literal-constructed across a crate boundary in
+  production, and `DecisionState` has no `Default` — sealing it without a constructor would strand
+  a downstream evaluator implementor with no way to build a test fixture.
+- **Criteria 1 and 3 are merge-time work.** Stock git-cliff template renders subject lines only,
+  never bodies, and the repo squash-merges — so the changelog line *is* the PR title.
+- **Merged `origin/main` through `49ba49e` (v0.7.6)** before the final runs; earlier semver readings
+  had been comparing 0.7.6 → 0.7.5, a downgrade.
+- **Gates:** ALL GATES PASS; tier 1 127/127; both lockfiles byte-unmoved; `cargo test --doc -p
+  macp-modes` run by hand (CI's `--all-targets` skips doctests).
+- **Next:** end-of-plan closeout — full regression, then `/reconcile` on the accumulated
+  `UNCONFIRMED` `ASSUMPTIONS.md` entries, then ship G4.
