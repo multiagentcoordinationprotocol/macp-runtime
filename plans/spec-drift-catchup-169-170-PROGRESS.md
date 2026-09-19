@@ -99,7 +99,7 @@ Nothing in the runtime is wrong. The spec moved four commits; exactly two files 
 |---|---|---|
 | 1 | Classify a drift report before escalating it, and keep what is suppressed visible | **DONE** |
 | 2 | Bump `SPEC_REV` to `0de1fab2` | **DONE** |
-| 3 | Pin the vacuous participation floor with tests, and document it | **TODO** |
+| 3 | Pin the vacuous participation floor with tests, and document it | **DONE** |
 
 **PR strategy:** one PR, three commits (per the plan's own recommendation — three disjoint
 file sets, no shared symbol, any phase droppable independently). Branch:
@@ -114,6 +114,64 @@ one unrelated pre-existing docs commit correcting stale phase-status tables in
 **Issues:** **#170** closes on Phase 2 (and would also close on Phase 1 alone, since a `non-actionable` verdict triggers the existing `!= 'yes'` close step — they are alternative closers, both wanted). **#169** needs all three: ask 1 is Phase 2, ask 2 is Phase 1, and the "Separately, and worth more than the above" section is Phase 3.
 
 ## Log
+
+- 2026-09-19 (Phase 3 executed and verified, branch `ci/spec-drift-catchup-169-170`):
+  Six tests added exactly as named in the plan — `evaluator.rs`:
+  `a_zero_participation_floor_makes_require_vote_quorum_inert_at_schema_version_3` (16-combo
+  spelling×direction×roster sweep plus the empty-tally-at-v3 row),
+  `a_nonzero_participation_floor_still_gates_at_schema_version_3`,
+  `a_zero_floor_does_not_waive_the_legacy_empty_tally_arm_at_schema_version_2`,
+  `check_quorum_is_met_by_every_spelling_of_a_zero_floor` (4 types × 4 voter counts × 4
+  participant counts, 64 cells), `check_quorum_percentage_and_count_arithmetic`; `registry.rs`:
+  `register_every_zero_floor_spelling_succeeds`. Plus a `docs/policy.md` bullet after the
+  "`voting.quorum` is inert on its own" bullet, and an extended `voting.quorum.value` table
+  row. No production code touched — every line of the two Rust diffs sits inside
+  `#[cfg(test)]`.
+
+  **Plan gap found and closed during execution:** acceptance criterion 5 names a
+  `test 5's ("percentage", 0.0, 0, 0)` cell that the Approach's own case list for test 5
+  omits (it lists `("percentage", 50.0, 0, 0)` instead, which criterion 5 itself says does
+  *not* discriminate the mutation). Added the missing 7th case rather than leaving criterion
+  5 undischargeable; the verifier confirmed this reading and the fix independently.
+
+  **All 9 acceptance criteria measured:**
+  1. Exactly 6 new tests, `204 = 198 + 6`, nothing renamed/ignored/deleted (confirmed by
+     `git diff` — zero removed lines in either Rust file).
+  2. Mutation (equivalence): dropped `!quorum_met` from the `:353` gate → test 1 failed on
+     the first case (`quorum absent / positive / declared participants`), `Deny` vs `Allow`.
+  3. Mutation (non-vacuity): replaced the gate condition with `false` → test 1 stayed green,
+     test 2 failed as predicted.
+  4. Mutation (regime boundary), two variants: `:456` to unconditional `true` → test 3 failed
+     on the exact legacy reason string; `:456` to `>= 4` → test 1's empty-tally-at-v3 row
+     failed specifically (`Deny{"no votes cast"}` vs `Allow`), confirming that row is what
+     makes the `schema_version` axis load-bearing.
+  5. Mutation (zero-participant guard): unguarded the `total_participants == 0` division in
+     `check_quorum` → test 4's zero-participant `percentage` cells failed, and test 5's added
+     `("percentage", 0.0, 0, 0)` case failed, while the neighboring `(50.0, 0, 0)` case
+     correctly stayed green (does not discriminate, exactly as the plan states).
+  6. Mutation (constant function): replaced `check_quorum`'s body with `true` → test 4 stayed
+     green, test 5 failed on `("percentage", 100.0, 2, 3)`.
+  7. Mutation (admission MUST): `registry.rs:618` `< 0.0` → `<= 0.0` → the new registry test
+     failed with `voting.quorum.value 0 is out of range`.
+  8. Full workspace `cargo test --workspace`: every crate `0 failed`. Tier 1: 127 passed.
+     Tier 2: 5 passed. Both integration tiers at baseline.
+  9. `cargo semver-checks check-release --workspace --baseline-version 0.7.6` reproduces the
+     predicted `unsupported rustdoc format v57` failure — genuinely unrunnable on this
+     machine, recorded as deferred to CI per the criterion's own instruction. No semver risk
+     exists regardless: zero production code changed.
+  Also: `cargo fmt --check` clean, `cargo clippy -p macp-policy --all-targets` clean.
+  Every mutation was reverted immediately after observing the failure; the working tree was
+  confirmed clean of stray mutations before moving to the next.
+
+  **Fresh Opus verify: PASS, first round.** Independently re-ran the full `macp-policy`
+  suite (204/0), independently re-ran 3 of the 5 mutations from scratch (criteria 2, 4, 5)
+  and observed the identical failures, independently re-ran Tier 1 (127/0) and Tier 2 (5/0),
+  independently reproduced the `cargo-semver-checks` environment failure and confirmed zero
+  production code changed, verified the `docs/policy.md` bullet against
+  `crates/macp-policy/src/defaults.rs:13`, and verified the "library-reachable, not
+  wire-reachable" claim in test 1's comments against `crates/macp-modes/src/mode/decision.rs`
+  directly. No gaps found. No `ASSUMPTIONS.md` entries — fully prescriptive phase, one plan
+  inconsistency resolved rather than assumed.
 
 - 2026-09-19 (Phase 2 executed and verified, branch `ci/spec-drift-catchup-169-170`):
   `.github/workflows/ci.yml:39` `SPEC_REV` bumped from `c137f735358a046d677b607315006bb1c03baabd`

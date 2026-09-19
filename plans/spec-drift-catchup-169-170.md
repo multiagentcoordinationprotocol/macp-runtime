@@ -163,7 +163,24 @@ One **ordering hazard**, not a dependency: once Phase 2 lands, `spec-drift.yml`'
 
 ### Phase 3 — pin the vacuous participation floor with tests, and document it
 
-- **Status:** TODO
+- **Status:** DONE (2026-09-19). All six tests implemented under the exact names given, plus
+  the `docs/policy.md` bullet and table-row edit. No production code touched — only
+  `#[cfg(test)]` additions, confirmed by diff inspection. All 9 acceptance criteria
+  discharged, including all 5 mutation tests (each applied, observed red, reverted).
+  Criterion 9 (differential semver) is unrunnable on this machine
+  (`cargo-semver-checks` rejects this toolchain's rustdoc format v57) and is recorded as
+  deferred to CI, per the criterion's own instruction — not claimed as a pass. Fresh Opus
+  verify: **PASS**, first round, no gaps.
+
+  **One divergence from the plan's literal Approach text, surfaced during implementation
+  and confirmed correct by the verifier.** Acceptance criterion 5 names a
+  `test 5's ("percentage", 0.0, 0, 0)` cell that the Approach's own 6-case list for test 5
+  never included — the Approach lists `("percentage", 50.0, 0, 0)` instead, which criterion
+  5 itself says does *not* discriminate the mutation. Treated the acceptance criterion as
+  authoritative and added the missing 7th case; the verifier independently confirmed this
+  is the correct reading, the case is arithmetically sound, and it is precisely the case
+  that fails under criterion 5's mutation (while the neighboring `50.0` case correctly does
+  not).
 - **Delivers:** RFC-MACP-0012 §4.1 "Vacuous participation floor" (`1.6.0-draft`, spec #122) becomes a defended invariant of this runtime rather than an accident of its control flow, at both the evaluation and admission layers, with the `schema_version <= 2` divergence pinned alongside it. Closes the substantive half of **#169**. Also closes the repository's complete absence of coverage for a *satisfied* percentage quorum.
 - **Depends on:** nothing. Pure test and docs addition in `crates/macp-policy` — **no production code changes**; the audit found no bug to fix. If the executor finds itself editing `evaluator.rs` outside `#[cfg(test)]`, something in the diagnosis was wrong and the plan should be revisited rather than the code.
 - **Files:** `crates/macp-policy/src/evaluator.rs` — a new test section in `mod tests` (`:1097`), placed after the existing `// ── Quorum checking ──` block (`:2164-2225`) so the related tests read together; the helpers it uses are `make_policy` (`:1102`, **`schema_version: 1` at `:1108` — override it**), `make_state_with_votes` (`:1112`), `participants()` (`:1145`), `split_votes` (`:3614`) and `approves` (`:3630`); `check_quorum` itself (`:565-583`) is private and callable from `mod tests` via `use super::*`, as `:3478` already does. `crates/macp-policy/src/registry.rs` — one test beside `register_zero_voting_quorum_value_succeeds` (`:1445`), using `decision_policy` (`:1206`, **also `schema_version: 1` at `:1212`**) and `accept` (`:1235`). `docs/policy.md` — a new bullet after `:145`, and a clause on the `voting.quorum.value` table row at `:64`.

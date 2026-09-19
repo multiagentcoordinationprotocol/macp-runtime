@@ -1455,6 +1455,34 @@ mod tests {
     }
 
     #[test]
+    fn register_every_zero_floor_spelling_succeeds() {
+        // RFC-MACP-0012 §4.1's admission MUST: a runtime "MUST NOT reject the
+        // descriptor at admission" for an effective-zero participation floor
+        // combined with `require_vote_quorum: true`. The test above covers
+        // only `percentage: 0` at the default `schema_version: 1` — this
+        // pins all four spellings at `schema_version: 3`, with the flag set
+        // `true`, which is the exact combination the MUST is about.
+        let spellings = [
+            serde_json::json!({ "algorithm": "majority" }),
+            serde_json::json!({
+                "algorithm": "majority", "quorum": { "type": "count", "value": 0 }
+            }),
+            serde_json::json!({
+                "algorithm": "majority", "quorum": { "type": "percentage", "value": 0 }
+            }),
+            serde_json::json!({ "algorithm": "majority", "quorum": { "value": 0 } }),
+        ];
+        for voting in spellings {
+            let mut policy = decision_policy(serde_json::json!({
+                "voting": voting,
+                "commitment": { "require_vote_quorum": true }
+            }));
+            policy.schema_version = 3;
+            accept(policy);
+        }
+    }
+
+    #[test]
     fn register_fractional_quorum_threshold_fails() {
         let err = refuse(quorum_policy(serde_json::json!({
             "threshold": { "type": "n_of_m", "value": 0.5 }
