@@ -115,6 +115,29 @@ one unrelated pre-existing docs commit correcting stale phase-status tables in
 
 ## Log
 
+- 2026-09-19 (finalization pass, fresh Opus, whole-feature cumulative diff vs `main..HEAD`):
+  **PASS.** All three phases' commits (`a56922c`, `d434327`, `735ba35`) reviewed together
+  against the plan as a whole, not phase by phase. Confirmed: the cumulative diff is exactly
+  the three phases' disjoint file sets plus the two plan-tracking docs, nothing else;
+  independently re-derived the core spec-diff claims from a fresh `git archive` export
+  (not reusing this session's scratch files) and matched every measured number; re-extracted
+  and re-ran the real `id: diff` step under `bash -e` against the real `c137f735`/`0de1fab2`
+  pair and got a byte-for-byte match to this log's own numbers (`drift=non-actionable`,
+  5154-byte summary); confirmed the "ordering hazard" (Phase 2's pin bump means Phase 1's
+  classifier can no longer be exercised against this exact historical pair by a live
+  scheduled run) is a documented, harmless consequence, not a verification gap, since
+  Phase 1's harness sets `PINNED` directly rather than reading the live `ci.yml` value;
+  confirmed zero cross-phase coupling (no shared symbols, `spec-drift.yml` only reads
+  `SPEC_REV` from `ci.yml` at workflow runtime); swept tracked docs for stale
+  `spec-drift`/`SPEC_REV`/old-pin references and found only the two intended edits
+  (`docs/testing.md`, `docs/policy.md`); confirmed zero non-test lines touched in
+  `crates/`; read all 6 Open questions and confirmed none is load-bearing for what shipped;
+  re-ran the full workspace suite (0 failed everywhere, `macp-policy` 204/204) and
+  `actionlint` on both workflow files (clean). No gaps found.
+
+  **Feature complete.** No `ASSUMPTIONS.md` entries for this plan — `/reconcile` is a
+  no-op, skipped per its own gate. Proceeding to `/ship`.
+
 - 2026-09-19 (Phase 3 executed and verified, branch `ci/spec-drift-catchup-169-170`):
   Six tests added exactly as named in the plan — `evaluator.rs`:
   `a_zero_participation_floor_makes_require_vote_quorum_inert_at_schema_version_3` (16-combo
