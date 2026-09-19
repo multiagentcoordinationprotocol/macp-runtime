@@ -2223,6 +2223,281 @@ mod tests {
         assert!(matches!(result, PolicyDecision::Allow { .. }));
     }
 
+    // ── RFC-MACP-0012 §4.1 "Vacuous participation floor" (schema_version >= 3), spec #122 ──
+    //
+    // `require_vote_quorum` has exactly two decision-affecting reads in the
+    // whole workspace: the quorum gate at `:353` and the legacy
+    // `schema_version <= 2` empty-tally arm at `:463`. At `schema_version >=
+    // 3` the legacy arm is dead (`:456`'s branch is taken instead), so `:353`
+    // is the flag's only remaining effect, and `check_quorum` (`:565-583`)
+    // returns `true` for every zero-floor spelling regardless of voters or
+    // participants. This section pins that as a defended invariant rather
+    // than an accident of control flow.
+    //
+    // Every test here sets `schema_version = 3` explicitly. `make_policy` and
+    // `decision_policy` default to `schema_version: 1`, at which
+    // `require_vote_quorum` keeps a second, independent role (the legacy
+    // empty-tally arm) that a zero floor does not disable — building a test
+    // of the v3 equivalence on that default would silently exercise the
+    // legacy regime instead. See `a_zero_floor_does_not_waive_the_legacy_empty_tally_arm_at_schema_version_2`
+    // below for the boundary this guards.
+
+    #[test]
+    fn a_zero_participation_floor_makes_require_vote_quorum_inert_at_schema_version_3() {
+        // Four ways to spell an effective zero floor (RFC-MACP-0012 §4.1):
+        // absent `quorum`, `count: 0`, `percentage: 0`, and `value: 0` with no
+        // `type` (which exercises `default_quorum_type()`,
+        // `macp-core/src/policy/rules.rs:67`, and is the same declaration as
+        // `count: 0`).
+        let spellings: [(&str, serde_json::Value); 4] = [
+            (
+                "quorum absent",
+                serde_json::json!({ "algorithm": "majority", "threshold": 0.5 }),
+            ),
+            (
+                "count: 0",
+                serde_json::json!({
+                    "algorithm": "majority", "threshold": 0.5,
+                    "quorum": { "type": "count", "value": 0 }
+                }),
+            ),
+            (
+                "percentage: 0",
+                serde_json::json!({
+                    "algorithm": "majority", "threshold": 0.5,
+                    "quorum": { "type": "percentage", "value": 0 }
+                }),
+            ),
+            (
+                "value: 0, no type",
+                serde_json::json!({
+                    "algorithm": "majority", "threshold": 0.5,
+                    "quorum": { "value": 0 }
+                }),
+            ),
+        ];
+
+        for (spelling_name, voting) in &spellings {
+            for (direction, outcome_positive) in [("positive", true), ("negative", false)] {
+                // Non-empty tallies in both directions, so the empty-tally
+                // rule (`:456-461`) cannot mask the result under test.
+                let (state, _voters) = if outcome_positive {
+                    split_votes(1, 0)
+                } else {
+                    split_votes(0, 1)
+                };
+                for (roster_name, roster) in [
+                    ("declared participants", participants()),
+                    ("empty roster", Vec::<String>::new()),
+                ] {
+                    let evaluate = |require_vote_quorum: bool| {
+                        let mut policy = make_policy(serde_json::json!({
+                            "voting": voting.clone(),
+                            "commitment": { "require_vote_quorum": require_vote_quorum }
+                        }));
+                        policy.schema_version = 3;
+                        evaluate_decision_commitment_outcome(
+                            &policy,
+                            &state,
+                            &roster,
+                            outcome_positive,
+                        )
+                    };
+                    let gated = evaluate(true);
+                    let ungated = evaluate(false);
+                    assert_eq!(
+                        gated, ungated,
+                        "{spelling_name} / {direction} / {roster_name}: require_vote_quorum \
+                         must be inert over a zero floor at schema_version 3"
+                    );
+                    assert!(
+                        matches!(gated, PolicyDecision::Allow { .. }),
+                        "{spelling_name} / {direction} / {roster_name}: expected Allow, got \
+                         {gated:?}"
+                    );
+                }
+            }
+        }
+
+        // The one row the sweep above cannot reach: an empty tally at v3.
+        // With non-empty tallies (above), `:456`/`:463` are never entered, so
+        // setting `schema_version = 3` there is cosmetic — the sweep would
+        // yield identical results at every schema version. Here the
+        // empty-tally rule (`:456-461`) denies unconditionally on *both*
+        // sides of the flag, which is what actually makes the
+        // `schema_version` axis load-bearing (it is what turns acceptance
+        // criterion 4's `>= 4` mutation red). Both sides are `Deny`, so this
+        // row is deliberately excluded from the blanket `Allow` assertion
+        // above — it is library-reachable only (`participants: &[]` cannot
+        // be reached over the wire: `decision.rs:251`'s `commitment_ready`
+        // gate means a zero-participant Decision session can never accept a
+        // `Proposal`), but the fixed roster here makes that distinction
+        // irrelevant to what this row is pinning.
+        let empty = make_state_with_votes(vec![]);
+        let voting = serde_json::json!({
+            "algorithm": "majority",
+            "threshold": 0.5,
+            "quorum": { "type": "count", "value": 0 },
+        });
+        let evaluate = |require_vote_quorum: bool| {
+            let mut policy = make_policy(serde_json::json!({
+                "voting": voting.clone(),
+                "commitment": { "require_vote_quorum": require_vote_quorum }
+            }));
+            policy.schema_version = 3;
+            evaluate_decision_commitment(&policy, &empty, &participants())
+        };
+        let gated = evaluate(true);
+        let ungated = evaluate(false);
+        assert_eq!(
+            gated, ungated,
+            "an empty tally at schema_version 3 must deny identically regardless of \
+             require_vote_quorum"
+        );
+        assert!(
+            matches!(gated, PolicyDecision::Deny { .. }),
+            "expected the empty-tally rule to deny, got {gated:?}"
+        );
+    }
+
+    #[test]
+    fn a_nonzero_participation_floor_still_gates_at_schema_version_3() {
+        // The discriminator that makes the equivalence test above
+        // non-vacuous: a real floor still gates at v3. Without this, a
+        // runtime that ignored `require_vote_quorum` entirely at v3 would
+        // pass that test too.
+        let (state, _voters) = split_votes(1, 0);
+        let voting = serde_json::json!({
+            "algorithm": "majority",
+            "threshold": 0.5,
+            "quorum": { "type": "count", "value": 99 },
+        });
+
+        let mut gated = make_policy(serde_json::json!({
+            "voting": voting.clone(),
+            "commitment": { "require_vote_quorum": true }
+        }));
+        gated.schema_version = 3;
+        match evaluate_decision_commitment_outcome(&gated, &state, &participants(), true) {
+            PolicyDecision::Deny { reasons } => assert!(
+                reasons.iter().any(|r| r.contains("vote quorum not met")),
+                "expected a quorum-not-met denial, got: {reasons:?}"
+            ),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+
+        let mut ungated = make_policy(serde_json::json!({
+            "voting": voting,
+            "commitment": { "require_vote_quorum": false }
+        }));
+        ungated.schema_version = 3;
+        assert!(
+            matches!(
+                evaluate_decision_commitment_outcome(&ungated, &state, &participants(), true),
+                PolicyDecision::Allow { .. }
+            ),
+            "without require_vote_quorum an unmet floor must not block"
+        );
+    }
+
+    #[test]
+    fn a_zero_floor_does_not_waive_the_legacy_empty_tally_arm_at_schema_version_2() {
+        // RFC-MACP-0012 §4.1 "Retaining the legacy arm": below schema_version
+        // 3, `require_vote_quorum` keeps its second, independent role —
+        // deciding whether an empty tally blocks a positive commitment — and
+        // a zero floor does not disable it. This is the regime boundary a
+        // later "simplify the equivalence to all versions" change must not
+        // cross. `empty_tally_under_schema_version_2_still_follows_require_vote_quorum`
+        // (above) already pins the *absent*-quorum spelling at v2; this adds
+        // the *percentage: 0* spelling.
+        let empty = make_state_with_votes(vec![]);
+        let voting = serde_json::json!({
+            "algorithm": "unanimous",
+            "quorum": { "type": "percentage", "value": 0 },
+        });
+
+        let mut gated = make_policy(serde_json::json!({
+            "voting": voting.clone(),
+            "commitment": { "require_vote_quorum": true }
+        }));
+        gated.schema_version = 2;
+        match evaluate_decision_commitment(&gated, &empty, &participants()) {
+            PolicyDecision::Deny { reasons } => assert!(
+                reasons.iter().any(|r| r == "no votes cast"),
+                "the legacy denial keeps its exact reason string, got: {reasons:?}"
+            ),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+
+        let mut ungated = make_policy(serde_json::json!({
+            "voting": voting,
+            "commitment": { "require_vote_quorum": false }
+        }));
+        ungated.schema_version = 2;
+        assert!(
+            matches!(
+                evaluate_decision_commitment(&ungated, &empty, &participants()),
+                PolicyDecision::Allow { .. }
+            ),
+            "at schema_version 2, without require_vote_quorum an unvoted positive \
+             commitment is not blocked"
+        );
+    }
+
+    #[test]
+    fn check_quorum_is_met_by_every_spelling_of_a_zero_floor() {
+        // `check_quorum` has no dedicated test today — its only appearance in
+        // tests elsewhere is a precondition assertion. `n_of_m` and an
+        // unrecognised type are included because both land on the same arm
+        // as `count` (`:572`, `:581`): `n_of_m` is refused for Decision at
+        // *admission* (`DECISION_VOTING_QUORUM_TYPES`, `registry.rs:29`) but
+        // accepted here, a documented departure the evaluator must keep
+        // honouring.
+        for quorum_type in ["count", "n_of_m", "percentage", "unrecognised"] {
+            for actual_voters in [0usize, 1, 2, 7] {
+                for total_participants in [0usize, 1, 3, 100] {
+                    assert!(
+                        check_quorum(quorum_type, 0.0, actual_voters, total_participants),
+                        "{quorum_type} / voters={actual_voters} / participants={total_participants}: \
+                         a zero floor must always be met"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn check_quorum_percentage_and_count_arithmetic() {
+        // The falsification partner for the table above, and the
+        // repository's first coverage of a percentage quorum being *met*. If
+        // `check_quorum` were replaced with a constant `true`, the table
+        // above stays green and this test goes red.
+        let cases: [(&str, f64, usize, usize, bool); 7] = [
+            // (type, value, actual_voters, total_participants, expected)
+            ("percentage", 50.0, 2, 3, true), // 66.6% clears 50 -- satisfied, never tested before
+            ("percentage", 100.0, 3, 3, true), // exact boundary, inclusive
+            ("percentage", 100.0, 2, 3, false),
+            // The zero-participant guard's *other* direction: a non-vacuous
+            // floor is still unmet when nobody is declared. This does NOT
+            // detect an unguarded division -- `NaN >= 50.0` is also `false`.
+            ("percentage", 50.0, 0, 0, false),
+            // The zero-floor twin of the row above: DOES detect an unguarded
+            // division (`0.0 / 0.0` is `NaN`, and `NaN >= 0.0` is `false`, so
+            // this cell goes red under criterion 5's mutation).
+            ("percentage", 0.0, 0, 0, true),
+            ("count", 2.0, 2, 3, true),
+            ("count", 3.0, 2, 3, false),
+        ];
+        for (quorum_type, value, actual_voters, total_participants, expected) in cases {
+            assert_eq!(
+                check_quorum(quorum_type, value, actual_voters, total_participants),
+                expected,
+                "{quorum_type} / value={value} / voters={actual_voters} / \
+                 participants={total_participants}"
+            );
+        }
+    }
+
     // ── Evaluation requirements (confidence-based) ───────────────────
 
     #[test]

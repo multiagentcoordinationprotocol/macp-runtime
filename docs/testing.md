@@ -120,6 +120,8 @@ The policy engine has dedicated coverage across multiple test layers:
 
 Every pull request runs the full gate in `.github/workflows/ci.yml`: MSRV check (1.89.0), fmt, clippy, rustdoc (`-D warnings`), unit + conformance + policy tests, release build, crate dependency-isolation checks, a blocking `cargo audit` (ignore list in `.cargo/audit.toml`), feature-gated builds and tests for the rocksdb/redis/otel features (including backend smoke tests through the real gRPC binary against rocksdb and a live redis service), the Tier 1 + Tier 2 integration suites, the conformance oracle against the spec repo's canonical fixtures, and a build-only Docker gate. Coverage uploads to Codecov as advisory. All jobs run on the toolchain pinned in `rust-toolchain.toml`; a weekly scheduled audit (`scheduled-audit.yml`) catches new RUSTSEC advisories between PRs.
 
+The conformance oracle reads the spec repo at a pinned revision (`SPEC_REV` in `ci.yml`), not at its default branch, so the check stays reproducible regardless of upstream merge timing. A separate scheduled workflow, `spec-drift.yml`, watches that pin daily and files a tracked `spec-drift`-labelled issue — but only when the upstream change is one the oracle's gates can actually act on. A change it can prove inert (a file outside the oracle's scope, or a policy-schema edit that is provably annotation-only once `description`/`$comment`/`title` are stripped) is reported on the workflow run's step summary instead of escalated, so the label stays a reliable signal rather than routine noise.
+
 Tier 3 runs only via manual GitHub Actions dispatch:
 
 ```

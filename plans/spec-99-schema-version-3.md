@@ -335,7 +335,10 @@ The evaluator half closes too, differently. `weighted_total == 0.0 => NoVotes` (
 
 ### Phase 5 — accept a zero-participant Decision session
 
-- **Status:** TODO
+- **Status:** DONE — merged to `main` via PR #165 (`67e4417`, 2026-09-12). `crates/macp-core/src/session.rs:607`
+  gates the empty-`participants` rejection on `!allow_empty_participants` as specified (mode-scoped, not
+  flat-removed); `decision_zero_participants.json` is vendored and green. This status line was left at
+  TODO after the work shipped — corrected 2026-09-19.
 - **Delivers:** `SessionStart` with `participants: []` accepted for Decision, with the reachability guard that makes §4.1's zero-participant `unanimous` clause unreachable at the wire — no sender, initiator included, can create a `Proposal`.
 - **Depends on:** nothing in this plan; required by Phase 6's `decision_zero_participants.json`.
 - **Files:** `crates/macp-core/src/session.rs` — the empty-participants rejection at `:347-349` (**moved, not deleted**, per the Approach), `validate_strict_session_start_payload` at `:375-384`, and the test at `:480`. `src/runtime.rs:360-363` and `src/replay.rs:249-256` — the two call sites that currently reach the inner validator directly; both already hold the mode name (`runtime.rs:353`, `replay.rs:238-244`). `crates/macp-modes/src/mode/decision.rs` — the mode-level rejection at `:118` (and the now-unused `session` parameter at `:115`, which is a `-D warnings` failure if left) and the test at `:355`.
