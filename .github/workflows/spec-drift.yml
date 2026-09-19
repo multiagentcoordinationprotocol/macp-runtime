@@ -17,6 +17,19 @@ name: Spec drift watch
 # `schemas/json/policy/**`, the two trees the conformance-oracle job consumes.
 # RFC prose moving without a schema or fixture change is not drift we can act
 # on mechanically, and reporting it would train everyone to ignore this issue.
+#
+# The comparison itself stays wide -- every byte difference in either tree is
+# read and reported on the run -- but escalation (filing a GitHub issue) is
+# classified. Two shapes are treated as non-actionable rather than dropped:
+# a non-`.json` file under `schemas/conformance/` (outside `check_dir`'s glob
+# in ci.yml, so it can never fail that gate) and a `schemas/json/policy/*.json`
+# diff that is provably annotation-only -- structurally identical once
+# `description`/`$comment`/`title` are stripped at every depth, which is all
+# `enum_lists_match_the_canonical_schemas` (registry.rs) ever reads. Suppressing
+# the *issue* for these is safe because neither oracle gate can see them; making
+# the *diff* invisible would not be, because annotation text is exactly where
+# the spec records new normative reasoning (see issue #169). So suppression
+# only ever removes an entry from escalation, never from the step summary.
 
 on:
   schedule:
@@ -68,44 +81,253 @@ jobs:
         with:
           repository: multiagentcoordinationprotocol/multiagentcoordinationprotocol
           path: spec-head
+          # Full history: "Commits since the pin" below walks
+          # $PINNED..$head_sha on this checkout, which needs $PINNED to be a
+          # reachable ancestor. The default fetch-depth: 1 makes that range
+          # empty every single run (the pinned commit is never in a
+          # one-commit-deep history) -- that was already happening before
+          # this change and is fixed here because it's the same step.
+          fetch-depth: 0
 
       - name: Compare the trees the conformance oracle consumes
         id: diff
         run: |
-          # The printf formats below emit literal issue-body markdown. They are
-          # double-quoted with escaped backticks rather than single-quoted: the text
-          # must reach the issue body unexpanded either way, but single quotes around a
-          # backtick trip shellcheck's SC2016, and actionlint exits non-zero on it.
+          # The printf formats below emit literal issue-body markdown, double-quoted
+          # with escaped backticks rather than single-quoted. (Single-quoted backticks
+          # elsewhere in this step -- the annotation-diff markdown fence markers below,
+          # and the jq program in strip_is_annotation_only -- lint clean: SC2016 is
+          # content-sensitive, not a blanket rule against single-quoting a backtick.)
+          #
+          # GitHub runs this step as `bash -e {0}` by default (no `shell:` override
+          # here), layered on top of this script's own `set -uo pipefail` below -- so
+          # -e IS live. Every command whose non-zero exit is expected and should not
+          # abort the step needs `|| true`, `|| return 1`, or to sit inside an
+          # `if`/while-condition, exactly like the `diff … || true` calls below.
           set -uo pipefail
           head_sha=$(git -C spec-head rev-parse HEAD)
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+          no_drift_comment="The mirrored trees (\`schemas/conformance\`, \`schemas/json/policy\`) no longer differ from the pinned revision. Closed automatically."
+
           if [ "$head_sha" = "$PINNED" ]; then
             echo "drift=none" >> "$GITHUB_OUTPUT"
+            {
+              echo 'close_comment<<REPORT_EOF'
+              echo "$no_drift_comment"
+              echo REPORT_EOF
+            } >> "$GITHUB_OUTPUT"
             echo "pin is current; nothing to report"
             exit 0
           fi
 
+          # Raw report, both directions, both trees. No annotation-stripping
+          # and no relabelling here -- classification below needs the real
+          # spec-pinned/spec-head paths to open the files, and relabelling
+          # first would leave nothing for the classifier to match.
           report=$(mktemp)
           for tree in schemas/conformance schemas/json/policy; do
             # README.md is excluded deliberately: it is not vendored into this
             # repo, so a change to it implies no action from the issue's
             # checklist. Reporting it would be noise, and noise is how a
             # non-blocking issue gets trained into being ignored.
-            diff -rq -x 'README.md' "spec-pinned/$tree" "spec-head/$tree" >> "$report" 2>&1 || true
+            #
+            # LC_ALL=C pins diff's "Files ... differ" / "Only in ...: ..."
+            # wording so the classifier below can match it as a contract,
+            # not an incidental default.
+            LC_ALL=C diff -rq -x 'README.md' "spec-pinned/$tree" "spec-head/$tree" >> "$report" 2>&1 || true
           done
-          # Relabel the checkout prefixes rather than stripping them. `diff -rq`
-          # reports a one-sided file as "Only in <dir>", so stripping the prefix
-          # would destroy the direction -- added upstream and deleted upstream
-          # would render identically, and they need opposite responses.
-          sed -i 's|spec-pinned/|pinned:|g; s|spec-head/|upstream:|g' "$report"
 
           if [ ! -s "$report" ]; then
             echo "drift=prose-only" >> "$GITHUB_OUTPUT"
+            {
+              echo 'close_comment<<REPORT_EOF'
+              echo "$no_drift_comment"
+              echo REPORT_EOF
+            } >> "$GITHUB_OUTPUT"
             echo "spec moved to $head_sha but neither mirrored tree changed; not reporting"
             exit 0
           fi
 
-          echo "drift=yes" >> "$GITHUB_OUTPUT"
+          # ---- Classification ---------------------------------------------
+          #
+          # `check_dir` (ci.yml) only ever reads *.json directly under
+          # schemas/conformance (and schemas/conformance/cmt-hash/*.json)
+          # against the vendored tests/conformance tree -- so a non-.json
+          # file there can never move that gate. And
+          # enum_lists_match_the_canonical_schemas (registry.rs) only reads
+          # schema *keywords* out of schemas/json/policy/*.json -- never
+          # `description`, `$comment` or `title` -- so a policy-schema diff
+          # that is structurally identical once those three are stripped at
+          # every depth can never move that gate either. Everything else is
+          # actionable, and the classifier fails closed: anything it cannot
+          # positively place in the suppressible buckets stays actionable.
+
+          strip_is_annotation_only() {
+            # $1, $2: two JSON file paths. Exit 0 iff both parse and are
+            # structurally identical once description/$comment/title are
+            # removed at every depth. Any jq failure (malformed JSON, unreadable
+            # file) is "not annotation-only" -- fail closed, never fail open.
+            local a b
+            a=$(jq -S 'walk(if type == "object" then del(.["$comment"], .description, .title) else . end)' "$1" 2>/dev/null) || return 1
+            b=$(jq -S 'walk(if type == "object" then del(.["$comment"], .description, .title) else . end)' "$2" 2>/dev/null) || return 1
+            [ "$a" = "$b" ]
+          }
+
+          actionable=$(mktemp)
+          suppressed=$(mktemp)
+          suppressed_detail=$(mktemp)
+
+          while IFS= read -r line; do
+            rel=""
+            case "$line" in
+              "Files spec-pinned/"*" and spec-head/"*" differ")
+                # Field 2 of "Files spec-pinned/X and spec-head/Y differ" is
+                # spec-pinned/X. X and Y are always equal here (both sides of
+                # the checkout use the same relative tree layout), so field 2
+                # alone is enough once the prefix is stripped.
+                rel=$(printf '%s\n' "$line" | awk '{print $2}' | sed 's|^spec-pinned/||')
+                ;;
+            esac
+
+            if [ -n "$rel" ]; then
+              # Guard: if the extracted path isn't a real file on both sides,
+              # the awk field-split was wrong (e.g. a path containing a
+              # space truncates at the first space) -- don't trust a
+              # possibly-truncated name, fall through to "actionable".
+              if [ ! -f "spec-pinned/$rel" ] || [ ! -f "spec-head/$rel" ]; then
+                rel=""
+              fi
+            fi
+
+            if [ -z "$rel" ]; then
+              # Not a matched "Files ... differ" line (an "Only in ..." line
+              # in either direction, a stderr line, or a failed guard above)
+              # -- actionable unexamined.
+              echo "$line" >> "$actionable"
+              continue
+            fi
+
+            case "$rel" in
+              schemas/conformance/*.json)
+                # Shell `case` globs cross `/`, so this also matches
+                # cmt-hash/*.json and anything deeper -- the conservative
+                # reading check_dir deserves. Fixture bytes must always
+                # block: check_dir demands byte identity, and the fixtures'
+                # own _comment/description keys are load-bearing bytes there
+                # even though this repo's loader drops them at parse time.
+                echo "$line" >> "$actionable"
+                ;;
+              schemas/conformance/*)
+                echo "$line" >> "$suppressed"
+                echo "- \`$rel\`: not a \`*.json\` fixture; outside \`check_dir\`'s glob (ci.yml)" >> "$suppressed_detail"
+                ;;
+              schemas/json/policy/*.json)
+                if strip_is_annotation_only "spec-pinned/$rel" "spec-head/$rel"; then
+                  echo "$line" >> "$suppressed"
+                  {
+                    echo "- \`$rel\`: annotation-only (\`description\`/\`\$comment\`/\`title\`), verified structurally. Diff:"
+                    echo '  ```diff'
+                    # diff -u exits 1 whenever the files differ, which is always --
+                    # we only reach this line because the earlier diff -rq already
+                    # said so. Under the live -e (see the step's opening comment)
+                    # an unguarded pipeline here aborts the whole step, silently,
+                    # on the exact happy path this phase exists to create.
+                    LC_ALL=C diff -u "spec-pinned/$rel" "spec-head/$rel" | sed 's/^/  /' || true
+                    echo '  ```'
+                  } >> "$suppressed_detail"
+                else
+                  echo "$line" >> "$actionable"
+                fi
+                ;;
+              *)
+                echo "$line" >> "$actionable"
+                ;;
+            esac
+          done < "$report"
+
+          # Relabel both lists now that classification is done -- matching
+          # first, relabelling second, is load-bearing: relabelling before
+          # classifying would leave the case arms above matching nothing.
+          sed -i 's|spec-pinned/|pinned:|g; s|spec-head/|upstream:|g' "$actionable" "$suppressed"
+
+          if [ -s "$actionable" ]; then
+            verdict="yes"
+          elif [ -s "$suppressed" ]; then
+            verdict="non-actionable"
+          else
+            # Unreachable in practice (every report line lands in one of the
+            # two buckets above), kept as a safety net -- but it still needs
+            # a close_comment, same as the other two non-"yes" exits, or the
+            # close step's `gh issue close --comment ""` breaks under its
+            # own `set -euo pipefail`.
+            verdict="prose-only"
+            {
+              echo 'close_comment<<REPORT_EOF'
+              echo "$no_drift_comment"
+              echo REPORT_EOF
+            } >> "$GITHUB_OUTPUT"
+          fi
+          echo "drift=$verdict" >> "$GITHUB_OUTPUT"
+
+          # ---- Visibility ---------------------------------------------------
+          #
+          # Must run before any verdict branches below, and unconditionally
+          # whenever something was suppressed -- including when the overall
+          # verdict is "yes", since a run can carry both actionable and
+          # suppressed entries at once. This is the half of the design that
+          # keeps suppression from turning into silence (see the file header
+          # and issue #169): nothing here should be trimmed for tidiness.
+          if [ -s "$suppressed" ]; then
+            suppressed_count=$(wc -l < "$suppressed" | tr -d ' ')
+
+            # Cap the embedded detail (which can include full annotation
+            # diffs) across ALL suppressed entries combined, not per entry,
+            # so a large upstream rewrite can't approach the 1 MiB step
+            # summary limit.
+            detail_lines=$(wc -l < "$suppressed_detail" | tr -d ' ')
+            detail_capped=$(mktemp)
+            if [ "$detail_lines" -gt 200 ]; then
+              head -n 200 "$suppressed_detail" > "$detail_capped"
+              echo "" >> "$detail_capped"
+              echo "_(truncated: $((detail_lines - 200)) more line(s) omitted)_" >> "$detail_capped"
+            else
+              cp "$suppressed_detail" "$detail_capped"
+            fi
+
+            {
+              echo "### Spec drift: $suppressed_count suppressed (not actionable by any oracle gate)"
+              echo
+              echo '```'
+              cat "$suppressed"
+              echo '```'
+              echo
+              cat "$detail_capped"
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            notice_count=0
+            while IFS= read -r sline; do
+              notice_count=$((notice_count + 1))
+              if [ "$notice_count" -le 10 ]; then
+                echo "::notice::spec-drift suppressed (not actionable): $sline"
+              fi
+            done < "$suppressed"
+            if [ "$notice_count" -gt 10 ]; then
+              echo "::notice::$((notice_count - 10)) more suppressed entries -- see the step summary"
+            fi
+          fi
+
+          if [ "$verdict" = "non-actionable" ]; then
+            {
+              echo 'close_comment<<REPORT_EOF'
+              echo "The mirrored trees (\`schemas/conformance\`, \`schemas/json/policy\`) differ from the pinned revision (\`$head_sha\`), but only in ways \`conformance-oracle\`'s gates cannot act on -- see this run's step summary for detail. The pin itself remains behind. Closed automatically; this is not tracked as an open issue."
+              echo REPORT_EOF
+            } >> "$GITHUB_OUTPUT"
+            echo "spec moved to $head_sha; differences exist but none is actionable -- not filing"
+            exit 0
+          fi
+
+          # ---- verdict == yes: build the issue body -------------------------
 
           body=$(mktemp)
           {
@@ -114,8 +336,13 @@ jobs:
             printf "| Pinned (\`SPEC_REV\` in \`ci.yml\`) | \`%s\` |\n" "$PINNED"
             printf "| Spec default branch | \`%s\` |\n\n" "$head_sha"
             printf "### Differences in the mirrored trees\n\n\`\`\`\n"
-            cat "$report"
-            printf "\`\`\`\n\n### Commits since the pin\n\n"
+            cat "$actionable"
+            printf "\`\`\`\n\n"
+            if [ -s "$suppressed" ]; then
+              suppressed_count=$(wc -l < "$suppressed" | tr -d ' ')
+              printf "%s additional difference(s) were suppressed as not actionable by any oracle gate -- see the step summary on this run for detail.\n\n" "$suppressed_count"
+            fi
+            printf "### Commits since the pin\n\n"
             git -C spec-head log --oneline "$PINNED..$head_sha" \
               -- schemas/conformance schemas/json/policy 2>/dev/null | sed 's/^/- /' \
               || printf -- '- (could not enumerate; the pinned commit may not be an ancestor)\n'
@@ -123,11 +350,11 @@ jobs:
           } > "$body"
           cat >> "$body" <<'MARKDOWN'
           ### What to do
-          
+
           1. Vendor any changed or added fixture from `schemas/conformance/` into `tests/conformance/` **byte-identically** (never hand-edit them), and register new ones with `conformance_test!`.
           2. If `schemas/json/policy/**` changed, re-check the hand-written mirrors in `crates/macp-policy/src/registry.rs` (`validate_conditional_constraints`) and the `enum_lists_match_the_canonical_schemas` parity test.
           3. Implement any new normative behaviour, then bump `SPEC_REV` in `.github/workflows/ci.yml` in the same PR.
-          
+
           Bumping `SPEC_REV` without doing 1 and 2 turns `conformance-oracle` red on every PR, which is the failure mode the pin exists to prevent. This issue refreshes itself daily and closes itself once the pin catches up.
           MARKDOWN
 
@@ -167,13 +394,14 @@ jobs:
         if: steps.diff.outputs.drift != 'yes'
         env:
           GH_TOKEN: ${{ github.token }}
+          CLOSE_COMMENT: ${{ steps.diff.outputs.close_comment }}
         run: |
           set -euo pipefail
           existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
                        --label spec-drift --limit 1 --json number -q '.[0].number // empty')
           if [ -n "$existing" ]; then
             gh issue close "$existing" --repo "$GITHUB_REPOSITORY" \
-              --comment "The mirrored trees (\`schemas/conformance\`, \`schemas/json/policy\`) no longer differ from the pinned revision. Closed automatically."
+              --comment "$CLOSE_COMMENT"
             echo "::notice::closed drift issue #$existing"
           else
             echo "no open drift issue; nothing to close"
