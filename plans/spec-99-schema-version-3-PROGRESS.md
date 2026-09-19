@@ -92,11 +92,19 @@ Detached worktree off `882beeb`, all 32 canonical fixtures vendored, 12 register
 | Phase | Title | Status |
 |---|---|---|
 | 1 | Re-mirror the tightened decision-rules schema; invert the two deferral tests | **DONE** |
-| 2 | Accept `schema_version` 3; evaluate the empty tally under the policy's declared version | TODO |
-| 3 | The weighted electorate; decisive rejects only | TODO |
-| 4 | The objection-authorized decline | TODO |
-| 5 | Accept a zero-participant Decision session | TODO |
-| 6 | Vendor 12 fixtures, sync 3 drifted files, register all 12 | TODO |
+| 2 | Accept `schema_version` 3; evaluate the empty tally under the policy's declared version | **DONE** |
+| 3 | The weighted electorate; decisive rejects only | **DONE** |
+| 4 | The objection-authorized decline | **DONE** |
+| 5 | Accept a zero-participant Decision session | **DONE** |
+| 6 | Vendor 12 fixtures, sync 3 drifted files, register all 12 | **DONE** |
+| 7 | Catch up to spec `main` at `aedfcad` (added mid-execution) | **DONE** |
+
+**Merged to `main`:** PR #165 (`67e4417`, 2026-09-12) carried phases 1–7 as a single squash merge — the
+per-phase commit hashes cited in the Log below (`826bade`, `92033fa`, `473d0ef`, etc.) were made in an
+isolated worktree and do not appear directly in `git log` on `main`, which is why this table went
+stale relative to the Log even though the work shipped. PR #168 (`91bd6f4`, 2026-09-12) closed the one
+item Phase 4 left open (spec issue #117's decline-guard waiver, resolved by spec PR #126). Closes
+issue #164. `MACP Runtime CI` is green on every `main` commit since.
 
 ## Log
 
