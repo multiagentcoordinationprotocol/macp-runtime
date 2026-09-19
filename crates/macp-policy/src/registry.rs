@@ -994,12 +994,8 @@ mod tests {
     fn policies_dir_cannot_smuggle_in_a_std_id() {
         // `MACP_POLICIES_DIR` is an "implementation-defined loading path" under
         // §2.2; it funnels through `register`, so the guard covers it.
-        let dir = std::env::temp_dir().join(format!(
-            "macp-policy-std-guard-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = temp_dir("std-guard");
+        let dir = scratch.path();
         let path = dir.join("evil.json");
         std::fs::write(
             &path,
@@ -1008,11 +1004,9 @@ mod tests {
         .unwrap();
 
         let registry = PolicyRegistry::new();
-        let err = registry.load_from_dir(&dir).unwrap_err();
+        let err = registry.load_from_dir(dir).unwrap_err();
         assert!(err.contains("INVALID_POLICY_DEFINITION"), "error: {err}");
         assert!(registry.get("policy.std.evil").is_none());
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1717,15 +1711,18 @@ mod tests {
 
     // ── MACP_POLICIES_DIR: fail-closed loading and the dry-run pass ─────
 
-    fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "macp-policy-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A scratch directory that removes itself on drop.
+    ///
+    /// Drop runs during unwind, so the directory is reclaimed even when an
+    /// assertion fails. Cleaning up on the success path alone strands one
+    /// directory per failing run, which under a mutation-testing pass (where
+    /// failure is the point) accumulates without bound — `TMPDIR` is never
+    /// garbage-collected on macOS.
+    fn temp_dir(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("macp-policy-{tag}-"))
+            .tempdir()
+            .expect("create scratch dir")
     }
 
     fn write_policy(dir: &std::path::Path, file: &str, definition: &PolicyDefinition) {
@@ -1740,47 +1737,47 @@ mod tests {
     fn policies_dir_rejects_an_out_of_schema_file() {
         // `load_from_dir` funnels through `register`, so the new constraints
         // apply to the startup path — fatally, by design.
-        let dir = temp_dir("dir-refusal");
+        let scratch = temp_dir("dir-refusal");
+        let dir = scratch.path();
         let mut bad = decision_policy(serde_json::json!({ "voting": { "algorithm": "majorty" } }));
         bad.policy_id = "policy.ops.typo".into();
-        write_policy(&dir, "typo.json", &bad);
+        write_policy(dir, "typo.json", &bad);
 
         let registry = PolicyRegistry::new();
-        let err = registry.load_from_dir(&dir).unwrap_err();
+        let err = registry.load_from_dir(dir).unwrap_err();
         assert!(err.contains("typo.json"), "error: {err}");
         assert!(err.contains("INVALID_POLICY_DEFINITION"), "error: {err}");
         assert!(registry.get("policy.ops.typo").is_none());
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn validate_dir_reports_every_file_by_name() {
-        let dir = temp_dir("dry-run");
+        let scratch = temp_dir("dry-run");
+        let dir = scratch.path();
         let mut good = decision_policy(serde_json::json!({
             "voting": { "algorithm": "majority", "threshold": 0.5 }
         }));
         good.policy_id = "policy.ops.good".into();
-        write_policy(&dir, "a-good.json", &good);
+        write_policy(dir, "a-good.json", &good);
 
         let mut bad = quorum_policy(serde_json::json!({
             "threshold": { "type": "n_of_m", "value": 0.5 }
         }));
         bad.policy_id = "policy.ops.bad".into();
-        write_policy(&dir, "b-bad.json", &bad);
+        write_policy(dir, "b-bad.json", &bad);
 
         let mut also_good = decision_policy(serde_json::json!({
             "voting": { "algorithm": "unanimous" }
         }));
         also_good.policy_id = "policy.ops.also-good".into();
-        write_policy(&dir, "c-also-good.json", &also_good);
+        write_policy(dir, "c-also-good.json", &also_good);
 
         // Not a policy file at all — must not abort the pass either.
         std::fs::write(dir.join("d-garbage.json"), "{ not json").unwrap();
         // Non-JSON files are ignored entirely.
         std::fs::write(dir.join("README.txt"), "ignored").unwrap();
 
-        let outcomes = PolicyRegistry::validate_dir(&dir).unwrap();
+        let outcomes = PolicyRegistry::validate_dir(dir).unwrap();
         let names: Vec<String> = outcomes
             .iter()
             .map(|o| o.path.file_name().unwrap().to_string_lossy().into_owned())
@@ -1800,21 +1797,20 @@ mod tests {
         assert!(rejection.contains("threshold.value"), "{rejection}");
         assert_eq!(outcomes[2].result.as_deref(), Ok("policy.ops.also-good"));
         assert!(outcomes[3].result.is_err());
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn validate_dir_detects_duplicates_without_touching_the_registry() {
-        let dir = temp_dir("dry-run-dup");
+        let scratch = temp_dir("dry-run-dup");
+        let dir = scratch.path();
         let mut policy = decision_policy(serde_json::json!({
             "voting": { "algorithm": "majority" }
         }));
         policy.policy_id = "policy.ops.dup".into();
-        write_policy(&dir, "a.json", &policy);
-        write_policy(&dir, "b.json", &policy);
+        write_policy(dir, "a.json", &policy);
+        write_policy(dir, "b.json", &policy);
 
-        let outcomes = PolicyRegistry::validate_dir(&dir).unwrap();
+        let outcomes = PolicyRegistry::validate_dir(dir).unwrap();
         assert!(outcomes[0].result.is_ok());
         assert!(
             outcomes[1]
@@ -1829,8 +1825,6 @@ mod tests {
         // Validation runs against a scratch registry: nothing was loaded.
         let registry = PolicyRegistry::new();
         assert!(registry.get("policy.ops.dup").is_none());
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

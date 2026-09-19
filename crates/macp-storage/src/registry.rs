@@ -443,7 +443,6 @@ mod tests {
     use super::*;
     use macp_core::session::{Session, SessionState};
     use std::collections::HashSet;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_session(id: &str) -> Session {
         Session::builder(id, "macp.mode.decision.v1", "alice")
@@ -777,14 +776,11 @@ mod tests {
     /// this runs at startup, so recovery has to stay available.
     #[tokio::test]
     async fn load_sessions_repairs_key_field_mismatch() {
-        let base = std::env::temp_dir().join(format!(
-            "macp-registry-mismatch-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&base).unwrap();
+        let scratch = tempfile::Builder::new()
+            .prefix("macp-registry-mismatch-")
+            .tempdir()
+            .expect("create scratch dir");
+        let base = scratch.path();
 
         let mut persisted = HashMap::new();
         persisted.insert(
@@ -793,7 +789,7 @@ mod tests {
         );
         SessionRegistry::persist_map(&base.join("sessions.json"), &persisted).unwrap();
 
-        let reopened = SessionRegistry::with_persistence(&base).unwrap();
+        let reopened = SessionRegistry::with_persistence(base).unwrap();
 
         // The key wins: the session is keyed at, and reports, "A".
         let session = reopened.get_session("A").await.unwrap();
@@ -807,20 +803,18 @@ mod tests {
 
     #[tokio::test]
     async fn persistent_registry_round_trip() {
-        let base = std::env::temp_dir().join(format!(
-            "macp-registry-test-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = tempfile::Builder::new()
+            .prefix("macp-registry-test-")
+            .tempdir()
+            .expect("create scratch dir");
+        let base = scratch.path();
 
-        let registry = SessionRegistry::with_persistence(&base).unwrap();
+        let registry = SessionRegistry::with_persistence(base).unwrap();
         registry
             .insert_recovered_session("s1".into(), sample_session("s1"))
             .await;
 
-        let reopened = SessionRegistry::with_persistence(&base).unwrap();
+        let reopened = SessionRegistry::with_persistence(base).unwrap();
         let session = reopened.get_session("s1").await.unwrap();
         assert_eq!(session.mode, "macp.mode.decision.v1");
         assert_eq!(session.mode_version, "1.0.0");
