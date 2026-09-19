@@ -98,7 +98,7 @@ Nothing in the runtime is wrong. The spec moved four commits; exactly two files 
 | Phase | Title | Status |
 |---|---|---|
 | 1 | Classify a drift report before escalating it, and keep what is suppressed visible | **DONE** |
-| 2 | Bump `SPEC_REV` to `0de1fab2` | **TODO** |
+| 2 | Bump `SPEC_REV` to `0de1fab2` | **DONE** |
 | 3 | Pin the vacuous participation floor with tests, and document it | **TODO** |
 
 **PR strategy:** one PR, three commits (per the plan's own recommendation — three disjoint
@@ -114,6 +114,31 @@ one unrelated pre-existing docs commit correcting stale phase-status tables in
 **Issues:** **#170** closes on Phase 2 (and would also close on Phase 1 alone, since a `non-actionable` verdict triggers the existing `!= 'yes'` close step — they are alternative closers, both wanted). **#169** needs all three: ask 1 is Phase 2, ask 2 is Phase 1, and the "Separately, and worth more than the above" section is Phase 3.
 
 ## Log
+
+- 2026-09-19 (Phase 2 executed and verified, branch `ci/spec-drift-catchup-169-170`):
+  `.github/workflows/ci.yml:39` `SPEC_REV` bumped from `c137f735358a046d677b607315006bb1c03baabd`
+  to `0de1fab20bc396fdc5f1412e61fdc3d7baf0a64d`. Only that one line changed — `git diff
+  --name-only` is exactly `.github/workflows/ci.yml`. Verified against a freshly-built clean
+  `git archive` export of the new pin (not the sibling's dirty working tree, which sits on an
+  unrelated branch): the new SHA's content spot-checked directly (the `$comment`/`description`
+  annotation edits at the two #122 pointers, confirmed present and confirmed to be the only
+  diff at those pointers). All 6 acceptance criteria: (1) new SHA appears exactly once, old SHA
+  gone; (2) `check_dir` replayed verbatim against both mirrored trees, 0 MISSING/0 DRIFT/0
+  EXTRA, exit 0; (3) `enum_lists_match_the_canonical_schemas` against the export: 1 passed; (4)
+  `conformance_loader` against the export: 35 passed/0 failed; (5) diff scope confirmed exactly
+  one file; (6) deferred to post-merge (#170 evidence comment) per the criterion's own text.
+  Also ran both cargo suites *without* the env vars (vendored-directory path): 198 passed
+  (`macp-policy --lib`) and 35 passed (`conformance_loader`), confirming the fallback path is
+  unaffected. `actionlint .github/workflows/ci.yml` clean (exit 0).
+
+  **Fresh Opus verify: PASS, first round.** Independently rebuilt its own clean archive export,
+  independently re-ran all four measurable criteria (matching results exactly), independently
+  read `enum_lists_match_the_canonical_schemas` and confirmed its 14 assertions never touch
+  `$comment`/`description`, independently diffed the schema file between the two pins and
+  confirmed the only two hunks are the two annotation pointers the plan names, and confirmed
+  spec #120's descriptor-schema change sits outside both gates' scope (Open question 3,
+  correctly left unimplemented here). No gaps found. No `ASSUMPTIONS.md` entries — fully
+  prescriptive phase, everything measured rather than assumed.
 
 - 2026-09-19 (Phase 1 executed, branch `ci/spec-drift-catchup-169-170` off `1990c9b`):
   `.github/workflows/spec-drift.yml` rewritten exactly per the plan's Approach — classifier

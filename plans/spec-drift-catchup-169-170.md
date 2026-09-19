@@ -134,7 +134,10 @@ One **ordering hazard**, not a dependency: once Phase 2 lands, `spec-drift.yml`'
 
 ### Phase 2 — bump `SPEC_REV` to `0de1fab2`
 
-- **Status:** TODO
+- **Status:** DONE (2026-09-19). Implemented exactly as specified — a single line, no
+  divergence. All 6 acceptance criteria measured against a clean `git archive` export of
+  `0de1fab2` (criterion 6, closing #170 with evidence, is deferred to post-merge as the
+  criterion itself specifies). Fresh Opus verify: **PASS**, first round, no gaps.
 - **Delivers:** the `conformance-oracle` pin catches up to spec `main`, crossing spec #120 and #122. Closes **#170**, and **#169** ask 1.
 - **Depends on:** nothing. One line. Independent of Phases 1 and 3 — though note the ordering hazard above: verify Phase 1 before or independently of this landing, never by waiting for a scheduled run afterwards.
 - **Files:** `.github/workflows/ci.yml:39` — `SPEC_REV: "c137f735358a046d677b607315006bb1c03baabd"` becomes `SPEC_REV: "0de1fab20bc396fdc5f1412e61fdc3d7baf0a64d"`. **Nothing else.** No fixture is vendored, no mirror is edited, no test changes.
