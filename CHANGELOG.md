@@ -6,6 +6,21 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.7.6...macp-runtime-v0.8.0) - 2026-09-20
+
+### Added
+
+- *(handoff)* [**breaking**] record the implicit accept at semantics_rev 2; mode-state records no longer exhaustively constructible ([#171](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/171))
+
+### Fixed
+
+- *(deps)* bump rustls to 0.23.45 to resolve RUSTSEC-2026-0285 ([#174](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/174))
+
+### Other
+
+- *(deps)* bump macp-proto to 0.1.10 ([#175](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/175))
+- catch up spec pin ([#170](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/170)), harden drift watcher, pin quorum-floor equivalence ([#169](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/169))
+
 ## [0.7.6](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.7.5...macp-runtime-v0.7.6) - 2026-09-12
 
 ### Fixed
