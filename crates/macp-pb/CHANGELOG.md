@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-pb-v0.7.6...macp-pb-v0.8.0) - 2026-09-20
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.7.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-pb-v0.7.0...macp-pb-v0.7.1) - 2026-08-31
 
 ### Other

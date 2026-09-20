@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-storage-v0.7.6...macp-storage-v0.8.0) - 2026-09-20
+
+### Added
+
+- *(handoff)* [**breaking**] record the implicit accept at semantics_rev 2; mode-state records no longer exhaustively constructible ([#171](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/171))
+
 ## [0.7.6](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-storage-v0.7.5...macp-storage-v0.7.6) - 2026-09-12
 
 ### Other
