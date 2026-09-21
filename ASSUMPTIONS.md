@@ -882,3 +882,32 @@
   in-process coverage still holds, so deleting it loses the boundary proof but no correctness
   guarantee.
 - **Status:** UNCONFIRMED (2026-09-13)
+
+## Phase 1 semver-check acceptance criterion verified by manual inspection, not the tool
+- **Plan:** `plans/parity-contract-176.md` (Phase 1, proof-of-concept parity-contract consumer)
+- **Assumed:** Phase 1's acceptance criteria require a clean `cargo semver-checks
+  check-release --workspace --baseline-version 0.8.0` run. Locally installed
+  `cargo-semver-checks` (0.45.0) crashes before evaluating any lints against this repo's
+  pinned rustc (1.96.1, via `rust-toolchain.toml`): `error: unsupported rustdoc format v57
+  for file... (supported formats are v53, v55, v56)`. An empty grep of the crash output is
+  indistinguishable from "no breaking changes" but actually means "no check ran at all" —
+  same trap CLAUDE.md §8a warns about, one level deeper (this isn't a documented
+  known-issue, it's a version-skew crash that mimics a clean pass).
+- **Chose:** Treat this as the same class of gap PR #173 hit and documented ("unrunnable
+  on this machine... deferred to CI") — proceed on Phase 1 with a fresh-Opus verifier's
+  independent manual API-delta inspection (all ten `"1.0"` replacements, both
+  `#[doc(hidden)] pub fn` conversions, four new constants — no removals, renames,
+  signature changes, field additions, or visibility narrowings found) standing in for the
+  automated check locally, and state honestly in the PR body that the automated
+  semver-check itself is unverified locally and deferred to CI's pinned toolchain.
+- **Alternatives:** (a) upgrade `cargo-semver-checks` locally before continuing — rejected
+  for scope; this phase's actual code change doesn't depend on it and upgrading a global
+  cargo-installed tool is outside a code-review diff; (b) skip the criterion silently —
+  rejected, CLAUDE.md's rule exists precisely to prevent an unverified pass being reported
+  as clean.
+- **Blast radius if wrong:** If the diff actually did contain a breaking change the manual
+  inspection missed, CI's `deps-isolation`/release-plz `semver_check = true` gate (which
+  runs on a matched, current toolchain) catches it before any release — this is a
+  proof-of-concept-scope repo-internal phase, not a publish, so nothing ships to
+  crates.io off of this local result alone.
+- **Status:** UNCONFIRMED (2026-09-20)

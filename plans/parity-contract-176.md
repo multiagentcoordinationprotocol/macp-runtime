@@ -63,7 +63,37 @@ review's corrections.
 
 ### Phase 1 — Expose the real predicates; introduce real version/default constants
 
-**Status:** TODO
+**Status:** DONE
+
+**Divergences from plan (noted by the Phase 1 verifier, PASS with caveats):**
+- The `cargo semver-checks` acceptance criterion below could not actually be executed
+  locally: `cargo-semver-checks` 0.45.0 (the version installed on this machine) crashes
+  before evaluating any lints against rustc 1.96.1's rustdoc JSON (`error: unsupported
+  rustdoc format v57 for file... (supported formats are v53, v55, v56)`) — the empty
+  `grep` output this produces is indistinguishable from "no failures" but actually means
+  "no check ran." This is a local-toolchain limitation, not a code issue — same precedent
+  as PR #173 (documented there as "cargo-semver-checks is unrunnable on this machine...
+  deferred to CI"). The verifier independently hand-inspected the API delta (all ten
+  `"1.0"` replacements, both `#[doc(hidden)] pub fn` conversions, the four new
+  constants) and found it purely additive/hidden — no removals, renames, signature
+  changes, field additions, or visibility narrowings — so the change is very likely
+  semver-clean, but this is **not a verified automated pass** and must not be
+  represented as one in the eventual PR body. Deferred to CI, which runs a matched
+  rustc/cargo-semver-checks pair.
+- The test-count acceptance criterion below ("same total test count as baseline... must
+  be identical") was wrong as originally written — it contradicts this same phase's Tests
+  section, which requires 2 new unit tests. Corrected here: baseline was 871, Phase 1
+  added exactly 2 (`macp_version_value` in `crates/macp-core/src/lib.rs`,
+  `default_mode_and_configuration_version_values` in `crates/macp-core/src/session.rs`),
+  total after Phase 1 is 873. `cargo test --workspace` passes at 873/873, 0 failed.
+- Three benign wording-level deviations the verifier flagged as not worth changing:
+  constant placement, the re-export path style in `common.rs`, and an off-by-one line
+  citation (`src/server.rs:810` in this doc vs. `:814` in the actual current file —
+  harmless drift from other code moving in the same region).
+- The pre-existing `clippy::assertions_on_constants` failure at `crates/macp-core/src/
+  session.rs` (now line ~1402, `assert!(CURRENT_SEMANTICS_REV >= 2)`) is confirmed
+  pre-existing and unrelated to this phase (verified via `git stash` reproducing the
+  identical failure on unmodified code) — out of scope, not fixed here.
 
 **Delivers:** The two governance predicates the parity runner must exercise become
 callable from outside `macp-modes` (marked as not a stability promise, matching the
@@ -194,13 +224,16 @@ use the constant would remove that redundancy for no benefit.
   distinguish hidden from non-hidden additions in its output, so no tool-based criterion
   can stand in for that — see the next bullet instead). `0.8.0` is confirmed already
   published to crates.io (this session verified all seven crates live at `0.8.0` after PR
-  #172).
+  #172). **Actually unverifiable locally** — see the divergence note above; deferred to
+  CI, confirmed manually-additive by the Phase 1 verifier in the meantime.
 - Each of the two functions and the two new `session.rs` constants carries `#[doc(hidden)]`
   directly above its `pub` — verified by reading the diff, not by a tool (no existing tool
   in this repo's CI distinguishes hidden vs. non-hidden public items either way).
-- `cargo test --workspace` passes with the same total test count as baseline (this phase
-  changes no test file, so the count must be identical — a changed count means a test was
-  accidentally dropped or duplicated).
+- `cargo test --workspace` passes at baseline + 2 (871 → 873) — the 2 new unit tests
+  listed in the Tests section below, and no other change; any other delta means a test
+  was accidentally dropped or duplicated. (Originally written as "must be identical to
+  baseline" — corrected here; that contradicted this phase's own Tests section. See the
+  divergence note above.)
 
 **Tests:**
 - A new unit test in `crates/macp-core` asserting `MACP_VERSION == "1.0"`.

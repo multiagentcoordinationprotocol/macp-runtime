@@ -112,6 +112,28 @@ Files this plan's phases touch or read, one line each:
 
 ## Phase checkpoint log
 
-(empty — plan went through two review rounds (both REVISE, all findings closed — see
-plan's "Plan review" section for the full round-2 itemization), `/implement` has not
-started yet)
+### Phase 1 — Expose the real predicates; introduce real version/default constants
+- **Date:** 2026-09-20
+- **Verdict:** PASS (1 round, fresh Opus verifier, no Fable — not a one-way door: both
+  predicates get `#[doc(hidden)]`, not plain `pub`, which is the whole point)
+- **Gap summary:** none required fixing (PASS on round 1). Verifier surfaced two items
+  needing inline correction rather than code changes, both applied to
+  `plans/parity-contract-176.md`'s Phase 1 section directly: (1) the plan's test-count
+  acceptance criterion was self-contradictory (claimed "identical to baseline" while the
+  same phase's Tests section required 2 new tests) — corrected to "baseline + 2
+  (871 → 873)"; (2) the `cargo semver-checks` acceptance criterion's local run was a
+  silent tool crash (rustdoc format v57 unsupported by local `cargo-semver-checks`
+  0.45.0), not a genuine clean pass — noted inline as deferred to CI, per PR #173's
+  precedent; verifier independently hand-confirmed the API delta is additive-only.
+- **Files touched:** `crates/macp-core/src/lib.rs`, `crates/macp-core/src/session.rs`,
+  `crates/macp-modes/src/mode/handoff.rs`, `crates/macp-modes/src/mode/multi_round.rs`,
+  `crates/macp-modes/src/mode/util.rs`, `src/bin/support/common.rs`, `src/replay.rs`,
+  `src/runtime.rs`, `src/server.rs`. No repo docs touched (Phase 1's own `Docs: None` was
+  correct — confirmed, nothing describes these functions' visibility today).
+- **Test evidence:** `cargo test --workspace` 873 passed, 0 failed (baseline 871 + 2 new:
+  `macp_version_value`, `default_mode_and_configuration_version_values`). `cargo fmt
+  --check` clean. `cargo doc --workspace -D warnings` clean. `cargo clippy --workspace
+  --all-targets -- -D warnings` has one failure, confirmed pre-existing via `git stash`
+  (identical failure on unmodified code) and out of scope for this phase.
+- **What's next:** Phase 2 — vendor `tests/parity/contract.json` + `tests/parity/
+  SOURCE.md`, write `tests/parity_contract.rs`.

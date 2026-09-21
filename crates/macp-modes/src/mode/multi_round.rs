@@ -54,7 +54,13 @@ struct ContributeJson {
 /// opens a proto group that a later `|` byte closes) and silently change a
 /// replayed contribution. A proto payload never parses as a JSON object, so
 /// this order is deterministic and costs proto senders one failed JSON parse.
-fn parse_contribute_value(payload: &[u8]) -> Result<String, MacpError> {
+///
+/// `#[doc(hidden)] pub` solely so `tests/parity_contract.rs` (in the root
+/// `macp-runtime` crate) can assert this predicate directly, against
+/// `schemas/parity/contract.json`'s `contribute_payload`/`contribute_acceptance`
+/// vectors, instead of reimplementing it. Not a stability promise.
+#[doc(hidden)]
+pub fn parse_contribute_value(payload: &[u8]) -> Result<String, MacpError> {
     // Empty payloads were always rejected in the JSON era (and canonical
     // proto3 encoding cannot produce a non-empty encoding for value "");
     // keep rejecting them rather than accepting an empty contribution.

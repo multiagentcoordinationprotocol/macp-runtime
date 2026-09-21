@@ -92,7 +92,7 @@ fn replay_entry(
         EntryKind::Incoming => {
             let replay_env = Envelope {
                 macp_version: if entry.macp_version.is_empty() {
-                    "1.0".into()
+                    macp_core::MACP_VERSION.into()
                 } else {
                     entry.macp_version.clone()
                 },
@@ -326,7 +326,7 @@ fn replay_from_start(
 
     let env = Envelope {
         macp_version: if start_entry.macp_version.is_empty() {
-            "1.0".into()
+            macp_core::MACP_VERSION.into()
         } else {
             start_entry.macp_version.clone()
         },

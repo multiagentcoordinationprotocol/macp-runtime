@@ -5,6 +5,19 @@ use macp_pb::pb::SessionStartPayload;
 use prost::Message;
 use std::collections::{HashMap, HashSet};
 
+/// Default `SessionStart.mode_version` used by this repo's example clients.
+/// `#[doc(hidden)]` — a conventional default, not a value any kernel check
+/// compares against (unlike [`crate::MACP_VERSION`]); promoted here purely so
+/// `tests/parity_contract.rs` and `src/bin/support/common.rs` share one
+/// source instead of two literals that merely happen to agree.
+#[doc(hidden)]
+pub const DEFAULT_MODE_VERSION: &str = "1.0.0";
+
+/// Default `SessionStart.configuration_version` used by this repo's example
+/// clients. Same `#[doc(hidden)]` rationale as [`DEFAULT_MODE_VERSION`].
+#[doc(hidden)]
+pub const DEFAULT_CONFIGURATION_VERSION: &str = "config.default";
+
 pub const MAX_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// Default cap on the cumulative time a session may spend `Suspended` before
@@ -690,6 +703,12 @@ pub fn validate_session_id_for_acceptance(session_id: &str) -> Result<(), MacpEr
 mod tests {
     use super::*;
     use prost::Message;
+
+    #[test]
+    fn default_mode_and_configuration_version_values() {
+        assert_eq!(DEFAULT_MODE_VERSION, "1.0.0");
+        assert_eq!(DEFAULT_CONFIGURATION_VERSION, "config.default");
+    }
 
     fn encode_payload(ttl_ms: i64, participants: Vec<String>) -> Vec<u8> {
         let payload = SessionStartPayload {

@@ -112,7 +112,7 @@ impl MacpServer {
     }
 
     fn validate_envelope_shape(&self, env: &Envelope) -> Result<(), MacpError> {
-        if env.macp_version != "1.0" {
+        if env.macp_version != macp_core::MACP_VERSION {
             return Err(MacpError::InvalidMacpVersion);
         }
         if env.message_type.is_empty() || env.message_id.is_empty() {
@@ -800,14 +800,18 @@ impl MacpRuntimeService for MacpServer {
                 "INVALID_REQUEST: supported_protocol_versions must not be empty",
             ));
         }
-        if !req.supported_protocol_versions.iter().any(|v| v == "1.0") {
+        if !req
+            .supported_protocol_versions
+            .iter()
+            .any(|v| v == macp_core::MACP_VERSION)
+        {
             return Err(Status::failed_precondition(
                 "UNSUPPORTED_PROTOCOL_VERSION: no mutually supported protocol version",
             ));
         }
 
         Ok(Response::new(InitializeResponse {
-            selected_protocol_version: "1.0".into(),
+            selected_protocol_version: macp_core::MACP_VERSION.into(),
             runtime_info: Some(RuntimeInfo {
                 name: "macp-runtime".into(),
                 title: "MACP Reference Runtime".into(),
