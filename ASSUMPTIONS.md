@@ -910,4 +910,13 @@
   runs on a matched, current toolchain) catches it before any release — this is a
   proof-of-concept-scope repo-internal phase, not a publish, so nothing ships to
   crates.io off of this local result alone.
-- **Status:** UNCONFIRMED (2026-09-20)
+- **Status:** CONFIRMED (2026-09-20) — see `DECISIONS.md`. Verified CI does not share
+  the crash: release-plz-action's pinned commit (`b5543c19b03be9bd48852d20ca89f478b7723260`,
+  "v0.5.132") installs `cargo-semver-checks@0.50` independently of `rust-toolchain.toml`,
+  and 0.50 is confirmed (via the real, closed `release-plz/release-plz#3018`) to already
+  support rustdoc v56/v57 — past the v56 ceiling of the locally-stale 0.45.0. Residual,
+  not specific to this diff: this repo's release-plz default (`0.3.161`, cut 2026-09-03)
+  predates `release-plz#3021`'s fix (merged 2026-09-08) for a separate defect — a
+  *minor*-only deny-lint violation from a cargo-semver-checks run that completes normally
+  can still misclassify as "compatible." Doesn't touch this purely-additive diff; worth a
+  maintainer follow-up to bump the action's `version:` input past `0.3.161`.
