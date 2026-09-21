@@ -137,3 +137,36 @@ Files this plan's phases touch or read, one line each:
   (identical failure on unmodified code) and out of scope for this phase.
 - **What's next:** Phase 2 — vendor `tests/parity/contract.json` + `tests/parity/
   SOURCE.md`, write `tests/parity_contract.rs`.
+
+### Phase 2 — Vendor the manifest; write the parity-contract runner
+- **Date:** 2026-09-20
+- **Verdict:** PASS (1 round, fresh Opus verifier, no Fable — test code, not a
+  published-crate API surface, so no one-way-door risk)
+- **Gap summary:** none required fixing (PASS on round 1). Verifier noted one
+  non-blocking, by-design forward-reference: `tests/parity/SOURCE.md` and
+  `docs/testing.md`'s new subsection both describe Phase 3's CI wiring as
+  already active, true only once Phase 3 lands in the same PR (this plan's
+  chosen single-PR strategy) — flagged for the eventual PR body, not a code
+  change. Also noted the runner's 17 tests vs. the plan's approximate ~10-test
+  estimate is finer granularity, not a design deviation — see the inline note
+  added to `plans/parity-contract-176.md`'s Phase 2 section.
+- **Files touched:** `tests/parity/contract.json` (new, byte-identical vendor
+  of the spec repo's manifest, verified against spec `main` HEAD `4f15b96c`),
+  `tests/parity/SOURCE.md` (new), `tests/parity_contract.rs` (new, 17 tests),
+  `docs/testing.md` (new "Parity contract" subsection under "Unit tests and
+  conformance").
+- **Test evidence:** `cargo test --test parity_contract` 17/17 passed, both
+  against the vendored copy and directly against the canonical spec-repo file
+  via `MACP_PARITY_CONTRACT` (proves the exact seam Phase 3 wires into CI
+  already works). Prove/restore re-verified live by the verifier: removing
+  `"defaults"` from `HANDLED` fails `every_macp_runtime_section_is_handled`,
+  naming the section; corrupting one `commitment_hash` vector in a `/tmp`
+  scratch copy fails `commitment_hash_accept_reject_vectors_match_runtime`
+  naming the exact bad value (both done and reverted by this session before
+  the verifier's own independent re-check). `cargo test --workspace`: 890
+  passed, 0 failed (873 baseline + 17 new). `cargo clippy --test
+  parity_contract -- -D warnings` and `cargo fmt --check` clean. The 8
+  pre-existing `needless_borrow` warnings in `tests/policies_dry_run.rs`
+  (untouched by this phase) confirmed unrelated.
+- **What's next:** Phase 3 — bump `SPEC_REV`, add the third `check_dir` call,
+  wire `MACP_PARITY_CONTRACT` into CI, update `spec-drift.yml`.

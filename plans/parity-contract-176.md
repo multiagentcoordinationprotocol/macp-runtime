@@ -253,7 +253,28 @@ enumerates `"1.0"` call sites.
 
 ### Phase 2 — Vendor the manifest; write the parity-contract runner
 
-**Status:** TODO
+**Status:** DONE
+
+**Divergences from plan (noted by the Phase 2 verifier, PASS with one note):**
+- The runner ended up with 17 `#[test]` functions rather than the roughly
+  "one per `HANDLED` entry plus two structural guards" (≈10) the plan
+  described — `defaults` split into three tests (mode/configuration/policy
+  version match, the documentation-grade `policy_builder_schema_version`
+  literal pin, and its separate real registry-acceptance assertion) and
+  `contribute_payload` split into two (the decode/encode round trip, and the
+  `first_byte` marker check), plus three tests for the hand-rolled hex
+  helpers (a self-test and the two required-rejection cases). This is finer
+  granularity than the plan's approximate count, not a different design —
+  every section the plan named is still asserted against real code exactly
+  as specified.
+- `tests/parity/SOURCE.md` and `docs/testing.md`'s new subsection both
+  describe Phase 3's CI wiring (the `check_dir` gate, `MACP_PARITY_CONTRACT`
+  set in CI) as already active. This is true only once Phase 3 lands — by
+  design, per this plan's single-PR strategy (all three phases ship as one
+  PR with three phase-commits) — but a reviewer diffing only this phase's
+  commit in isolation would find that stated invariant momentarily false
+  against `ci.yml`'s still-unbumped `SPEC_REV`. Noted here so it isn't
+  mistaken for a defect; the PR body should say so too.
 
 **Delivers:** `tests/parity/contract.json` (byte-identical vendor of the spec repo's
 manifest at the commit Phase 3 pins `SPEC_REV` to), `tests/parity/SOURCE.md`

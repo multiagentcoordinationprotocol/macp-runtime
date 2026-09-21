@@ -14,6 +14,16 @@ make test-all                     # fmt -> clippy -> test -> integration -> conf
 
 Unit tests live inside `src/` modules under `#[cfg(test)]` and cover mode state machines, policy evaluation algorithms, storage backends (including compaction, legacy-format migration, and crash-recovery paths), replay logic, metrics rendering, the extension registry, JWT auth including remote-JWKS fetch/caching/rotation, the auth resolver chain, and error handling. The conformance fixtures in `tests/conformance/` define mode lifecycles as JSON files and verify that each mode's happy path and reject paths produce the expected results.
 
+### Parity contract
+
+`tests/parity_contract.rs` asserts every macp-runtime-relevant section of the spec repo's `schemas/parity/contract.json` -- a small, non-normative manifest pinning cross-implementation-agreed values (protocol version, mode-id sets, defaults, error codes, commitment-hash format, Contribute payload encoding) shared with `macp-sdk-python` and `macp-sdk-typescript` -- against this runtime's real, live code: `macp_core::MACP_VERSION`, the mode-registry constants, `is_canonical_commitment_hash`/`parse_contribute_value`, `MacpError::error_code()`, and `PolicyRegistry::register`.
+
+```bash
+cargo test --test parity_contract
+```
+
+It reads `tests/parity/contract.json` (a byte-identical vendored copy; see `tests/parity/SOURCE.md` for provenance and the re-vendor command) by default, or the file named by `MACP_PARITY_CONTRACT` when set -- CI's `conformance-oracle` job points this at the spec-repo checkout directly, proving the runtime matches canonical, not merely the vendored copy.
+
 ## Integration test suite
 
 A separate Rust crate at `integration_tests/` tests the runtime through the real gRPC transport boundary. It is not part of the main Cargo build -- `cargo build --release` ignores it entirely.
