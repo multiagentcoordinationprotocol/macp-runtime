@@ -1399,7 +1399,10 @@ mod tests {
     fn suspension_cycle_cap_force_expires_at_rev2() {
         let mut s = open_session(1_000_000_000);
         assert_eq!(s.semantics_rev, CURRENT_SEMANTICS_REV);
-        assert!(CURRENT_SEMANTICS_REV >= 2);
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(CURRENT_SEMANTICS_REV >= 2);
+        }
         for i in 0..MAX_SUSPENSION_CYCLES as i64 {
             s.suspend(i).unwrap();
             s.resume(i).unwrap();
