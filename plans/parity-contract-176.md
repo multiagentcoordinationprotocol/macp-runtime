@@ -526,7 +526,15 @@ tree today.
 
 ### Phase 3 — CI wiring: bump `SPEC_REV`, byte-diff the vendored copy, watch it for drift
 
-**Status:** TODO
+**Status:** DONE
+
+**Divergences from plan:** none of substance. The verifier flagged one cosmetic
+note: `ci.yml:24-31`'s top-of-file comment describing what "alignment work"
+belongs in the same PR as a `SPEC_REV` bump wasn't updated to name parity
+re-vendoring explicitly — the detailed instruction correctly lives in
+`spec-drift.yml`'s "What to do" checklist instead (the authoritative copy per
+this phase's own file scoping; that comment was never in Phase 3's `Files`
+list). Not a gap against the plan.
 
 **Delivers:** The vendored `tests/parity/contract.json` can never silently diverge from
 its spec-repo source, the daily drift watcher learns about the new tree (including its

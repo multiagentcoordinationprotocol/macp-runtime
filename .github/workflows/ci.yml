@@ -36,7 +36,7 @@ env:
   # of truth -- and files one tracked issue when upstream moves ahead of it in a
   # way that touches the mirrored trees. Pin without that watcher and the gate
   # quietly rots; that pairing is the whole design.
-  SPEC_REV: "0de1fab20bc396fdc5f1412e61fdc3d7baf0a64d"
+  SPEC_REV: "4f15b96cac6e39d62925a5baa1ef80a42c2f818d"
 
 jobs:
   actionlint:
@@ -623,6 +623,7 @@ jobs:
           }
           check_dir "tests/conformance" "spec-repo/schemas/conformance"
           check_dir "tests/conformance/cmt-hash" "spec-repo/schemas/conformance/cmt-hash"
+          check_dir "tests/parity" "spec-repo/schemas/parity"
           exit $status
 
       - name: Install Rust toolchain
@@ -645,6 +646,24 @@ jobs:
         env:
           MACP_CONFORMANCE_FIXTURES_DIR: ${{ github.workspace }}/spec-repo/schemas/conformance
         run: cargo test --test conformance_loader
+
+      # tests/parity_contract.rs currently defines 17 #[test] functions; a
+      # bare `cargo test` exit code can't tell a passing suite from a
+      # silently-renamed-or-#[ignore]d one (it exits 0 either way), so this
+      # asserts the reported passed-count directly, same idea as the
+      # single-test guard below.
+      - name: Run parity-contract suite against canonical manifest
+        env:
+          MACP_PARITY_CONTRACT: ${{ github.workspace }}/spec-repo/schemas/parity/contract.json
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP:-/tmp}/parity-contract.log"
+          cargo test --test parity_contract | tee "$log"
+          passed=$(grep -oE '^test result: ok\. [0-9]+ passed' "$log" | grep -oE '[0-9]+' | head -1)
+          if [ -z "$passed" ] || [ "$passed" -lt 17 ]; then
+            echo "::error::expected at least 17 parity_contract tests to pass, got '${passed:-0}' -- was a test renamed, skipped, or #[ignore]d?"
+            exit 1
+          fi
 
       # The policy registry's value-domain validators are hand-written mirrors
       # of schemas/json/policy/*.schema.json (this runtime carries no

@@ -13,8 +13,9 @@ name: Spec drift watch
 # the spec moves ahead of us in a way that actually touches the artifacts we
 # mirror.
 #
-# Deliberately narrow: it reports only on `schemas/conformance/**` and
-# `schemas/json/policy/**`, the two trees the conformance-oracle job consumes.
+# Deliberately narrow: it reports only on `schemas/conformance/**`,
+# `schemas/json/policy/**`, and `schemas/parity/**`, the three trees the
+# conformance-oracle job consumes.
 # RFC prose moving without a schema or fixture change is not drift we can act
 # on mechanically, and reporting it would train everyone to ignore this issue.
 #
@@ -107,7 +108,7 @@ jobs:
           head_sha=$(git -C spec-head rev-parse HEAD)
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
 
-          no_drift_comment="The mirrored trees (\`schemas/conformance\`, \`schemas/json/policy\`) no longer differ from the pinned revision. Closed automatically."
+          no_drift_comment="The mirrored trees (\`schemas/conformance\`, \`schemas/json/policy\`, \`schemas/parity\`) no longer differ from the pinned revision. Closed automatically."
 
           if [ "$head_sha" = "$PINNED" ]; then
             echo "drift=none" >> "$GITHUB_OUTPUT"
@@ -125,7 +126,7 @@ jobs:
           # spec-pinned/spec-head paths to open the files, and relabelling
           # first would leave nothing for the classifier to match.
           report=$(mktemp)
-          for tree in schemas/conformance schemas/json/policy; do
+          for tree in schemas/conformance schemas/json/policy schemas/parity; do
             # README.md is excluded deliberately: it is not vendored into this
             # repo, so a change to it implies no action from the issue's
             # checklist. Reporting it would be noise, and noise is how a
@@ -144,7 +145,7 @@ jobs:
               echo "$no_drift_comment"
               echo REPORT_EOF
             } >> "$GITHUB_OUTPUT"
-            echo "spec moved to $head_sha but neither mirrored tree changed; not reporting"
+            echo "spec moved to $head_sha but none of the mirrored trees changed; not reporting"
             exit 0
           fi
 
@@ -320,7 +321,7 @@ jobs:
           if [ "$verdict" = "non-actionable" ]; then
             {
               echo 'close_comment<<REPORT_EOF'
-              echo "The mirrored trees (\`schemas/conformance\`, \`schemas/json/policy\`) differ from the pinned revision (\`$head_sha\`), but only in ways \`conformance-oracle\`'s gates cannot act on -- see this run's step summary for detail. The pin itself remains behind. Closed automatically; this is not tracked as an open issue."
+              echo "The mirrored trees (\`schemas/conformance\`, \`schemas/json/policy\`, \`schemas/parity\`) differ from the pinned revision (\`$head_sha\`), but only in ways \`conformance-oracle\`'s gates cannot act on -- see this run's step summary for detail. The pin itself remains behind. Closed automatically; this is not tracked as an open issue."
               echo REPORT_EOF
             } >> "$GITHUB_OUTPUT"
             echo "spec moved to $head_sha; differences exist but none is actionable -- not filing"
@@ -344,7 +345,7 @@ jobs:
             fi
             printf "### Commits since the pin\n\n"
             git -C spec-head log --oneline "$PINNED..$head_sha" \
-              -- schemas/conformance schemas/json/policy 2>/dev/null | sed 's/^/- /' \
+              -- schemas/conformance schemas/json/policy schemas/parity 2>/dev/null | sed 's/^/- /' \
               || printf -- '- (could not enumerate; the pinned commit may not be an ancestor)\n'
             printf '\n'
           } > "$body"
@@ -353,9 +354,10 @@ jobs:
 
           1. Vendor any changed or added fixture from `schemas/conformance/` into `tests/conformance/` **byte-identically** (never hand-edit them), and register new ones with `conformance_test!`.
           2. If `schemas/json/policy/**` changed, re-check the hand-written mirrors in `crates/macp-policy/src/registry.rs` (`validate_conditional_constraints`) and the `enum_lists_match_the_canonical_schemas` parity test.
-          3. Implement any new normative behaviour, then bump `SPEC_REV` in `.github/workflows/ci.yml` in the same PR.
+          3. If `schemas/parity/contract.json` changed, re-vendor it byte-identically into `tests/parity/contract.json` (see `tests/parity/SOURCE.md`), re-run `cargo test --test parity_contract`, and re-run its prove-then-restore checks.
+          4. Implement any new normative behaviour, then bump `SPEC_REV` in `.github/workflows/ci.yml` in the same PR.
 
-          Bumping `SPEC_REV` without doing 1 and 2 turns `conformance-oracle` red on every PR, which is the failure mode the pin exists to prevent. This issue refreshes itself daily and closes itself once the pin catches up.
+          Bumping `SPEC_REV` without doing 1, 2, and 3 turns `conformance-oracle` red on every PR, which is the failure mode the pin exists to prevent. This issue refreshes itself daily and closes itself once the pin catches up.
           MARKDOWN
 
           {

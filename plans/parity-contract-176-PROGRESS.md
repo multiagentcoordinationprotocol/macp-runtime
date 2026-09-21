@@ -170,3 +170,48 @@ Files this plan's phases touch or read, one line each:
   (untouched by this phase) confirmed unrelated.
 - **What's next:** Phase 3 — bump `SPEC_REV`, add the third `check_dir` call,
   wire `MACP_PARITY_CONTRACT` into CI, update `spec-drift.yml`.
+
+### Phase 3 — CI wiring: bump SPEC_REV, byte-diff the vendored copy, watch it for drift
+- **Date:** 2026-09-20
+- **Verdict:** PASS (1 round, fresh Opus verifier, no Fable — CI config,
+  reversible in a commit, not a one-way door)
+- **Gap summary:** none required fixing (PASS on round 1). One cosmetic,
+  non-blocking note: `ci.yml`'s top-of-file comment about same-PR alignment
+  work doesn't explicitly name parity re-vendoring (the authoritative
+  instruction lives in `spec-drift.yml`'s checklist instead, by design — that
+  comment was never in this phase's `Files` list). Noted inline in
+  `plans/parity-contract-176.md`'s Phase 3 section.
+- **Files touched:** `.github/workflows/ci.yml` (`SPEC_REV` bumped to
+  `4f15b96c`, third `check_dir "tests/parity" "spec-repo/schemas/parity"`
+  call, new "Run parity-contract suite against canonical manifest" step with
+  a passed-count collection guard), `.github/workflows/spec-drift.yml`
+  (header comment, watched-tree loop, both close-comment strings,
+  commits-since-pin path list, and the renumbered "What to do" checklist with
+  a corrected "1, 2, and 3" back-reference — all updated to include
+  `schemas/parity`; deliberately no new case-statement suppression branch,
+  per this phase's own fail-closed-by-design decision).
+- **Test evidence:** Verifier independently re-fetched spec `origin/main` and
+  confirmed it is still exactly `4f15b96c` (pin not stale). Verifier
+  extracted and ran the literal `check_dir` bash locally: clean baseline,
+  `MISSING` on a deleted scratch copy, `DRIFT` on a flipped byte (this session
+  had already proven the same two cases earlier in Phase 3 execution,
+  independently reproduced by the verifier). New CI step run live:
+  `MACP_PARITY_CONTRACT` pointed at the canonical spec-repo file, 17/17
+  passed; verifier applied the guard's exact grep logic against the real log
+  and two synthetic reduced-count logs (16, 0) to confirm it correctly fails
+  a silently-renamed/ignored/filtered test. `actionlint` (with `shellcheck`
+  on PATH) clean on both files, zero findings. `cargo test --workspace`
+  unchanged at 890/0 (this phase touches no Rust code). Old-pin non-existence
+  of `schemas/parity/` at `0de1fab2` independently reconfirmed by the
+  verifier via `git ls-tree`.
+- **Whole-feature check:** verifier cross-checked all three phases against
+  issue #176's full ask (via a fresh `gh issue view 176`) and found every
+  promised deliverable present, with the one dropped item (a hand-written
+  `CHANGELOG.md` entry) explicitly reasoned and documented as out of scope in
+  the plan's Context section (release-plz generates changelog entries from
+  conventional commits), not a silently-deferred promise.
+- **What's next:** This was the last phase. Proceed to `/implement`'s §4
+  finalization pass (whole-feature test/doc sweep, one final cumulative-diff
+  Opus verify), then `/reconcile` (one `UNCONFIRMED` entry in `ASSUMPTIONS.md`
+  tagged to this plan — the local semver-checks tool-limitation logged during
+  Phase 1 closeout), then `/ship`.
