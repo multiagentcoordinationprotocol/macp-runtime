@@ -16,9 +16,10 @@ pub fn new_session_id() -> String {
 }
 
 pub const DEV_ENDPOINT: &str = "http://127.0.0.1:50051";
-pub const MODE_VERSION: &str = "1.0.0";
-pub const CONFIG_VERSION: &str = "config.default";
-pub const POLICY_VERSION: &str = "policy.default";
+pub use macp_runtime::macp_core::session::{
+    DEFAULT_CONFIGURATION_VERSION as CONFIG_VERSION, DEFAULT_MODE_VERSION as MODE_VERSION,
+};
+pub use macp_runtime::policy::defaults::DEFAULT_POLICY_ID as POLICY_VERSION;
 
 pub async fn connect_client(
 ) -> Result<MacpRuntimeServiceClient<Channel>, Box<dyn std::error::Error>> {
@@ -81,7 +82,7 @@ pub fn envelope(
     payload: Vec<u8>,
 ) -> Envelope {
     Envelope {
-        macp_version: "1.0".into(),
+        macp_version: macp_runtime::macp_core::MACP_VERSION.into(),
         mode: mode.into(),
         message_type: message_type.into(),
         message_id: message_id.into(),
@@ -97,7 +98,7 @@ pub async fn initialize(
 ) -> Result<InitializeResponse, tonic::Status> {
     client
         .initialize(InitializeRequest {
-            supported_protocol_versions: vec!["1.0".into()],
+            supported_protocol_versions: vec![macp_runtime::macp_core::MACP_VERSION.into()],
             client_info: None,
             capabilities: None,
         })

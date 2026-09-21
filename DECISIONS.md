@@ -227,3 +227,44 @@ semver-compatible; it must land before #114 publishes 0.7.0.
   `enum_variant_added` is already a major lint that blocks the release PR.
 - **Status:** CONFIRMED (2026-09-11); factual premise corrected and executed scope recorded
   2026-09-13.
+
+## 2026-09-20 — `plans/parity-contract-176.md` closeout (1 entry)
+
+Reconciled at the end of the plan, before `/ship`. One `UNCONFIRMED` entry, low blast
+radius (no public contract, schema, auth model, migration, or external dependency) — Opus
+tier, no Fable escalation.
+
+### D8 — Phase 1 semver-check acceptance criterion verified by manual inspection, not the tool → **CONFIRMED**
+
+- **Assumed:** Phase 1's acceptance criterion (a clean `cargo semver-checks check-release
+  --workspace --baseline-version 0.8.0`) couldn't be verified locally because the installed
+  `cargo-semver-checks` 0.45.0 crashes on this repo's rustdoc v57 output
+  (`error: unsupported rustdoc format v57 for file... (supported formats are v53, v55,
+  v56)`), so the session substituted a fresh-Opus manual API-delta inspection (confirmed
+  purely additive: ten `"1.0"` literal-to-constant replacements, two `fn` →
+  `#[doc(hidden)] pub fn` visibility changes, four new constants — no removals, renames,
+  signature changes, field additions, or visibility narrowings) and deferred the automated
+  check to CI, citing PR #173 as precedent.
+- **Analysis:** Confirmed CI does not share the crash — `.github/workflows/release-plz.yml`
+  pins `release-plz-action` at commit `b5543c19b03be9bd48852d20ca89f478b7723260`
+  ("v0.5.132"), whose `action.yml` (fetched directly) installs `cargo-semver-checks@0.50`
+  via a separate `taiki-e/install-action` step, decoupled from this repo's
+  `rust-toolchain.toml`. A real, closed upstream issue (`release-plz/release-plz#3018`,
+  filed by a sibling project hitting the identical crash class) documents that
+  `cargo-semver-checks` 0.48 already supports rustdoc v56/v57 — past the v56 ceiling of the
+  locally-stale 0.45.0 — so 0.50 almost certainly does too. PR #173's cited precedent is
+  weaker than the original entry framed it: that PR's own body states "no production code
+  changed... so there is no semver surface to check regardless," meaning it never actually
+  exercised the CI gate against a real diff — Phase 1's diff is the first real test of it.
+  Investigation also surfaced a genuine but inapplicable residual: this repo's
+  release-plz-action defaults to release-plz core `0.3.161` (cut 2026-09-03), which predates
+  `release-plz#3021`'s fix (merged 2026-09-08) for a separate classifier bug where a
+  *minor*-only deny-lint violation from a completed cargo-semver-checks run can misreport as
+  "compatible." Irrelevant to this diff (verified purely additive, no lints of any kind
+  would fire), but worth a maintainer follow-up to bump the action's `version:` input past
+  `0.3.161` independently of this plan.
+- **Decided by:** Opus (`/reconcile`).
+- **Verdict:** CONFIRMED — deferring to CI is the strongest available option and is not a
+  false safety net; the specific local crash mode does not carry into CI's independently
+  pinned, newer tool version.
+- **Status:** CONFIRMED (2026-09-20).

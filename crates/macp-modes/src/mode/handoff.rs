@@ -443,7 +443,7 @@ impl Mode for HandoffMode {
             "deadline {deadline} is in the future of the observation {now_ms}"
         );
         Some(Envelope {
-            macp_version: "1.0".into(),
+            macp_version: macp_core::MACP_VERSION.into(),
             mode: session.mode.clone(),
             message_type: "HandoffAccept".into(),
             message_id: format!(

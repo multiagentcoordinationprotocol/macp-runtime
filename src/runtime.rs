@@ -207,7 +207,7 @@ impl Runtime {
             .into_iter()
             .map(|(_idx, entry)| Envelope {
                 macp_version: if entry.macp_version.is_empty() {
-                    "1.0".into()
+                    macp_core::MACP_VERSION.into()
                 } else {
                     entry.macp_version
                 },
@@ -295,7 +295,7 @@ impl Runtime {
             entry_kind: EntryKind::Internal,
             session_id: session_id.into(),
             mode: mode.into(),
-            macp_version: "1.0".into(),
+            macp_version: macp_core::MACP_VERSION.into(),
             timestamp_unix_ms: at_ms,
             bound_mode_version: None,
             semantics_rev: 0,
