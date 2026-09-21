@@ -7,15 +7,20 @@
 //! contract, and the process must never reach the server.
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("macp-dry-run-{tag}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A scratch directory that removes itself on drop.
+///
+/// Drop runs during unwind, so a failing assertion still reclaims the
+/// directory. Cleaning up only on the success path strands one directory per
+/// failing run, and macOS never garbage-collects `TMPDIR`.
+fn temp_dir(tag: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("macp-dry-run-{tag}-"))
+        .tempdir()
+        .expect("create scratch dir")
 }
 
 fn write_policy(dir: &Path, file: &str, policy_id: &str, mode: &str, rules: serde_json::Value) {
@@ -95,9 +100,10 @@ fn run(dir: Option<&Path>) -> (i32, String) {
 
 #[test]
 fn dry_run_reports_every_rejection_by_filename_and_exits_nonzero() {
-    let dir = temp_dir("mixed");
+    let scratch = temp_dir("mixed");
+    let dir = scratch.path();
     write_policy(
-        &dir,
+        dir,
         "good.json",
         "policy.ops.good",
         "macp.mode.decision.v1",
@@ -105,7 +111,7 @@ fn dry_run_reports_every_rejection_by_filename_and_exits_nonzero() {
     );
     // Out-of-schema `voting.algorithm`.
     write_policy(
-        &dir,
+        dir,
         "typo.json",
         "policy.ops.typo",
         "macp.mode.decision.v1",
@@ -113,14 +119,14 @@ fn dry_run_reports_every_rejection_by_filename_and_exits_nonzero() {
     );
     // Out-of-schema quorum `threshold.value`: the schema types it `integer`.
     write_policy(
-        &dir,
+        dir,
         "fractional.json",
         "policy.ops.fractional",
         "macp.mode.quorum.v1",
         serde_json::json!({ "threshold": { "type": "n_of_m", "value": 0.5 } }),
     );
 
-    let (code, output) = dry_run(&dir);
+    let (code, output) = dry_run(dir);
     assert_eq!(code, 1, "output: {output}");
     // Every rejection is reported, not just the first one `load_from_dir` hits.
     assert!(output.contains("typo.json"), "output: {output}");
@@ -134,22 +140,21 @@ fn dry_run_reports_every_rejection_by_filename_and_exits_nonzero() {
         "output: {output}"
     );
     assert!(output.contains("2 rejected"), "output: {output}");
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn dry_run_exits_zero_for_a_directory_that_would_load() {
-    let dir = temp_dir("clean");
+    let scratch = temp_dir("clean");
+    let dir = scratch.path();
     write_policy(
-        &dir,
+        dir,
         "good.json",
         "policy.ops.good",
         "macp.mode.decision.v1",
         serde_json::json!({ "voting": { "algorithm": "unanimous" } }),
     );
     write_policy(
-        &dir,
+        dir,
         "quorum.json",
         "policy.ops.quorum",
         "macp.mode.quorum.v1",
@@ -157,11 +162,9 @@ fn dry_run_exits_zero_for_a_directory_that_would_load() {
         serde_json::json!({ "threshold": { "type": "percentage", "value": 100 } }),
     );
 
-    let (code, output) = dry_run(&dir);
+    let (code, output) = dry_run(dir);
     assert_eq!(code, 0, "output: {output}");
     assert!(output.contains("0 rejected"), "output: {output}");
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -170,10 +173,11 @@ fn dry_run_warns_but_succeeds_when_the_directory_holds_no_policy_files() {
     // MACP_POLICIES_DIR. `load_from_dir` would start happily, so dry-run must
     // exit 0 — but it has to say so out loud rather than leaving a bare `0` in
     // the summary line as the only signal.
-    let dir = temp_dir("empty");
+    let scratch = temp_dir("empty");
+    let dir = scratch.path();
     std::fs::write(dir.join("notes.txt"), "not a policy").unwrap();
 
-    let (code, output) = dry_run(&dir);
+    let (code, output) = dry_run(dir);
     assert_eq!(code, 0, "output: {output}");
     assert!(
         output.contains("WARNING: no *.json files found"),
@@ -183,8 +187,6 @@ fn dry_run_warns_but_succeeds_when_the_directory_holds_no_policy_files() {
         output.contains("0 policy file(s) checked"),
         "output: {output}"
     );
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

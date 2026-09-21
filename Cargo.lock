@@ -1186,6 +1186,7 @@ dependencies = [
  "macp-core",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
