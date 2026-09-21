@@ -269,3 +269,25 @@ Files this plan's phases touch or read, one line each:
 
 **Next:** `/reconcile` (one `UNCONFIRMED` `ASSUMPTIONS.md` entry tagged to
 this plan), then `/ship`.
+
+## /ship
+
+- 2026-09-21: rebased `feat/parity-contract-176` onto `origin/main` post-PR#177
+  (the unrelated `tempfile::TempDir` fix shipped and merged separately as
+  `4836ea7`). Branch is now 6 commits atop the real `origin/main`, HEAD `2b0a60f`.
+- Full suite green post-rebase: 890 tests passed, `cargo fmt --check` clean.
+- `cargo clippy --workspace --all-targets -- -D warnings` found one failure at
+  `crates/macp-core/src/session.rs:1402` (`assertions_on_constants` on
+  `assert!(CURRENT_SEMANTICS_REV >= 2)`). Root-caused as pre-existing on `main`
+  (introduced by `7c652b69`/#171, well before this branch existed; untouched by
+  this diff) and masked in CI by a stale `Swatinem/rust-cache` hit — confirmed
+  CI's Clippy job on `main` HEAD finished in ~20s with no warnings despite the
+  same toolchain reproducing the failure locally on a clean build. Filed as
+  [issue #178](https://github.com/multiagentcoordinationprotocol/macp-runtime/issues/178),
+  explicitly out of scope for this PR. Confirmed the feature branch itself
+  introduces zero new clippy issues.
+- Verification gate (fresh Opus subagent, full `main..HEAD` diff + plan +
+  tracked files + independent re-check of the clippy claim): **PASS**. No gaps.
+  One non-blocking nit noted (`CLAUDE.md`'s "Key files" table has no row for
+  `tests/parity/`) — optional polish, not required by this plan's scope.
+- pushed feat/parity-contract-176 2b0a60f
