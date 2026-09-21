@@ -291,3 +291,15 @@ this plan), then `/ship`.
   One non-blocking nit noted (`CLAUDE.md`'s "Key files" table has no row for
   `tests/parity/`) — optional polish, not required by this plan's scope.
 - pushed feat/parity-contract-176 2b0a60f
+- pushed feat/parity-contract-176 fd55d9a
+- PR #179 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/179
+- CI on PR #179 (run 35647233779): all 14 required checks passed, including
+  Clippy (37s) — consistent with the stale-`rust-cache` theory in #178, since
+  this diff (like the base) doesn't touch `session.rs`'s offending assert line.
+- merged #179 (squash, sha `48bfc7c`); local/remote `feat/parity-contract-176`
+  deleted. This repo has no web deploy (crates.io publish only, gated on
+  release-plz cutting a release from the accumulated conventional-commit
+  history) — nothing to watch post-merge.
+
+Feature done. #178 (stale CI clippy cache) remains open, filed separately, not
+blocking.
