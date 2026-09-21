@@ -103,7 +103,7 @@ fn dry_run_reports_every_rejection_by_filename_and_exits_nonzero() {
     let scratch = temp_dir("mixed");
     let dir = scratch.path();
     write_policy(
-        &dir,
+        dir,
         "good.json",
         "policy.ops.good",
         "macp.mode.decision.v1",
@@ -111,7 +111,7 @@ fn dry_run_reports_every_rejection_by_filename_and_exits_nonzero() {
     );
     // Out-of-schema `voting.algorithm`.
     write_policy(
-        &dir,
+        dir,
         "typo.json",
         "policy.ops.typo",
         "macp.mode.decision.v1",
@@ -119,14 +119,14 @@ fn dry_run_reports_every_rejection_by_filename_and_exits_nonzero() {
     );
     // Out-of-schema quorum `threshold.value`: the schema types it `integer`.
     write_policy(
-        &dir,
+        dir,
         "fractional.json",
         "policy.ops.fractional",
         "macp.mode.quorum.v1",
         serde_json::json!({ "threshold": { "type": "n_of_m", "value": 0.5 } }),
     );
 
-    let (code, output) = dry_run(&dir);
+    let (code, output) = dry_run(dir);
     assert_eq!(code, 1, "output: {output}");
     // Every rejection is reported, not just the first one `load_from_dir` hits.
     assert!(output.contains("typo.json"), "output: {output}");
@@ -147,14 +147,14 @@ fn dry_run_exits_zero_for_a_directory_that_would_load() {
     let scratch = temp_dir("clean");
     let dir = scratch.path();
     write_policy(
-        &dir,
+        dir,
         "good.json",
         "policy.ops.good",
         "macp.mode.decision.v1",
         serde_json::json!({ "voting": { "algorithm": "unanimous" } }),
     );
     write_policy(
-        &dir,
+        dir,
         "quorum.json",
         "policy.ops.quorum",
         "macp.mode.quorum.v1",
@@ -162,7 +162,7 @@ fn dry_run_exits_zero_for_a_directory_that_would_load() {
         serde_json::json!({ "threshold": { "type": "percentage", "value": 100 } }),
     );
 
-    let (code, output) = dry_run(&dir);
+    let (code, output) = dry_run(dir);
     assert_eq!(code, 0, "output: {output}");
     assert!(output.contains("0 rejected"), "output: {output}");
 }
@@ -177,7 +177,7 @@ fn dry_run_warns_but_succeeds_when_the_directory_holds_no_policy_files() {
     let dir = scratch.path();
     std::fs::write(dir.join("notes.txt"), "not a policy").unwrap();
 
-    let (code, output) = dry_run(&dir);
+    let (code, output) = dry_run(dir);
     assert_eq!(code, 0, "output: {output}");
     assert!(
         output.contains("WARNING: no *.json files found"),
