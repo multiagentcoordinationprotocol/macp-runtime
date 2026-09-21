@@ -215,3 +215,57 @@ Files this plan's phases touch or read, one line each:
   Opus verify), then `/reconcile` (one `UNCONFIRMED` entry in `ASSUMPTIONS.md`
   tagged to this plan — the local semver-checks tool-limitation logged during
   Phase 1 closeout), then `/ship`.
+
+## Finalization (`/implement` §4)
+
+- **Date:** 2026-09-20
+- **Whole-feature tests:** `cargo test --workspace` re-run fresh from the
+  Phase 3 commit — 890 passed, 0 failed, unchanged. `cargo fmt --check` and
+  `cargo doc --workspace --no-deps` both clean.
+- **Seam-between-phases check:** the exact command Phase 3's CI step runs
+  (`MACP_PARITY_CONTRACT` pointed at the real, live spec-repo checkout,
+  `cargo test --test parity_contract`) re-run directly — 17/17 passed. This
+  is the one behavior no single phase's own tests could prove alone: that
+  Phase 1's constants, Phase 2's runner, and Phase 3's CI wiring actually
+  compose correctly end to end, not just that each phase passed in
+  isolation.
+- **Docs sweep:** `CLAUDE.md`, `README.md`, `docs/testing.md` grepped for
+  stale `conformance-oracle`/`SPEC_REV`/tree-count references beyond what
+  Phase 2/3 already updated — none found; the one existing `CLAUDE.md`
+  mention of `conformance-oracle` (Policy evaluation section) is about the
+  unrelated policy-schema mirror check and needed no change.
+- **Tracked-file hygiene:** all three phases in `plans/parity-contract-176.md`
+  read `**Status:** DONE`; this file's three checkpoint entries all read
+  PASS with reconciling file lists; `ASSUMPTIONS.md` has exactly one entry
+  tagged `parity-contract-176` (the local `cargo-semver-checks`
+  rustdoc-format-v57 crash), accurate and not stale.
+- **Final cumulative-diff verdict:** **PASS**, fresh Opus verifier, no Fable
+  (no critical/one-way-door surface in this feature). Independently
+  reproduced, live: byte-identity of the vendored manifest against the real
+  spec-repo copy; the coverage-guard prove/restore (dropping `"defaults"`
+  from `HANDLED` fails naming the section); the `commitment_hash`
+  corrupt-a-vector prove/restore (fails naming the specific bad value); all
+  10 production `"1.0"` replacement sites confirmed complete with no
+  production site missed (grepped every remaining `"1.0"` literal and
+  confirmed each sits inside a `mod tests` block). No gaps found requiring
+  code changes.
+- **Notes carried to the PR body** (per the verifier, none blocking):
+  - Local `cargo-semver-checks` 0.45.0 cannot run on this machine (rustdoc
+    format v57 unsupported) — logged in `ASSUMPTIONS.md`, deferred to CI's
+    matched toolchain, same precedent as PR #173.
+  - No lint forbids a future contributor reintroducing a bare `"1.0"`
+    literal instead of `macp_core::MACP_VERSION` — an explicitly accepted,
+    proof-of-concept-scope gap per the plan's Phase 1 edge cases, not a
+    silently missing guard.
+  - No PR is open yet, so the actual GitHub Actions execution of the new CI
+    steps has not been observed — only local-equivalent simulation of the
+    exact commands each step runs. This is `/ship`'s job to close.
+  - Local `main` sits one commit (`7b55645`, an unrelated, already-verified
+    `tempfile::TempDir` test fix from earlier this session) ahead of
+    `origin/main`. This feature branch is based on that commit, so it will
+    ride along when this PR opens against `origin/main` unless `main` is
+    pushed on its own first — a `/ship`-time decision, not a defect in this
+    feature.
+
+**Next:** `/reconcile` (one `UNCONFIRMED` `ASSUMPTIONS.md` entry tagged to
+this plan), then `/ship`.
