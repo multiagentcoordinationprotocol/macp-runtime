@@ -6,6 +6,16 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.8.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.0...macp-runtime-v0.8.1) - 2026-09-22
+
+### Added
+
+- feat/parity-contract-176 — proof-of-concept parity-contract consumer (issue #176) ([#179](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/179))
+
+### Other
+
+- use tempfile::TempDir for scratch dirs in policy/storage tests ([#177](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/177))
+
 ## [0.8.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.7.6...macp-runtime-v0.8.0) - 2026-09-20
 
 ### Added
