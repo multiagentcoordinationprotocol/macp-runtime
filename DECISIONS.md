@@ -268,3 +268,299 @@ tier, no Fable escalation.
   false safety net; the specific local crash mode does not carry into CI's independently
   pinned, newer tool version.
 - **Status:** CONFIRMED (2026-09-20).
+
+## 2026-09-22 — `plans/backlog-closeout-2026-09.md` closeout (39 entries)
+
+Reconciled a week-plus after the plan itself shipped (all 14 phases `DONE`, released as
+0.8.0 on 2026-09-20) — the code, not just the plan, has been live in production. Six fresh
+Opus subagents analyzed the 39 `UNCONFIRMED` entries in parallel, each re-verifying its
+assigned entries' `file:line` citations against current code and re-running the relevant
+test suites (macp-core, macp-modes, macp-policy, macp-runtime — all green, several
+hundred tests, every cited test confirmed present and passing). None of the 39 turned out
+to be a genuine one-way door requiring escalation — all Opus tier, no Fable. Two small,
+non-wire-visible code fixes surfaced and were applied in this same pass (below); the rest
+are confirmations, several with a stale-citation or scope correction folded in. The
+remaining 4 `UNCONFIRMED` entries in `ASSUMPTIONS.md` (2 tagged `plans/spec-99-schema-version-3.md`,
+2 tagged "spec #126 alignment") are out of scope for this pass and left for a future
+`/reconcile` run scoped to those plans.
+
+**Fixes applied in this pass:**
+- `src/runtime.rs`: the `Err(_)` arm of `resume_session` logged a generic "session
+  force-expired" with no way to tell `MAX_SUSPEND_MS` (duration cap) from
+  `MAX_SUSPENSION_CYCLES` (rev≥2 cycle-count cap) apart, even though `Session::resume`
+  mutates both fields before returning `Err` and they were sitting right there. Added a
+  `tracing::warn!` naming both booleans and both raw counts. Observability-only, no
+  behavior or wire change.
+- `src/replay.rs:184-186`: `validate_replay_consistency`'s rustdoc field list stopped at
+  `suspended_at_ms` and never mentioned the 8th comparison, `suspension_intervals`, that
+  the function has compared since Phase 11b. Doc-only.
+- `src/runtime.rs:3316-3341` and `:3519-3537`: two test doc comments describing 11d/11e/
+  Phase 12 as future work, written when they still were. Rewritten to describe the shipped
+  state — the client-boundary double-guard is now the reserved-`message_id` check in
+  `dispatch_implicit_accept` (`crates/macp-modes/src/mode/handoff.rs:733-740`), not "11d
+  restructuring that arm"; the eager sweep is `sweep_due_synthetic_accepts`
+  (`src/runtime.rs:1438`), not "Phase 12's caller." Doc-only.
+
+Non-code follow-ups noted below, not actioned in this pass (each is small and independent;
+listed so they aren't lost): a spec clarification for RFC-MACP-0011 §4a's literal
+zero-ballot reading (D11); the `src/replay.rs:63-67` checkpoint-bypasses-registry-validation
+caveat, shared by D10 and D12; a distinguishing line in `CHANGELOG.md`'s 0.8.0 `[Unreleased]`
+follow-up (not the released section, which release-plz regenerates) noting the
+`message_count` consequence of D26's `record_participant_activity` skip.
+
+### D9 — Quorum `threshold.value = 0` means two different things in the two layers → **CONFIRMED**
+The 2026-09-11 narrowing holds: `crates/macp-policy/src/registry.rs:516-527` refuses a
+*supplied* `threshold.value <= 0` at registration, so `EffectiveThreshold::Inert` is reachable
+only by omitting the key. The residual divergence (mode falls back to `required_approvals`,
+evaluator applies no bar) is real but inert — the mode is strictly the stricter layer and
+gates first (`crates/macp-modes/src/mode/quorum.rs:477-480`), so the lax evaluator reading can
+never seal something the mode refused. Pinned by the matrix test's own carve-out comment
+(`quorum.rs:1822-1826`).
+
+### D10 — The quorum mode silently tolerates a rules object the evaluator rejects → **CONFIRMED**
+Still fail-closed: `quorum.rs:220-221`'s `unwrap_or_default()` yields an inert threshold on a
+malformed rules object, while `evaluator.rs:43-52` denies the same object outright — a
+confusing error, not a hole. New reachability note: `src/replay.rs:63-67` restores a
+checkpoint's inline `policy_definition` verbatim without re-validating it, so a definition
+written by an older binary can reach this path on restart, bypassing registration entirely
+(shared with D12).
+
+### D11 — A zero-ballot quorum decline is refused even though RFC-MACP-0011 §4a permits it → **CONFIRMED**; spec clarification recommended (non-blocking)
+Both guards ship and are tested: the `ApprovalRequest` domain check (`quorum.rs:394-410`,
+refuses an effective threshold outside `1..=participants`) and the `counted > 0` conjunct
+(`quorum.rs:328`). Wire-visible and shipped in 0.8.0 with a migration note
+(`docs/deployment.md:50-58`). The departure from a literal §4a reading is recorded only in
+this repo's own docs (`docs/policy.md:212`) — worth filing upstream as a spec clarification
+that an empty ballot box is a misconfiguration, not a decision, to ratify the departure
+rather than leave it local.
+
+### D12 — Wildcard (`mode: "*"`) policies are now held to every mode's schema → **CONFIRMED**
+`registry.rs:386-390` fans a `"*"` policy across all standards-track modes; both conditional-
+constraint families gate on `matches!(mode, "…" | "*")`. `quorum_threshold_constraints_apply_to_wildcard_policies`
+(`registry.rs:1592-1646`) pins all four cases. The entry's "did not materialise in any test"
+prediction held. Shares D10's checkpoint-bypass caveat.
+
+### D13 — `EffectiveThreshold` is deliberately not `#[non_exhaustive]` → **CONFIRMED**
+Exactly two match sites workspace-wide, both exhaustive (`quorum.rs:222-231`,
+`evaluator.rs:1037-1050`) — the premise still holds. The reasoning now lives in the code
+(`crates/macp-core/src/policy/rules.rs:273-287`) and is consistent with `CLAUDE.md` §8a's
+repo-wide "enums stay unsealed" rule for the same reason. Revisit trigger (a third external
+consumer) has not fired.
+
+### D14 — A negative weighted total fails the round, which moves one decline from DENY to ALLOW → **CONFIRMED**, fully closed
+The short-circuit (`evaluator.rs:679-684`) and all three tests pass, asserting the
+`VotingResult` variant directly. The release-notes obligation is discharged
+(`docs/deployment.md:61`, `docs/policy.md:142`). The deferred half is no longer deferred:
+spec #99 / RFC-MACP-0012 §4.1 has since made zero decisive weight normatively `NoVotes`,
+now cited directly in `evaluator.rs:685-697`.
+
+### D15 — `supermajority` silently substitutes 2/3 for an out-of-domain threshold → **CONFIRMED**
+Arm unchanged (`evaluator.rs:626-631`); the registry door is now tighter than when written —
+`registry.rs:468-471` refuses `supermajority` with `threshold <= 0.5` (which also refuses an
+omitted threshold, since the default is `0.5`), pinned by two registration tests. Substitution
+branch is dead through every registered path.
+
+### D16 — `unanimous` passes by vacuous truth on an empty participant list → **CONFIRMED**; rationale corrected
+Code unchanged (`evaluator.rs:647-664`) and now *more* clearly right, but for the opposite
+reason recorded originally. RFC-MACP-0012 §4.1 has since ratified this exact case in the
+runtime's favor. The entry's "unreachable — `SessionStart` requires non-empty participants"
+claim is now **false**: `allows_empty_participants` (`crates/macp-core/src/session.rs:574-576`)
+admits it for Decision. Reachability is instead preserved by `DecisionMode::authorize_sender`
+forbidding every `Vote` over an empty roster, pinned by
+`zero_participant_unanimous_is_no_votes_not_a_pass` (`evaluator.rs:1841-1906`).
+
+### D17 — The public effective-threshold accessor answers three questions in three layers, not one `Option` → **CONFIRMED**
+Shipped shape matches exactly (`crates/macp-modes/src/mode/quorum.rs:144-290`), now published
+API on crates.io since 0.8.0. `tests/quorum_threshold_public_api.rs` exercises all three
+layers from outside the crate. Closest of this cluster to a one-way door, but the door shut
+at the 0.8.0 publish with no defect behind it — narrowing later is a major, but nothing
+argues for churning it.
+
+### D18 — The rev-2 scaffolding branch cannot be *literally* identical to the rev-1 branch → **CONFIRMED**; one detail corrected
+The seam (`crates/macp-modes/src/mode/handoff.rs:169-226`, `rev2_elapsed_ms`) paid for
+itself — it's where the suspension-correction term now lives, with its own rustdoc and unit
+tests. Correction: the `const _: () = assert!(..)` form did not survive; it shipped as a
+plain `assert!` under `#[allow(clippy::assertions_on_constants)]`
+(`crates/macp-core/src/session.rs:1402-1405`, fixed in 7815a97, whose message notes CI's
+rust-cache had been serving a stale `target/` and never re-linted the file).
+
+### D19 — Discharging Phase 10's acceptance criterion 3 when no conformance fixture exists → **CONFIRMED**
+`assert_replay_equivalence` (`tests/conformance_loader.rs:356`) is still called only from the
+vendored-fixture loop, and no local fixture is addable (CI byte-diffs `tests/conformance/`
+against pinned `SPEC_REV` in both directions). Discharged through the real `replay_session`
+path instead (`src/replay.rs`, tests named rather than cited by line since they've drifted
+~300 lines: `legacy_rev1_handoff_history_with_suspension_still_implicitly_accepts`,
+`rev2_handoff_history_implicitly_accepts_on_unsuspended_time`,
+`current_rev_handoff_history_replays_identically_to_rev1`).
+
+### D20 — Updating `CURRENT_SEMANTICS_REV`'s rev-2 doc bullet outside Phase 10's Files list → **CONFIRMED**
+Doc-only; the bullet (now at `crates/macp-core/src/session.rs:77-98`) accurately describes
+both halves of the revision with no stale "currently identical to revision 1" wording. Still
+the only place semantics revisions are enumerated.
+
+### D21 — Omitting the in-flight suspension term while the implicit-accept check is lazy-only → **CONFIRMED**; forward constraint resolved
+The entry's own "Phase 12 must resolve this" held: Phase 12 shipped the eager sweep and chose
+*skip suspended sessions entirely* over adding an in-flight term
+(`sweep_due_synthetic_accepts` at `src/runtime.rs:1464-1466`, re-checked independently in
+`synthesize_due_accept` at `:727-729`). Standing invariant to carry forward: any future caller
+of `due_synthetic_envelope` / `unsuspended_deadline` must filter to `Open`, or add the
+in-flight term.
+
+### D22 — Synthetic accept stands even when the triggering message is later rejected → **CONFIRMED**; blast radius narrowed
+Ordering is load-bearing and explicit: synthesis (`src/runtime.rs:876`) happens before the
+trigger's `mode.on_message_at` (`:878`), while the trigger's dedup slot is consumed only by
+`step::commit` (`:895`) — a later `Err` provably leaves `message_id` free. Both mitigations
+shipped: carve-out in `CONTRIBUTING.md:48-68`, acceptance tests both in-process
+(`tests/handoff_implicit_accept_live.rs:698`) and on the wire
+(`integration_tests/tests/tier1_protocol/test_handoff_implicit_accept.rs:584`). Correction:
+synthesis sits after `authorize_sender` and `validate_client_envelope`, so the trigger must be
+an authenticated, authorized participant — the entry's stated blast radius is wider than the
+code actually allows. Record this at normative-carve-out weight (per `CLAUDE.md`'s
+freeze-profile section), not as an implementation note.
+
+### D23 — Persisted suspension intervals, with a cycle cap, rather than a derived deadline → **CONFIRMED**
+Fully realized (`crates/macp-core/src/session.rs:171,290-298`,
+`crates/macp-storage/src/registry.rs:70-163`). `MAX_SUSPENSION_CYCLES = 1024` is a `pub const`,
+so raising it later is non-breaking. The cap-cause logging gap this entry implied is the fix
+applied above.
+
+### D24 — The `implicit` payload flag as discriminator, guarded by a mode-trait boundary hook → **CONFIRMED**
+Hook exists with fail-open default (`crates/macp-modes/src/mode/mod.rs:100`) and the handoff
+override (`crates/macp-modes/src/mode/handoff.rs:276-297`); both live entry points covered
+(`src/runtime.rs:500,865`, funnelled from `server.rs:449,872`). The specific mitigation
+requested shipped verbatim — the rustdoc hazard at `mode/mod.rs:84-99` uses the runtime itself
+as the worked example. `MacpError::InvalidPayload` and `InvalidEnvelope` both map to wire code
+`"INVALID_ENVELOPE"` (`crates/macp-core/src/error.rs:58,66`), confirming the "rev-2 error
+surface does not shift" claim.
+
+### D25 — Retiring the interim implicit-accept path fail-loud rather than fail-open → **CONFIRMED**, no longer an assumption
+Its entire safety argument was "phases 10-13 ship as one PR and one release" — now verified
+fact: `7c652b6` (#171) is the single commit, first released as 0.8.0 (`f97fd15`, tag
+`macp-runtime-v0.8.0`, 2026-09-20). No 0.7.x release ever published
+`CURRENT_SEMANTICS_REV = 2`, so no rev-2 history can predate the synthetic entry.
+
+### D26 — The synthetic commit deliberately skips `record_participant_activity` → **CONFIRMED**; changelog follow-up noted
+Skip is correct: `record_participant_activity` is called only from
+`crates/macp-modes/src/step.rs:104`, and `synthesize_due_accept` bypasses `step::commit`
+entirely, doing dedup insert and `apply_mode_response` by hand (`src/runtime.rs:764-765`).
+Pinned by `synthetic_accept_is_not_credited_as_participant_activity`
+(`src/runtime.rs:3676`). Gap: the `message_count` consequence was never noted anywhere
+durable — belongs in `CHANGELOG.md`'s `[Unreleased]` section or a fresh entry here, not a
+hand-edit of the released 0.8.0 section (which release-plz regenerates from commit history).
+
+### D27 — Counting granularity of the widened `validate_replay_consistency` → **CONFIRMED**
+Three independent `if` blocks, three increments, three warn lines (`src/replay.rs:244-274`),
+exactly as chosen. Blast radius nil — the count feeds one log line plus a Prometheus counter,
+never a branch. Addressed by the rustdoc fix applied above.
+
+### D28 — `cancel_session` reads a clock solely to stamp its log entry → **CONFIRMED**
+Unchanged: a single `Utc::now()` (`src/runtime.rs:1027`) after the terminal-state early
+return, matching `Session::cancel()` taking no timestamp. Lowest-consequence entry in the
+cluster — zero wire surface.
+
+### D29 — `suspension_intervals` added to `validate_replay_consistency` (11b's "optional fourth comparison") → **CONFIRMED**; doc fix applied
+Live at `src/replay.rs:266-274`, warn-only, single caller (`src/main.rs:351`). The rustdoc
+field-list gap this entry left open is the fix applied above.
+
+### D30 — Criterion 3's checkpoint fixture binds no `policy_version` → **CONFIRMED**
+The trap is real and still present (`src/replay.rs:63-70`); the sibling test
+`replay_from_checkpoint_restores_suspension_intervals` (`:742-822`) avoids it correctly via a
+non-vacuous tripwire. Bonus: `replay_from_checkpoint_restores_state`'s vacuity, flagged but
+not fixed by the original entry, has since been closed with the same tripwire technique.
+
+### D31 — `Session::resume`'s stray doc comment re-attached → **CONFIRMED**
+Rustdoc-only. `resume`'s doc (`crates/macp-core/src/session.rs:258-270`) now names both caps
+and documents the record-before-check ordering the code at `:290-298` actually depends on.
+
+### D32 — A degenerate suspension pair (`e < s`) counts as a zero-width pause at `s` → **CONFIRMED**, verified algebraically
+Checked rather than trusted: the clamp `cur = e.max(s).max(cur)` (`session.rs:422`) keeps the
+per-pair contribution in `[0, max(e-s,0)]` in every case (degenerate, overlapping, unsorted),
+so over-reporting is structurally impossible. `unsuspended_deadline_never_over_reports_on_adversarial_pairs`
+(`session.rs:1326-1391`) covers backwards, nested, overlapping and unsorted pairs.
+
+### D33 — Nothing below `semantics_rev` 2 reads `suspension_intervals`, so dropping the overflow is invisible → **CONFIRMED**
+`unsuspended_deadline` has exactly one non-test caller (`handoff.rs:440`, itself gated
+`semantics_rev < 2 → None`), and no code path ever raises a session's `semantics_rev` (only
+writers: replay from the recorded `SessionStart`, and the `SessionStart` builder itself,
+pinned by `replay_preserves_recorded_semantics_rev`). A rev≤1 session can never later become a
+rev≥2 reader of its own truncated vec.
+
+### D34 — Committing a replay test that pins today's *pre-11d* refusal of the synthetic shape → **CONFIRMED**
+Played out exactly as designed and was already consumed: the test
+(`src/replay.rs:1660`, `synthetic_shaped_entry_reaches_dispatch_not_the_client_boundary`) was
+flipped by 11d from `Err(InvalidPayload)` to `Ok` with an implicit-accept assertion, precisely
+the failure direction the entry engineered.
+
+### D35 — Keeping a runtime-level assertion that is double-guarded (and saying so) rather than dropping it → **CONFIRMED**; doc fix applied
+The assertion (`src/runtime.rs:3343`) still passes and its non-vacuous isolation still lives
+in the mode-level unit test. The doc-comment fix applied above (naming the current
+`message_id`-check guard instead of a predicted-but-unrealized 11d restructuring, and the
+shipped eager-sweep location) is this entry's resolution.
+
+### D36 — Flipping an `src/replay.rs` test in a phase whose file list names only the mode crate → **CONFIRMED**
+"The plan is a document; the failing test is the fact" was the right call. The rewritten
+rustdoc (`src/replay.rs:1641-1658`) now describes the post-11d state honestly and remains the
+only end-to-end proof through `replay_session` that the synthetic entry is accepted as data.
+
+### D37 — One shared `IMPLICIT_ACCEPT_REASON` const instead of two copies of the literal → **CONFIRMED**, stronger now
+`crates/macp-modes/src/mode/handoff.rs:52`, used by both the synthesizer and the interim
+in-`Commitment` arm — drift is structurally impossible. Since written, the string has become
+externally published (`docs/modes.md:95`, the TypeScript SDK handover plan, the live test
+harness), raising the cost of drift and retroactively justifying the const.
+
+### D38 — Error codes and check order inside the rev-2 implicit-accept arm → **CONFIRMED**, explicitly not wire-visible
+Verified line by line (`handoff.rs:712-743`): rev gate → offer lookup → sender → `accepted_by`
+match → `message_id` → disposition, unchanged. At `semantics_rev >= 2` no client envelope with
+`implicit = true` can reach this arm at all (refused earlier, `handoff.rs:286-295` via
+`src/runtime.rs:865`); at rev <= 1 the arm returns `InvalidPayload` unconditionally,
+byte-identical to pre-0.8.0. The only observers are replay and direct library callers, exactly
+as predicted.
+
+### D39 — A fifth test, beyond the four acceptance criteria, to make the phase's negative rule killable → **CONFIRMED**
+Both extra tests exist and pass:
+`implicit_accept_dispatch_does_not_reverify_the_deadline` (`handoff.rs:2834`) reproduces the
+negative-scalar state exactly as claimed, and `due_synthetic_envelope_returns_none_unless_an_offer_is_due`
+(`handoff.rs:2621`) covers all seven listed edges plus undecodable `mode_state`.
+
+### D40 — `debug_assert!(suspended_at_ms.is_none())` placed inside `due_synthetic_envelope` → **CONFIRMED**, escalation already acted on
+The entry's own late correction — that a `debug_assert!` cannot protect release builds, so
+11e's non-`Open` filter is load-bearing — was carried through. Enforcement that ships is
+`src/runtime.rs:727-729`, documented as a correctness gate (`:652-661`), with its own test
+`synthesis_is_skipped_for_a_non_open_session` (`src/runtime.rs:3536`) proving concrete harm
+would occur without it. The `debug_assert!` correctly stays as the mode-level tripwire.
+
+### D41 — Four handoff-mode tests broke that the plan's "complete" sweep had cleared, and two replay tests besides → **CONFIRMED**
+Independently corroborated by two subagents against the live, green workspace suite. No
+disposition change.
+
+### D42 — A terminal checkpoint made the live-replay criterion pass with the synthetic entry deleted → **CONFIRMED**
+
+### D43 — Two storage backends in the live harness, chosen for what each one cannot do → **CONFIRMED**
+
+### D44 — `ModeRef::due_synthetic_envelope` returns `None` for a mode that has vanished → **CONFIRMED**
+
+### D45 — The freeze-profile invariant amended in `CONTRIBUTING.md`, with the carve-out spelled out → **CONFIRMED**
+Consistent with `CLAUDE.md`'s own "Freeze-profile priorities" section, which documents the
+same carve-out (gitignored `CLAUDE.md` leaves `CONTRIBUTING.md:48-69` as the sole durable
+copy visible to a fresh checkout).
+
+### D46 — Tier-1 bounds the synthetic's deadline timestamp rather than leaving it unasserted → **CONFIRMED**; bound description corrected
+The shipped test is *stronger* than the entry's shorthand in both directions — the lower
+operand is a clock read taken before two RPCs (sound but not millisecond-tight), and the
+upper operand is read 300ms before the commitment is sent (300ms stronger than claimed). A
+second bounded pair exists in the Phase 12 sweep test (`test_handoff_implicit_accept.rs:898-908`)
+that the entry didn't mention.
+
+### D47 — Phase 11f ships five tier-1 tests where the plan specified four → **CONFIRMED**; citations corrected
+The mutation-kill argument is real: `src/server.rs:526` replays a history snapshot at
+subscribe time with no gap-fill re-read, so dropping the publish would hand an attached
+subscriber the Commitment first. Corrections: the `runtime.rs:775` citation was wrong when
+written (the file introduced the call at `:795` in the same commit), not drifted since; "all
+124 tier-1 tests" should read 121.
+
+**Cluster summary:** 39/39 CONFIRMED, 0 CHANGE requiring more than the 2 code fixes above, 0
+DEFER, 0 ESCALATE. Two items flagged for someone's attention outside this reconcile pass: D11
+(a spec clarification worth filing upstream for RFC-MACP-0011 §4a) and D26 (an
+`[Unreleased]`-section changelog note still to write).
+
+- **Decided by:** Opus (`/reconcile`, 6 parallel subagents, Opus tier throughout).
