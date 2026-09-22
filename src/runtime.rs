@@ -12,7 +12,7 @@ use crate::policy::PolicyDefinition;
 use crate::registry::SessionRegistry;
 use crate::session::{
     extract_ttl_ms, parse_session_start_payload, validate_canonical_session_start_payload_for_mode,
-    validate_session_id_for_acceptance, Session, SessionState,
+    validate_session_id_for_acceptance, Session, SessionState, MAX_SUSPENSION_CYCLES,
 };
 use crate::storage::StorageBackend;
 use crate::stream_bus::SessionStreamBus;
@@ -1193,7 +1193,21 @@ impl Runtime {
                 // (cumulative suspended duration) or, at semantics_rev >= 2,
                 // MAX_SUSPENSION_CYCLES (completed suspend/resume cycles).
                 // Both take the same posture in `Session::resume`: the
-                // session is now Expired.
+                // session is now Expired. `resume` mutates `session` before
+                // returning `Err`, so both fields are readable here to name
+                // which cap actually fired instead of leaving an operator to
+                // guess between two causes that share one error variant.
+                let cycle_cap_exceeded = session.suspension_intervals.len() > MAX_SUSPENSION_CYCLES;
+                let duration_cap_exceeded =
+                    session.accumulated_suspended_ms > session.effective_max_suspend_ms();
+                tracing::warn!(
+                    session_id,
+                    cycle_cap_exceeded,
+                    duration_cap_exceeded,
+                    suspension_cycles = session.suspension_intervals.len(),
+                    accumulated_suspended_ms = session.accumulated_suspended_ms,
+                    "session force-expired: suspension cap exceeded"
+                );
                 self.save_session_to_storage(session).await;
                 self.metrics.record_session_expired(&session.mode);
                 let _ = self
@@ -3318,27 +3332,30 @@ mod tests {
     ///
     /// Two envelopes, as the criterion requires:
     /// (a) `implicit = true` with an ordinary `message_id` — `InvalidPayload`.
-    ///     **This assertion is double-guarded today** and so does not isolate
-    ///     the hook: `handle_message` rejects the same envelope with the same
-    ///     code (deliberately kept until 11d restructures that arm). What it
-    ///     does pin is the criterion's actual requirement — that the rev-2
-    ///     error *surface* through `Send` is unchanged — and it becomes the
-    ///     only guard once 11d teaches dispatch to accept the shape.
+    ///     **This assertion is double-guarded**: `handle_message` rejects the
+    ///     envelope at the client boundary before dispatch ever sees it
+    ///     (`crates/macp-modes/src/mode/handoff.rs`, the client-envelope
+    ///     validation that refuses a client-submitted `implicit = true`), and
+    ///     — since 11d — `dispatch_implicit_accept`'s own reserved-`message_id`
+    ///     check (`handoff.rs:733-740`) would refuse the same envelope on its
+    ///     `message_id` alone even if the boundary check were removed. What it
+    ///     pins is the criterion's actual requirement — that the rev-2 error
+    ///     *surface* through `Send` is unchanged — not which single guard is
+    ///     load-bearing.
     /// (b) `implicit = true` with the **reserved** `message_id` and the
     ///     correct sender — `InvalidEnvelope`, which only the boundary can
     ///     produce (dispatch would say `InvalidPayload`). The envelope is
-    ///     byte-shaped exactly like the one the runtime will synthesize
-    ///     from 11e.
+    ///     byte-shaped exactly like the one the runtime synthesizes in
+    ///     `synthesize_due_accept`.
     ///
-    /// Measured, **neither half pins the `implicit` rule**: (b) is killed by
-    /// the *reserved-prefix* rule, which fires first and returns
+    /// Measured, **neither half pins the `implicit` rule in isolation**: (b)
+    /// is killed by the *reserved-prefix* rule, which fires first and returns
     /// `InvalidEnvelope` whatever the flag says, so deleting the `implicit`
     /// rule leaves this whole test green. The `implicit` rule's only
     /// non-vacuous guard is the mode-level unit test
     /// `handoff::tests::client_implicit_accept_rejected_at_the_boundary`.
     /// What this test pins is the runtime-level *error surface* at rev 2 —
-    /// which is the criterion's requirement, and which 11d must keep in view
-    /// when it restructures the dispatch arm.
+    /// which is the criterion's requirement.
     #[tokio::test]
     async fn client_implicit_accept_rejected_through_the_runtime() {
         let rt = make_runtime();
@@ -3529,9 +3546,9 @@ mod tests {
     ///
     /// The method is called directly because no message path can reach it with
     /// a suspended session — `step::check_preconditions` rejects every message
-    /// to a non-`Open` session first. Phase 12's eager sweep is the caller that
-    /// *will* see suspended sessions, which is exactly why the filter has to
-    /// be in the seam rather than at its current call site.
+    /// to a non-`Open` session first. The eager sweep (`sweep_due_synthetic_accepts`)
+    /// is the caller that *does* see suspended sessions, which is exactly why
+    /// this filter has to live in the seam rather than at a single call site.
     #[tokio::test]
     async fn synthesis_is_skipped_for_a_non_open_session() {
         let rt = make_runtime();

@@ -75,7 +75,7 @@
 - **Chose:** Left it, and carved `value = 0` out of the differential matrix explicitly (the test names the carve-out and says why, so nobody widens the grid and then "fixes" the failure by weakening the assertion). The two fallbacks are arguably both correct for their own layer — the mode has a request to fall back to and the evaluator does not, and an inert rule *should* mean "the mode's built-in rule stands". Unifying it means deciding what an absent policy bar means, which is a semantics question for RFC-MACP-0012, not a rounding bug.
 - **Alternatives:** Pass `required_approvals` into the evaluator so both layers use the same fallback (changes a public signature and makes the evaluator depend on mode state); or treat `value: 0` as an explicit "no approvals required" bar in both layers (the degenerate case the floor-to-1 fix exists to make unreachable — strictly worse).
 - **Blast radius if wrong:** Low and bounded in the safe direction. The mode is the stricter of the two: it will not call the evaluator until its own bar is met, so the evaluator's laxer reading can only fail to add a constraint, never remove one. It cannot produce a commitment the mode would have refused.
-- **Status:** UNCONFIRMED (2026-09-10)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D9).
 
 - **Narrowed 2026-09-11 by spec #110 + Phase 7 of plans/spec-99-schema-version-3.md.** This entry's
   premise — that a supplied `threshold.value` of `0` is registrable — is **no longer true**. Canonical
@@ -90,7 +90,7 @@
 - **Chose:** Left both behaviours as they are. The refusal is fail-closed and nothing can be sealed on a policy neither layer understood, so the defect is a confusing error, not a governance hole — and after Phase 2 (registration-time shape validation) and Phase 3 (wildcard policies now validated against every mode's schema) the only way to reach it is a directly-constructed `PolicyDefinition` or a policy file edited under a running session.
 - **Alternatives:** Make the mode propagate the parse error (`MacpError::InvalidModeState`-ish) so the failure surfaces at the first message rather than at commitment — better feedback, but it converts what is today a late refusal into an early one for every message in the session, which is a wider wire-visible change than the rounding fix warrants.
 - **Blast radius if wrong:** Low. No commitment seals; the operator sees `POLICY_DENIED` where `INVALID_PAYLOAD` would have been clearer.
-- **Status:** UNCONFIRMED (2026-09-10)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D10).
 
 ## A zero-ballot quorum decline is refused even though RFC-MACP-0011 §4a permits it
 - **Plan:** `plans/backlog-closeout-2026-09.md` (Phase 3, acceptance criterion 6 — "close it or move it to Blocked; do not leave it silent")
@@ -98,7 +98,7 @@
 - **Chose:** Two guards, both narrower than they look. (1) The `ApprovalRequest` is refused when the effective threshold falls outside `1..=participants` — the domain the field it *replaces* already had to satisfy. (2) `commitment_ready`'s unreachable-threshold branch additionally requires at least one ballot, covering the replay path where an edited policy rebinds a larger threshold to a session whose request was already accepted. Guard (2) is a deliberate deviation from the literal §4a formula, and it is provably confined to the misconfigured case: with zero ballots the formula reduces to `participants < required`, which is unreachable once guard (1) holds. Every §4b scenario the RFC actually describes (all-abstain, or abstentions plus rejections) has at least one ballot behind it, and both are covered by tests.
 - **Alternatives:** Clamp the effective threshold to `participants.len()` in both layers — rejected: it silently *loosens* a governance bar (an operator's "5 approvals" becomes 3), which is the wrong direction for a fail-closed runtime. Or refuse the policy at `SessionStart` instead of at `ApprovalRequest` — blames the right party but is a larger wire-visible change touching `runtime.rs`, and the participant count is already known at request time. Or leave it and record it — rejected because a binding negative commitment with no participation is exactly the "confident wrong answer" the issue reports.
 - **Blast radius if wrong:** Moderate, in the fail-closed direction. A deployment whose quorum policy sets a threshold above a session's participant count now gets `INVALID_PAYLOAD` on the `ApprovalRequest` instead of a session that could only ever decline. No such policy can produce a positive outcome, so nothing that worked stops working — but the failure moved from "declines" to "refuses", which is visible. Reversal is a small edit to one match arm.
-- **Status:** UNCONFIRMED (2026-09-10)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D11).
 
 ## Wildcard (`mode: "*"`) policies are now held to every mode's schema
 - **Plan:** `plans/backlog-closeout-2026-09.md` (Phase 3 — but **no acceptance criterion of Phase 3 covers this**. An earlier revision of this entry cited "Phase 3, item 4"; that is wrong, Phase 3's criterion 4 is the differential `{type} × {value} × {participant count}` threshold matrix. The wildcard fail-open reached Phase 3 only through the Phase 2 pinning test's own comment — `quorum_threshold_constraints_apply_to_wildcard_policies` in `crates/macp-policy/src/registry.rs`, renamed from `..._do_not_apply_to_...`, which pinned the fail-open and named Phase 3 as the place to close it. Phase 3's Files list records the resulting registry edit as a justified scope expansion, not as a planned criterion.)
@@ -106,7 +106,7 @@
 - **Chose:** Option (a). A `"*"` policy binds to every mode's sessions and every mode's evaluator re-parses the same rules through its own struct, so holding it to all five schemas and all their constraints is the only reading of `"*"` that is not a hole. In practice it is also the smallest change: `validate_conditional_constraints` has exactly three families (decision, quorum, all-mode commitment) and the decision one already ran for `"*"`, so option (b) — "validate the quorum block whenever `threshold` is present" — would have been the same behaviour with a narrower justification.
 - **Alternatives:** Option (c), leave it open now that the floor-to-1 defuses the severe case, and document it. Rejected: the fail-open is a hole through *every* quorum constraint Phase 2 added, not just the rounding one, and "use `mode: "macp.mode.quorum.v1"`, not `"*"`" is documentation asking operators to avoid a trap rather than removing it.
 - **Blast radius if wrong:** Low, and the plan's stated worry ("may refuse policies that register today") did not materialise in any test. Since no struct uses `deny_unknown_fields`, a field one mode's schema does not know is still ignored rather than refused — the built-in `policy.default`'s Decision-shaped rules register unchanged, and the only new refusals are values that are out-of-domain for the mode that owns them. What *would* break is a wildcard deliberately carrying a knowingly-invalid block for a mode it never expected to be used with.
-- **Status:** UNCONFIRMED (2026-09-10)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D12).
 
 ## `EffectiveThreshold` is deliberately not `#[non_exhaustive]`
 - **Plan:** `plans/backlog-closeout-2026-09.md` (Phase 3, quorum threshold unification — the new `macp-core` type the shared resolver introduced)
@@ -114,7 +114,7 @@
 - **Chose:** Keep it exhaustive, and document why in the enum's own rustdoc rather than only here. `#[non_exhaustive]` binds every crate *except* the defining one, and this enum has exactly two consumers, both outside `macp-core`: `QuorumMode::effective_threshold` (`crates/macp-modes/src/mode/quorum.rs:92-94`) and `evaluate_quorum_commitment_outcome` (`crates/macp-policy/src/evaluator.rs:712-725`). Their compile-time exhaustiveness **is** the guarantee the whole #145 fix buys — one rule, one interpretation, provable at build time. Adding the attribute would force a `_` arm at both, and a fail-closed `_` arm is strictly worse for a governance kernel than a build failure: a future variant would silently decline instead of failing to compile, which is the same class of silent mis-handling as #145 itself (a `_` arm reinterpreting `weighted` as a raw approval count is precisely what that fix deleted).
 - **Alternatives:** Add `#[non_exhaustive]` for consistency with the other six and accept fail-closed `_` arms (rejected above); or add it and have both call sites `panic!`/`unreachable!` in the `_` arm to recover the loudness (trades a compile error for a runtime abort in a kernel that must not panic on policy data); or leave it exhaustive and undocumented (the status quo this entry exists to end — an unexplained departure from six documented precedents reads as an oversight and invites someone to "fix" it).
 - **Blast radius if wrong:** Low and bounded to release mechanics. Adding a variant later is a breaking change for downstream matches, but it is **not** a silent one: `enum_variant_added` is a major `cargo-semver-checks` lint and `release-plz.toml:20` sets `semver_check = true`, so it blocks the release PR rather than shipping. The residual cost is release coordination (a deliberate minor bump on 0.x, with both in-tree call sites updated in the same commit), not an undetected break. If the enum ever grows a third consumer outside this workspace, revisit — the trade is sound while every consumer is in-tree.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D13).
 
 ## A negative weighted total fails the round, which moves one decline from DENY to ALLOW
 - **Plan:** `plans/backlog-closeout-2026-09.md` (Phase 4, the negative-weight evaluator hole — **the phase's stated premise was wrong against the code; see below**)
@@ -122,7 +122,7 @@
 - **Chose:** Ship the `< 0.0 => Failed` short-circuit as planned (the fix is right even though the diagnosis was not), and correct the account of it in the code, the `evaluate_decision_commitment_outcome` rustdoc table, and the tests. Kept the `== 0.0 => NoVotes` branch untouched, deferred to spec #98 item 3. Wrote the criteria-1-3 tests around a genuinely negative map (`{fraud: 1.0, growth: -2.0}`) and asserted the `VotingResult` variant directly via `check_voting_algorithm`, not only the `PolicyDecision` — necessary, because two of the three rounds were already denied before the change and a `PolicyDecision`-only assertion would have passed against the unfixed code. Every new test was mutation-checked: removing the branch reddens exactly the three negative tests, removing the `== 0.0` branch reddens only the zero test, removing the `:337` short-circuit reddens the guard test plus the two §4.1 tests it protects.
 - **Alternatives:** Refuse the round with an error rather than `Failed` (out of scope — `check_voting_algorithm` has no error channel and every caller treats its result as a governance outcome); or clamp the total to zero and fall into `NoVotes` (keeps the decline direction unchanged but re-launders out-of-schema data as "nobody voted", the same silent reinterpretation the #145 fix removed).
 - **Blast radius if wrong:** Bounded to out-of-schema policies — `voting.weights[*]` is `minimum: 0`, so registration already refuses these and only a directly-constructed `PolicyDefinition` reaches the arm. **Not purely a tightening.** In the approve direction it is one (`Passed` → `Failed`: a positive commitment that used to seal is now denied). In the decline direction it is a fail-open: on that same round a decline moves **DENY → ALLOW**, because a decline over `Passed` was refused while a decline over `Failed` is permitted once the universal reject-floor (`reject_count > 0`) is met. That is the intended outcome — the round is genuinely decided and an explicit reject backs the decline — but RFC-MACP-0012 §4.1's no-result branch is conditioned on no decisive vote having been *cast*, which is false here, so this **fills a gap §4.1 does not address** rather than moving toward conformance. It must be stated as a direction change in the release notes, not as a tightening.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D14).
 
 ## `supermajority` silently substitutes 2/3 for an out-of-domain threshold
 - **Plan:** `plans/backlog-closeout-2026-09.md` (Phase 4 edge cases — "Leave it; record it in `ASSUMPTIONS.md`")
@@ -130,7 +130,7 @@
 - **Chose:** Left it. Not touched in Phase 4, which is confined to the weighted arm. The substitution fails **closed** (it can only raise the bar, never lower it), the reachable path is already refused at the door, and changing a silent substitution into a refusal inside the evaluator would move a policy-authoring error from commitment time to a place with no error channel — `check_voting_algorithm` returns a governance outcome, not a `Result`.
 - **Alternatives:** Return `Failed` with an "out-of-domain threshold" reason (fails closed and is honest, but converts a conservative bar into a hard block for any consumer driving `macp-core` + `macp-modes` with its own evaluator and no registry); or delete the clamp and use `threshold` as given (fails **open** — a 40% "supermajority" — strictly worse).
 - **Blast radius if wrong:** Very low. One unreachable branch whose only effect is a stricter bar than requested, and a reason string that under-explains itself.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D15).
 
 ## `unanimous` passes by vacuous truth on an empty participant list
 - **Plan:** `plans/backlog-closeout-2026-09.md` (Phase 4 edge cases — "record, do not fix here")
@@ -138,7 +138,7 @@
 - **Chose:** Left it. Fixing it means deciding what `unanimous` means on an empty tally, which is spec issue #98 item 1 (RFC-MACP-0012 §4.1) and blocked — the same blocker that holds issue #147. Phase 4 deliberately did not touch the `unanimous` arm, and a local fix here would pre-empt the amendment and contradict the two §4.1 tests the phase is required to leave green (`all_abstain_returns_no_votes`, `no_decisive_votes_blocks_a_positive_commitment_only_under_require_vote_quorum`).
 - **Alternatives:** Return `Failed` when `participants.is_empty()` (the honest reading, but it is exactly the §4.1 change #98 must ratify first); or assert non-empty participants at the function boundary (moves an unreachable case into a panic in a kernel that must not panic on policy data).
 - **Blast radius if wrong:** Very low while unreachable from the wire. It becomes live for any consumer that drives the evaluator directly with no participants, and it will be revisited as part of the blocked #147 work rather than in isolation.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D16).
 
 ## The public effective-threshold accessor answers three questions in three layers, not one `Option`
 - **Plan:** `plans/backlog-closeout-2026-09.md` (Phase 5, publish the corrected effective threshold — the plan's own signature suggestion had to be rejected; see below)
@@ -146,7 +146,7 @@
 - **Chose:** `pub fn effective_threshold_for_session(&Session) -> Result<Option<ApprovalThreshold>, MacpError>` over a new two-variant `pub enum ApprovalThreshold { Approvals(u32), Unsatisfiable }`, with the request-level `pub fn effective_threshold(&Session, &ApprovalRequestRecord) -> ApprovalThreshold` sharing that enum. One layer per question, and no representable-but-impossible state: `Err` = undecodable state (which also catches a session of another mode, since `QuorumState`'s fields are not `#[serde(default)]`), `Ok(None)` = no request accepted, `Ok(Some(_))` = the resolved bar. The policy's `Inert` case is resolved *before* it reaches the caller, to `Approvals(request.required_approvals)`, because handing back `EffectiveThreshold::Inert` would hand back the fallback rule and re-create the 15-line mirror issue #146 exists to delete. `ApprovalThreshold` is deliberately exhaustive, for the reason already recorded for `EffectiveThreshold` above.
 - **Alternatives:** `Option<EffectiveThreshold>` (the plan's second option) — rejected twice over: it widens `macp-core`'s `EffectiveThreshold` exposure into a second crate's public API, and its inner `Inert` variant would be unreachable through this path, i.e. an impossible state the caller must still match. A flat three-variant enum with a `NoRequest` member — rejected because the request-level form then carries a variant it can never return, and because `Option::map` is exactly the composition the two functions have. `Result<u32, Reason>` — rejected: it makes the ordinary "no request yet" case an error, and folds two non-error outcomes into an error channel. Keeping `effective_threshold` private and documenting `decode_mode_state` as the route — rejected: that is the reconstruct-the-internals path the issue asks to remove.
 - **Blast radius if wrong:** Additive only — `cargo semver-checks check-release` on `macp-core`, `macp-modes` and `macp-runtime` is clean (exit 0, no major lints). The cost of being wrong is API churn: narrowing `Result<Option<_>, _>` later, or adding an `ApprovalThreshold` variant, is a breaking change, though `enum_variant_added` and signature lints are majors that `release-plz.toml`'s `semver_check = true` blocks on rather than shipping silently. If a third outcome for the session-level form ever appears, it belongs in a new `Ok` variant, not in a new error.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D17).
 
 ## The rev-2 scaffolding branch cannot be *literally* identical to the rev-1 branch
 - **Plan:** `plans/backlog-closeout-2026-09.md` (Phase 9, "a `>= 2` branch identical to `>= 1`")
@@ -174,7 +174,7 @@
 - **Blast radius if wrong:** None observable. Both functions are private, the arithmetic is identical
   on every input, and three replay fixtures plus a rev-1-vs-rev-2 differential test pin that
   equivalence; the cost of being wrong is one extra function to inline later.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D18).
 
 ## Discharging Phase 10's acceptance criterion 3 when no conformance fixture exists
 - **Plan:** plans/backlog-closeout-2026-09.md (Phase 10)
@@ -196,7 +196,7 @@
   error in my own acceptance criterion, not a gap in the work.
 - **Blast radius if wrong:** test-only. Satisfying the criterion literally requires a fixture PR in
   the spec repo, which is read + issues only under the current authorization.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D19).
 
 ## Updating `CURRENT_SEMANTICS_REV`'s rev-2 doc bullet outside Phase 10's Files list
 - **Plan:** plans/backlog-closeout-2026-09.md (Phase 10)
@@ -210,7 +210,7 @@
   scopes to `docs/` and `CLAUDE.md`, so a slip or a narrow reading there ships a doc that contradicts
   the code.
 - **Blast radius if wrong:** doc comment only.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D20).
 
 ## Omitting the in-flight suspension term while the implicit-accept check is lazy-only
 - **Plan:** plans/backlog-closeout-2026-09.md (Phase 10)
@@ -229,7 +229,7 @@
   the message path *can* observe a suspended session, at which point either the in-flight term is
   added or the sweep must skip suspended sessions entirely. RFC-MACP-0010 §5.1(1) arguably implies
   the latter is correct. The doc comment says so at the site so the constraint travels with the code.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D21).
 
 ## Synthetic accept stands even when the triggering message is later rejected
 - **Plan:** plans/backlog-closeout-2026-09.md (Phase 11e)
@@ -259,7 +259,7 @@
   `mode_version`, a duplicate offer. Mitigations required by the plan: `CONTRIBUTING.md` must be
   amended in the same PR to name the carve-out, and an acceptance criterion asserts the rejected
   trigger consumes **no** dedup slot and can be retried successfully.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D22).
 
 ## Persisted suspension intervals, with a cycle cap, rather than a derived deadline
 - **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b)
@@ -291,7 +291,7 @@
   vec turns constant-size writes into O(N), i.e. **O(N²) total bytes, triggerable by the session's
   own initiator.** A cap that force-expires corrupts nothing — it is the posture `Session::resume`
   already takes at `session.rs:191-194`. Note 11b therefore **cannot** claim "zero behaviour change".
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D23).
 
 ## The `implicit` payload flag as discriminator, guarded by a mode-trait boundary hook
 - **Plan:** plans/backlog-closeout-2026-09.md (Phase 11c/11d)
@@ -319,7 +319,7 @@
   re-reads entries that already passed the hook, so the guarantee holds for *this* runtime. The
   rustdoc hazard must therefore use the runtime itself as the worked example, not "a library
   consumer".
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D24).
 
 ## Retiring the interim implicit-accept path fail-loud rather than fail-open
 - **Plan:** plans/backlog-closeout-2026-09.md (Phase 11e)
@@ -335,7 +335,7 @@
 - **Blast radius if wrong:** if any rev-2 history escapes before 11e lands, it becomes unreplayable —
   `replay_session` errors and `src/main.rs:386-391` skips the session entirely. Bounded by the
   single-release constraint, which must therefore be honoured.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D25).
 
 ## The synthetic commit deliberately skips `record_participant_activity`
 - **Plan:** plans/backlog-closeout-2026-09.md (Phase 11e)
@@ -348,7 +348,7 @@
 - **Blast radius if wrong:** the sole consumer is informational — `SessionMetadata.participant_activity`
   (`src/server.rs:165-177`); nothing gates TTL, liveness or authorization on it. Consequence to note
   in the changelog: the target's `message_count` will not include the synthetic accept.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D26).
 
 ## Counting granularity of the widened `validate_replay_consistency`
 - **Plan:** plans/backlog-closeout-2026-09.md (Phase 11a)
@@ -365,7 +365,7 @@
   (`src/main.rs:350`) is a log field plus a metric (`record_replay_mismatch`); nothing branches on
   the number and no test in `tests/` or `integration_tests/` asserts on it. Grouping changes a
   reported magnitude, never an outcome.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D27).
 
 ## `cancel_session` reads a clock solely to stamp its log entry
 - **Plan:** plans/backlog-closeout-2026-09.md (Phase 11a)
@@ -380,7 +380,7 @@
 - **Blast radius if wrong:** one extra `Utc::now()` per `CancelSession` RPC. `SessionCancel` replay
   only sets terminal state (`src/replay.rs:145-147`), reading neither timestamp, so nothing
   downstream observes the value.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D28).
 
 ## A real 5 ms sleep in `suspend_resume_entries_share_the_session_mutation_clock`
 - **Plan:** plans/backlog-closeout-2026-09.md (Phase 11a)
@@ -444,7 +444,7 @@
 - **Blast radius if wrong:** warn-only; `recovery_replay_mismatches` is only ever read as
   zero-vs-nonzero (`src/main.rs`), so at worst a snapshot lag logs one extra warn line. No
   behavior change.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D29).
 
 ## Criterion 3's checkpoint fixture binds no `policy_version`
 - **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b, criterion 3: "extend
@@ -465,7 +465,7 @@
   no extra coverage).
 - **Blast radius if wrong:** test-only. The production round-trip is the same either way; the
   assumption only governs whether the test can see it.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D30).
 
 ## `Session::resume`'s stray doc comment re-attached
 - **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b, Docs bullet)
@@ -478,7 +478,7 @@
 - **Alternatives:** leave the misattachment and document the cap on `MAX_SUSPENSION_CYCLES` only
   (the rendered docs would keep pointing readers at the wrong function).
 - **Blast radius if wrong:** rustdoc only; no signature or behavior change.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D31).
 
 ## A degenerate suspension pair (`e < s`) counts as a zero-width pause at `s`
 - **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b, verifier GAP 1 — the walk can over-report
@@ -501,7 +501,7 @@
   consumer supplied through `SessionBuilder::suspension_intervals`. Either way the result stays
   `>= from_ms + duration_ms` and `<=` the true union-corrected deadline, so 11d's planned
   `debug_assert!(D <= now_ms)` holds.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D32).
 
 ## Nothing below `semantics_rev` 2 reads `suspension_intervals`, so dropping the overflow is invisible
 - **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b, verifier GAP 2 — the cycle cap does not
@@ -523,7 +523,7 @@
   sessions that were replayed from legacy logs).
 - **Blast radius if wrong:** if some future rev <= 1 path did read the vec, it would see the first
   `MAX_SUSPENSION_CYCLES` pauses and none after. Bounded, and the recorded prefix is never mutated.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D33).
 ## Hoisting the critical-objection scan above check 1 rather than filtering deny reasons
 - **Plan:** spec #126 alignment (RFC-MACP-0007 §6.2, closing this runtime's spec issue #117)
 - **Assumed:** §6.2's waiver now reaches two gates that run on *opposite sides* of the
@@ -587,7 +587,7 @@
   the sole guard one sub-phase early).
 - **Blast radius if wrong:** one test. If 11d forgets it, the assertion fails loudly at that
   commit rather than silently passing — which is the intended failure direction.
-- **Status:** UNCONFIRMED (2026-09-12)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D34).
 
 ## Keeping a runtime-level assertion that is double-guarded (and saying so) rather than dropping it
 - **Plan:** Phase 11c of `plans/backlog-closeout-2026-09.md` (the client boundary)
@@ -609,7 +609,7 @@
   runtime).
 - **Blast radius if wrong:** one assertion; the mode-level unit test
   `client_implicit_accept_rejected_at_the_boundary` isolates the rule non-vacuously either way.
-- **Status:** UNCONFIRMED (2026-09-12)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D35).
 
 ## Flipping an `src/replay.rs` test in a phase whose file list names only the mode crate
 - **Plan:** Phase 11d of `plans/backlog-closeout-2026-09.md` (the synthesis contract in the mode)
@@ -628,7 +628,7 @@
 - **Blast radius if wrong:** one test in a file the plan did not enumerate. It is the strongest
   evidence 11d works end-to-end through `replay_session`, so the risk of keeping it is lower than
   the risk of deferring it.
-- **Status:** UNCONFIRMED (2026-09-12)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D36).
 
 ## One shared `IMPLICIT_ACCEPT_REASON` const instead of two copies of the literal
 - **Plan:** Phase 11d of `plans/backlog-closeout-2026-09.md`
@@ -648,7 +648,7 @@
   outside the crate needs yet).
 - **Blast radius if wrong:** the string is frozen either way; a wrong const value breaks replay of
   every rev <= 1 history that implicitly accepted, loudly, in-tree, at the workspace gate.
-- **Status:** UNCONFIRMED (2026-09-12)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D37).
 
 ## Error codes and check order inside the rev-2 implicit-accept arm
 - **Plan:** Phase 11d of `plans/backlog-closeout-2026-09.md` (the strict accept arm)
@@ -670,7 +670,7 @@
   gain).
 - **Blast radius if wrong:** the codes are only observable through replay failures and direct
   library callers until 11e; no wire surface changes in this phase.
-- **Status:** UNCONFIRMED (2026-09-12)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D38).
 
 ## A fifth test, beyond the four acceptance criteria, to make the phase's negative rule killable
 - **Plan:** Phase 11d of `plans/backlog-closeout-2026-09.md` ("the mode MUST NOT re-verify the
@@ -693,7 +693,7 @@
   introduces it).
 - **Blast radius if wrong:** two extra unit tests. If the invariant is ever deliberately reversed,
   they fail loudly and name the reason.
-- **Status:** UNCONFIRMED (2026-09-12)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D39).
 
 ## `debug_assert!(suspended_at_ms.is_none())` placed inside `due_synthetic_envelope`
 - **Plan:** Phase 11b of `plans/backlog-closeout-2026-09.md` ("`debug_assert!(session.suspended_at_ms.is_none())`
@@ -717,7 +717,7 @@
   `timestamp_unix_ms` is baked into permanent history. `debug_assert!` cannot prevent that. It follows
   that **11e's non-`Open` session filter is load-bearing, not hygiene, and needs its own test** —
   recorded in 11e's acceptance criteria.
-- **Status:** UNCONFIRMED (2026-09-12)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D40).
 
 ## Four handoff-mode tests broke that the plan's "complete" sweep had cleared, and two replay tests besides
 - **Plan:** Phase 11e of `plans/backlog-closeout-2026-09.md` ("**A full sweep of every
@@ -752,7 +752,7 @@
   wrong, the current revision's behavior for that claim is untested and a regression there would
   ship green. The two forged-timestamp tests are the ones to re-examine first: their rev-2 arms are
   new and shorter than the rev-1 bodies they sit under.
-- **Status:** UNCONFIRMED (2026-09-13)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D41).
 
 ## A terminal checkpoint made the live-replay criterion pass with the synthetic entry deleted
 - **Plan:** Phase 11e of `plans/backlog-closeout-2026-09.md`, acceptance criterion 3
@@ -776,7 +776,7 @@
   `FileBackend` the resolved-session assertions still run through a checkpoint, so
   `rejected_trigger_leaves_dedup_intact_and_snapshot_current`'s final replay is checkpoint-based.
   Its pre-resolution assertions are not, which is why they are made first.
-- **Status:** UNCONFIRMED (2026-09-13)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D42).
 
 ## Two storage backends in the live harness, chosen for what each one cannot do
 - **Plan:** Phase 11e of `plans/backlog-closeout-2026-09.md`, acceptance criteria 1-9
@@ -801,7 +801,7 @@
   `save_session_to_storage` is dropped. Running it on the wrong backend makes the durable-save
   argument unguarded, and the omission would then surface only as an 11a `mode_state` warn at some
   later startup.
-- **Status:** UNCONFIRMED (2026-09-13)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D43).
 
 ## `ModeRef::due_synthetic_envelope` returns `None` for a mode that has vanished
 - **Plan:** Phase 11e of `plans/backlog-closeout-2026-09.md`, Approach (`mode.due_synthetic_envelope(session, now_ms)`)
@@ -820,7 +820,7 @@
 - **Blast radius if wrong:** an unregistered-mid-message mode silently skips a due synthesis for
   that one message; the next message to the same session synthesizes normally, or the session is
   already unusable because `process_message` will reject on `UnknownMode`.
-- **Status:** UNCONFIRMED (2026-09-13)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D44).
 
 ## The freeze-profile invariant amended in `CONTRIBUTING.md`, with the carve-out spelled out
 - **Plan:** Phase 11e of `plans/backlog-closeout-2026-09.md`, acceptance criterion 10
@@ -840,7 +840,7 @@
   — no test can fail if the wording drifts back. If the carve-out is ever judged wrong, reverting
   it means removing `synthesize_due_accept`'s call site, which strands rev-2 sessions with no
   implicit accept at all; the interim gate must come back in the same commit.
-- **Status:** UNCONFIRMED (2026-09-13)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D45).
 
 ## Tier-1 bounds the synthetic's deadline timestamp rather than leaving it unasserted
 - **Plan:** Phase 11f of `plans/backlog-closeout-2026-09.md`, verify-round finding 2
@@ -863,7 +863,7 @@
   bound is ever too tight it fails as a hard error with a diagnostic naming the overshoot, not as a
   silent pass — the safe direction. The millisecond-equality proof remains where the plan put it,
   in 11e's in-process `tests/handoff_implicit_accept_live.rs`.
-- **Status:** UNCONFIRMED (2026-09-13)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D46).
 
 ## Phase 11f ships five tier-1 tests where the plan specified four
 - **Plan:** Phase 11f of `plans/backlog-closeout-2026-09.md`, acceptance criteria 1-4
@@ -881,7 +881,7 @@
 - **Blast radius if wrong:** one extra tier-1 test (~2 s) on every PR. If it ever proves flaky the
   in-process coverage still holds, so deleting it loses the boundary proof but no correctness
   guarantee.
-- **Status:** UNCONFIRMED (2026-09-13)
+- **Status:** CONFIRMED (2026-09-22) — see `DECISIONS.md` (D47).
 
 ## Phase 1 semver-check acceptance criterion verified by manual inspection, not the tool
 - **Plan:** `plans/parity-contract-176.md` (Phase 1, proof-of-concept parity-contract consumer)

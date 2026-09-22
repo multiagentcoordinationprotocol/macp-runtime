@@ -183,7 +183,7 @@ fn replay_entry(
 ///
 /// Compared: `state`, dedup count, `participants`, the bound versions
 /// (mode/configuration/policy, counted as one), `mode_state` (byte equality),
-/// `accumulated_suspended_ms` and `suspended_at_ms`.
+/// `accumulated_suspended_ms`, `suspended_at_ms`, and `suspension_intervals`.
 ///
 /// Deliberately **warn-only**: making it fatal would turn a benign snapshot
 /// lag (a crash between the log append and the snapshot write) into a startup
