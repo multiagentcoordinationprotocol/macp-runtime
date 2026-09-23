@@ -8,6 +8,16 @@ pub mod pb {
 
 pub use macp_pb::{decision_pb, handoff_pb, multi_round_pb, proposal_pb, quorum_pb, task_pb};
 
+/// The compiled `macp.v1` protobuf FileDescriptorSet, written by `build.rs`.
+/// Feeds gRPC server reflection (dev/debug tooling only, e.g. grpcurl/grpcui)
+/// when the `reflection` feature is enabled -- see docs/deployment.md's
+/// "gRPC reflection" note under Monitoring. Public so both `src/main.rs` and
+/// a downstream consumer embedding this server can register it with
+/// `tonic_reflection::server::Builder`.
+#[cfg(feature = "reflection")]
+pub const FILE_DESCRIPTOR_SET: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/macp_descriptor.bin"));
+
 // The base vocabulary crate, re-exported whole. `macp-runtime`'s public
 // signatures already traffic in macp-core types, but four of the five lower
 // crates were reachable through this root and macp-core was not — so items

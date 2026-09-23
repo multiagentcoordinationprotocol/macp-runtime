@@ -289,7 +289,7 @@ to `ListSessions`, that no-signature decision must be re-analyzed first.
 
 The runtime applies a pluggable resolver chain assembled at startup:
 
-1. **JWT bearer** (active when `MACP_AUTH_ISSUER` is set) -- validates signature, issuer, audience, and expiration against a JWKS. Supported algorithms: `RS256`, `ES256`, `HS256`. The `sub` claim becomes the sender; an optional `macp_scopes` claim carries capability flags (`allowed_modes`, `can_start_sessions`, `max_open_sessions`, `can_manage_mode_registry`, `is_observer`).
+1. **JWT bearer** (active when `MACP_AUTH_ISSUER` is set) -- validates signature, issuer, audience, and expiration against a JWKS. Default algorithm allowlist: `RS256`, `ES256`; `HS256` (shared-secret) requires explicit opt-in via `MACP_AUTH_JWT_ALGS=HS256` (see CHANGELOG 0.5.0). The `sub` claim becomes the sender; an optional `macp_scopes` claim carries capability flags (`allowed_modes`, `can_start_sessions`, `max_open_sessions`, `can_manage_mode_registry`, `is_observer`).
 2. **Static bearer** (active when `MACP_AUTH_TOKENS_FILE` or `MACP_AUTH_TOKENS_JSON` is set) -- looks up opaque tokens in a preloaded identity map. Accepts `Authorization: Bearer <token>` or the alternate `x-macp-token: <token>` header.
 3. **Dev-mode fallback** -- activates only when **neither** JWT nor static bearer is configured. Any `Authorization: Bearer <value>` header authenticates the caller as sender `<value>` with full capabilities. Intended strictly for local development.
 
@@ -321,6 +321,8 @@ The runtime provides operational visibility through several mechanisms:
 **Session eviction** -- Terminal sessions (resolved, expired, or cancelled) are evicted from memory once their age exceeds `MACP_SESSION_RETENTION_SECS` (default one hour), measured from session **start** rather than from when they became terminal. This is on by default and bounds memory usage. Their data remains on disk and can be replayed if needed. Deleting that durable data is a separate, opt-in step governed by `MACP_SESSION_DISK_RETENTION_SECS`, which defaults to `0` -- disk GC does not run at all unless you set it.
 
 **Log compaction** -- When a session reaches a terminal state, the runtime automatically compacts its log into a single checkpoint entry. This reduces storage footprint for completed sessions.
+
+**gRPC reflection** (dev/debug only) -- Build with the `reflection` Cargo feature (`cargo build --features reflection`) to enable the standard gRPC Server Reflection API, so tools like `grpcurl`/`grpcui` can call RPCs without a local `.proto`/`.protoset` file (e.g. `grpcurl -plaintext localhost:50051 list`). Off by default and never enabled in the published Docker image -- it exposes the full service/message schema to any client that can reach the port, so treat it the same as `MACP_ALLOW_INSECURE`: fine for a local instance or an ephemeral CI container, not for a production deployment. The runtime logs a warning at startup when it's active. Without this feature, point `grpcurl -proto`/`-protoset` at the published proto instead (`@multiagentcoordinationprotocol/proto` on npm, `macp-proto` on crates.io).
 
 ## Container deployment
 

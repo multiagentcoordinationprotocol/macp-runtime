@@ -73,6 +73,10 @@ default = []
 rocksdb-backend = ["macp-storage/rocksdb-backend"]
 redis-backend = ["macp-storage/redis-backend"]
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
+# gRPC server reflection for dev/debug tooling (e.g. grpcurl, grpcui). Never
+# enabled in the published Docker image or a default `cargo build` -- see
+# docs/deployment.md's "gRPC reflection" note under Monitoring.
+reflection = ["dep:tonic-reflection"]
 
 [dependencies]
 macp-pb = { workspace = true }
@@ -108,6 +112,7 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = [
     "trace",
 ], optional = true }
 tracing-opentelemetry = { version = "0.33", optional = true }
+tonic-reflection = { version = "0.14", optional = true }
 macp-proto = { workspace = true }
 
 [dev-dependencies]

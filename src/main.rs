@@ -493,6 +493,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set_serving::<pb::macp_runtime_service_server::MacpRuntimeServiceServer<MacpServer>>()
         .await;
 
+    // gRPC server reflection (dev/debug tooling only -- grpcurl, grpcui).
+    // Opt-in via the `reflection` Cargo feature; never on in the published
+    // Docker image or a default `cargo build`.
+    #[cfg(feature = "reflection")]
+    let reflection_service = {
+        tracing::warn!(
+            "gRPC server reflection is enabled (reflection feature); this exposes the full \
+             service/message schema to any client and should be used for local dev/debug only"
+        );
+        tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(macp_runtime::FILE_DESCRIPTOR_SET)
+            .build_v1()?
+    };
+
     // Make the transport-level message bound track the configured payload
     // bound: previously tonic's 4 MB default applied BEFORE the payload-size
     // check, so MACP_MAX_PAYLOAD_BYTES above 4 MB was silently ineffective
@@ -515,13 +529,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = tokio::signal::ctrl_c().await;
         tracing::info!("shutdown signal received; draining in-flight requests");
     };
-    let server_future = builder
-        .add_service(health_service)
-        .add_service(
-            pb::macp_runtime_service_server::MacpRuntimeServiceServer::new(svc)
-                .max_decoding_message_size(max_payload_bytes + ENVELOPE_OVERHEAD_BYTES),
-        )
-        .serve_with_shutdown(addr, shutdown);
+    let builder = builder.add_service(health_service).add_service(
+        pb::macp_runtime_service_server::MacpRuntimeServiceServer::new(svc)
+            .max_decoding_message_size(max_payload_bytes + ENVELOPE_OVERHEAD_BYTES),
+    );
+    #[cfg(feature = "reflection")]
+    let builder = builder.add_service(reflection_service);
+    let server_future = builder.serve_with_shutdown(addr, shutdown);
 
     // Background maintenance task: expire TTL-exceeded sessions, emit synthetic
     // envelopes whose deadline has passed, and evict stale ones.

@@ -459,6 +459,14 @@ jobs:
       - name: Clippy (otel feature)
         run: cargo clippy -p macp-runtime --features otel --all-targets -- -D warnings
 
+      # gRPC server reflection (dev/debug tooling, issue #187) -- opt-in,
+      # non-default feature on the root crate.
+      - name: Clippy (reflection feature)
+        run: cargo clippy -p macp-runtime --features reflection --all-targets -- -D warnings
+
+      - name: Test reflection feature (descriptor set + service build)
+        run: cargo test -p macp-runtime --features reflection --test reflection
+
       # Both backends enabled together must also build at the root crate —
       # feature unification across the workspace is not covered by the
       # per-feature runs below.
