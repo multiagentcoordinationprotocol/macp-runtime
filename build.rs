@@ -6,10 +6,16 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_dir =
         std::env::var("DEP_MACP_PROTO_PROTO_DIR").expect("macp-proto crate must set proto_dir");
+    let out_dir = std::env::var("OUT_DIR").expect("cargo always sets OUT_DIR for build scripts");
+    // Written unconditionally (it's a tiny file) so the `reflection` feature
+    // can `include_bytes!` it without build.rs needing to know which
+    // features are enabled. Only embedded into the binary when that feature
+    // is on -- see src/main.rs.
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
         .extern_path(".macp.v1", "::macp_pb::pb")
+        .file_descriptor_set_path(std::path::Path::new(&out_dir).join("macp_descriptor.bin"))
         .compile_protos(
             &[
                 "macp/v1/envelope.proto",

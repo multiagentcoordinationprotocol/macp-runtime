@@ -61,7 +61,7 @@ The improvement-plan release (see `CHANGELOG.md` for the complete list):
   - `UnregisterExtMode` removes dynamically registered extensions (built-in modes protected)
   - `PromoteMode` promotes extensions to standards-track with optional identifier rename
 - **Pluggable authentication chain**
-  - JWT bearer resolver validates signature, issuer, audience, and expiration against a JWKS (inline JSON or URL-fetched with TTL cache); `RS256`, `ES256`, and `HS256` supported
+  - JWT bearer resolver validates signature, issuer, audience, and expiration against a JWKS (inline JSON or URL-fetched with TTL cache); default algorithm allowlist is `RS256`, `ES256` -- `HS256` requires explicit opt-in via `MACP_AUTH_JWT_ALGS=HS256`
   - Static bearer resolver maps opaque tokens to identities via `MACP_AUTH_TOKENS_FILE`/`MACP_AUTH_TOKENS_JSON`
   - Resolvers run in chain order (JWT → static); dev-mode fallback only when both are absent
   - Identities carry capability flags: `allowed_modes`, `can_start_sessions`, `max_open_sessions`, `can_manage_mode_registry`, `is_observer`
