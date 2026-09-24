@@ -1,0 +1,20 @@
+# Runs the integration_tests crate (Tier 1 protocol, Tier 2 Rig tools, Tier 3
+# real-LLM E2E -- see docs/testing.md) inside a container that builds the
+# runtime binary from this checkout and drives it through the real gRPC
+# boundary, exactly like ci.yml's `integration` job (MACP_TEST_BINARY
+# subprocess mode). Tier 3 additionally needs OPENAI_API_KEY (picked up from
+# a `.env` file at the repo root, gitignored, or the host environment).
+#
+# Usage:
+#   docker compose build integration-tests
+#   docker compose run --rm integration-tests                                          # tier 1 + tier2 (default CMD)
+#   docker compose run --rm integration-tests cargo test --test tier3 -- --ignored --test-threads=1   # tier 3, real LLM
+#   docker compose run --rm integration-tests cargo test -- --test-threads=1            # everything except #[ignore]d tier 3
+services:
+  integration-tests:
+    build:
+      context: .
+      dockerfile: integration_tests/Dockerfile
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      RUST_LOG: ${RUST_LOG:-warn}
