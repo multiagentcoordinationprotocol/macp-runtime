@@ -578,3 +578,21 @@ section found no new issues. Two sub-nits noted as non-blocking (an implicit "th
 two" count in the intro sentence, and the `:main` row's parenthetical citing only the
 `push` trigger though a no-`ref` `workflow_dispatch` against `main` produces the same
 pair) — accurate as written, not gaps. Phase 4 is DONE.
+
+## PR B — /ship gate: PASS (no blockers)
+
+Fresh Opus verifier, given the full `git diff main...HEAD` (5 files, 383/-22) plus
+`docker.yml` (unchanged in this PR, confirmed via an empty diff) as the interface
+contract, `plans/docker-tag-trigger-184.md`/`ASSUMPTIONS.md`/`DECISIONS.md` for context,
+and this file's own Phase 2/3/4 checkpoint trail as prior work rather than a cold review.
+Specifically re-derived the `docker-version-guard`/`docker` `needs:`/`if:` failure-mode
+claim independently against GitHub's own docs (a job's default status check is
+`success()` on its `needs:`, so a `docker-version-guard` failure skips `docker` before its
+`with:` expression is ever evaluated) rather than trusting the phase-level verifiers'
+prior conclusion, and re-ran `actionlint` on both `release-plz.yml` and `docker.yml`
+itself. No blockers found. One cosmetic-only observation: `release-plz.yml:101-104`'s
+comment slightly understates the guard's own robustness (it also silently catches an
+empty `releases: []` array, not just a single-entry-empty-version anomaly) — not treated
+as a gap, left as-is.
+
+**What's next:** push, open PR B, watch CI, merge.
