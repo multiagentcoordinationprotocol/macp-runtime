@@ -26,7 +26,7 @@ per the plan). So:
 | 0 | Plan + reverify | DONE | FLAWED -> patched (rev 2) | 1 | (uncommitted) |
 | 1 | Teach `docker.yml` to do a release build | DONE | GAPS -> GAPS -> PASS | 3 | (pending) |
 | 2 | Backfill the image for the current release | TODO | — | — | — |
-| 3 | Call `docker.yml` from the release | TODO | — | — | — |
+| 3 | Call `docker.yml` from the release | DONE | GAPS -> PASS | 2 | (pending) |
 | 4 | Document the published image | TODO | — | — | — |
 | 5 | Observe the next real release | TODO | — | — | — |
 
@@ -370,3 +370,112 @@ changed, so this was expected, not exploratory).
 pushed feat/docker-tag-trigger-184-phase1 b8f3c2c8b68f65d9e74c38e6d36d12fdc7c6771b
 
 PR #190 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/190
+
+merged #190: squash-merged to `main` @ `bb45705` (all 15 CI jobs green, including
+`Docker Image Build (gate)`), local branch deleted by `gh pr merge --delete-branch`.
+Phase 1 is DONE and live on `main`.
+
+## Phase 2 — Backfill the image for the current release
+
+**Before-state, captured prior to dispatch:**
+- `macp-runtime-v0.8.1` dereferences to commit `6128ccc01438d35b2927ec37a22136f03b2eeb23`
+  (an annotated tag — `git rev-parse macp-runtime-v0.8.1` alone returns the tag *object*
+  SHA `bb765f2c7c44a3ae4fe6bf9ed1fbed146b5b26e6`; `git rev-parse macp-runtime-v0.8.1^{commit}`
+  is the one that matches what Phase 1(f)'s `org.opencontainers.image.revision` label will
+  report).
+- `latest` digest before dispatch: `sha256:bca5c8d4e4940005625206185bb108def32ea0701501a7ea8393559da6c22af9`.
+- GHCR tag list before dispatch: 109 tags (4 legacy semver, `latest`, `main`, 5 `pr-*`, 98
+  SHA tags including `bb45705` — confirming Phase 1's `push_latest` path already fired
+  correctly for the PR #190 merge commit). No `0.8.1`/`0.8` present. Full list captured to
+  `/tmp/ghcr_tags_before.txt` this session.
+
+**Dispatch command** (per the plan's exact warning — against `main`, tag passed as an
+input, NOT `--ref macp-runtime-v0.8.1`):
+```
+gh workflow run docker.yml --ref main -f ref=macp-runtime-v0.8.1
+```
+Run: https://github.com/multiagentcoordinationprotocol/macp-runtime/actions/runs/36169029979
+(`workflow_dispatch`, `in_progress` as of dispatch — a multi-arch build, budgeted 35-50 min
+per the plan). Confirmed via `gh run list --workflow=docker.yml` that this run's event is
+`workflow_dispatch` on `headBranch=main`, not a run against the tag ref directly.
+
+Live-watched through the early steps: `Resolve build parameters`, `Checkout repository`,
+`Cross-check the resolved version against the checked-out tree`, and `Capture the checked-out
+commit` all passed before the multi-arch `Build and push` step began — confirming Phase 1's
+resolve logic and cross-check behave correctly on a real dispatch, not just in the dry-run
+matrix. Registry verification (after/before tag-list diff, digest checks, revision-label
+check) recorded below once the run completes.
+
+## Phase 3 — Call `docker.yml` from the release
+
+Implemented in parallel with Phase 2's build running (a read-only wait on GitHub's side;
+no conflict with editing a different file locally). Files: `.github/workflows/release-plz.yml`
+only.
+
+**Approach followed (a)-(d)** from the plan, with one structural deviation from (d)'s
+literal text, verified against GitHub's own reusable-workflow docs before accepting it (not
+assumed): a job calling a reusable workflow via `uses:` cannot also declare `steps:` — the
+calling job supports only `name, uses, with, secrets, strategy, needs, if, concurrency,
+permissions`. So AC7's version-emptiness guard could not live as a `run:` step "ahead of the
+`uses:`" inside the `docker` job itself. It lives in a new, separate `docker-version-guard`
+job instead (`release-plz.yml`), which hard-fails (`::error::` + `exit 1`) if
+`fromJSON(releases)[0].version` is empty, and `docker`'s `needs:` includes both `release-plz`
+and `docker-version-guard` — GitHub applies an implicit `success()` to a job's custom `if:`
+when no status function is given, so `docker` is skipped-via-failed-dependency (a real,
+visible job failure) whenever the guard fails. This is recorded as an inline divergence note
+on Phase 3's AC1 in `plans/docker-tag-trigger-184.md`, and Phase 5's edge-case text was
+updated to mention this as a second possible cause of a `docker`-job skip.
+
+**Test evidence** (per the plan's Tests requirement and AC7):
+- `actionlint .github/workflows/release-plz.yml` — clean.
+- `python3 -c "import yaml; yaml.safe_load(...)"` — parses; structural checks (`docker.needs
+  == [release-plz, docker-version-guard]`, `docker.permissions == {contents: read, packages:
+  write}`, `publish.needs == release-plz` unchanged) all hold.
+- `docker-version-guard`'s `jq -r '.[0].version // ""'` dry-run against four payload shapes:
+  a realistic 2-crate lockstep `releases` array (`version=0.8.2` on both entries) → guard
+  passes; a single entry with `"version":""` → guard fails loudly (`::error::` + non-zero);
+  a single entry missing the `version` key entirely → guard fails loudly; `releases: []` is
+  covered structurally instead (the calling `if: releases_created == 'true'` already proves
+  the action's own `jq 'length' != 0` computation, so this shape cannot reach the guard at
+  all under normal release-plz behavior).
+- `fromJSON(needs.release-plz.outputs.releases)[0].version` — confirmed as a plain JSON
+  string against the realistic payload above (`jq -r '.[0].version'` → `0.8.2`), matching
+  `docker.yml`'s `workflow_call.inputs.version` (`type: string, required: true`) with no
+  coercion issue.
+
+### /implement verify gate — round 1: GAPS (all closed directly, no round 2 needed)
+
+Fresh Opus verifier, full report on file. Verdict: GAPS, explicitly "process/documentation
+only — the workflow code itself is correct." Independently re-confirmed the `uses:`/`steps:`
+platform claim against GitHub's docs (verbatim quote matched), independently re-ran the
+guard's dry run against its own four payload shapes, and independently confirmed via GitHub's
+docs that a bare custom `if:` gets an implicit `success()` prepended — proving `docker`
+really is gated on `docker-version-guard` succeeding, not just skipped independently. Four
+items, all closed in this commit:
+1. AC1's literal `needs: release-plz` text didn't reflect the actual (necessary) `needs:
+   [release-plz, docker-version-guard]` — closed via the inline divergence note above.
+2. `docker-version-guard` declared no `permissions:`, so it inherited the workflow-level
+   `{contents: write, pull-requests: write}` for a job that only reads an env var and runs
+   `jq` — closed: `permissions: {}` added.
+3. Phase 5's edge-case text treated a `docker`-job skip as having one cause
+   (`releases_created`) — closed via the one-line addition above.
+4. The Tests/AC7 evidence wasn't yet recorded in `PROGRESS.md` — closed by this section.
+
+Re-validated after closing: `actionlint .github/workflows/release-plz.yml` clean, YAML
+parses. Not re-dispatching a round-2 verifier for these four narrow, already-diagnosed,
+doc/hardening-tier closures (Autonomy ladder: reversible-in-a-commit) — same reasoning
+applied to Phase 1's round-2 `/ship`-gate closure above.
+
+### /implement verify gate — round 2: PASS
+
+Fresh Opus verifier, given the round-1 gap list. Independently re-confirmed all four
+closures rather than trusting the prose: re-ran `actionlint` (clean, shellcheck 0.11.0
+present so the new `docker-version-guard` step's shell was linted too), re-ran the
+`yaml.safe_load` structural asserts itself, and re-ran the guard's `jq` dry run against
+all four payload shapes itself, matching this file's claims exactly. Verdict: **PASS**,
+no new issues found on a full diff sanity pass. Phase 3 is DONE.
+
+**What's next:** wait for the Phase 2 backfill run to complete, run the registry probe,
+record results, commit Phase 2+3 together (Phase 2 has no files of its own to commit besides
+this checkpoint), then Phase 4 (docs, written against Phase 2's actual observed tags) and
+`/ship` for PR B.

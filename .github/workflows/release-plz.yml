@@ -17,13 +17,15 @@ concurrency:
 # merge, creates the git tags + GitHub Release. The crates.io upload is done by
 # publish.yml.
 #
-# publish.yml is CALLED here rather than left to its `macp-runtime-v*` tag
-# trigger. That trigger cannot work from this workflow: GitHub does not start
-# workflow runs from events created with the default GITHUB_TOKEN, so the tags
-# release-plz pushes are invisible to it. That is why 0.6.1 was tagged and
-# GitHub-released on 2026-07-12 but never published — the tag fired nothing.
-# `workflow_call` runs inside this same run, so the recursion guard never
-# applies and no PAT is needed.
+# publish.yml and docker.yml are both CALLED here rather than left to their
+# `macp-runtime-v*` tag triggers. Neither trigger can work from this
+# workflow: GitHub does not start workflow runs from events created with the
+# default GITHUB_TOKEN, so the tags release-plz pushes are invisible to
+# them. That is why 0.6.1 was tagged and GitHub-released on 2026-07-12 but
+# never published to crates.io, and why no docker.yml run fired for any
+# macp-runtime-v* tag from 0.6.1 through 0.8.1 (issue #184). `workflow_call`
+# runs inside this same run, so the recursion guard never applies and no PAT
+# is needed for either call.
 jobs:
   release-plz:
     name: release-plz
@@ -37,6 +39,13 @@ jobs:
       # `prs_created` and never on `pr != ''`.
       prs_created: ${{ steps.release-plz.outputs.prs_created }}
       pr: ${{ steps.release-plz.outputs.pr }}
+      # Feeds docker-version-guard and docker below. Always a single-line JSON
+      # ARRAY (one entry per released crate, `[]` when nothing released) —
+      # never the `{}` string `pr` has to guard against — so `fromJSON` is
+      # safe on it directly. All seven crates share one `version_group` in
+      # release-plz.toml, so every entry carries the same `version`; only
+      # `tag` differs per crate.
+      releases: ${{ steps.release-plz.outputs.releases }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -72,6 +81,76 @@ jobs:
     if: ${{ needs.release-plz.outputs.releases_created == 'true' }}
     uses: ./.github/workflows/publish.yml
     secrets: inherit
+
+  # A job that calls a reusable workflow via `uses:` cannot also declare its
+  # own `steps:` (GitHub's reusable-workflow docs: "you call reusable
+  # workflows directly within a job, and not from within job steps" — a job
+  # is one or the other). So the version-emptiness guard docker.yml's own
+  # header comment requires from this caller lives in its own job here,
+  # rather than as a step ahead of `docker`'s `uses:` below.
+  #
+  # docker.yml's resolve step detects a workflow_call invocation by its
+  # `version` input being non-empty — a workflow_call inherits the caller's
+  # own event_name/ref/sha, so an EMPTY version is indistinguishable, from
+  # inside docker.yml, from a genuine push to main. It would silently fall
+  # through to a second, concurrent branch build of the release commit
+  # instead of failing loudly. docker.yml cannot close that gap from its own
+  # side (see its header comment); this job is the caller-side guarantee it
+  # asks for.
+  #
+  # releases_created == 'true' already proves `releases` is a non-empty
+  # array (the action computes that boolean as `jq 'length' != 0`), so this
+  # guards only a single-entry-with-empty-version anomaly — release-plz
+  # emitting the field wrong — not a missing release entry.
+  docker-version-guard:
+    name: docker image version guard
+    runs-on: ubuntu-latest
+    needs: release-plz
+    if: ${{ needs.release-plz.outputs.releases_created == 'true' }}
+    # Reads an env var and runs jq -- no repo access needed at all.
+    permissions: {}
+    steps:
+      - name: Assert the released version is non-empty
+        env:
+          RELEASES: ${{ needs.release-plz.outputs.releases }}
+        run: |
+          set -euo pipefail
+          version=$(echo "$RELEASES" | jq -r '.[0].version // ""')
+          if [ -z "$version" ]; then
+            echo "::error::release-plz reported releases_created=true but the first entry's version is empty (releases=$RELEASES). Refusing to call docker.yml with an empty version -- it cannot distinguish that from a plain push to main and would silently build a second branch image instead of a release image."
+            exit 1
+          fi
+          echo "release version guard OK: $version"
+
+  # Sibling of `publish`, never a dependency of it: an image failure must
+  # never cost a crates.io release, and the reverse is also true (the same
+  # isolation principle sync-integration-lock's comment states below).
+  #
+  # `permissions:` here is mandatory, not optional. Per GitHub's
+  # reusable-workflow reference, the GITHUB_TOKEN permissions passed from a
+  # caller can only be downgraded, never elevated, by the called workflow —
+  # so docker.yml's own job-level `{contents: read, packages: write}` is a
+  # downgrade request applied to what THIS job hands it, not a grant on its
+  # own. This workflow's workflow-level block above has no `packages:
+  # write`; without the block below, docker.yml would authenticate to GHCR
+  # successfully and then 403 on the push, after a 35-50 minute multi-arch
+  # build. Scoped to this one job rather than widened workflow-wide, so
+  # `release-plz`/`docker-version-guard`/`sync-integration-lock` gain no
+  # registry access they have no business with.
+  #
+  # No `secrets: inherit`: docker.yml uses only the automatically-granted
+  # `secrets.GITHUB_TOKEN` (secrets and permissions are orthogonal —
+  # inheriting secrets would not have granted any scope anyway).
+  docker:
+    name: docker image
+    needs: [release-plz, docker-version-guard]
+    if: ${{ needs.release-plz.outputs.releases_created == 'true' }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker.yml
+    with:
+      version: ${{ fromJSON(needs.release-plz.outputs.releases)[0].version }}
 
   # `integration_tests/` is a separate cargo workspace (root Cargo.toml:
   # `exclude = ["integration_tests"]`). It depends on the runtime by path only,

@@ -529,7 +529,8 @@ instead of mis-tagging.
 
 ### Phase 3 — Call `docker.yml` from the release
 
-- **Status:** TODO
+- **Status:** DONE (2026-09-25) — see AC1's inline divergence note above for the one
+  approach change (`docker-version-guard` as a separate job, not a step ahead of `uses:`).
 - **Delivers:** acceptance criterion 1 — cutting a release publishes a correspondingly-tagged
   image, automatically, on the live path rather than the inert one.
 - **Depends on:** Phase 1 (the `workflow_call` entry point must exist, or the `uses:` is a
@@ -673,6 +674,17 @@ instead of mis-tagging.
 - **Acceptance criteria:**
   1. `release-plz.yml` has a `docker` job with `needs: release-plz` and
      `if: releases_created == 'true'`, invoking `./.github/workflows/docker.yml` via `uses:`.
+     **Divergence (implementation):** `needs` is actually `[release-plz, docker-version-guard]`,
+     not `release-plz` alone. This is a necessary consequence of AC7 below, not a miss: a job
+     calling a reusable workflow via `uses:` cannot also declare its own `steps:` (confirmed
+     against GitHub's reusable-workflow docs — the calling job supports only `name, uses, with,
+     secrets, strategy, needs, if, concurrency, permissions`, no `steps`), so AC7's version guard
+     could not live as a `run:` step inside the `docker` job itself as this section's Approach (d)
+     first proposed. It lives in a separate `docker-version-guard` job instead, and `docker`
+     depends on it — GitHub applies an implicit `success()` to a job's custom `if:` when no status
+     function is given, so `docker` is skipped-via-failed-dependency (a real job failure, louder
+     than a same-job skip) whenever the guard fails, satisfying AC7 more strongly than either
+     option this section originally offered.
   2. That job declares `permissions: {contents: read, packages: write}`; the workflow-level
      `permissions` block at `release-plz.yml:7-9` is **unchanged**, so no other job gains
      registry scope.
@@ -765,9 +777,11 @@ instead of mis-tagging.
   5. `publish` still succeeded, i.e. the new job did not disturb the crates.io upload;
   6. the wall-clock the release run now takes, against the ~2m39s baseline — this is the
      concurrency-group cost from Phase 3, measured rather than estimated.
-- **Edge cases & failure modes:** if the `docker` job is skipped, check `releases_created`; if it
-  fails on the GHCR push with a 403, the calling job's `permissions:` block is missing or wrong
-  (Phase 3(a)) — that is the predicted failure and it costs a build, not a release.
+- **Edge cases & failure modes:** if the `docker` job is skipped, check `releases_created` first;
+  if that's `true`, also check whether `docker-version-guard` failed (Phase 3's AC1 divergence
+  note) — `docker` shows as skipped-via-failed-dependency in that case, not skipped-via-`if:`.
+  If it fails on the GHCR push with a 403, the calling job's `permissions:` block is missing or
+  wrong (Phase 3(a)) — that is the predicted failure and it costs a build, not a release.
 - **Acceptance criteria:** all six observations above recorded in `PROGRESS.md`, with the run URL.
   Until then the issue's criterion 1 is **implemented but unobserved**, and the plan should say so
   rather than claim completion.
