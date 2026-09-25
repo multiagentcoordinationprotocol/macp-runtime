@@ -564,3 +564,35 @@ DEFER, 0 ESCALATE. Two items flagged for someone's attention outside this reconc
 `[Unreleased]`-section changelog note still to write).
 
 - **Decided by:** Opus (`/reconcile`, 6 parallel subagents, Opus tier throughout).
+
+### D48 — `fromJSON(releases)[0].version` indexing instead of a `jq select()` on `package_name` → **CONFIRMED**
+Stronger than the entry's own framing: every one of the seven crate manifests declares
+`version.workspace = true`, so there is structurally only one version string in the repo to
+read, not merely a CI-enforced convention that could drift. `ci.yml:312-342`'s lockstep
+assertion blocks any divergence from ever reaching `main` in the first place, and the cited
+safety net (`docker.yml:221-237`'s Cargo.toml cross-check) was confirmed to have actually run
+and passed on Phase 2's real backfill dispatch, not just in a dry run.
+
+### D49 — Backfilling only `:0.8.1`, not `:0.8.0`, for issue #184's acceptance criterion 2 → **CONFIRMED**
+Phase 2 has since actually run (`gh workflow run docker.yml --ref main -f
+ref=macp-runtime-v0.8.1`, run `36169029979`): all 4 acceptance criteria passed against the
+live GHCR registry, no edge case triggered, ~12 minutes wall-clock. Nothing in that evidence
+surfaces a reason to also image `0.8.0`; AC2 asked for "the current release," which is what
+shipped. The reversal path (dispatch `0.8.0` before any future `0.8.1` rebuild, to avoid
+dragging the moving `0.8` tag backwards) remains available and correctly documented.
+
+### D50 — Accepting a ~45-minute release-run concurrency hold over an out-of-band PAT-driven trigger → **still UNCONFIRMED, deferred**
+Shipped code matches the plan's reasoning exactly (`docker.yml:64-68`'s `timeout-minutes: 90`
+bound, `release-plz.yml:11-13`'s unchanged concurrency group, `docker` as a true sibling of
+`publish` so a slow/failed image build can't cost a crates.io release) and nothing
+contradicts it. But the specific scenario reasoned about — two concurrent cold multi-arch
+builds racing for the same commit inside the release run's group — hasn't been observed yet:
+no release has been cut since PR #191 merged, so Phase 2's single ~12-minute dispatch is
+encouraging but not dispositive. This is exactly what Phase 5 ("Observe the next real
+release," still `plans/docker-tag-trigger-184.md` Phase 5, `TODO`) exists to settle. Re-
+evaluate once Phase 5 records a real automatic release run's wall-clock, ideally across a
+few releases, to confirm the queueing stays occasional rather than becoming routine.
+
+- **Decided by:** Opus (`/reconcile`, 1 subagent analyzing all three entries together — all
+  explicitly low/reversible blast radius per the plan's own "Long-term posture" section, no
+  entry rose to a one-way door or trust boundary requiring escalation).

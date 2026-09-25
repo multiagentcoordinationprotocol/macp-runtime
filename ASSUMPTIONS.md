@@ -944,7 +944,7 @@
   different crate's version than `macp-runtime`'s. Phase 1(e)'s `Cargo.toml` cross-check
   catches this before any image is pushed — it fails the build loudly rather than
   mis-tagging — so the blast radius is a failed release-image build, not a wrong tag.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-25, `/reconcile` — see `DECISIONS.md` D48)
 
 ## Backfilling `:0.8.1` only for acceptance criterion 2, not `:0.8.0` as well
 - **Plan:** `plans/docker-tag-trigger-184.md` (Phase 2, backfilling the current release)
@@ -961,7 +961,7 @@
 - **Blast radius if wrong:** low and fully reversible — if `0.8.0` is wanted later, dispatch
   it via the same `workflow_dispatch` path Phase 2 establishes, built *before* any future
   `0.8.1` rebuild so the moving `0.8` tag ends up correct.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-25, `/reconcile` — see `DECISIONS.md` D49)
 
 ## Accepting a ~45-minute release run in exchange for an automatic image, rather than an out-of-band trigger
 - **Plan:** `plans/docker-tag-trigger-184.md` (Phase 3, wiring `docker.yml` into the release)
@@ -985,4 +985,8 @@
 - **Blast radius if wrong:** delayed release-PR refreshes on `main` during a release window,
   never lost work. Revisit if release cadence increases enough to make the queueing
   routine rather than occasional.
-- **Status:** UNCONFIRMED
+- **Status:** UNCONFIRMED — reviewed at `/reconcile` (2026-09-25, `DECISIONS.md` D50) and
+  deliberately deferred: the shipped code matches this reasoning exactly, but the scenario
+  itself (two concurrent cold builds racing inside the release run's concurrency group)
+  hasn't been observed on a real release yet. Settle once Phase 5 (`plans/docker-tag-trigger-184.md`)
+  records an actual automatic release run's wall-clock.
