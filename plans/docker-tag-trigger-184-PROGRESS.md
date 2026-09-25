@@ -596,3 +596,7 @@ empty `releases: []` array, not just a single-entry-empty-version anomaly) — n
 as a gap, left as-is.
 
 **What's next:** push, open PR B, watch CI, merge.
+
+pushed feat/docker-tag-trigger-184-phase3-4 15cb6257b047e3f6f909c075725bba30351285d8
+
+PR #191 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/191
