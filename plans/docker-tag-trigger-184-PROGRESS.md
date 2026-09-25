@@ -606,3 +606,79 @@ merged #191: squash-merged to `main` @ `ff30863` (all 15 CI jobs green, includin
 Phases 2, 3, and 4 are all DONE and live on `main`. Only Phase 5 (observe the next real
 release) remains, and it requires an external event (the next release being cut, days to
 a week out per the plan) -- it cannot be completed in this session.
+
+merged #193 (`/reconcile`): 2 of the 3 `UNCONFIRMED` assumptions confirmed (D48, D49);
+the third (D50, the ~45-minute concurrency hold) deliberately left deferred pending real
+evidence from an actual automatic release run.
+
+approved and merged #185 (release-plz's own "chore: release v0.8.2"): cuts v0.8.2 and,
+for the first time, exercises the full Phase 1-3 pipeline on a real release. This is also
+Phase 5's triggering event -- see below.
+
+## Phase 5 — Observe the next real release
+
+Triggered by merging PR #185 (release-plz's "chore: release v0.8.2"), which pushed
+`0c01691` to `main` and started `release-plz.yml` run
+[`36194214828`](https://github.com/multiagentcoordinationprotocol/macp-runtime/actions/runs/36194214828)
+(event `push`). All six required observations checked directly against GitHub Actions
+and GHCR, not inferred from the run's overall conclusion:
+
+**Job outcomes** (`gh run view 36194214828 --json status,conclusion,jobs`):
+```
+release-plz:                       completed success
+docker image version guard:        completed success   <- first real pass against a genuine non-empty version
+publish / Publish to crates.io:    completed success
+sync integration_tests lockfile:   completed skipped    <- expected: this run merged an existing release PR directly, no new PR to sync
+docker image / Build Docker Image: completed success
+```
+
+1. **The `docker` job appeared in the run and succeeded.** Confirmed above. `PASS.`
+
+2. **`:0.8.2` and `:0.8` present on GHCR for the new version.** Anonymous-pull-token
+   `curl` against the GHCR v2 manifest API: both tags resolve to
+   `sha256:73718ce02c98897c8277efdd73273b6533ea075779310b8d5828ed1cab26a9d3`. `PASS.`
+
+3. **`org.opencontainers.image.revision` equals the release commit.** `docker buildx
+   imagetools inspect` on the amd64 platform manifest
+   (`sha256:6d7e46a23b4d9f87955d8cb255305cc3dcafce70de29582a6331ff8bfac2c384`, resolved
+   from the `0.8.2` index) reports
+   `"org.opencontainers.image.revision": "0c01691b6eaf18d20cdda72b83097517852e2ef1"` —
+   an exact match for `git rev-parse macp-runtime-v0.8.2^{commit}` and for `main`'s tip at
+   merge time. The same inspect confirms `org.opencontainers.image.version: "0.8.2"`.
+   `PASS.`
+
+4. **`latest` still tracks `main`.** `:latest` and `:main` both resolve to
+   `sha256:2fee277921f4e8c9264ca02fd5c158cf996128ef2ba2eb387449deaaef912129` — a
+   *different* digest from `:0.8.2`/`:0.8` (expected and already documented in Phase 4's
+   deployment-docs section: the release-tag build and the branch-push build for the same
+   commit are two independent `docker.yml` runs, so their image digests are not required
+   to match even though both assert the same `org.opencontainers.image.revision`). Since
+   the release commit `0c01691` is itself `main`'s tip at this moment, `latest` correctly
+   points at the release commit. `PASS.`
+
+5. **`publish` still succeeded.** Confirmed in the job table above:
+   `publish / Publish to crates.io: completed success`. `PASS.`
+
+6. **Wall-clock, against the ~2m39s baseline.** Per-job timestamps
+   (`gh api .../actions/jobs/108266430665`):
+   ```
+   release-plz run total:               21:56:37Z -> 22:37:11Z  = 40m34s
+   docker job "Build and push" step:    21:57:57Z -> 22:36:52Z  = 38m55s
+   ```
+   Lands inside the plan's own 35-50 minute projection (`plans/docker-tag-trigger-184.md`
+   "Enterprise concerns") and under its ~45-minute headline figure, well under the
+   `timeout-minutes: 90` bound. `docker-version-guard` and `publish` both ran and
+   completed in under 2 minutes, in parallel with the docker build, confirming Phase 3's
+   sibling-job isolation held on a real run: the slow image build did not gate or delay
+   the crates.io publish. `PASS` — this is real confirming evidence for `DECISIONS.md`
+   D50's deferred concurrency-hold assumption (see below).
+
+**No edge cases triggered:** `docker-version-guard` passed cleanly against a real
+non-empty `releases` array (its first live exercise against genuine release data, not
+just the plan's dry-run matrix); no 403 on the GHCR push (Phase 3(a)'s `permissions:`
+block is correct on the live path); `sync integration_tests lockfile` skipped as
+expected rather than failing.
+
+All six observations recorded above with the run URL. Acceptance criterion 1 of issue
+#184 is now **observed**, not merely implemented. Phase 5 is DONE — the plan's last open
+phase.

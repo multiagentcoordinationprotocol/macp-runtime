@@ -581,7 +581,7 @@ surfaces a reason to also image `0.8.0`; AC2 asked for "the current release," wh
 shipped. The reversal path (dispatch `0.8.0` before any future `0.8.1` rebuild, to avoid
 dragging the moving `0.8` tag backwards) remains available and correctly documented.
 
-### D50 — Accepting a ~45-minute release-run concurrency hold over an out-of-band PAT-driven trigger → **still UNCONFIRMED, deferred**
+### D50 — Accepting a ~45-minute release-run concurrency hold over an out-of-band PAT-driven trigger → **CONFIRMED (2026-09-25, Phase 5 observation)**
 Shipped code matches the plan's reasoning exactly (`docker.yml:64-68`'s `timeout-minutes: 90`
 bound, `release-plz.yml:11-13`'s unchanged concurrency group, `docker` as a true sibling of
 `publish` so a slow/failed image build can't cost a crates.io release) and nothing
@@ -593,6 +593,24 @@ release," still `plans/docker-tag-trigger-184.md` Phase 5, `TODO`) exists to set
 evaluate once Phase 5 records a real automatic release run's wall-clock, ideally across a
 few releases, to confirm the queueing stays occasional rather than becoming routine.
 
+**Update — Phase 5 has now recorded a real automatic release run.** Merging PR #185
+("chore: release v0.8.2") triggered `release-plz.yml` run `36194214828`: the `docker` job's
+"Build and push" step ran 38m55s (21:57:57Z-22:36:52Z), for a total release-run wall-clock
+of 40m34s — inside the plan's own 35-50 minute projection and under its ~45-minute headline
+figure, well under the 90-minute timeout bound. `docker-version-guard` and `publish` both
+completed in under 2 minutes, running concurrently with the slow image build, confirming
+the sibling-job isolation held: the crates.io publish was not delayed by the image build.
+No hung build, no timeout, no GHCR permission failure. Full per-job timestamps and GHCR
+verification are in `plans/docker-tag-trigger-184-PROGRESS.md`'s Phase 5 checkpoint. One
+data point is not "a few releases," so the trend (does queueing stay occasional as release
+cadence continues) is still worth a glance at the next release or two, but the core
+assumption — that the hold lands in the projected band and does not regress to the
+360-minute default or starve `publish` — is now directly confirmed rather than merely
+reasoned about. No follow-up action needed; nothing to change.
+
 - **Decided by:** Opus (`/reconcile`, 1 subagent analyzing all three entries together — all
   explicitly low/reversible blast radius per the plan's own "Long-term posture" section, no
-  entry rose to a one-way door or trust boundary requiring escalation).
+  entry rose to a one-way door or trust boundary requiring escalation). Re-confirmed by
+  Opus directly against the live Phase 5 evidence above (no subagent needed — this is a
+  factual observation against an already-decided, low-blast-radius assumption, not a new
+  judgment call).

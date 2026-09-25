@@ -764,8 +764,14 @@ instead of mis-tagging.
 
 ### Phase 5 — Observe the next real release
 
-- **Status:** TODO — **a manual observation, like Phase 2. It cannot be completed by a code
-  change,** and the plan is not done until it is recorded.
+- **Status:** DONE (2026-09-25) — observed on the v0.8.2 release, run
+  [`36194214828`](https://github.com/multiagentcoordinationprotocol/macp-runtime/actions/runs/36194214828),
+  triggered by merging PR #185. All six observations recorded; see
+  `docker-tag-trigger-184-PROGRESS.md`'s Phase 5 checkpoint for the full evidence
+  (GHCR digests, OCI labels, per-job timestamps). No divergence from the planned approach —
+  `docker` ran as a true sibling of `publish`, `docker-version-guard` passed against a real
+  non-empty version for the first time, and the concurrency-group cost landed inside the
+  plan's own 35-50 minute projection.
 - **Delivers:** the only real proof of acceptance criterion 1. Phases 1-3 are verifiable by
   inspection and by a manual dispatch; **neither observes the automatic path actually firing on a
   release.** Without this phase the plan could be signed off with criterion 1 unproven — which is

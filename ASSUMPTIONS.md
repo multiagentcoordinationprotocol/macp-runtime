@@ -985,8 +985,11 @@
 - **Blast radius if wrong:** delayed release-PR refreshes on `main` during a release window,
   never lost work. Revisit if release cadence increases enough to make the queueing
   routine rather than occasional.
-- **Status:** UNCONFIRMED — reviewed at `/reconcile` (2026-09-25, `DECISIONS.md` D50) and
-  deliberately deferred: the shipped code matches this reasoning exactly, but the scenario
-  itself (two concurrent cold builds racing inside the release run's concurrency group)
-  hasn't been observed on a real release yet. Settle once Phase 5 (`plans/docker-tag-trigger-184.md`)
-  records an actual automatic release run's wall-clock.
+- **Status:** CONFIRMED (2026-09-25, Phase 5 observation — see `DECISIONS.md` D50). The
+  v0.8.2 release (`release-plz.yml` run `36194214828`) recorded a 38m55s image build /
+  40m34s total release-run wall-clock, inside the projected 35-50 minute band and well
+  under the 90-minute timeout; `docker-version-guard` and `publish` both completed in
+  under 2 minutes concurrently, confirming the queueing cost lands as reasoned and does
+  not delay `publish`. One release is one data point, not "a few" — worth a glance at the
+  next release or two to confirm queueing stays occasional — but the core assumption is
+  no longer theoretical.
