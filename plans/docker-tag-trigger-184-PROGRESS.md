@@ -347,3 +347,24 @@ including the new tag-ref-dispatch and cross-check-quoting cases.
 **What's next:** commit Phase 1 (including the `/ship`-gate fixes above and the Phase 3
 plan update), open PR A (Phase 1 only, per the PR strategy above), watch CI, merge. Then
 Phase 2 (manual backfill dispatch against `main`) can run.
+
+### /ship gate, round 2 — 2 gaps, both closed directly (no third agent round)
+
+Both were documentation-only, determinate, and confined to this file — the round-2
+verifier explicitly said it would "sign off on `docker.yml` as-is" and that neither
+finding touched shipped code. Closed via commit `b8f3c2c` rather than a third spawned
+verification round (Autonomy ladder: reversible-in-a-commit tier), with direct
+re-confirmation in place of re-dispatching an agent:
+
+1. The diff-stat claim (previous section) had gone stale a second time — corrected to
+   252/11, re-confirmed via `git diff --numstat main..HEAD -- .github/workflows/docker.yml`,
+   and pinned to commit `e8ce52b` instead of "the final revision" so a future edit to
+   `docker.yml` can't silently make this line stale a third time.
+2. The 13-case matrix's N2 row (above) still read "verified deliberate, not a gap",
+   contradicting this same file's own Gap 2 retraction. Corrected to state the actual
+   measured behavior and point at Gap 2.
+
+Re-confirmed after the fix: `actionlint .github/workflows/docker.yml` clean (no code
+changed, so this was expected, not exploratory).
+
+pushed feat/docker-tag-trigger-184-phase1 b8f3c2c8b68f65d9e74c38e6d36d12fdc7c6771b
