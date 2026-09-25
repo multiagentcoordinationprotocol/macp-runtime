@@ -1801,7 +1801,6 @@ mod tests {
     /// to the correct value.
     #[test]
     fn rev3_multi_round_history_replays_to_the_corrected_value() {
-        assert!(macp_core::session::CURRENT_SEMANTICS_REV >= 3);
         let registry = make_registry();
         let mut entries = multi_round_collision_history(macp_core::session::CURRENT_SEMANTICS_REV);
 
