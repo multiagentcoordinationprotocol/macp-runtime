@@ -326,20 +326,23 @@ The runtime provides operational visibility through several mechanisms:
 
 ## Container deployment
 
-Use the repository's `Dockerfile` (multi-stage, non-root `macp` user). The
+Use the repository's `Dockerfile` (multi-stage, non-root `macp` user) to build
+your own image, or pull the image this repo publishes to GitHub Container
+Registry: `ghcr.io/multiagentcoordinationprotocol/macp-runtime`. The
 image does **not** enable dev mode: the runtime refuses to start without
 configured authentication and TLS unless you explicitly opt in for local
 development:
 
 ```bash
-# Production: configure auth + TLS
+# Production: configure auth + TLS. Pin an immutable :X.Y.Z tag (see below) --
+# substitute the version you're deploying.
 docker run -p 50051:50051 \
   -e MACP_AUTH_TOKENS_FILE=/etc/macp/tokens.json \
   -e MACP_TLS_CERT_PATH=/etc/macp/tls.crt -e MACP_TLS_KEY_PATH=/etc/macp/tls.key \
-  -v ./secrets:/etc/macp macp-runtime
+  -v ./secrets:/etc/macp ghcr.io/multiagentcoordinationprotocol/macp-runtime:X.Y.Z
 
 # Local development ONLY: any bearer token becomes a fully-privileged identity
-docker run -p 50051:50051 -e MACP_ALLOW_INSECURE=1 macp-runtime
+docker run -p 50051:50051 -e MACP_ALLOW_INSECURE=1 ghcr.io/multiagentcoordinationprotocol/macp-runtime:X.Y.Z
 ```
 
 When deploying in containers:
@@ -348,6 +351,54 @@ When deploying in containers:
 - Expose port 50051 (or the port configured via `MACP_BIND_ADDR`).
 - Provide TLS certificates and auth tokens via mounted secrets.
 - Set `MACP_BIND_ADDR=0.0.0.0:50051` to accept connections from outside the container.
+
+### Published image tags
+
+Every image is multi-arch (`linux/amd64`, `linux/arm64`) with SLSA provenance
+and an SBOM attached, built by `.github/workflows/docker.yml`. Every push to
+`main` (a "branch build") publishes three of these together, always pointing
+at the same digest; a release publishes the other two, also always sharing a
+digest with each other but never with a branch build's:
+
+| Tag | Mutability | Meaning |
+|-----|------------|---------|
+| `:X.Y.Z` (e.g. `0.8.1`) | Immutable | Exactly one release. Pin this for production. |
+| `:X.Y` (e.g. `0.8`) | Moves within the minor | Always the newest `X.Y.Z` patch published so far. |
+| `:latest` | Moves on every push to `main` | The tip of `main` — **not** the newest release. Do not use `latest` in production; it is not a release channel. |
+| `:main` | Moves on every push to `main` | Synonymous with `:latest` today (both are branch-build tags on the one `push: branches: [main]` trigger) — documented separately since nothing in `docker.yml` guarantees they stay synonymous if a second branch trigger is ever added. |
+| `:<sha>` (e.g. `:bb45705`) | Immutable | One image per commit pushed to `main` (branch builds only — a release build never gets a SHA tag; see below). |
+
+A release commit **is** `main`'s tip at the moment it's cut, but `main` moves
+on immediately afterward as later commits land — so by the time you read
+this, `latest`/`main`/`:<sha>` are very likely already ahead of every semver
+tag. Never assume `latest` matches the newest release.
+
+**A `:X.Y.Z` tag and its release commit's `:<sha>` tag do not share a
+digest**, even though they're built from the same source tree: the release
+build and the branch build for that commit run as two separate, concurrent
+CI jobs, and each stamps its own `org.opencontainers.image.created`
+timestamp. Same source, two images — don't expect `docker inspect` to report
+identical digests across them.
+
+Every image's `org.opencontainers.image.revision` label names the exact
+commit it was built from — this is reliable even for a manually backfilled
+release image (a `workflow_dispatch` naming an older tag), where
+`org.opencontainers.image.revision` still correctly reports the tag's
+commit. The one residual gap on a manual backfill: buildkit's SLSA
+provenance *attestation* records the runner's own `GITHUB_SHA` (the dispatch
+commit, i.e. whatever `main` was at dispatch time), not the backfilled tag's
+commit — only the `revision` label is authoritative there. Every image
+published by the normal, automatic release path (cutting a release via
+release-plz) has correct provenance with no such gap.
+
+**Do not pin the `macp-runtime-v*` git tag format as an image tag** — GHCR
+image tags drop the `macp-runtime-v` prefix (`macp-runtime-v0.8.1` → image
+tag `0.8.1`). `docker.yml`'s resolve step strips it deliberately, to emit a
+bare semver value for `docker/metadata-action`'s `{{version}}`/
+`{{major}}.{{minor}}` patterns — the prefix is redundant once the image
+already lives in the `macp-runtime` repository path, not a Docker tag
+syntax restriction (`macp-runtime-v0.8.1` would itself be a perfectly valid
+tag string).
 
 ## Development tools
 

@@ -150,3 +150,8 @@ from the Actions UI ("Approve and run" on the run's page) — the workflow run
 list at that SHA gets you there fastest. If the lock was already in sync the
 job commits nothing, the head does not move, and there is only the one run to
 approve.
+
+Merging the release PR also publishes a Docker image to GHCR for the new
+version, via the `docker` job in `.github/workflows/release-plz.yml` calling
+`.github/workflows/docker.yml` — see [Container deployment](docs/deployment.md#container-deployment)
+for the published tag contract.
