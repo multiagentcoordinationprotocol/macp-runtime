@@ -35,7 +35,9 @@
 //! not re-validating the manifest's JSON shape.
 
 use macp_core::error::MacpError;
-use macp_core::session::{DEFAULT_CONFIGURATION_VERSION, DEFAULT_MODE_VERSION};
+use macp_core::session::{
+    CURRENT_SEMANTICS_REV, DEFAULT_CONFIGURATION_VERSION, DEFAULT_MODE_VERSION,
+};
 use macp_core::MACP_VERSION;
 use macp_modes::mode::multi_round::parse_contribute_value;
 use macp_modes::mode::util::is_canonical_commitment_hash;
@@ -464,7 +466,7 @@ fn contribute_payload_vectors_round_trip_through_the_real_codec() {
         // Decode: protobuf_hex must decode, via the real parse_contribute_value,
         // to `value`.
         let protobuf_bytes = hex_decode(&vector.protobuf_hex, &vector.name);
-        let decoded = parse_contribute_value(&protobuf_bytes)
+        let decoded = parse_contribute_value(&protobuf_bytes, CURRENT_SEMANTICS_REV)
             .unwrap_or_else(|e| panic!("vector {}: protobuf decode failed: {e:?}", vector.name));
         assert_eq!(
             decoded, vector.value,
@@ -474,9 +476,10 @@ fn contribute_payload_vectors_round_trip_through_the_real_codec() {
 
         if let Some(legacy_hex) = &vector.legacy_json_hex {
             let legacy_bytes = hex_decode(legacy_hex, &vector.name);
-            let decoded_legacy = parse_contribute_value(&legacy_bytes).unwrap_or_else(|e| {
-                panic!("vector {}: legacy_json decode failed: {e:?}", vector.name)
-            });
+            let decoded_legacy = parse_contribute_value(&legacy_bytes, CURRENT_SEMANTICS_REV)
+                .unwrap_or_else(|e| {
+                    panic!("vector {}: legacy_json decode failed: {e:?}", vector.name)
+                });
             assert_eq!(
                 decoded_legacy, vector.value,
                 "vector {}: legacy_json decode mismatch",
@@ -535,7 +538,7 @@ fn contribute_acceptance_empty_payload_is_rejected() {
     let sec = section(&contract, "contribute_acceptance");
     assert_eq!(sec["empty_payload"].as_str().unwrap(), "reject");
 
-    let result = parse_contribute_value(&[]);
+    let result = parse_contribute_value(&[], CURRENT_SEMANTICS_REV);
     assert!(
         result.is_err(),
         "parse_contribute_value(&[]) must be rejected per the manifest's \

@@ -1678,4 +1678,140 @@ mod tests {
         // deterministic id holds a dedup slot.
         assert!(session.seen_message_ids.contains("implicit-accept:h1"));
     }
+
+    // --- issue #192: parse_contribute_value's semantics_rev-gated fix -------
+
+    fn multi_round_entry(
+        message_id: &str,
+        message_type: &str,
+        sender: &str,
+        payload: Vec<u8>,
+        received_ms: i64,
+    ) -> LogEntry {
+        LogEntry {
+            message_id: message_id.into(),
+            received_at_ms: received_ms,
+            sender: sender.into(),
+            message_type: message_type.into(),
+            raw_payload: payload,
+            entry_kind: EntryKind::Incoming,
+            session_id: "s1".into(),
+            mode: "ext.multi_round.v1".into(),
+            macp_version: "1.0".into(),
+            timestamp_unix_ms: received_ms,
+            bound_mode_version: None,
+            semantics_rev: 0,
+            bound_max_suspend_ms: None,
+            compacted_incoming_ordinals: 0,
+        }
+    }
+
+    /// SessionStart (initiator `coordinator`, one participant `alice`) +
+    /// Contribute (the length-13 canonical-proto/JSON collision payload from
+    /// issue #192 -- `{"value":"x"}` as a 13-byte value, encoded as
+    /// canonical proto) + Commitment, at the given `semantics_rev`. One
+    /// participant is enough for convergence (`check_convergence`,
+    /// `crates/macp-modes/src/mode/multi_round.rs`, is vacuously true over a
+    /// single contribution).
+    fn multi_round_collision_history(semantics_rev: u32) -> Vec<LogEntry> {
+        let start_payload = SessionStartPayload {
+            intent: "converge".into(),
+            participants: vec!["alice".into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            policy_version: String::new(),
+            ttl_ms: 60_000,
+            context_id: String::new(),
+            extensions: std::collections::HashMap::new(),
+            roots: vec![],
+            max_suspend_ms: 0,
+        }
+        .encode_to_vec();
+
+        let contribute = macp_pb::multi_round_pb::ContributePayload {
+            value: r#"{"value":"x"}"#.into(),
+        }
+        .encode_to_vec();
+
+        let commitment = CommitmentPayload {
+            commitment_id: "c1".into(),
+            action: "multi_round.converged".into(),
+            authority_scope: "test".into(),
+            reason: "converged".into(),
+            mode_version: "1.0.0".into(),
+            policy_version: String::new(),
+            configuration_version: "cfg-1".into(),
+            outcome_positive: true,
+            supersedes: None,
+        }
+        .encode_to_vec();
+
+        let mut start =
+            multi_round_entry("m1", "SessionStart", "coordinator", start_payload, 1_000);
+        start.semantics_rev = semantics_rev;
+        vec![
+            start,
+            multi_round_entry("m2", "Contribute", "alice", contribute, 2_000),
+            multi_round_entry("m3", "Commitment", "coordinator", commitment, 3_000),
+        ]
+    }
+
+    fn converged_value(session: &Session) -> String {
+        let resolution: serde_json::Value = serde_json::from_slice(
+            session
+                .resolution
+                .as_deref()
+                .expect("session must have resolved"),
+        )
+        .unwrap();
+        resolution["converged_value"]
+            .as_str()
+            .expect("converged_value must be a string")
+            .to_string()
+    }
+
+    /// Legacy (rev 2) history: a colliding-length `Contribute` was accepted
+    /// before issue #192's fix shipped, so `parse_contribute_value` --
+    /// called again on the exact original bytes during replay -- must keep
+    /// returning the historically-wrong value, not the corrected one. This
+    /// is the legacy-log fixture `CONTRIBUTING.md`'s ground rule requires
+    /// for any change to accepted/replay semantics (see
+    /// `Session::semantics_rev`).
+    #[test]
+    fn legacy_rev2_multi_round_history_replays_to_the_original_collision() {
+        let registry = make_registry();
+        let entries = multi_round_collision_history(2);
+
+        let session = replay_session("s1", &entries, &registry, None).unwrap();
+        assert_eq!(session.semantics_rev, 2);
+        assert_eq!(session.state, SessionState::Resolved);
+        assert_eq!(converged_value(&session), "x");
+
+        // Differential proof: the identical entries at the current revision
+        // resolve to the corrected value instead -- only the recorded
+        // revision decides the outcome.
+        let mut current = entries.clone();
+        current[0].semantics_rev = macp_core::session::CURRENT_SEMANTICS_REV;
+        let current_session = replay_session("s1", &current, &registry, None).unwrap();
+        assert_ne!(converged_value(&current_session), "x");
+    }
+
+    /// Sibling of the fixture above: a fresh session (current
+    /// `semantics_rev`) receiving the SAME colliding-length payload resolves
+    /// to the correct value.
+    #[test]
+    fn rev3_multi_round_history_replays_to_the_corrected_value() {
+        let registry = make_registry();
+        let mut entries = multi_round_collision_history(macp_core::session::CURRENT_SEMANTICS_REV);
+
+        let session = replay_session("s1", &entries, &registry, None).unwrap();
+        assert_eq!(session.state, SessionState::Resolved);
+        assert_eq!(converged_value(&session), r#"{"value":"x"}"#);
+
+        // Differential proof, mirrored: the same entries at rev 2 resolve to
+        // the historically-wrong value instead.
+        entries[0].semantics_rev = 2;
+        let legacy_session = replay_session("s1", &entries, &registry, None).unwrap();
+        assert_eq!(converged_value(&legacy_session), "x");
+    }
 }
