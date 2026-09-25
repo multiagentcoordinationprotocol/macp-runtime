@@ -174,6 +174,12 @@ PR this whole session). See the next checkpoint for the actual gate outcome once
 three vectors (lengths 13, 32, 123) regenerated from the actual shipped Phase 1 code via a
 direct Python re-encoding (not copied from the plan's Context section numbers), each
 independently verified against the plan's own derivation. `tests/parity/contract.json` and
-`tests/parity_contract.rs` untouched (re-vendor explicitly deferred, per the plan). GitHub
-issue filing and its exact URL: see the next checkpoint (filed after the PR branch was pushed,
-so the issue could link a real blob URL rather than a placeholder).
+`tests/parity_contract.rs` untouched (re-vendor explicitly deferred, per the plan).
+
+GitHub issue filed: https://github.com/multiagentcoordinationprotocol/multiagentcoordinationprotocol/issues/149
+— links back to this repo's plan file via a `main`-branch blob URL (noted in the issue that it
+resolves once PR #196 merges, with a working branch-URL fallback in the meantime).
+
+pushed fix/parse-contribute-value-192 d180113
+
+PR #196 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/196
