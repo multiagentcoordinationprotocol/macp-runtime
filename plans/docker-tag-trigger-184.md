@@ -711,7 +711,9 @@ instead of mis-tagging.
 
 ### Phase 4 — Document the published image
 
-- **Status:** TODO
+- **Status:** DONE (2026-09-25) — 2 verify rounds (GAPS -> PASS); round 1 found a false
+  technical claim (Docker tag character-validity) and a missing AC4 report, both closed.
+  See `PROGRESS.md`'s Phase 4 checkpoint for the full gap list.
 - **Delivers:** the semver tags are discoverable, and the standing downstream advice "do not pin a
   semver tag" is retired.
 - **Depends on:** Phases 1-3.

@@ -27,7 +27,7 @@ per the plan). So:
 | 1 | Teach `docker.yml` to do a release build | DONE | GAPS -> GAPS -> PASS | 3 | (pending) |
 | 2 | Backfill the image for the current release | DONE | verified (manual action, no code) | — | (n/a) |
 | 3 | Call `docker.yml` from the release | DONE | GAPS -> PASS | 2 | (pending) |
-| 4 | Document the published image | TODO | — | — | — |
+| 4 | Document the published image | DONE | GAPS -> PASS | 2 | (pending) |
 | 5 | Observe the next real release | TODO | — | — | — |
 
 **Two phases are not code changes, and the plan is not done without them.**
@@ -516,3 +516,65 @@ no new issues found on a full diff sanity pass. Phase 3 is DONE.
 record results, commit Phase 2+3 together (Phase 2 has no files of its own to commit besides
 this checkpoint), then Phase 4 (docs, written against Phase 2's actual observed tags) and
 `/ship` for PR B.
+
+## Phase 4 — Document the published image
+
+Written after Phase 2's registry probe completed, against the actually-observed tag list
+and digests rather than intent, per the plan's own instruction. Files:
+`docs/deployment.md`, `CONTRIBUTING.md`, plus `CLAUDE.md` as a local mirror (**gitignored
+in this repo — confirmed via `git check-ignore -v CLAUDE.md` → `.gitignore:20:CLAUDE.md` —
+so the `CLAUDE.md` edit does NOT appear in `git diff`/`git status` and is not part of the
+committable PR diff; this is by design, per `DECISIONS.md` D45, not an omission**).
+
+`docs/deployment.md`'s new "### Published image tags" section documents all five tag kinds
+now actually observed on GHCR (`:X.Y.Z`, `:X.Y`, `:latest`, `:main`, `:<sha>` — round 1's
+draft undercounted at four, missing `:main`; see gap 3 below), the non-shared-digest
+relationship between a release tag and its commit's branch-build SHA tag, the
+provenance-vs-revision-label residual on a manual backfill, and why the `macp-runtime-v`
+prefix is dropped. `CONTRIBUTING.md`'s release-approval section gained one linking
+sentence.
+
+### /implement verify gate — round 1: GAPS
+
+Fresh Opus verifier, given the full diff plus `docker.yml`/`release-plz.yml` as ground
+truth, and independently re-probed the live GHCR registry rather than trusting
+`PROGRESS.md`'s Phase 2 record. Verdict: GAPS, 2 blocking + 3 non-blocking:
+1. **(blocking, factual error)** The original draft claimed `macp-runtime-v0.8.1` isn't a
+   valid Docker tag string ("`v*` and `.` are not valid Docker tag characters in that
+   combination"). False — OCI/Docker tag grammar is `[\w][\w.-]{0,127}`, and the
+   `vX.Y.Z`-as-tag convention is ubiquitous. The real reason is that `docker.yml`'s resolve
+   step deliberately strips the prefix (`version="${REF_NAME#"$tag_prefix"}"`,
+   `docker.yml:120,175`) to emit a bare semver value for `metadata-action`'s patterns.
+   Closed: corrected the sentence to state the real mechanism.
+2. **(blocking, AC4)** No Phase 4 section existed in this file yet, so AC4's required
+   statement ("the phase report states the `CLAUDE.md` edit is absent from the diff
+   because the file is gitignored") didn't exist anywhere. Closed: this section.
+3. **(non-blocking)** The tag table underclaimed "four kinds" — `docker.yml`'s metadata
+   step also emits `:main` on every branch build (`type=ref,event=branch`,
+   `docker.yml:282`), currently always digest-identical to `:latest`. Verified live: both
+   tags resolved to the same digest during this session's probe. Closed: added a `:main`
+   row noting the synonymy is incidental (one trigger today), not guaranteed.
+4. **(non-blocking)** The runnable `docker run` examples hardcoded `:0.8.1`, which this
+   repo has live precedent for going stale undetected (`README.md`/`docs/examples.md`
+   already reference `v0.5.0`, several releases behind the actual `0.8.1`). Closed:
+   switched the examples to a `:X.Y.Z` placeholder with an explicit "substitute the
+   version you're deploying" comment, consistent with the tag table's own notation.
+5. **(non-blocking, prose)** "A release commit is usually behind `main`'s tip by the time
+   it's cut" was imprecise — at the moment of merge the release commit *is* `main`'s tip;
+   divergence happens only as later commits land. Closed: reworded.
+
+Re-validated after closing: re-read the full "Container deployment" section end to end for
+internal consistency; no markdown lint tooling exists in this repo to run mechanically.
+
+### /implement verify gate — round 2: PASS
+
+Fresh Opus verifier, given the round-1 gap list. Independently re-confirmed all five
+closures directly (not trusted from prose): re-read the corrected tag-validity paragraph
+against `docker.yml`'s actual resolve-step prefix-stripping logic, ran `git check-ignore
+-v CLAUDE.md` itself and confirmed the AC4 statement's wording, confirmed the `:main` row
+and the `:X.Y.Z` placeholder examples, and confirmed the reworded release-commit sentence
+introduced no new imprecision. Full end-to-end re-read of the whole "Container deployment"
+section found no new issues. Two sub-nits noted as non-blocking (an implicit "three +
+two" count in the intro sentence, and the `:main` row's parenthetical citing only the
+`push` trigger though a no-`ref` `workflow_dispatch` against `main` produces the same
+pair) — accurate as written, not gaps. Phase 4 is DONE.
