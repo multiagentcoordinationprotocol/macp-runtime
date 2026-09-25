@@ -614,3 +614,47 @@ reasoned about. No follow-up action needed; nothing to change.
   Opus directly against the live Phase 5 evidence above (no subagent needed — this is a
   factual observation against an already-decided, low-blast-radius assumption, not a new
   judgment call).
+
+### D51 — Fixing `parse_contribute_value`'s canonical-proto/JSON collision (issue #192) via `semantics_rev`-gating, not an unconditional global change → **CONFIRMED**
+`parse_contribute_value` (`crates/macp-modes/src/mode/multi_round.rs`) mis-decodes a canonical
+protobuf `Contribute` payload as legacy JSON at value byte-lengths 13, 32, and 123 — the proto
+tag/length-prefix bytes happen to be JSON-insignificant whitespace (or, at 123, the literal
+`{`), exposing the value's own bytes to `serde_json` and returning a wrong substring with no
+error anywhere. An unconditional fix would change what an already-persisted, already-accepted
+byte sequence decodes to on every future replay — a genuine one-way door under RFC-MACP-0003
+§1's replay-determinism constraint (`src/replay.rs`'s `replay_entry` re-derives state from the
+original accepted bytes, byte-for-byte, on every restart).
+
+This was routed to a scoped Fable consult (`plans/parse-contribute-value-192.md`'s "Open
+questions" section) before any code was written, per this repo's Autonomy ladder (a one-way-
+door-shaped call on a public/persisted-data question). Fable's recommendation — gate the fix
+behind `session.semantics_rev >= 3` (a new revision on this repo's existing, twice-precedented
+`Session::semantics_rev`/`CURRENT_SEMANTICS_REV` mechanism, `crates/macp-core/src/session.rs`),
+rather than an unconditional global change (which would silently corrupt legacy replay) or a
+`MultiRoundState`-local flag (rejected: `on_session_start` re-mints `MultiRoundState` fresh on
+every replay too, so a mode-local flag would just have to derive from `session.semantics_rev`
+anyway — strictly more surface for the same gate) — was independently corroborated against
+`src/replay.rs`, `src/runtime.rs`, and `crates/macp-core/src/session.rs`'s builder defaults
+before being accepted, and matched exactly what shipped in Phase 1: `CURRENT_SEMANTICS_REV`
+2 → 3, `parse_contribute_value` gained a `semantics_rev` parameter, and the tie-break trusts a
+JSON parse only when the same bytes do NOT also round-trip byte-identically through the
+canonical proto encoding.
+
+Also confirmed a fact the plan's first draft asserted but had not itself verified: no
+`semantics_rev ==` comparison exists anywhere in the codebase (all gates are `>=`/`<=`), so
+bumping the shared counter is mechanically additive for every other consumer (Handoff, the
+suspension-cycle cap) — re-checked directly this session via a workspace-wide grep, zero hits.
+
+Per the plan's own framing, this does not need to route back through `/reconcile` as an open
+item — it is a defensible, already-analyzed engineering decision, not an `UNCONFIRMED` guess.
+The one accepted, deliberately-not-further-reduced trade-off from this same decision — the
+reverse-direction residual (a payload starting with literal `0x0a` that is simultaneously
+valid legacy JSON and valid canonical proto) — is logged separately in `ASSUMPTIONS.md`
+(`UNCONFIRMED` in the narrow "not yet proven zero real traffic hits it" sense, though provably
+narrow in construction and identical to a trade-off `macp-sdk-python`'s PR #77 already
+accepted for the same reason).
+
+- **Decided by:** Fable (scoped consult on the one-way-door-shaped design question, during
+  `/plan`), independently corroborated by Opus against live code before Phase 1 was written,
+  and confirmed by the actual shipped implementation and its test suite (`plans/parse-contribute-value-192.md`,
+  `plans/parse-contribute-value-192-PROGRESS.md`).

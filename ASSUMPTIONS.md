@@ -993,3 +993,38 @@
   not delay `publish`. One release is one data point, not "a few" — worth a glance at the
   next release or two to confirm queueing stays occasional — but the core assumption is
   no longer theoretical.
+
+## Accepting the reverse-direction residual in `parse_contribute_value`'s canonicality tie-break (issue #192)
+- **Plan:** `plans/parse-contribute-value-192.md` (Phase 1, the canonicality tie-break)
+- **Assumed:** a payload starting with the literal byte `0x0a` whose remainder is *also* a
+  complete, well-formed proto field-1 string is irreducibly ambiguous — it reads as one thing
+  as legacy JSON (leading `0x0a` skipped as insignificant whitespace) and another as canonical
+  proto (tag `0x0a`, and the rest round-trips exactly) — and no further tie-break can
+  distinguish the two readings from the bytes alone.
+- **Chose:** accept that the tie-break resolves this specific shape in favor of the proto
+  reading (matching every other collision this fix closes), rather than attempting a further
+  mechanism to disambiguate it. Concretely pinned by
+  `reverse_direction_residual_is_a_documented_trade_off_at_rev3`
+  (`crates/macp-modes/src/mode/multi_round.rs`): the identical 125-byte payload as the
+  length-123 collision fixture, read from the opposite direction. No known encoder in this
+  codebase or `macp-sdk-python` (both use their language's standard JSON serializer, which
+  never emits a leading-whitespace byte before a JSON object) produces this shape unprompted.
+  `macp-sdk-python`'s PR #77 already accepted the identical trade-off for the identical reason
+  (`macp-sdk-python/ASSUMPTIONS.md`'s "Contribute payload canonicality tie-break (option A vs.
+  B)" entry).
+- **Alternatives:** inverting the JSON-then-protobuf decode order — rejected as out of scope,
+  since `decode_order` is a cross-implementation-pinned convention
+  (`schemas/parity/contract.json`'s `contribute_payload.decode_order`), not something this repo
+  can unilaterally flip without breaking parity with `macp-sdk-python`/`macp-sdk-typescript`.
+- **Blast radius if wrong:** narrow by construction — requires a sender to genuinely intend
+  legacy JSON with a literal leading `0x0a` byte before the JSON object, a shape no known
+  encoder produces. If ever hit, the payload decodes as its proto reading instead of its
+  legacy-JSON reading; both readings are internally valid, so this is a misinterpretation, not
+  a crash or data-integrity failure with no valid reading at all.
+- **Status:** UNCONFIRMED — not in the sense of an open design question (the design question
+  itself is settled, see `DECISIONS.md` D51), but in the narrower sense that no evidence yet
+  exists that zero real traffic will ever construct this exact byte shape. Provably narrow in
+  construction; not further Fable-escalated, since the identical trade was already accepted
+  for the identical reason in `macp-sdk-python`. No specific evidence would definitively
+  "confirm" this the way Phase 5 confirmed D50 — this stays open-ended low-priority
+  observation, not a blocking question.
