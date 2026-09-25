@@ -920,3 +920,69 @@
   *minor*-only deny-lint violation from a cargo-semver-checks run that completes normally
   can still misclassify as "compatible." Doesn't touch this purely-additive diff; worth a
   maintainer follow-up to bump the action's `version:` input past `0.3.161`.
+
+## Reading the release version via `fromJSON(releases)[0].version` instead of a `jq select()` on `package_name`
+- **Plan:** `plans/docker-tag-trigger-184.md` (Phase 3, wiring `docker.yml` into the release)
+- **Assumed:** every entry in release-plz-action's `releases` JSON output carries the same
+  `version` for a given run, because `release-plz.toml`'s `version_group = "macp"` puts all
+  seven workspace crates in lockstep and `ci.yml`'s "Internal crate versions are in
+  lockstep" step asserts that on every PR — so indexing `[0]` is exact, not a shortcut.
+- **Chose:** `fromJSON(needs.release-plz.outputs.releases)[0].version`, a pure `${{ }}`
+  expression with no extra job. The `select(.package_name == "macp-runtime")` alternative
+  needs a `jq` shell step, which cannot live in the `release-plz` job (any failing step
+  there would skip `publish` even though tags/the GitHub Release already exist — the exact
+  0.6.1 incident `release-plz.yml:15-26` documents) and isn't worth a third job just to
+  compute a value the lockstep invariant already yields correctly.
+- **Alternatives:** a `jq select()` in a dedicated third job (rejected: cost of a `needs`
+  edge and a job purely to run one `jq` line, for no behavioral gain over `[0]` given the
+  lockstep guarantee); reading `tag` instead of `version` and deriving the version by
+  stripping `macp-runtime-v` (rejected: `docker.yml`'s checkout target is `github.sha`, not
+  the tag, so `tag` is unused by the design and would be a second, redundant version
+  source).
+- **Blast radius if wrong:** if the lockstep invariant were ever violated (a crate released
+  independently, or the `version_group` config changed), `[0].version` could read a
+  different crate's version than `macp-runtime`'s. Phase 1(e)'s `Cargo.toml` cross-check
+  catches this before any image is pushed — it fails the build loudly rather than
+  mis-tagging — so the blast radius is a failed release-image build, not a wrong tag.
+- **Status:** UNCONFIRMED
+
+## Backfilling `:0.8.1` only for acceptance criterion 2, not `:0.8.0` as well
+- **Plan:** `plans/docker-tag-trigger-184.md` (Phase 2, backfilling the current release)
+- **Assumed:** issue #184's acceptance criterion 2 ("the current release gets a matching
+  image tag published retroactively") is satisfied by imaging the single newest release.
+  The issue itself named `0.8.0`; by the time this plan executed, `0.8.1` had shipped
+  (`Cargo.toml`'s `[workspace.package].version`, confirmed against `gh release list`), so
+  `0.8.1` is "the current release" and is what Phase 2 backfills.
+- **Chose:** back-image `macp-runtime-v0.8.1` only. `0.8.0` is left un-imaged.
+- **Alternatives:** backfill both `0.8.0` and `0.8.1` — rejected for this pass because the
+  issue only asks for "the current release," and because the mutable `0.8` minor tag makes
+  build order load-bearing (an older patch built after a newer one drags `0.8` backwards),
+  which is easy to get right once but is unnecessary scope for this plan.
+- **Blast radius if wrong:** low and fully reversible — if `0.8.0` is wanted later, dispatch
+  it via the same `workflow_dispatch` path Phase 2 establishes, built *before* any future
+  `0.8.1` rebuild so the moving `0.8` tag ends up correct.
+- **Status:** UNCONFIRMED
+
+## Accepting a ~45-minute release run in exchange for an automatic image, rather than an out-of-band trigger
+- **Plan:** `plans/docker-tag-trigger-184.md` (Phase 3, wiring `docker.yml` into the release)
+- **Assumed:** calling `docker.yml` via `workflow_call` from `release-plz.yml` means the
+  image build's ~45-minute cold multi-arch build (QEMU-emulated arm64, no cache warmth
+  across the two concurrent branch/release builds for the same commit) now runs *inside*
+  `release-plz.yml`'s `concurrency: release-plz-${{ github.ref }}` group
+  (`cancel-in-progress: false`), so a `main` push during a release build queues its
+  release-plz run rather than running immediately.
+- **Chose:** accept the queueing. The queued work is idempotent release-PR refreshes
+  (nothing is lost, only delayed); releases are roughly weekly, so the window is
+  infrequent; and the alternative — triggering `docker.yml` out-of-band instead of via
+  `workflow_call` — needs a PAT (a `GITHUB_TOKEN` cannot fire `workflow_dispatch` either),
+  which is materially more infrastructure than this issue warrants. `timeout-minutes: 90`
+  on `docker.yml` (Phase 1) bounds the downside to a bad build, not a hung one holding the
+  group for the 360-minute default.
+- **Alternatives:** an out-of-band `workflow_dispatch` triggered by a PAT stored as a repo
+  secret, decoupling the image build from the release run's concurrency group entirely —
+  rejected as disproportionate infrastructure (a new secret, a new failure mode around PAT
+  expiry) for a problem that is currently theoretical.
+- **Blast radius if wrong:** delayed release-PR refreshes on `main` during a release window,
+  never lost work. Revisit if release cadence increases enough to make the queueing
+  routine rather than occasional.
+- **Status:** UNCONFIRMED

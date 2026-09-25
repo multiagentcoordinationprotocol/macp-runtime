@@ -1,12 +1,44 @@
 name: Build & Push Docker Image
 
-# Build-and-PUSH on main/tags only. PRs get a build-only gate via the
-# `docker-build` job in ci.yml (part of the required ci-pass gate), so a
-# broken image build blocks merges without pushing PR images to GHCR.
+# Two disjoint build kinds, kept disjoint by construction so neither can clobber
+# the other's tags (see the `tags:` gating on the metadata step below):
+#
+#   - branch build:  a push to `main`, or a `workflow_dispatch` with no `ref`.
+#     Emits `latest`, `main`, `<sha>` -- exactly what this workflow has always
+#     published on every merge.
+#   - release build: a `workflow_call` (the live path, invoked from
+#     release-plz.yml once it cuts a release), a `workflow_dispatch` with a
+#     `ref`, or a `macp-runtime-v*` tag push. Emits `<version>`,
+#     `<major>.<minor>` and nothing else.
+#
+# The `macp-runtime-v*` tag trigger is a backstop, not the live path, for the
+# same reason publish.yml's identically-shaped trigger is a backstop (see its
+# header comment): GitHub does not start workflow runs from events created
+# with the default GITHUB_TOKEN, so this never fires for a tag release-plz
+# pushes -- only for one pushed by a human or a PAT. release-plz.yml calls
+# this workflow directly instead, immediately after it creates the tags.
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    tags: ["macp-runtime-v*"]
+  workflow_call:
+    inputs:
+      version:
+        description: "Released workspace version, e.g. 0.8.1 (no leading v)"
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build, e.g. macp-runtime-v0.8.1 (blank = build the default branch)"
+        type: string
+        required: false
+        default: ""
+      version:
+        description: "Override the version tag (blank = derive from ref)"
+        type: string
+        required: false
+        default: ""
 
 env:
   REGISTRY: ghcr.io
@@ -19,10 +51,176 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # A hung multi-arch build must not sit on release-plz.yml's
+    # `cancel-in-progress: false` concurrency group for the 360-minute
+    # default when this runs as a workflow_call from a release. Observed
+    # maximum build time is 51 minutes.
+    timeout-minutes: 90
 
     steps:
+      # No checkout yet: this step only reasons about GitHub Actions context
+      # and its own inputs, and its output decides what `actions/checkout`
+      # below should check out.
+      - name: Resolve build parameters
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          SHA: ${{ github.sha }}
+          INPUT_REF: ${{ inputs.ref }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          tag_prefix="macp-runtime-v"
+
+          # github.event_name is NOT a reliable way to detect a workflow_call
+          # invocation: per GitHub's reusable-workflow reference, the called
+          # workflow's github context -- event_name included -- is "the same
+          # as the caller workflow", never the literal string "workflow_call".
+          # Since release-plz.yml is itself triggered by `push`, EVENT_NAME
+          # reads "push" on the live release path too. This inheritance rule
+          # applies to workflow_dispatch just as much as push: it is genuine
+          # ONLY because release-plz.yml (today's only caller) has no
+          # workflow_dispatch trigger of its own for event_name to inherit --
+          # not because of any property of workflow_dispatch itself. If a
+          # future caller of this workflow ever gains one, a dispatched
+          # caller run would inherit EVENT_NAME=workflow_dispatch with no
+          # `ref` input (docker.yml's own workflow_dispatch.ref is not part
+          # of the workflow_call input schema), which is indistinguishable
+          # from a genuine no-ref dispatch below -- so that branch guards
+          # against exactly that ambiguity rather than assuming it away.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -n "$INPUT_REF" ]; then
+              # Without this guard a dispatch with ref: some-branch would
+              # resolve is_release=false *and* push_latest=true, pushing
+              # latest/main/a SHA tag built from the wrong tree.
+              case "$INPUT_REF" in
+                "$tag_prefix"*) ;;
+                *)
+                  echo "::error::workflow_dispatch 'ref' must be a ${tag_prefix}* tag, got '$INPUT_REF'"
+                  exit 1
+                  ;;
+              esac
+              ref="$INPUT_REF"
+              if [ -n "$INPUT_VERSION" ]; then
+                version="$INPUT_VERSION"
+              else
+                version="${INPUT_REF#"$tag_prefix"}"
+              fi
+              is_release=true
+              push_latest=false
+            elif [ -n "$INPUT_VERSION" ]; then
+              # `version` without `ref` is meaningless for a genuine dispatch
+              # (documented as "blank = derive from ref") and is also what an
+              # inherited workflow_call-from-a-dispatched-caller would look
+              # like, per the note above. Either way this must never fall
+              # through to a silent branch build that discards `version` and
+              # emits no semver tag.
+              echo "::error::workflow_dispatch 'version' was supplied without a 'ref'. If this is a release build routed through a dispatched caller, docker.yml cannot currently distinguish that from a plain dispatch -- see the comment above this block."
+              exit 1
+            else
+              # A manual "refresh latest from main" affordance -- but only
+              # when the dispatch itself targets the default branch. A
+              # no-ref dispatch against a feature branch must not move
+              # `latest` to that branch's build.
+              ref="$SHA"
+              version=""
+              is_release=false
+              if [ "$REF_TYPE" = "branch" ] && [ "$REF_NAME" = "main" ]; then
+                push_latest=true
+              else
+                push_latest=false
+              fi
+            fi
+          elif [ -n "$INPUT_VERSION" ]; then
+            # workflow_call: release-plz tags the release-PR merge commit on
+            # `main`, which *is* the caller's github.sha -- so the caller's
+            # commit is already the right thing to check out, with no ref
+            # input needed.
+            ref="$SHA"
+            version="$INPUT_VERSION"
+            is_release=true
+            push_latest=false
+          elif [ "$EVENT_NAME" = "push" ]; then
+            if [ "$REF_TYPE" = "tag" ]; then
+              # The `tags:` trigger above already restricts this path to
+              # macp-runtime-v* refs.
+              ref="$REF_NAME"
+              version="${REF_NAME#"$tag_prefix"}"
+              is_release=true
+              push_latest=false
+            else
+              ref="$SHA"
+              version=""
+              is_release=false
+              push_latest=true
+            fi
+          else
+            echo "::error::unsupported trigger for docker.yml: event_name='$EVENT_NAME', no version input present, not a push"
+            exit 1
+          fi
+
+          # Converts docker/metadata-action's silent warn-and-skip on an
+          # unparseable version (it does no macp-runtime-v prefix stripping)
+          # into a hard failure -- a release build must never emit no semver
+          # tag and still exit green.
+          if [ "$is_release" = "true" ]; then
+            if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]]; then
+              echo "::error::resolved version '$version' is not a valid semver (expected X.Y.Z)"
+              exit 1
+            fi
+          fi
+
+          {
+            echo "ref=$ref"
+            echo "version=$version"
+            echo "is_release=$is_release"
+            echo "push_latest=$push_latest"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "resolved: event=$EVENT_NAME ref=$ref version=$version is_release=$is_release push_latest=$push_latest"
+
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.resolve.outputs.ref }}
+
+      # Guards the cheap half of "built from the right tree": a wrong
+      # *version* input or tag. It does NOT guard against a wrong
+      # *checkout* -- main keeps the released version for every commit
+      # after the release, so a mis-resolved `ref` that happened to land on
+      # main would pass this check while building the wrong tree. That case
+      # is closed by construction in the resolve step's per-trigger table
+      # above, not by this check.
+      - name: Cross-check the resolved version against the checked-out tree
+        if: steps.resolve.outputs.is_release == 'true'
+        run: |
+          set -euo pipefail
+          tree_version=$(grep -A5 '^\[workspace.package\]' Cargo.toml | grep -m1 '^version' \
+            | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')
+          if [ -z "$tree_version" ]; then
+            echo "::error::could not parse [workspace.package].version out of Cargo.toml"
+            exit 1
+          fi
+          if [ "$tree_version" != "${{ steps.resolve.outputs.version }}" ]; then
+            echo "::error::resolved version '${{ steps.resolve.outputs.version }}' does not match the checked-out Cargo.toml version '$tree_version'"
+            exit 1
+          fi
+          echo "version cross-check OK: $tree_version"
+
+      # Pins org.opencontainers.image.revision to the commit actually built.
+      # metadata-action defaults that label to github.sha, which is wrong on
+      # a backfill dispatch (it would report main's HEAD, not the tag) --
+      # publishing a false source-commit claim in a repo that turns on
+      # provenance/sbom. Correct on every other path too, so applied
+      # unconditionally rather than only when it would otherwise be wrong.
+      - name: Capture the checked-out commit
+        id: resolve_sha
+        run: |
+          set -euo pipefail
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU (arm64 emulation)
         uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4
@@ -42,13 +240,24 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # latest=auto (the default) re-adds `latest` whenever any semver
+          # rule resolves (metadata-action src/meta.ts:195,198) -- including
+          # one driven by an explicit `value=` on a non-default-branch ref.
+          # Left on its default, a backfill build of an old release tag
+          # would move `latest` backwards. The deliberate `latest` tag below
+          # is an explicit type=raw rule, which this flavor does not
+          # suppress (meta.ts's raw-tag path is independent of it).
+          flavor: |
+            latest=false
+          labels: |
+            org.opencontainers.image.revision=${{ steps.resolve_sha.outputs.sha }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=
+            type=raw,value=latest,enable=${{ steps.resolve.outputs.push_latest }}
+            type=ref,event=branch,enable=${{ steps.resolve.outputs.is_release != 'true' }}
+            type=ref,event=pr,enable=${{ steps.resolve.outputs.is_release != 'true' }}
+            type=sha,prefix=,enable=${{ steps.resolve.outputs.is_release != 'true' }}
+            type=semver,pattern={{version}},value=${{ steps.resolve.outputs.version }},enable=${{ steps.resolve.outputs.is_release }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.resolve.outputs.version }},enable=${{ steps.resolve.outputs.is_release }}
 
       - name: Build and push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -57,7 +266,13 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           # Supply-chain metadata: SLSA provenance attestation + SBOM,
-          # both attached to the pushed image on GHCR.
+          # both attached to the pushed image on GHCR. The provenance
+          # attestation is generated by buildkit from the runner
+          # environment and records GITHUB_SHA -- correct on every live
+          # path, but on a manual backfill dispatch it names the dispatch
+          # commit rather than the backfilled tag's commit. The revision
+          # *label* above is correct in both cases; the attestation residual
+          # on a backfill is a known, accepted gap.
           provenance: true
           sbom: true
           tags: ${{ steps.meta.outputs.tags }}
