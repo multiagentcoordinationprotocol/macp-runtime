@@ -368,3 +368,5 @@ Re-confirmed after the fix: `actionlint .github/workflows/docker.yml` clean (no 
 changed, so this was expected, not exploratory).
 
 pushed feat/docker-tag-trigger-184-phase1 b8f3c2c8b68f65d9e74c38e6d36d12fdc7c6771b
+
+PR #190 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/190
