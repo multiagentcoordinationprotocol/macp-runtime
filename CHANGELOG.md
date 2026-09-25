@@ -6,6 +6,23 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.8.2](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.1...macp-runtime-v0.8.2) - 2026-09-25
+
+### Added
+
+- *(ci)* wire release-plz to publish a versioned Docker image (#184 Phases 2-4) ([#191](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/191))
+- *(ci)* add docker-compose for running the integration test suite ([#189](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/189))
+
+### Fixed
+
+- *(ci)* teach docker.yml to build a real release image (#184 Phase 1) ([#190](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/190))
+- *(docs,server)* correct JWT algorithm docs and add opt-in gRPC reflection ([#188](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/188))
+
+### Other
+
+- reconcile docker-tag-trigger-184's 3 UNCONFIRMED assumptions ([#193](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/193))
+- reconcile plans/backlog-closeout-2026-09.md's 39 ASSUMPTIONS entries ([#183](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/183))
+
 ## [0.8.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.0...macp-runtime-v0.8.1) - 2026-09-22
 
 ### Added
