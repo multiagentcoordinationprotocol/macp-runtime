@@ -617,6 +617,26 @@ instead of mis-tagging.
   of why calling beats tagging; leaving it describing only `publish.yml` invites the next reader
   to treat the docker call as ad hoc.
 
+  **(d) Guard the extracted version before the call, not after.** Phase 1's `/ship`-gate review
+  found that Phase 1(c)'s semver validation does **not** catch an empty `version` reaching
+  `docker.yml` the way this section originally (and wrongly) assumed. Phase 1's resolve step
+  detects a `workflow_call` invocation by `INPUT_VERSION` being **non-empty** — a platform
+  correction made necessary because `github.event_name` is never literally `"workflow_call"`
+  inside a called workflow (it inherits the caller's own event). One consequence: an *empty*
+  `version` input doesn't land in the release-build branch at all — it fails the `-n
+  "$INPUT_VERSION"` test and falls through to the plain-push branch-build arm instead, silently
+  building a second, concurrent branch build of the same commit (no semver tag, `latest` and
+  `main` re-pushed) rather than failing loudly. `docker.yml` cannot close this from its own side:
+  a genuine push to `main` and a `workflow_call` with an empty version are indistinguishable from
+  inside the called workflow (identical inherited `event_name`/`ref`/`sha`).
+
+  So this job's own `with:` block must validate non-emptiness before the call, e.g. a `run:` step
+  ahead of the `uses:` (or an `if:` on the job itself) asserting
+  `fromJSON(needs.release-plz.outputs.releases)[0].version != ''`, failing loudly (`::error::` +
+  non-zero exit / a job-level `if:` that still surfaces as a visible skip-with-reason, not a
+  silent one) rather than letting an empty value reach `docker.yml` at all. This is a **new
+  acceptance criterion for this phase**, not optional polish — see AC7 below.
+
 - **Edge cases & failure modes:**
   - *A run that only opens/refreshes the release PR* → `releases_created == 'false'` → job
     skipped, as `publish` is.
@@ -624,8 +644,10 @@ instead of mis-tagging.
     they are siblings. A release can therefore complete on crates.io with no image, which is the
     correct priority ordering and is recoverable by the Phase 2 dispatch.
   - *`releases` is `[]` despite `releases_created == 'true'`* → impossible by the action's own
-    definition of that boolean; if it ever happened, `fromJSON(...)[0].version` is empty and
-    Phase 1(c) fails the build rather than tagging something wrong.
+    definition of that boolean, so this specific case cannot occur. **Superseded concern:** an
+    earlier draft of this section claimed an empty `fromJSON(...)[0].version` would be caught by
+    Phase 1(c)'s semver guard. It is not — see (d) above. The guard belongs on this side of the
+    call, and (d)/AC7 exist because of it.
   - *Duplicate build for the release commit* (Phase 1's first edge case) — accepted; disjoint
     tags, but **both builds run cold and concurrently**, so the real cost is a second full
     ~45-minute multi-arch build, not a cache hit.
@@ -659,9 +681,16 @@ instead of mis-tagging.
      `needs`.
   5. The header comment names both called workflows and why.
   6. `actionlint .github/workflows/release-plz.yml` is clean.
+  7. **A run in which the extracted version is empty fails loudly before invoking `docker.yml`**,
+     rather than reaching the call and silently degrading to a second branch build — see (d).
+     Provable by a dry-run of the guard's condition/script against a crafted `releases: []`-shaped
+     (or single-entry-with-empty-`version`) payload, the same way (b)'s `fromJSON` behavior is
+     tested.
 - **Tests:** `actionlint`, plus `fromJSON(...)[0].version` evaluated locally against a real
-  `releases` payload shape recorded in `PROGRESS.md`. The true end-to-end test is the **next real
-  release**, which must be watched rather than assumed — see Enterprise concerns.
+  `releases` payload shape recorded in `PROGRESS.md`, **and AC7's guard exercised against an
+  empty-version payload to confirm it fails loudly rather than reaching the call.** The true
+  end-to-end test is the **next real release**, which must be watched rather than assumed — see
+  Enterprise concerns.
 - **Docs:** Phase 4.
 
 ---

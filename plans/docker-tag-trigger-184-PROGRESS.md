@@ -180,11 +180,14 @@ _(appended per phase by `/implement`)_
 
 ### Phase 1 — 2026-09-25 — DONE, verdict PASS (3 rounds), fresh-Opus verifier each round
 
-**Files touched:** `.github/workflows/docker.yml` only (197 insertions / 11 deletions from
-`main`). `ASSUMPTIONS.md` (+66 lines: the three plan-level assumptions from the plan's Open
-Questions, logged here since they hadn't been written yet when Phase 0 closed) and the two
-new `plans/docker-tag-trigger-184*.md` files from planning are also in the working tree but
-are not Phase 1's own diff. No local `docs/`/`CLAUDE.md` touched (Phase 1's own Docs field:
+**Files touched:** `.github/workflows/docker.yml` only (226 insertions / 11 deletions from
+`main` as of the final, `/ship`-gate-reviewed revision — `git diff --numstat main..HEAD`;
+an earlier figure of 197/11 recorded here before the round-2/3 `/implement` fixes and the
+subsequent `/ship`-gate fixes below was stale and is corrected here). `ASSUMPTIONS.md` (+66
+lines: the three plan-level assumptions from the plan's Open Questions, logged here since
+they hadn't been written yet when Phase 0 closed) and the two new
+`plans/docker-tag-trigger-184*.md` files from planning are also in the working tree but are
+not Phase 1's own diff. No local `docs/`/`CLAUDE.md` touched (Phase 1's own Docs field:
 none yet, Phase 4).
 
 **Static checks:** `actionlint .github/workflows/docker.yml` clean (1.7.12, shellcheck
@@ -271,5 +274,72 @@ one-way door per the plan's Models section):**
 corrections closed to a determinate fix, not ambiguous judgment calls with a chosen
 alternative and a blast radius.
 
-**What's next:** commit Phase 1, open PR A (Phase 1 only, per the PR strategy above), watch
-CI, merge. Then Phase 2 (manual backfill dispatch against `main`) can run.
+### `/ship` gate (separate from the `/implement` rounds above) — GAPS -> PASS
+
+The `/implement`-level gate above checks phase-vs-spec compliance; `/ship`'s own gate is a
+separate pass checking the diff as a shippable unit (doc drift, tracked-file consistency,
+enterprise-readiness) — run fresh against commit `fdd82de`, after Phase 1 was already
+marked `DONE` above. It returned **GAPS**, 4 items, none ship-blocking on their own (`git
+diff --numstat` confirms `docker.yml` is internally complete and inert until Phase 3
+exists — not half-migrated), but all closed before opening the PR rather than carried
+forward:
+
+1. **`docker.yml`'s no-`ref` `workflow_dispatch` branch didn't reject a dispatch made
+   directly against a tag ref.** Not in the 13-case matrix (which only covered
+   `REF_TYPE=branch`, on `main` and on a feature branch). Verified live: dispatching with
+   no `ref` input against `REF_TYPE=tag` built that tag's tree as an ordinary
+   non-release build — no semver tag, a bare SHA tag pushed anyway, exit green. This is
+   exactly the wrong command Phase 2's own plan text warns against
+   (`--ref macp-runtime-vX.Y.Z` instead of `--ref main -f ref=...`), and every tag cut
+   after this merges will carry the `workflow_dispatch` trigger (unlike today's
+   `macp-runtime-v0.8.1`, which has neither trigger — verified during planning). Fixed:
+   the no-`ref` branch now hard-fails unless `REF_TYPE = branch`.
+2. **An empty `version` on the live `workflow_call` path silently falls through to a
+   branch build** rather than failing loudly, contradicting the file's own header claim
+   that the two build kinds are disjoint "by construction." The 13-case matrix's N2 row
+   examined this and recorded "verified deliberate, not a gap" — the `/ship` gate
+   disagreed, correctly: `docker.yml` cannot distinguish this case from a genuine push
+   (identical inherited `event_name`/`ref`/`sha` under `workflow_call`), so the guard
+   cannot live here and must live in the *caller* instead. Closed by: softening the
+   header's "by construction" claim to "given a well-formed trigger" and stating the
+   caller obligation explicitly, adding a matching comment at the `workflow_call`
+   detection branch, and — the real fix — adding a new Phase 3 sub-item (d) and
+   acceptance criterion 7 to `plans/docker-tag-trigger-184.md` requiring `release-plz.yml`
+   to validate the extracted version is non-empty *before* invoking `docker.yml`, and
+   correcting Phase 3's edge-case bullet that had wrongly assumed Phase 1(c)'s semver
+   guard would already catch this (it does not, under the corrected discriminator: an
+   empty `INPUT_VERSION` fails the `-n` test and is never even classified as a release
+   build).
+3. **`${{ steps.resolve.outputs.version }}` was interpolated directly into two `run:`
+   shell lines** (the Cargo.toml cross-check step) rather than passed through `env:`, in a
+   job holding `packages: write` — an inconsistency with the resolve step's own scrupulous
+   `env:`-only pattern. The `/ship` gate demonstrated a crafted value (embedded quote +
+   command + comment) reaching the unquoted-delimiter output line. Severity judged low —
+   every input path already requires repo write access, so this is a hardening/consistency
+   defect, not privilege escalation. Fixed: moved to `env: RESOLVED_VERSION:` and compared
+   `"$RESOLVED_VERSION"`, matching the resolve step's pattern.
+4. **This file's own diff-stat claim was stale** (197/11 vs. actual 226/11, after the
+   round-2/3 `/implement` fixes were applied but before this file's number was updated).
+   Corrected above.
+
+The gate also flagged, as a forward note rather than a gap: Phase 3 must **not** copy
+`publish.yml`'s `secrets: inherit` literally when calling `docker.yml` — `docker.yml`
+declares no `secrets:` block on `workflow_call` and needs only the automatically-granted
+`secrets.GITHUB_TOKEN`, so `secrets: inherit` would needlessly hand a Docker-build job
+every repo secret including `CARGO_REGISTRY_TOKEN`. Phase 1 already gets this right (no
+`secrets:` block); recorded here so Phase 3 doesn't regress it.
+
+Endorsed without change: the two-PR strategy itself (the dependency is real and
+physical — tags are immutable, so Phase 2 cannot exist before Phase 1 is on `main`);
+zero doc drift (no tracked `.md` anywhere mentions `ghcr.io`/`docker.yml`/an image tag
+scheme, and `CLAUDE.md` is confirmed gitignored at `.gitignore:20`); all `ASSUMPTIONS.md`
+entries correctly scoped to Phase 2/3, none blocking Phase 1; tracked-file consistency
+(Phase 1 `DONE`, Phases 2-5 `TODO`, in both files, in agreement).
+
+Re-validated after the fixes: `actionlint` clean (both `docker.yml` alone and the full
+`.github/workflows/` sweep), `yaml.safe_load` clean, full resolve-script matrix re-run
+including the new tag-ref-dispatch and cross-check-quoting cases.
+
+**What's next:** commit Phase 1 (including the `/ship`-gate fixes above and the Phase 3
+plan update), open PR A (Phase 1 only, per the PR strategy above), watch CI, merge. Then
+Phase 2 (manual backfill dispatch against `main`) can run.

@@ -1,7 +1,7 @@
 name: Build & Push Docker Image
 
-# Two disjoint build kinds, kept disjoint by construction so neither can clobber
-# the other's tags (see the `tags:` gating on the metadata step below):
+# Two disjoint build kinds, kept disjoint by construction given a well-formed
+# trigger (see the `tags:` gating on the metadata step below):
 #
 #   - branch build:  a push to `main`, or a `workflow_dispatch` with no `ref`.
 #     Emits `latest`, `main`, `<sha>` -- exactly what this workflow has always
@@ -10,6 +10,16 @@ name: Build & Push Docker Image
 #     release-plz.yml once it cuts a release), a `workflow_dispatch` with a
 #     `ref`, or a `macp-runtime-v*` tag push. Emits `<version>`,
 #     `<major>.<minor>` and nothing else.
+#
+# "Well-formed" carries one real obligation: a `workflow_call` invocation is
+# detected by its `version` input being non-empty (see the resolve step below
+# for why event_name can't be used instead), and an EMPTY `version` on that
+# path is indistinguishable, from inside this workflow, from a genuine push
+# to `main` -- both inherit identical github.event_name/ref/sha. An empty
+# call would silently fall through to a second, concurrent branch build of
+# the same commit instead of failing loudly. This workflow cannot close that
+# gap on its own; the caller MUST guarantee a non-empty version before
+# invoking it. See plans/docker-tag-trigger-184.md Phase 3.
 #
 # The `macp-runtime-v*` tag trigger is a backstop, not the live path, for the
 # same reason publish.yml's identically-shaped trigger is a backstop (see its
@@ -121,14 +131,25 @@ jobs:
               echo "::error::workflow_dispatch 'version' was supplied without a 'ref'. If this is a release build routed through a dispatched caller, docker.yml cannot currently distinguish that from a plain dispatch -- see the comment above this block."
               exit 1
             else
-              # A manual "refresh latest from main" affordance -- but only
-              # when the dispatch itself targets the default branch. A
-              # no-ref dispatch against a feature branch must not move
-              # `latest` to that branch's build.
+              # A manual "refresh latest from main" affordance -- valid only
+              # when the dispatch itself targets a branch. Without this
+              # guard, dispatching directly against a tag ref with no `ref`
+              # input (the exact wrong command Phase 2's own plan warns
+              # about -- `--ref macp-runtime-vX.Y.Z` instead of `--ref main
+              # -f ref=...`) would silently build that tag's tree as an
+              # ordinary non-release build: no semver tag, a bare SHA tag
+              # pushed anyway, exit green.
+              if [ "$REF_TYPE" != "branch" ]; then
+                echo "::error::workflow_dispatch with no 'ref' input must target a branch (dispatched against '$REF_NAME', ref_type '$REF_TYPE'). To build a specific release tag, pass it via the 'ref' input instead of dispatching directly against that tag."
+                exit 1
+              fi
+              # `latest` only moves when the dispatch itself targets the
+              # default branch -- a no-ref dispatch against a feature
+              # branch must not move it.
               ref="$SHA"
               version=""
               is_release=false
-              if [ "$REF_TYPE" = "branch" ] && [ "$REF_NAME" = "main" ]; then
+              if [ "$REF_NAME" = "main" ]; then
                 push_latest=true
               else
                 push_latest=false
@@ -138,7 +159,10 @@ jobs:
             # workflow_call: release-plz tags the release-PR merge commit on
             # `main`, which *is* the caller's github.sha -- so the caller's
             # commit is already the right thing to check out, with no ref
-            # input needed.
+            # input needed. An empty INPUT_VERSION here is indistinguishable
+            # from a genuine push and falls through to the branch-build arm
+            # below instead of failing loudly -- see the header comment; the
+            # caller must never invoke this workflow with an empty version.
             ref="$SHA"
             version="$INPUT_VERSION"
             is_release=true
@@ -196,6 +220,8 @@ jobs:
       # above, not by this check.
       - name: Cross-check the resolved version against the checked-out tree
         if: steps.resolve.outputs.is_release == 'true'
+        env:
+          RESOLVED_VERSION: ${{ steps.resolve.outputs.version }}
         run: |
           set -euo pipefail
           tree_version=$(grep -A5 '^\[workspace.package\]' Cargo.toml | grep -m1 '^version' \
@@ -204,8 +230,8 @@ jobs:
             echo "::error::could not parse [workspace.package].version out of Cargo.toml"
             exit 1
           fi
-          if [ "$tree_version" != "${{ steps.resolve.outputs.version }}" ]; then
-            echo "::error::resolved version '${{ steps.resolve.outputs.version }}' does not match the checked-out Cargo.toml version '$tree_version'"
+          if [ "$tree_version" != "$RESOLVED_VERSION" ]; then
+            echo "::error::resolved version '$RESOLVED_VERSION' does not match the checked-out Cargo.toml version '$tree_version'"
             exit 1
           fi
           echo "version cross-check OK: $tree_version"
