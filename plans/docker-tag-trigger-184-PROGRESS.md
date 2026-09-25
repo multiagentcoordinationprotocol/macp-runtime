@@ -180,10 +180,14 @@ _(appended per phase by `/implement`)_
 
 ### Phase 1 — 2026-09-25 — DONE, verdict PASS (3 rounds), fresh-Opus verifier each round
 
-**Files touched:** `.github/workflows/docker.yml` only (226 insertions / 11 deletions from
-`main` as of the final, `/ship`-gate-reviewed revision — `git diff --numstat main..HEAD`;
-an earlier figure of 197/11 recorded here before the round-2/3 `/implement` fixes and the
-subsequent `/ship`-gate fixes below was stale and is corrected here). `ASSUMPTIONS.md` (+66
+**Files touched:** `.github/workflows/docker.yml` only (252 insertions / 11 deletions from
+`main` as of commit `e8ce52b`, the last commit to touch this file in Phase 1 — `git diff
+--numstat main..e8ce52b -- .github/workflows/docker.yml`. This number has already gone
+stale twice in this section from edits made after it was written: 197/11 predates the
+round-2/3 `/implement` fixes, and 226/11 predated this same `/ship`-gate round's own fixes
+to this file. Pinned to a commit SHA rather than "the final revision" so it cannot go
+stale a third time by definition — if `docker.yml` is touched again, cite the new commit,
+don't edit this number in place). `ASSUMPTIONS.md` (+66
 lines: the three plan-level assumptions from the plan's Open Questions, logged here since
 they hadn't been written yet when Phase 0 closed) and the two new
 `plans/docker-tag-trigger-184*.md` files from planning are also in the working tree but are
@@ -208,7 +212,7 @@ unresolved `${{ }}`), not a hand-copied version, so this is testing what actuall
 | 4b | `workflow_dispatch`, no `ref`, dispatched against a feature branch | `$SHA` | *(empty)* | `false` | **`false`** | rc 0 — Gap round 1 (G2) fix |
 | 5 | push of a `macp-runtime-v*` tag (human/PAT backstop) | tag name | derived | `true` | `false` | rc 0 |
 | N1 | `workflow_dispatch` `ref` not `macp-runtime-v*` | — | — | — | — | rc 1, `::error::` |
-| N2 | `workflow_call`-context empty version | — | — | — | — | rc 1 (falls through to branch build if truly empty; see below — an *empty* `INPUT_VERSION` under `EVENT_NAME=push` is indistinguishable from a plain push and correctly resolves as one, not a release — verified deliberate, not a gap) |
+| N2 | `workflow_call`-context empty version | — | — | — | — | rc 0, `is_release=false`, `push_latest=true` (an *empty* `INPUT_VERSION` under the inherited `EVENT_NAME=push` context is indistinguishable from a plain push and resolves as one, silently, not as a release — this row originally recorded that as "verified deliberate, not a gap"; the `/ship` gate retracted that verdict as Gap 2 below, since it contradicts the header's "disjoint by construction" claim. The guard belongs in the caller, not here — see Gap 2 and Phase 3 sub-item (d)/AC7 in the plan) |
 | N3 | `workflow_call`-context malformed version (`not-a-version`) | — | — | — | — | rc 1, `::error::` (semver regex) |
 | N4 | `workflow_dispatch` `ref` with valid prefix, bad version suffix | — | — | — | — | rc 1, `::error::` |
 | G4 | dispatched-caller release: `EVENT_NAME=workflow_dispatch`, `INPUT_REF=""`, `INPUT_VERSION` set (simulating a future caller with its own `workflow_dispatch` trigger) | — | — | — | — | rc 1, `::error::` — round 2/3 fix, `$GITHUB_OUTPUT` left empty |
