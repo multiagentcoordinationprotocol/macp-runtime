@@ -441,9 +441,11 @@ instead of mis-tagging.
 
 ### Phase 2 — Backfill the image for the current release
 
-- **Status:** TODO — **this phase contains a manual action that `/implement` (or a human) must
-  actually run. It cannot be completed by a code change.** The 0.8.1 release is already cut; no
-  edit to a workflow file retroactively fires an event for it.
+- **Status:** DONE (2026-09-25) — dispatched via `gh workflow run docker.yml --ref main -f
+  ref=macp-runtime-v0.8.1` (run `36169029979`), all 4 acceptance criteria verified against
+  the live registry. Full evidence in `PROGRESS.md`. (As planned, this phase was a manual
+  action `/implement` had to actually run — no code change could retroactively fire an
+  event for the already-cut 0.8.1 release.)
 - **Delivers:** acceptance criterion 2 — `ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.8.1`
   and `:0.8` exist.
 - **Depends on:** **Phase 1 only.** Deliberately ordered *before* Phase 3: it exercises the entire

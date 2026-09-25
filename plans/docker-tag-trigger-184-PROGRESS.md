@@ -25,7 +25,7 @@ per the plan). So:
 |-------|-------|--------|---------|--------|--------|
 | 0 | Plan + reverify | DONE | FLAWED -> patched (rev 2) | 1 | (uncommitted) |
 | 1 | Teach `docker.yml` to do a release build | DONE | GAPS -> GAPS -> PASS | 3 | (pending) |
-| 2 | Backfill the image for the current release | TODO | — | — | — |
+| 2 | Backfill the image for the current release | DONE | verified (manual action, no code) | — | (n/a) |
 | 3 | Call `docker.yml` from the release | DONE | GAPS -> PASS | 2 | (pending) |
 | 4 | Document the published image | TODO | — | — | — |
 | 5 | Observe the next real release | TODO | — | — | — |
@@ -403,8 +403,45 @@ Live-watched through the early steps: `Resolve build parameters`, `Checkout repo
 `Cross-check the resolved version against the checked-out tree`, and `Capture the checked-out
 commit` all passed before the multi-arch `Build and push` step began — confirming Phase 1's
 resolve logic and cross-check behave correctly on a real dispatch, not just in the dry-run
-matrix. Registry verification (after/before tag-list diff, digest checks, revision-label
-check) recorded below once the run completes.
+matrix.
+
+**Run completed:** `success`, all steps green, wall-clock ~12 minutes (well under the
+35-50 minute budget — cold arm64/amd64 build, no cache hit expected or seen as a risk).
+
+**Registry verification, all 4 acceptance criteria checked directly against GHCR, not
+inferred from the run's exit code:**
+
+1. **`:0.8.1` and `:0.8` present, same digest.** `comm -13` of the before/after tag lists
+   shows exactly two new tags: `0.8` and `0.8.1`. Both resolve to
+   `sha256:0103b5fd9c4743f3683e9b37b1f641c269ae3cd351f41e6505c1728ca44d5e2f` (`curl`
+   against the GHCR v2 manifest API with an anonymous pull token, `Accept:` set to the OCI
+   index / Docker manifest-list media types). **PASS.**
+2. **`org.opencontainers.image.revision` equals the tag's commit.** `docker buildx
+   imagetools inspect` on the amd64 platform manifest
+   (`sha256:2f57a74569679b0f8be2fdf5e81d27de18d9f6fdbadbdc98fc3fc89efd01dd86`, resolved from
+   the `0.8.1` index) shows `"org.opencontainers.image.revision":
+   "6128ccc01438d35b2927ec37a22136f03b2eeb23"` — an exact match for
+   `git rev-parse macp-runtime-v0.8.1^{commit}`. (Note: `git rev-parse macp-runtime-v0.8.1`
+   alone returns the *annotated tag object* SHA `bb765f2c7c44a3ae4fe6bf9ed1fbed146b5b26e6`,
+   not the commit — `^{commit}` dereferences it. This tripped up the before-state capture
+   for a moment; recorded here so it doesn't trip up a future reader of this file.) The
+   same inspect also confirms `org.opencontainers.image.version: "0.8.1"`. **PASS.**
+3. **`latest` unchanged.** Digest before dispatch:
+   `sha256:bca5c8d4e4940005625206185bb108def32ea0701501a7ea8393559da6c22af9`. Digest after:
+   identical. No reconciliation against `gh run list` needed — it simply never moved.
+   **PASS.**
+4. **No SHA tag added or re-pointed.** The before/after tag-list diff's only additions are
+   `0.8`/`0.8.1`; nothing else appears in either the added or removed sets. Consistent with
+   Phase 1's metadata step: a `workflow_dispatch` with a `ref` input resolves
+   `is_release=true, push_latest=false`, which disables the `type=sha`/`type=ref` rules
+   entirely (`docker.yml`'s tag list `enable=` gating). **PASS.**
+
+**No edge cases triggered:** no toolchain drift building the 0.8.1 tree, `0.8.0` was not
+backfilled (0.8.1-only, per the plan and the `ASSUMPTIONS.md` entry), and `latest`'s
+non-movement needed no reconciliation since it simply held steady.
+
+Backfill dispatch command, run URL, and before/after tag lists are all recorded above and
+in `/tmp/ghcr_tags_before.txt` / `/tmp/ghcr_tags_after.txt` (scratch files, not committed).
 
 ## Phase 3 — Call `docker.yml` from the release
 
