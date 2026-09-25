@@ -140,7 +140,7 @@ PR in this session was verified.
 
 Files touched: `crates/macp-core/src/session.rs` (`CURRENT_SEMANTICS_REV` 2→3 + rev-3 doc
 bullet), `crates/macp-modes/src/mode/multi_round.rs` (`parse_contribute_value`'s
-`semantics_rev` parameter + round-trip tie-break + docstring fix + 10 new tests),
+`semantics_rev` parameter + round-trip tie-break + docstring fix + 11 new tests),
 `tests/parity_contract.rs` (3 call sites pass `CURRENT_SEMANTICS_REV`, import added),
 `src/replay.rs` (2 new legacy-log replay fixtures, matching the existing handoff-fixture
 structural precedent at `:1171-1360`).

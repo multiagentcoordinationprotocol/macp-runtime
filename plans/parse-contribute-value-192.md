@@ -151,7 +151,7 @@ bumped 2 → 3 with the rev-3 doc bullet; `parse_contribute_value` gained the `s
 parameter and the round-trip tie-break exactly per the code sketch; the false docstring claim
 rewritten; all three `tests/parity_contract.rs` call sites updated to pass
 `CURRENT_SEMANTICS_REV`, `tests/parity/contract.json` untouched. All 12 acceptance criteria
-covered by new tests in `crates/macp-modes/src/mode/multi_round.rs` (10 tests: the 6
+covered by new tests in `crates/macp-modes/src/mode/multi_round.rs` (11 tests: the 6
 length-13/32/123 rev2-vs-rev3 pairs, the reverse-direction-residual test, the
 non-canonical-proto regression pin, the exhaustive 1..=300×5-shape differential sweep, and the
 two end-to-end `handle_contribute` tests) plus 2 replay-layer legacy-log fixtures in
