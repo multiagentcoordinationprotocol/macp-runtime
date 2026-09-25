@@ -600,3 +600,9 @@ as a gap, left as-is.
 pushed feat/docker-tag-trigger-184-phase3-4 15cb6257b047e3f6f909c075725bba30351285d8
 
 PR #191 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/191
+
+merged #191: squash-merged to `main` @ `ff30863` (all 15 CI jobs green, including
+`Docker Image Build (gate)`), local branch deleted by `gh pr merge --delete-branch`.
+Phases 2, 3, and 4 are all DONE and live on `main`. Only Phase 5 (observe the next real
+release) remains, and it requires an external event (the next release being cut, days to
+a week out per the plan) -- it cannot be completed in this session.
