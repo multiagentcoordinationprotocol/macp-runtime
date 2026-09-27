@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-core-v0.8.2...macp-core-v0.8.3) - 2026-09-25
+
+### Fixed
+
+- *(multi_round)* tie-break canonical-proto/JSON Contribute collision ([#192](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/192)) ([#196](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/196))
+
 ## [0.8.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-core-v0.8.0...macp-core-v0.8.1) - 2026-09-22
 
 ### Added

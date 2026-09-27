@@ -6,6 +6,16 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.8.3](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.2...macp-runtime-v0.8.3) - 2026-09-25
+
+### Fixed
+
+- *(multi_round)* tie-break canonical-proto/JSON Contribute collision ([#192](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/192)) ([#196](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/196))
+
+### Other
+
+- record Phase 5 observation for docker-tag-trigger-184 (issue #184) ([#194](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/194))
+
 ## [0.8.2](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.1...macp-runtime-v0.8.2) - 2026-09-25
 
 ### Added
