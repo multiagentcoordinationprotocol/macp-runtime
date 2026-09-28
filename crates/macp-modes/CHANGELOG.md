@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-modes-v0.8.3...macp-modes-v0.8.4) - 2026-09-28
+
+### Fixed
+
+- *(server)* correct stale x-macp-agent-id capabilities claim ([#198](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/198)); ci: widen clippy to --workspace ([#201](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/201)) ([#203](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/203))
+
 ## [0.8.3](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-modes-v0.8.2...macp-modes-v0.8.3) - 2026-09-25
 
 ### Fixed
