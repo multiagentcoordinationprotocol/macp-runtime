@@ -6,6 +6,16 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.8.4](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.3...macp-runtime-v0.8.4) - 2026-09-28
+
+### Fixed
+
+- *(server)* correct stale x-macp-agent-id capabilities claim ([#198](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/198)); ci: widen clippy to --workspace ([#201](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/201)) ([#203](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/203))
+
+### Other
+
+- *(parity)* re-vendor contract.json 1.1.1, bump SPEC_REV to 2f7557c ([#200](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/200))
+
 ## [0.8.3](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.2...macp-runtime-v0.8.3) - 2026-09-25
 
 ### Fixed
