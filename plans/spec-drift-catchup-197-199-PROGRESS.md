@@ -73,7 +73,10 @@ to split across two PRs or two phases.
 
   **Verifier (fresh Opus subagent, independently re-ran every measured command including a fresh `git archive` export + sha256 comparison): PASS, round 1, no gaps.** Confirmed all acceptance criteria, confirmed the diff touches only the 4 planned files, confirmed the clippy-scoping finding by independently reading `ci.yml:159` and running both the CI-matching and `--workspace` invocations itself, confirmed the pre-existing `multi_round.rs:1014` line via its own `git blame`. Two cosmetic nits, not gaps: the plan's Context table undercounted the files outside the three consumed trees ("two" vs. the actual six-plus-three-proto-copies) — corrected in the plan; and `PROGRESS.md` didn't log the clippy result inline (fixed by this entry).
 - Next: commit the phase, then `/ship`.
-- **Committed:** `fdef908` on `feat/spec-drift-catchup-197-199`.
+- **Committed:** `fdef908` on `feat/spec-drift-catchup-197-199`; follow-up `caa294e` (PROGRESS.md verdict note).
+- **Ship-gate verification (fresh Opus subagent, independent re-run of every measured command over the full `main...HEAD` diff): PASS, round 1, no gaps.** Confirmed byte-identity, `check_dir`, all cargo checks, `ASSUMPTIONS.md` has zero entries tagged to this plan, doc drift is genuinely none (`CLAUDE.md` never mentions `SPEC_REV`; `docs/testing.md` describes the mechanism generically), tracked-file consistency holds. One note: issue #197's title says "1.1.0" but spec `main` had already moved to 1.1.1 the same day it was filed — substance (8 vectors) unchanged between those two spec commits (verified: empty diff across all three consumed trees), addressed in the PR body.
+- **pushed feat/spec-drift-catchup-197-199 caa294e**
+- **PR #200 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/200**
 
 ## Finalization (`/implement` §4)
 
