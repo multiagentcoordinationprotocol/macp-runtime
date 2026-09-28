@@ -53,3 +53,5 @@ specifically that clippy now sees everything Phase 1's diff touches too, so this
 also the first real confirmation that Phase 1's own code is clippy-clean under the
 widened scope. No `ASSUMPTIONS.md` entries created by this plan. Proceeding straight to
 `/ship`.
+- pushed feat/capabilities-instructions-and-clippy-scope-198-201 616ea9a
+- PR #203 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/203
