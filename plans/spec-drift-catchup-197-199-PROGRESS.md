@@ -73,3 +73,18 @@ to split across two PRs or two phases.
 
   **Verifier (fresh Opus subagent, independently re-ran every measured command including a fresh `git archive` export + sha256 comparison): PASS, round 1, no gaps.** Confirmed all acceptance criteria, confirmed the diff touches only the 4 planned files, confirmed the clippy-scoping finding by independently reading `ci.yml:159` and running both the CI-matching and `--workspace` invocations itself, confirmed the pre-existing `multi_round.rs:1014` line via its own `git blame`. Two cosmetic nits, not gaps: the plan's Context table undercounted the files outside the three consumed trees ("two" vs. the actual six-plus-three-proto-copies) — corrected in the plan; and `PROGRESS.md` didn't log the clippy result inline (fixed by this entry).
 - Next: commit the phase, then `/ship`.
+- **Committed:** `fdef908` on `feat/spec-drift-catchup-197-199`.
+
+## Finalization (`/implement` §4)
+
+Single-phase plan, so the "cumulative diff" and "last phase's diff" are identical, and
+there are no inter-phase seams to integration-test. Phase 1's own verification gate
+already reviewed the diff against the plan as a whole (not a narrow slice) and included
+the full untruncated `cargo test --workspace` run, fmt, and CI's exact clippy invocation
+— re-running a second identical Opus pass over the same diff would check nothing new.
+Treating §4's finalization pass as discharged by Phase 1's gate rather than duplicating
+it (Autonomy ladder: not critical, reversible, decidable by Opus). No `ASSUMPTIONS.md`
+entries were created by this plan (the one judgment call — pinning at spec `main` rather
+than the older commit #197's comment named — was decided with full evidence in the plan
+text itself, not a guess needing later reconciliation), so `/reconcile` has nothing to do
+here; proceeding straight to `/ship`.
