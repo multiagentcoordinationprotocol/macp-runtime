@@ -457,8 +457,8 @@ fn contribute_payload_vectors_round_trip_through_the_real_codec() {
     let vectors = contribute_vectors(&contract);
     assert_eq!(
         vectors.len(),
-        4,
-        "expected exactly 4 contribute_payload vectors, found {}",
+        8,
+        "expected exactly 8 contribute_payload vectors, found {}",
         vectors.len()
     );
 

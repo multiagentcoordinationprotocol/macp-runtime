@@ -6,9 +6,9 @@
 multiagentcoordinationprotocol/schemas/parity/contract.json
 ```
 
-in the spec repo, commit `4f15b96cac6e39d62925a5baa1ef80a42c2f818d`, on
-2026-09-20. That commit and date record the provenance of the initial import;
-this must stay equal to `SPEC_REV` in `.github/workflows/ci.yml`.
+in the spec repo, commit `2f7557c72082d20c0809cb025c2ba72270a7b068`, on
+2026-09-28. That commit and date record the provenance of this import; this
+must stay equal to `SPEC_REV` in `.github/workflows/ci.yml`.
 
 **Gated by `check_dir` in `.github/workflows/ci.yml`'s `conformance-oracle`
 job:** this directory is byte-compared, in both directions, against
