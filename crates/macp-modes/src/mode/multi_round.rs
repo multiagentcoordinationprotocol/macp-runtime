@@ -1011,7 +1011,9 @@ mod tests {
             format!(r#""value":"{}"}}"#, cycle_fill(pattern, len - SKELETON))
         }
 
-        let shapes: [(&str, fn(usize) -> String); 5] = [
+        type ContributeValueShape = (&'static str, fn(usize) -> String);
+
+        let shapes: [ContributeValueShape; 5] = [
             ("plain_ascii", |len| leading_brace(b"a", len)),
             ("all_digit", |len| leading_brace(b"7", len)),
             ("quoted_json_string_shaped", |len| {

@@ -854,7 +854,7 @@ impl MacpRuntimeService for MacpServer {
                 }),
             }),
             supported_modes: self.runtime.registered_mode_names(),
-            instructions: "Authenticate requests with Authorization: Bearer <token>. Use the unary Send RPC for all session messaging. For local development only, x-macp-agent-id may be enabled by configuration.".into(),
+            instructions: "Authenticate requests with Authorization: Bearer <token>. Use the unary Send RPC for all session messaging. For local development only (MACP_ALLOW_INSECURE=1 with no auth configured), the bearer token's value is used directly as the sender identity.".into(),
         }))
     }
 
@@ -2357,6 +2357,32 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    // Regression test for issue #198: the served `instructions` string once
+    // advertised `x-macp-agent-id`, a header no non-test code path reads.
+    // Pinned against both directions so a future edit can't silently swap
+    // one wrong claim for another.
+    #[tokio::test]
+    async fn initialize_instructions_do_not_advertise_removed_header() {
+        let (server, _) = make_server();
+        let resp = server
+            .initialize(Request::new(InitializeRequest {
+                supported_protocol_versions: vec!["1.0".into()],
+                client_info: None,
+                capabilities: None,
+            }))
+            .await
+            .unwrap();
+        let instructions = resp.into_inner().instructions;
+        assert!(
+            !instructions.contains("x-macp-agent-id"),
+            "instructions must not advertise the removed x-macp-agent-id header: {instructions:?}"
+        );
+        assert!(
+            instructions.contains("MACP_ALLOW_INSECURE"),
+            "instructions must describe the real dev-mode auth path: {instructions:?}"
+        );
     }
 
     // ── RFC-MACP-0006-A1: passive subscribe tests ──────────────────────

@@ -15,7 +15,7 @@ fmt:
 	cargo fmt --all
 
 clippy:
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets -- -D warnings
 
 test-integration:
 	cargo test --test '*'
