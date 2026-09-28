@@ -38,3 +38,18 @@ bundled into one `/drive` run at the user's request ("#198 and 201 as well", the
 
   **Verifier (fresh Opus subagent, batched gate, independently re-ran every measured command including a from-scratch clean-cache clippy run — 656.7 MiB removed, exit 0, all 7 crates actually recompiled, not a stale-fingerprint replay): Phase 1 PASS, Phase 2 PASS, round 1, no gaps.** Two cosmetic notes, neither a gap: the type alias sits inside the test fn immediately above `shapes` rather than above the whole test (tighter scoping, not worse); PROGRESS's "fails correctly if reverted" claim was verified by inspection, structurally guaranteed by the bidirectional assertions.
 - Next: commit both phases, then `/ship`.
+- **Committed:** `a243014` on `feat/capabilities-instructions-and-clippy-scope-198-201`.
+
+## Finalization (`/implement` §4)
+
+Two-phase plan, batched into one verification gate that already covered the full
+cumulative diff (not a per-phase slice), so there's no separate "seam between phases" to
+integration-test — the phases touch four completely disjoint files (`src/server.rs`;
+`crates/macp-modes/src/mode/multi_round.rs` + `.github/workflows/ci.yml` + `Makefile`)
+with zero interaction. Full `cargo test --workspace` (already run, 0 failures) and the
+clean-cache `--workspace` clippy run (already run by both the executor and the verifier,
+independently, both clean) together are the whole-feature proof: Phase 2's fix is
+specifically that clippy now sees everything Phase 1's diff touches too, so this run is
+also the first real confirmation that Phase 1's own code is clippy-clean under the
+widened scope. No `ASSUMPTIONS.md` entries created by this plan. Proceeding straight to
+`/ship`.
