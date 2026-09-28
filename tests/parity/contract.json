@@ -1,6 +1,6 @@
 {
   "$comment": "This file is NON-NORMATIVE: it projects values whose actual normative homes (where one exists) are named per-section via that section's `source` field. This manifest MUST NOT itself be cited as a normative source -- cite the named RFC/registry/proto file instead. See schemas/parity/README.md for full context, the applies_to/source semantics, and the versioning rules.",
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.1",
   "sections": {
     "protocol": {
       "applies_to": [
@@ -8,7 +8,7 @@
         "macp-sdk-python",
         "macp-sdk-typescript"
       ],
-      "source": "convention -- no RFC states this literal; examples/json/*.json use \"1.0\" consistently (in-repo consensus, not a normative citation)",
+      "source": "RFC-MACP-0001 Section 6 -- \"The MACP Core protocol version defined by this specification is 1.0\"; every examples/json/*.json envelope agrees, and scripts/check-parity-contract.py holds this value to that corpus",
       "macp_version": "1.0"
     },
     "modes": {
@@ -95,7 +95,7 @@
         "macp-sdk-python",
         "macp-sdk-typescript"
       ],
-      "source": "convention -- no RFC/registry home; macp-sdk-python/src/macp_sdk/base_projection.py and macp-sdk-typescript/src/projections/base.ts agree on kind strings, field set, and field order (Python's `kind` is typed as plain `str`, TypeScript's as a closed 2-value union -- the same runtime values, a narrower static contract in TS; noted here, not treated as drift)",
+      "source": "convention -- no RFC/registry home; macp-sdk-python/src/macp_sdk/base_projection.py and macp-sdk-typescript/src/projections/base.ts agree on kind strings, field set, and field order (Python's `kind` is typed as plain `str`, TypeScript's as a closed 2-value union -- the same runtime values, a narrower static contract in TS; noted here, not treated as drift). The `kinds` list is convention-sourced, so this manifest MIRRORS the two SDKs' agreement rather than originating it: a new kind lands here only after both SDKs agree on it, as a MINOR bump -- see the convention-sourced-list rule in schemas/parity/README.md. The open question of whether a discarded competing TaskAccept or an already-settled Handoff message should also record an anomaly is the SDKs' to settle (it is an observability record, not an acceptance decision -- RFC-MACP-0009 Section 5 and RFC-MACP-0010 Section 5 already require rejecting those messages)",
       "kinds": [
         "duplicate_vote",
         "duplicate_ballot"
@@ -142,7 +142,7 @@
         "macp-sdk-python",
         "macp-sdk-typescript"
       ],
-      "source": "convention -- schemas/proto/macp/modes/multi_round/v1/multi_round.proto defines ContributePayload's wire shape (field 1, `value`, string), which fixes the protobuf tag byte; the legacy-JSON fallback shape and the try-JSON-then-protobuf decode order have no RFC/registry home and are a historical runtime/SDK convention documented in each consumer's own decode path",
+      "source": "convention -- schemas/proto/macp/modes/multi_round/v1/multi_round.proto defines ContributePayload's wire shape (field 1, `value`, string), which fixes the protobuf tag byte; the legacy-JSON fallback shape and the try-JSON-then-protobuf decode order have no RFC/registry home and are a historical runtime/SDK convention documented in each consumer's own decode path. The \"json first\" order above is qualified, in all three consumers, by a canonicality tie-break: a successful JSON parse is trusted only when the same bytes do NOT also round-trip byte-identically through the canonical protobuf encoding (macp-sdk-typescript issue #104, macp-sdk-python PR #77, macp-runtime issue #192). The collision_* vectors below pin four of the byte-level cases that tie-break exists for -- at value byte-lengths 10, 13, 32 and 123 the proto tag and length-varint bytes are themselves insignificant JSON whitespace (or, at 123, the literal \"{\"), so a JSON-first decoder without the tie-break can misread a genuine canonical-proto payload. The band is wider than these four (macp-sdk-typescript's docblock names lengths 9, 10, 13, 32, 34, 45, 48, 49-57 and 123, from its own 1-127 sweep); these four are pinned as the documented instances of it. Length 10 is the odd one out, and structurally so: the shortest legacy-shaped object is {\"value\":\"\"} at 12 bytes, so no 10-byte value can carry a value key at all -- when its JSON reading is an object at all, that object is necessarily a foreign one. Before the tie-break landed the three consumers did not even fail alike there -- macp-sdk-typescript coerced the absent key to the empty string (String(undefined ?? '')) and lost the value outright, while macp-sdk-python returned the foreign object uninterpreted. macp-runtime never needed the tie-break at that length: its legacy-JSON reader requires a value key, so it rejects that shape and falls through to proto regardless. All three now decode it correctly. macp-runtime applies the tie-break only at Session semantics_rev >= 3; a session it accepted before that shipped replays to the original, pre-tie-break decode by design (RFC-MACP-0003 replay determinism), so for those already-persisted histories these vectors describe the tie-break rather than that runtime's behavior.",
       "canonical_encoding": "protobuf",
       "decode_order": [
         "json",
@@ -176,6 +176,30 @@
           "value": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
           "protobuf_hex": "0a7f79797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979",
           "decode_only": true
+        },
+        {
+          "name": "collision_foreign_key_10",
+          "value": "{\"a\":\"xx\"}",
+          "protobuf_hex": "0a0a7b2261223a227878227d",
+          "legacy_json_hex": "7b2276616c7565223a227b5c22615c223a5c2278785c227d227d"
+        },
+        {
+          "name": "collision_leading_brace_13",
+          "value": "{\"value\":\"x\"}",
+          "protobuf_hex": "0a0d7b2276616c7565223a2278227d",
+          "legacy_json_hex": "7b2276616c7565223a227b5c2276616c75655c223a5c22785c227d227d"
+        },
+        {
+          "name": "collision_leading_brace_32",
+          "value": "{\"value\":\"aaaaaaaaaaaaaaaaaaaa\"}",
+          "protobuf_hex": "0a207b2276616c7565223a226161616161616161616161616161616161616161227d",
+          "legacy_json_hex": "7b2276616c7565223a227b5c2276616c75655c223a5c2261616161616161616161616161616161616161615c227d227d"
+        },
+        {
+          "name": "collision_no_leading_brace_123",
+          "value": "\"value\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+          "protobuf_hex": "0a7b2276616c7565223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161227d",
+          "legacy_json_hex": "7b2276616c7565223a225c2276616c75655c223a5c22616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161615c227d227d"
         }
       ]
     },
@@ -183,7 +207,7 @@
       "applies_to": [
         "macp-runtime"
       ],
-      "source": "convention -- macp-runtime rejects an empty Contribute payload; this is not yet a confirmed cross-SDK agreement (see schemas/parity/README.md Open items and the follow-up issue tracked in Open Questions)",
+      "source": "convention -- macp-runtime is the sole acceptance gate for this mode and rejects an empty Contribute payload (crates/macp-modes/src/mode/multi_round.rs, parse_contribute_value). applies_to names it alone deliberately and permanently, not pending confirmation: macp-sdk-python and macp-sdk-typescript have each decided NOT to gate an empty payload at decode time, and neither raises -- macp-sdk-python returns None, its documented \"nothing decodable\" sentinel, and macp-sdk-typescript decodes zero bytes to {} under proto3 defaults, its decode layer being observational rather than an acceptance gate. Neither could distinguish the two cases anyway: canonical proto3 gives ContributePayload.value no field presence, so an explicitly-empty value and an absent payload are the same zero bytes. That shared non-gating IS the cross-SDK agreement here -- it settles the question rather than leaving it open, and it is not the kind of agreement that would ever add an SDK to this section's applies_to.",
       "empty_payload": "reject"
     }
   }
