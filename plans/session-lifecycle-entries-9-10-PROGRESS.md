@@ -466,3 +466,5 @@ merged #206 (27220e8)
   wrong PR's diff.
 - **Next:** `/ship` PR 2 — commit this test addition, push, open PR, watch
   CI, merge.
+pushed fix/session-resume-banked-ms 8e85693
+PR #208 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/208
