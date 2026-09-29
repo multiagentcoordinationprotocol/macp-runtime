@@ -211,6 +211,8 @@ rpc ResumeSession(ResumeSessionRequest) returns (ResumeSessionResponse)
 
 **Request fields**: `session_id` (string), `reason` (string, optional).
 
+The runtime records a `SessionResumePayload` in the durable log (RFC-MACP-0001 §7.5, RFC-MACP-0003 §2), whose `banked_ms` field is the remaining TTL banked at suspend (`deadline - suspend_time`), not the pause's duration. This entry is informational only -- it consumes no accepted ordinal, is not delivered on a subscribe stream, and replay re-derives the banked duration from the suspend/resume entries' own recorded timestamps rather than trusting this field.
+
 ## Background maintenance
 
 Some state transitions are not driven by a client message at all. The runtime

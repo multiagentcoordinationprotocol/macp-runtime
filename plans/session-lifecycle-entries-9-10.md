@@ -529,7 +529,7 @@ different quantity than the spec names.
 
 ### Phase 2 — Correct `SessionResumePayload.banked_ms` to the normative quantity
 
-- **Status:** TODO
+- **Status:** DONE (2026-09-29)
 - **Risk:** complex — it changes the value of a field written permanently into
   append-only history. Logs already on disk keep the old quantity forever, so
   the field becomes generation-dependent. That is a one-way door for

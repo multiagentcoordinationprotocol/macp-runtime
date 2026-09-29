@@ -1139,25 +1139,46 @@ impl Runtime {
         }
 
         let now_ms = chrono::Utc::now().timestamp_millis();
-        // `banked_ms` on the wire payload is **informational only**. Both this
-        // value and the `SessionResume` entry's `received_at_ms` now come from
-        // the single `now_ms` read above, so it is exactly
-        // `resume_entry.received_at_ms - suspend_entry.received_at_ms` — i.e.
-        // equal to the value replay derives by construction. Replay still
-        // ignores it and re-derives the banked duration from the two entry
-        // timestamps (see the `SessionSuspend`/`SessionResume` arms of
-        // `replay::replay_entry`). Keep it that way: starting to consume
-        // `banked_ms` would change how *legacy* logs replay, because entries
-        // written before this change recorded a second, independently-read
-        // clock and their `banked_ms` can disagree with their timestamps.
-        let banked_before = session
+        // `banked_ms` on the wire payload records the remaining TTL banked at
+        // suspend — `deadline − t_s` (RFC-MACP-0001 §7.5, RFC-MACP-0003 §2) —
+        // computed from `session.ttl_expiry` and `session.suspended_at_ms`
+        // *before* `session.resume` below mutates either. `Session::suspend`
+        // (crates/macp-core/src/session.rs) never touches `ttl_expiry`, so at
+        // this point it still holds the pre-suspension deadline: exactly the
+        // spec's `deadline`. `now_ms` is deliberately not an input to this
+        // value — do not reintroduce it here.
+        //
+        // The field is informational only: replay ignores it and re-derives
+        // the banked duration from the two entries' recorded timestamps (see
+        // the `SessionSuspend`/`SessionResume` arms of `replay::replay_entry`)
+        // rather than trusting this value — RFC-MACP-0003 §2's own determinism
+        // argument rests on those timestamps, not on `banked_ms`. Keep it that
+        // way: consuming the field would make logs written before the change
+        // below replay to a different deadline than they do today, since they
+        // recorded a different quantity under this same field name (next
+        // paragraph).
+        //
+        // A resume that force-expires the session (the cap-exceeded arm below)
+        // still appends this entry carrying this value: the payload is built
+        // and the entry appended before `session.resume` runs, and the
+        // recorded value is never applied to a deadline the session goes on to
+        // have.
+        //
+        // Entries written before the commit that introduced this expression
+        // (`git log -S banked_ms -- src/runtime.rs`, or the commit that added
+        // this comment) recorded the pause's *duration* (`t_r − t_s`) under
+        // this same field name instead — with no discriminator between the
+        // two quantities. That is a pre-existing, accepted divergence (see
+        // docs/deployment.md's `log.jsonl` audit note), not something
+        // detectable from the field alone.
+        let banked_ms = session
             .suspended_at_ms
-            .map(|at| (now_ms - at).max(0))
+            .map(|suspended_at| session.ttl_expiry.saturating_sub(suspended_at).max(0))
             .unwrap_or(0);
         let payload = crate::pb::SessionResumePayload {
             reason: reason.to_string(),
             resumed_by: resumed_by.to_string(),
-            banked_ms: banked_before,
+            banked_ms,
         };
         let entry = Self::make_internal_entry(
             "SessionResume",

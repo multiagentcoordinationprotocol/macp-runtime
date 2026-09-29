@@ -285,7 +285,7 @@ cargo test --workspace 2>&1 | grep -E '^(test .* FAILED|failures:)'
 | Phase | Status | Commit | Notes |
 |---|---|---|---|
 | 1 | DONE | `c173c9e` | Opus verifier, round 1, PASS. See checkpoint below. |
-| 2 | TODO | — | |
+| 2 | DONE | (pending — committing next) | Opus verifier, round 1, PASS, no gaps. See checkpoint below. |
 | 3 | DONE | `0efa11a` | Opus verifier, round 1, PASS, no gaps. See checkpoint below. |
 | 4 | TODO | — | Record the two spec-issue URLs here |
 
@@ -354,3 +354,35 @@ point of the two-PR split.
   then start Phase 2 (PR 2) once PR 1 has merged.
 pushed feat/session-lifecycle-ordinal-conformance b4351ee8d06e367dc6698f828f3c454003c8b776
 PR #206 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/206
+merged #206 (27220e8)
+
+### Checkpoint — Phase 2 (2026-09-29)
+
+- **Verdict:** PASS, round 1, no gaps, fresh Opus subagent.
+- **Branch:** `fix/session-resume-banked-ms`, created off `main` at `27220e8` (PR
+  #206's merge commit).
+- **Files touched:** `src/runtime.rs` (`resume_session`'s `banked_ms` expression
+  and its rustdoc), `tests/integration_mode_lifecycle.rs` (+4 tests: criterion
+  3+4 combined, criterion 5's cycle-shrink, and the two edge cases), `docs/API.md`
+  (`ResumeSession` section), `docs/deployment.md` (`log.jsonl` audit-path note).
+- **Verification performed:** full workspace suite (`cargo test --workspace
+  --no-fail-fast`, all 36 suites green, all 4 new tests pass), tier-1 + tier-2
+  integration suite (128 + 8 JWT + 5 Rig tests, all green, tier-3 ignored as
+  expected — no `OPENAI_API_KEY`), `cargo clippy --workspace --all-targets`
+  (force-rechecked via `cargo clean -p macp-runtime` first, per the Phase 1/3
+  stale-cache lesson — clean), `cargo fmt --all -- --check` (found 2 formatting
+  nits in the new tests, fixed with `cargo fmt`, re-verified clean) — all
+  independently re-run by the verifier. Verifier also independently confirmed
+  via `grep -rn banked_ms` over `src crates tests integration_tests benches docs
+  README.md CLAUDE.md` that the field has zero readers anywhere in the
+  workspace (only the write site and this phase's own comments/tests/docs), and
+  independently read `src/replay.rs`'s `SessionResume` arm to confirm replay
+  never decodes the payload — corroborating the rustdoc's "informational only"
+  claim rather than trusting it.
+- **Gaps:** none. One non-blocking observation from the verifier (this table
+  showing Phase 2 as TODO mid-verification) — resolved by this checkpoint.
+- **Assumptions logged:** Q3 (replay does not consume the corrected `banked_ms`)
+  and Q4 (`fix(runtime):` without `!`, on measured zero-reader exposure) — both
+  `UNCONFIRMED` in `ASSUMPTIONS.md`, per the plan's explicit instruction on Q3.
+- **Next:** Phase 4 (same PR, per PR strategy) — rustdoc cross-links, `docs/`
+  sweep, backlog rewrite, upstream spec issues — then `/ship` PR 2.

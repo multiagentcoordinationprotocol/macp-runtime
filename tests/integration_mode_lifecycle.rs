@@ -1,9 +1,9 @@
 use chrono::Utc;
 use macp_runtime::log_store::LogStore;
-use macp_runtime::pb::{CommitmentPayload, Envelope, SessionStartPayload};
+use macp_runtime::pb::{CommitmentPayload, Envelope, SessionResumePayload, SessionStartPayload};
 use macp_runtime::registry::SessionRegistry;
 use macp_runtime::runtime::Runtime;
-use macp_runtime::session::SessionState;
+use macp_runtime::session::{Session, SessionState};
 use macp_runtime::storage::MemoryBackend;
 use prost::Message;
 use std::sync::Arc;
@@ -853,5 +853,261 @@ async fn cancel_session_does_not_consume_accepted_ordinals() {
          Checkpoint (compaction has no replace_log override on this backend) \
          — both non-ordinal-consuming, proving the entries were written and \
          excluded rather than never written"
+    );
+}
+
+/// RFC-MACP-0001 §7.5 / RFC-MACP-0003 §2: `SessionResumePayload.banked_ms`
+/// records the remaining TTL banked at suspend (`deadline − t_s`), not the
+/// pause's duration (`t_r − t_s`). The fixture's suspension is short (tens of
+/// ms) against a 60s TTL suspended almost immediately after start, so the two
+/// quantities differ by more than an order of magnitude — a `banked_ms` that
+/// still recorded the old (wrong) quantity could not pass the exact-equality
+/// assertion below by coincidence.
+#[tokio::test]
+async fn resume_banks_the_remaining_ttl_at_suspend_not_the_pause_duration() {
+    let storage: Arc<dyn macp_runtime::storage::StorageBackend> = Arc::new(MemoryBackend);
+    let registry = Arc::new(SessionRegistry::new());
+    let log_store = Arc::new(LogStore::new());
+    let rt = Runtime::new(storage, registry, Arc::clone(&log_store));
+
+    let mode = "macp.mode.decision.v1";
+    let sid = new_sid();
+    rt.process(
+        &envelope(
+            mode,
+            "SessionStart",
+            "m1",
+            &sid,
+            "agent://coordinator",
+            session_start(vec!["agent://coordinator".into(), "agent://alice".into()]),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // `Session::suspend` never touches `ttl_expiry`, so this pre-suspend
+    // snapshot is exactly the spec's `deadline` — the value the formula banks
+    // from.
+    let ttl_expiry_before = rt.get_session_checked(&sid).await.unwrap().ttl_expiry;
+
+    rt.suspend_session(&sid, "pause", "agent://coordinator")
+        .await
+        .unwrap();
+    let suspended_at = log_store
+        .get_log(&sid)
+        .await
+        .unwrap()
+        .last()
+        .unwrap()
+        .received_at_ms;
+
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    rt.resume_session(&sid, "carry on", "agent://coordinator")
+        .await
+        .unwrap();
+
+    let resume_entry = log_store
+        .get_log(&sid)
+        .await
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    let resumed_at = resume_entry.received_at_ms;
+    let payload = SessionResumePayload::decode(&*resume_entry.raw_payload).unwrap();
+
+    let expected_banked_ms = ttl_expiry_before.saturating_sub(suspended_at).max(0);
+    assert_eq!(
+        payload.banked_ms, expected_banked_ms,
+        "banked_ms must be the remaining TTL at suspend (RFC-MACP-0001 §7.5, \
+         RFC-MACP-0003 §2), not the pause's duration"
+    );
+
+    let pause_duration = resumed_at - suspended_at;
+    assert!(
+        payload.banked_ms > pause_duration * 10,
+        "fixture must distinguish the two quantities by more than an order of \
+         magnitude: banked_ms={}, pause_duration={}",
+        payload.banked_ms,
+        pause_duration
+    );
+
+    // Criterion 4: the deadline arithmetic itself is untouched by this phase
+    // — only the recorded field's quantity changed, not what the session's
+    // actual TTL banks.
+    let session_after = rt.get_session_checked(&sid).await.unwrap();
+    assert_eq!(
+        session_after.ttl_expiry,
+        ttl_expiry_before + (resumed_at - suspended_at),
+        "the TTL deadline must still bank exactly the pause's duration, \
+         unaffected by the banked_ms field's corrected quantity"
+    );
+}
+
+/// RFC-MACP-0003 §2's per-event formula makes `banked_ms` non-monotonic
+/// across suspend/resume cycles by design: each cycle's value is the
+/// remaining TTL as of *that* cycle's own suspend, which shrinks as the
+/// session ages. A later reader must not "fix" this into a monotonic
+/// quantity.
+///
+/// The clock advance between the first resume and the second suspend is
+/// load-bearing, not cosmetic: since a second suspend cannot precede the
+/// first resume, banked_2 <= banked_1 always, but the inequality is strict
+/// only when the second suspend happens strictly after the first resume.
+/// Without this sleep, a fast run could tie the two events at the same
+/// millisecond and a strict `<` assertion would flake.
+#[tokio::test]
+async fn banked_ms_shrinks_across_two_suspend_resume_cycles() {
+    let storage: Arc<dyn macp_runtime::storage::StorageBackend> = Arc::new(MemoryBackend);
+    let registry = Arc::new(SessionRegistry::new());
+    let log_store = Arc::new(LogStore::new());
+    let rt = Runtime::new(storage, registry, Arc::clone(&log_store));
+
+    let mode = "macp.mode.decision.v1";
+    let sid = new_sid();
+    rt.process(
+        &envelope(
+            mode,
+            "SessionStart",
+            "m1",
+            &sid,
+            "agent://coordinator",
+            session_start(vec!["agent://coordinator".into(), "agent://alice".into()]),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+
+    rt.suspend_session(&sid, "pause 1", "agent://coordinator")
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    rt.resume_session(&sid, "carry on 1", "agent://coordinator")
+        .await
+        .unwrap();
+    let banked_ms_1 = SessionResumePayload::decode(
+        &*log_store
+            .get_log(&sid)
+            .await
+            .unwrap()
+            .last()
+            .unwrap()
+            .raw_payload,
+    )
+    .unwrap()
+    .banked_ms;
+
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    rt.suspend_session(&sid, "pause 2", "agent://coordinator")
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    rt.resume_session(&sid, "carry on 2", "agent://coordinator")
+        .await
+        .unwrap();
+    let banked_ms_2 = SessionResumePayload::decode(
+        &*log_store
+            .get_log(&sid)
+            .await
+            .unwrap()
+            .last()
+            .unwrap()
+            .raw_payload,
+    )
+    .unwrap()
+    .banked_ms;
+
+    assert!(
+        banked_ms_2 < banked_ms_1,
+        "banked_ms must strictly shrink across cycles once the clock has \
+         genuinely advanced between them: banked_ms_1={banked_ms_1}, \
+         banked_ms_2={banked_ms_2}"
+    );
+}
+
+/// Edge case: a session suspended exactly at its deadline banks zero
+/// remaining TTL — legal, and distinguishable from "field absent" only by
+/// context.
+#[tokio::test]
+async fn banked_ms_is_zero_when_suspended_exactly_at_the_deadline() {
+    let storage: Arc<dyn macp_runtime::storage::StorageBackend> = Arc::new(MemoryBackend);
+    let registry = Arc::new(SessionRegistry::new());
+    let log_store = Arc::new(LogStore::new());
+    let sid = new_sid();
+    let mode = "macp.mode.decision.v1";
+
+    let deadline = 1_700_000_060_000;
+    let mut session = Session::builder(sid.clone(), mode, "agent://coordinator").build();
+    session.state = SessionState::Suspended;
+    session.ttl_expiry = deadline;
+    session.suspended_at_ms = Some(deadline);
+    registry
+        .insert_recovered_session(sid.clone(), session)
+        .await;
+
+    let rt = Runtime::new(storage, Arc::clone(&registry), Arc::clone(&log_store));
+    let _ = rt
+        .resume_session(&sid, "edge case", "agent://coordinator")
+        .await;
+
+    let entries = log_store.get_log(&sid).await.unwrap();
+    let resume_entry = entries
+        .iter()
+        .find(|e| e.message_type == "SessionResume")
+        .expect("SessionResume entry recorded even if resume itself later force-expires");
+    let payload = SessionResumePayload::decode(&*resume_entry.raw_payload).unwrap();
+    assert_eq!(
+        payload.banked_ms, 0,
+        "deadline - suspend_time == 0 when suspended exactly at the deadline"
+    );
+}
+
+/// Edge case: a builder-constructed session with `suspended_at_ms` set past
+/// `ttl_expiry` — unreachable through the ordinary suspend path, since
+/// `suspend_session` runs `maybe_expire_session` first, but constructible by
+/// a library consumer via `Session::builder` — must clamp `banked_ms` to
+/// zero rather than go negative or panic.
+#[tokio::test]
+async fn banked_ms_clamps_to_zero_when_suspended_at_is_past_the_deadline() {
+    let storage: Arc<dyn macp_runtime::storage::StorageBackend> = Arc::new(MemoryBackend);
+    let registry = Arc::new(SessionRegistry::new());
+    let log_store = Arc::new(LogStore::new());
+    let sid = new_sid();
+    let mode = "macp.mode.decision.v1";
+
+    let deadline = 1_700_000_000_000;
+    let mut session = Session::builder(sid.clone(), mode, "agent://coordinator").build();
+    session.state = SessionState::Suspended;
+    session.ttl_expiry = deadline;
+    session.suspended_at_ms = Some(deadline + 5_000); // inconsistent: past the deadline
+    registry
+        .insert_recovered_session(sid.clone(), session)
+        .await;
+
+    let rt = Runtime::new(storage, Arc::clone(&registry), Arc::clone(&log_store));
+    // Deliberately ignore the Result: `suspended_at_ms` here (a fixed point
+    // in 2023) is far in the past relative to the real wall clock
+    // `resume_session` reads for the *unrelated* MAX_SUSPEND_MS cap check
+    // inside `Session::resume`, which will force-expire this session —
+    // exactly the "still records banked_ms" case documented on
+    // `resume_session`. The value under test is the appended entry's
+    // payload, not this call's Result.
+    let _ = rt
+        .resume_session(&sid, "edge case", "agent://coordinator")
+        .await;
+
+    let entries = log_store.get_log(&sid).await.unwrap();
+    let resume_entry = entries
+        .iter()
+        .find(|e| e.message_type == "SessionResume")
+        .expect("SessionResume entry recorded even though resume force-expires");
+    let payload = SessionResumePayload::decode(&*resume_entry.raw_payload).unwrap();
+    assert_eq!(
+        payload.banked_ms, 0,
+        "ttl_expiry.saturating_sub(suspended_at) must clamp to 0, not go \
+         negative or panic, when suspended_at_ms is past ttl_expiry"
     );
 }
