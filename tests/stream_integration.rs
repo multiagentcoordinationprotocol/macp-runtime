@@ -324,3 +324,106 @@ async fn stream_subscribers_see_the_synthetic_envelope_in_order() {
     // Its envelope clock is the deadline, not the publish time.
     assert!(syn.timestamp_unix_ms < commit.timestamp_unix_ms);
 }
+
+// ---------------------------------------------------------------------------
+// RFC-MACP-0006 §3.2 — the live-StreamSession half of the ordinal/delivery
+// invariant for SessionSuspend/SessionResume/SessionCancel.
+// ---------------------------------------------------------------------------
+//
+// Contrast with `stream_subscribers_see_the_synthetic_envelope_in_order`
+// above: that test pins the *opposite* answer for the handoff synthetic
+// accept, which is a mode message with a spec-pinned sender and so DOES
+// consume an ordinal and DOES publish. These three entry kinds are runtime
+// bookkeeping (`sender == "_runtime"`, `EntryKind::Internal`) and must not.
+//
+// Citation scoping: `:117` ("MUST NOT consume ordinals") is unrestricted and
+// names all three types. `:122` ("MUST NOT deliver an internal annotation on
+// this stream") is textually scoped to "a subscribe stream" — the passive
+// `StreamSession` replay path pinned by
+// `subscribe_never_delivers_lifecycle_annotations` in
+// `integration_tests/tests/tier1_protocol/test_suspend_resume.rs`, which is
+// the clause that governs literally. The live path asserted here follows *a
+// fortiori* from `:117` plus `:120`'s counting argument ("a client can
+// determine its position only by counting the distinct accepted envelopes it
+// has been delivered"): this runtime's live and passive paths share one
+// `stream_bus` and one `get_incoming_after`, so a live subscriber counting its
+// position the same way must see the same exclusion.
+#[tokio::test]
+async fn stream_subscriber_never_sees_lifecycle_annotations() {
+    let rt = make_runtime();
+    let sid = new_sid();
+    let mode = "macp.mode.decision.v1";
+
+    let mut rx = rt.subscribe_session_stream(&sid);
+
+    rt.process(
+        &envelope(
+            mode,
+            "SessionStart",
+            "m1",
+            &sid,
+            "agent://orchestrator",
+            session_start(vec!["agent://orchestrator".into(), "agent://a".into()]),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+
+    rt.suspend_session(&sid, "pause", "agent://orchestrator")
+        .await
+        .unwrap();
+    rt.resume_session(&sid, "carry on", "agent://orchestrator")
+        .await
+        .unwrap();
+
+    let proposal = macp_runtime::decision_pb::ProposalPayload {
+        proposal_id: "p1".into(),
+        option: "deploy".into(),
+        rationale: "after resume".into(),
+        supporting_data: vec![],
+    }
+    .encode_to_vec();
+    rt.process(
+        &envelope(
+            mode,
+            "Proposal",
+            "m2",
+            &sid,
+            "agent://orchestrator",
+            proposal,
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+
+    rt.cancel_session(&sid, "done", "agent://orchestrator")
+        .await
+        .unwrap();
+
+    let mut received = Vec::new();
+    loop {
+        match rx.try_recv() {
+            Ok(env) => received.push(env.message_type),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+            // Treat a lag as a hard failure rather than folding it into
+            // `Empty` — these tests publish single-digit envelopes into a
+            // 256-capacity channel, so `Lagged` is unreachable today; a
+            // future capacity change should surface here as red, not a false
+            // pass.
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                panic!("subscriber lagged by {n} envelopes")
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+        }
+    }
+
+    assert_eq!(
+        received,
+        vec!["SessionStart".to_string(), "Proposal".to_string()],
+        "a live StreamSession subscriber must receive exactly the ordinal-\
+         consuming client envelopes, in order, and none of \
+         SessionSuspend/SessionResume/SessionCancel"
+    );
+}
