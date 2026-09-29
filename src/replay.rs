@@ -420,7 +420,7 @@ mod tests {
     use crate::decision_pb::ProposalPayload;
     use crate::decision_pb::VotePayload;
     use crate::log_store::EntryKind;
-    use crate::pb::{CommitmentPayload, SessionStartPayload};
+    use crate::pb::{CommitmentPayload, SessionResumePayload, SessionStartPayload};
     use prost::Message;
 
     fn make_registry() -> ModeRegistry {
@@ -880,6 +880,83 @@ mod tests {
             vec![(1_050, 1_300), (1_500, 1_600)],
             "the pre-checkpoint pause must come from the snapshot and the \
              post-checkpoint pause from the replayed tail"
+        );
+    }
+
+    /// Phase 2 of `plans/session-lifecycle-entries-9-10.md` corrected
+    /// `SessionResumePayload.banked_ms` to a value replay never reads. This
+    /// pins that replay genuinely ignores the payload rather than merely
+    /// happening to agree with it: a `SessionResume` entry whose `banked_ms`
+    /// disagrees wildly with the timestamp-derived banked duration must
+    /// still replay to the timestamp-derived deadline. If `replay_entry`'s
+    /// `SessionResume` arm ever started trusting the payload instead of
+    /// `session.resume(at)`'s timestamp-only computation, this assertion
+    /// would observe the wrong deadline.
+    #[test]
+    fn replay_ignores_a_disagreeing_banked_ms_payload() {
+        let registry = make_registry();
+        let start_payload = SessionStartPayload {
+            intent: "test".into(),
+            participants: vec!["agent://orchestrator".into(), "agent://fraud".into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            policy_version: String::new(),
+            ttl_ms: 60_000,
+            context_id: String::new(),
+            extensions: std::collections::HashMap::new(),
+            roots: vec![],
+            max_suspend_ms: 0,
+        }
+        .encode_to_vec();
+
+        let start_at = 1_000;
+        let suspend_at = 1_050;
+        let resume_at = 1_300;
+        // The timestamp-derived banked duration is resume_at - suspend_at =
+        // 250ms. Record a wildly different value in the payload itself so
+        // agreement can't happen by coincidence.
+        let resume_payload = SessionResumePayload {
+            reason: "test".into(),
+            resumed_by: "agent://orchestrator".into(),
+            banked_ms: 10_000,
+        }
+        .encode_to_vec();
+
+        let entries = vec![
+            incoming_entry(
+                "m1",
+                "SessionStart",
+                "agent://orchestrator",
+                start_payload,
+                start_at,
+            ),
+            internal_entry("SessionSuspend", suspend_at),
+            LogEntry {
+                message_id: String::new(),
+                received_at_ms: resume_at,
+                sender: "_runtime".into(),
+                message_type: "SessionResume".into(),
+                raw_payload: resume_payload,
+                entry_kind: EntryKind::Internal,
+                session_id: "s1".into(),
+                mode: "macp.mode.decision.v1".into(),
+                macp_version: "1.0".into(),
+                timestamp_unix_ms: resume_at,
+                bound_mode_version: None,
+                semantics_rev: 0,
+                bound_max_suspend_ms: None,
+                compacted_incoming_ordinals: 0,
+            },
+        ];
+
+        let session = replay_session("s1", &entries, &registry, None).unwrap();
+        assert_eq!(session.state, SessionState::Open);
+        assert_eq!(
+            session.ttl_expiry,
+            start_at + 60_000 + (resume_at - suspend_at),
+            "replay must derive the banked duration from the recorded \
+             suspend/resume timestamps (250ms here), never from the \
+             payload's banked_ms field (10000ms here)"
         );
     }
 

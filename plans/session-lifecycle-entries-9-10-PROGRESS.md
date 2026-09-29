@@ -431,3 +431,38 @@ merged #206 (27220e8)
   not a code, test, or issue-content defect. Closed by this same edit.
 - **Next:** all four phases DONE. Hand off to `/implement`'s §4 whole-plan
   finalization pass, then `/ship` PR 2.
+
+### Checkpoint — Whole-plan finalization pass (2026-09-29)
+
+- **Verdict:** PASS, fresh Opus subagent, reviewing the cumulative PR2 diff
+  (`27220e8...HEAD`, all 4 commits) against the plan as a whole — combined
+  `/implement` §4 finalization pass and `/ship` §2 verification gate in one
+  review, since both examine the same diff.
+- **Full suite re-run fresh:** `cargo test --workspace --no-fail-fast` (all
+  suites green), tier-1 gRPC (128), tier-1 JWT (8), tier-2 Rig (5), tier-3 (3
+  ignored, no `OPENAI_API_KEY` — expected), `clippy --workspace --all-targets`
+  (clean, force-rechecked via `cargo clean` across every workspace crate to
+  rule out a stale-cache false-clean), `fmt --check` (clean).
+- **One gap found and closed:** the verifier noted that `src/replay.rs`'s
+  `SessionResume` arm ignoring the payload (matching Phase 4's rustdoc claim)
+  had only indirect test coverage — no test constructed a `SessionResume`
+  entry whose `banked_ms` payload disagreed with the timestamp-derived value
+  and asserted replay follows the timestamp. Closed by adding
+  `replay_ignores_a_disagreeing_banked_ms_payload` to `src/replay.rs`'s test
+  module: constructs exactly that disagreement (payload says `10_000`ms,
+  timestamps say `250`ms) and asserts `session.ttl_expiry` reflects the
+  250ms figure. Mutation-proved directly: temporarily made the
+  `SessionResume` arm consume the payload's `banked_ms` into `ttl_expiry`,
+  confirmed the new test fails (`left: 71250, right: 61250`), then reverted.
+  Re-ran the full workspace suite, clippy, and fmt after the addition — all
+  clean.
+- **One item noted as pre-existing, out of scope for this diff, not fixed
+  here:** `PROGRESS.md`'s own Assumptions-to-log table lists A5 (Q5 — not
+  renaming `src/server.rs`'s test) alongside A1-A4, but no A5 entry exists in
+  `ASSUMPTIONS.md` — a miss from PR1's Phase 1 checkpoint (which logged only
+  Q1/Q2), not introduced by this diff. Q5 itself is a low-stakes style
+  decision already recorded in the plan's Open Questions section; left as a
+  future-cleanup note rather than backfilling an assumption entry on the
+  wrong PR's diff.
+- **Next:** `/ship` PR 2 — commit this test addition, push, open PR, watch
+  CI, merge.
