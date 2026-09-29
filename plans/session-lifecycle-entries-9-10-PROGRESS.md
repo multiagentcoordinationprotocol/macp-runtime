@@ -284,9 +284,9 @@ cargo test --workspace 2>&1 | grep -E '^(test .* FAILED|failures:)'
 
 | Phase | Status | Commit | Notes |
 |---|---|---|---|
-| 1 | DONE | (pending — committing next) | Opus verifier, round 1, PASS. See checkpoint below. |
+| 1 | DONE | `c173c9e` | Opus verifier, round 1, PASS. See checkpoint below. |
 | 2 | TODO | — | |
-| 3 | TODO | — | Executing next (PR 1, before Phase 2 — see PR strategy) |
+| 3 | DONE | (pending — committing next) | Opus verifier, round 1, PASS, no gaps. See checkpoint below. |
 | 4 | TODO | — | Record the two spec-issue URLs here |
 
 **Execution order note:** phases run 1 → 3 → 2 → 4, not the plan's numeric 1-2-3-4
@@ -332,3 +332,23 @@ point of the two-PR split.
   exist identically on base commit `8115e75`, before this diff. Not touched by
   this plan; not this phase's to fix.
 - **Next:** Phase 3 (same PR, per PR strategy), then `/ship` PR 1.
+
+### Checkpoint — Phase 3 (2026-09-29)
+
+- **Verdict:** PASS, round 1, no gaps, fresh Opus subagent.
+- **Files touched:** `src/replay.rs` only — the `_ => {}` catch-all in
+  `replay_entry`'s `EntryKind::Internal` match replaced with a `tracing::warn!`
+  carrying `session_id`, `message_type`, `received_at_ms`, plus a new test
+  `replay_warns_but_continues_on_unrecognized_internal_entry`. No `Err`, no
+  metrics counter, no rate limiting — all three explicitly rejected in the plan
+  and confirmed absent by the verifier.
+- **Verification performed:** `cargo test --lib replay::` (31/31), full
+  workspace suite, tier-1 gRPC suite (128 tests, unaffected as expected —
+  no wire behavior changed), `cargo clippy --workspace --all-targets -- -D
+  warnings` (re-forced with a `touch` to rule out a stale-cache false-clean),
+  `cargo fmt --all -- --check` — all clean, independently re-run by the
+  verifier. `replay_handles_ttl_expired`/`replay_handles_session_cancel`
+  confirmed unmodified and still passing.
+- **Gaps:** none.
+- **Next:** both PR 1 phases (1, 3) are DONE — hand off to `/ship` for PR 1,
+  then start Phase 2 (PR 2) once PR 1 has merged.

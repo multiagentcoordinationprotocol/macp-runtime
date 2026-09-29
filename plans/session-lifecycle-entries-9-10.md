@@ -712,7 +712,9 @@ different quantity than the spec names.
 
 ### Phase 3 — Make the replay reader loud about unrecognized runtime entries
 
-- **Status:** TODO
+- **Status:** DONE (2026-09-29). Implemented as specified; independently
+  verified PASS (fresh Opus subagent, round 1, no gaps) — see
+  `plans/session-lifecycle-entries-9-10-PROGRESS.md` for the checkpoint.
 - **Risk:** simple — one `tracing::warn!` in place of a silent arm, plus a test.
   Reversible in a commit; changes no state, no acceptance decision, no wire
   behavior.

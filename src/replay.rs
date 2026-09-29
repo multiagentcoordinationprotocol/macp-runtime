@@ -164,7 +164,25 @@ fn replay_entry(
                 };
                 let _ = session.resume(at);
             }
-            _ => {}
+            // An `Internal` entry this binary does not recognise (e.g. a log
+            // written by a newer runtime version). Warn, not error: this is
+            // runtime bookkeeping the *runtime itself* produced and owns the
+            // state effect of — unlike `Mode::validate_client_envelope`'s
+            // "stale reader" posture (crates/macp-modes/src/mode/mod.rs:80-82),
+            // which is about *client-submitted* mode state a reader must
+            // refuse loudly rather than misapply. Failing replay here would
+            // convert a forward-compatibility gap into an outage: a replay
+            // `Err` drops the session from the registry entirely on startup
+            // (src/main.rs's "failed to replay session; skipping"), or aborts
+            // startup under `MACP_STRICT_RECOVERY=1`.
+            other => {
+                tracing::warn!(
+                    session_id,
+                    message_type = other,
+                    received_at_ms = entry.received_at_ms,
+                    "replay: unrecognized internal log entry type; skipping"
+                );
+            }
         },
         EntryKind::Checkpoint => {
             // Skip intermediate checkpoints when replaying from an earlier one
@@ -569,6 +587,45 @@ mod tests {
         let session = replay_session("s1", &entries, &registry, None).unwrap();
         // RFC-MACP-0001 §7.3: cancellation now terminates as CANCELLED.
         assert_eq!(session.state, SessionState::Cancelled);
+    }
+
+    /// Phase 3 (session-lifecycle-entries-9-10): an `Internal` entry whose
+    /// `message_type` this binary does not recognise (e.g. one a newer
+    /// runtime version wrote) must still replay to `Ok`, with the session
+    /// otherwise correctly rebuilt — the change under test is observability
+    /// only (a `tracing::warn!` replacing a silent `_ => {}`), not a behavior
+    /// change. A message accepted *after* the unrecognized entry is included
+    /// to prove replay continues past it rather than merely not erroring.
+    #[test]
+    fn replay_warns_but_continues_on_unrecognized_internal_entry() {
+        let registry = make_registry();
+        let proposal = ProposalPayload {
+            proposal_id: "p1".into(),
+            option: "deploy".into(),
+            rationale: "after unrecognized entry".into(),
+            supporting_data: vec![],
+        }
+        .encode_to_vec();
+        let entries = vec![
+            incoming_entry(
+                "m1",
+                "SessionStart",
+                "agent://orchestrator",
+                start_payload_bytes(),
+                1000,
+            ),
+            internal_entry("SomeFutureRuntimeAnnotation", 2000),
+            incoming_entry("m2", "Proposal", "agent://orchestrator", proposal, 3000),
+        ];
+
+        let session = replay_session("s1", &entries, &registry, None)
+            .expect("an unrecognized Internal entry must not fail replay");
+        assert_eq!(session.state, SessionState::Open);
+        assert!(
+            session.seen_message_ids.contains("m1") && session.seen_message_ids.contains("m2"),
+            "replay must continue past the unrecognized entry and apply the \
+             message that follows it, not merely avoid erroring"
+        );
     }
 
     #[test]
