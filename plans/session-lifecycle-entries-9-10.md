@@ -798,7 +798,14 @@ different quantity than the spec names.
 
 ### Phase 4 — Settle the record: rustdoc, docs, backlog, upstream issues
 
-- **Status:** TODO
+- **Status:** DONE (2026-09-29). Upstream issues filed as **two**, folding ask
+  #3 into ask #1 as the plan's own approach permitted:
+  [multiagentcoordinationprotocol/multiagentcoordinationprotocol#159](https://github.com/multiagentcoordinationprotocol/multiagentcoordinationprotocol/issues/159)
+  (asks #1 and #3 — `SessionCancel`'s classification plus the missing
+  §7.5/§7.3 → §3.2 cross-reference) and
+  [multiagentcoordinationprotocol/multiagentcoordinationprotocol#160](https://github.com/multiagentcoordinationprotocol/multiagentcoordinationprotocol/issues/160)
+  (ask #2 — RFC-MACP-0010 §5.1(2)'s construction analogy and its wrong §7.5
+  anchor for `SessionCancel`).
 - **Risk:** simple — documentation, backlog, and upstream GitHub issues (three
   after Round 3, or two if #3 is folded into #1). No
   code path changes.

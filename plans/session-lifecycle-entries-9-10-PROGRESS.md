@@ -287,7 +287,7 @@ cargo test --workspace 2>&1 | grep -E '^(test .* FAILED|failures:)'
 | 1 | DONE | `c173c9e` | Opus verifier, round 1, PASS. See checkpoint below. |
 | 2 | DONE | `c7166aa` | Opus verifier, round 1, PASS, no gaps. See checkpoint below. |
 | 3 | DONE | `0efa11a` | Opus verifier, round 1, PASS, no gaps. See checkpoint below. |
-| 4 | TODO | — | Record the two spec-issue URLs here |
+| 4 | DONE | (pending — committing next) | Opus verifier, round 1, PASS. Issue URLs: multiagentcoordinationprotocol/multiagentcoordinationprotocol#159, #160. See checkpoint below. |
 
 **Execution order note:** phases run 1 → 3 → 2 → 4, not the plan's numeric 1-2-3-4
 order — Phase 3 explicitly says "sequenced after Phase 1 only for PR packaging,"
@@ -386,3 +386,48 @@ merged #206 (27220e8)
   `UNCONFIRMED` in `ASSUMPTIONS.md`, per the plan's explicit instruction on Q3.
 - **Next:** Phase 4 (same PR, per PR strategy) — rustdoc cross-links, `docs/`
   sweep, backlog rewrite, upstream spec issues — then `/ship` PR 2.
+
+### Checkpoint — Phase 4 (2026-09-29)
+
+- **Verdict:** PASS, round 1, fresh Opus subagent. One cosmetic gap found
+  (this table and this checkpoint were missing) — closed by this edit.
+- **Files touched:** `src/runtime.rs` (rustdoc on `make_internal_entry` +
+  reciprocal cross-link on `synthesize_due_accept`, plus a one-line pointer
+  comment at each of the three `make_internal_entry` call sites),
+  `src/replay.rs` (a note on the `Internal` match arm), `crates/macp-storage/src/log_store.rs`
+  (named the four entry types in `get_incoming_after`'s doc comment),
+  `docs/API.md` (`StreamSession` sharpened to the ordinal-consuming set;
+  `CancelSession`/`SuspendSession`/`ResumeSession` each gained the
+  sole-emitter/not-via-Send/no-ordinal/no-delivery paragraph),
+  `plans/defer/follow_ons.md` (item 9 → NOT A DEFECT — closed; item 10 →
+  DONE, citing `7c652b6` and this plan's Phase 2 for the `banked_ms` half).
+  No test changes — this phase is documentation/backlog/upstream-issues only,
+  as specified.
+- **Upstream issues filed** (folding the plan's ask #3 into ask #1, as the
+  plan's own approach permitted — two issues, not three):
+  [multiagentcoordinationprotocol/multiagentcoordinationprotocol#159](https://github.com/multiagentcoordinationprotocol/multiagentcoordinationprotocol/issues/159)
+  (`SessionCancel` classification + the §7.5/§7.3 → §3.2 cross-reference ask)
+  and
+  [multiagentcoordinationprotocol/multiagentcoordinationprotocol#160](https://github.com/multiagentcoordinationprotocol/multiagentcoordinationprotocol/issues/160)
+  (RFC-MACP-0010 §5.1(2)'s construction analogy and its wrong §7.5 anchor for
+  `SessionCancel`).
+- **Verification performed:** full workspace suite (`cargo test --workspace
+  --no-fail-fast`, all suites green — no test file touched by this phase, so
+  this confirms no regression from the doc-only diff), `cargo clippy
+  --workspace --all-targets` (clean), `cargo fmt --all -- --check` (clean),
+  and `cargo doc -p macp-runtime --no-deps --document-private-items` to
+  confirm the new intra-doc cross-links (`[`Self::make_internal_entry`]` /
+  `[`Self::synthesize_due_accept`]`) resolve with no broken-link warnings —
+  all independently re-run by the verifier. The verifier also independently
+  confirmed the "not submittable via `Send`" claim in the `docs/API.md`
+  edits against `src/server.rs`/`src/runtime.rs`'s actual message-type
+  dispatch (no mode recognizes `SessionCancel`/`SessionSuspend`/
+  `SessionResume` as a message type, so a client-submitted envelope of that
+  type cannot reach the internal-entry code path), and spot-checked the two
+  filed issues' RFC quotations character-for-character against the spec
+  repo's actual RFC text.
+- **Gaps found and closed:** this table's Phase 4 row and this checkpoint
+  section were missing when the verifier ran — a pure tracked-file omission,
+  not a code, test, or issue-content defect. Closed by this same edit.
+- **Next:** all four phases DONE. Hand off to `/implement`'s §4 whole-plan
+  finalization pass, then `/ship` PR 2.

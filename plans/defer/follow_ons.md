@@ -145,83 +145,121 @@ tier-1 policy-registry tests and `std_policies_all_require_vote_quorum`.
   (flagged in spec PR #48 for a future schema_version alongside any real
   participation-quorum field).
 
-## 9. `SessionSuspend`/`Resume`/`Cancel` are emitted as `Internal`, not accepted history
-**Confirmed non-conformance, found 2026-09-11 while settling Phase 11 of
-`plans/backlog-closeout-2026-09.md` against the RFC text** — not a
-speculative cleanup.
+## 9. `SessionSuspend`/`Resume`/`Cancel` are emitted as `Internal`, not accepted history — **NOT A DEFECT — closed** (2026-09-29)
+**Re-analyzed by `plans/session-lifecycle-entries-9-10.md` against RFC-MACP-0006
+§3.2, which did not exist when this item was written.** The item's premise —
+that RFC-MACP-0001 §7.5 requires these three envelopes in accepted history —
+is superseded by a later, more specific clause. This runtime's current
+`EntryKind::Internal` treatment is conformant, not a gap.
 
-RFC-MACP-0001 §7.5 puts the runtime-emitted `SessionSuspend`, `SessionResume`
-and `SessionCancel` envelopes **in the session's accepted history**. This
-runtime emits all three through `Runtime::make_internal_entry`
-(`src/runtime.rs:816,875,933`), which writes `EntryKind::Internal`,
-`sender: "_runtime"` and an empty `message_id`. `log_store.rs:128` counts
-accepted ordinals as `Incoming` only, so these entries are not in accepted
-history by this runtime's own definition of the term. They are also not
-mode-dispatched on replay, not published to `StreamSession` subscribers, and
-`replay.rs:162`'s `_ => {}` arm silently ignores `Internal` types it does not
-recognize — so an old binary replaying a newer log diverges with no error.
+**The two clauses, verbatim, and why the later one governs.** RFC-MACP-0006
+§3.2 (added 2026-08-30, PR #79 — "rfcs: specify the subscribe sequence, vote
+cardinality, and intent") states:
 
-Why it surfaced now: RFC-MACP-0010 §5.1(2) specifies the handoff synthetic
-accept as "the same construction as runtime-emitted `SessionSuspend`/
-`SessionResume`/`SessionCancel` envelopes (RFC-MACP-0001 §7.5)". Item 1 above
-therefore had to decide `Incoming` vs. `Internal` for the synthetic accept,
-and the RFC's analogy settles it as `Incoming` — which is what makes the
-existing `Internal` treatment of the other three a divergence rather than a
-defensible local choice. Item 1 deliberately scopes itself to the synthetic
-accept and does **not** fix these three; changing them is wire-visible
-(subscribers begin seeing three envelope types they never saw) and changes
-accepted ordinals for every existing session, so it needs its own
-`semantics_rev` gate and its own release note.
+> Entries a runtime records for its own bookkeeping — the `SessionSuspend` /
+> `SessionResume` annotations of RFC-MACP-0001 §7.5, TTL expiry, storage
+> checkpoints, and any other internal log entry — **MUST NOT consume
+> ordinals**. Client-visible ordinals are therefore contiguous.
 
-Not urgent: nothing is known to depend on the current behaviour, and the
-gap has existed since these envelopes were introduced. Sized as its own
-phase whenever it is picked up, not as a rider on other work.
+and:
 
-## 10. `make_internal_entry`'s second clock read can drop a session at startup
+> The envelopes delivered on a subscribe stream **MUST be exactly those that
+> consume ordinals.** A runtime **MUST NOT deliver an internal annotation** on
+> this stream: a client cannot distinguish it from an ordinal-consuming
+> envelope, and would over-count.
+
+RFC-MACP-0001 §7.5's "enter the accepted history" language that this item
+relied on was added 2026-06-22 ("Add session suspension, distinct
+cancellation state, and commitment supersession") — **over two months before**
+§3.2's explicit MUST NOTs. §3.2 is both later and more specific (it names
+`SessionSuspend`/`SessionResume` directly, and reaches `SessionCancel` through
+its trailing "any other internal log entry"), so it is the clause this runtime
+follows. §7.5's "accepted history" is read as "the durable, replayed log" —
+which `EntryKind::Internal` entries are already part of — not as "consumes an
+ordinal", the meaning this item assumed.
+
+**Why the original finding made a reasonable inference anyway.** RFC-MACP-0010
+§5.1(2) describes the handoff synthetic accept as "the same construction as
+runtime-emitted `SessionSuspend`/`SessionResume`/`SessionCancel` envelopes
+(RFC-MACP-0001 §7.5)" — read out of context, "the same construction" suggests
+entry-classification equivalence with the synthetic accept, which *is*
+`EntryKind::Incoming`. In context the analogy is scoped to one property (the
+timer is outside the replay boundary, its recorded product is inside), not to
+ordinal-consumption or delivery — but a reader without §3.2 in hand had no way
+to tell the two readings apart. `plans/session-lifecycle-entries-9-10.md`
+files an upstream issue proposing RFC-MACP-0001 §7.5/§7.3 gain a
+parenthetical cross-reference to §3.2, precisely so the next reader does not
+have to re-derive this.
+
+**Had this item been implemented as originally written, it would have been
+non-conformant** against both of §3.2's MUST NOTs above, and a one-way door
+besides: an older binary replaying a newer log would route these entries into
+`replay_entry`'s `Incoming` arm, where `mode.authorize_sender`
+(`crates/macp-modes/src/mode/mod.rs:169-174`) rejects `sender: "_runtime"`
+with `Forbidden` because `"_runtime"` is never in `session.participants` —
+`replay_session` then errors, and the session is either skipped at startup
+(`src/main.rs`, "failed to replay session; skipping") or aborts startup under
+`MACP_STRICT_RECOVERY=1`. Any session that had ever been suspended would
+vanish from the registry on downgrade. See `plans/session-lifecycle-entries-9-10.md`'s
+"Long-term posture" section for the full cost accounting.
+
+**What now guards this.** `tests/integration_mode_lifecycle.rs`'s
+`suspend_resume_does_not_consume_accepted_ordinals` and
+`cancel_session_does_not_consume_accepted_ordinals`, plus
+`tests/stream_integration.rs`'s `stream_subscriber_never_sees_lifecycle_annotations`
+and `integration_tests/tests/tier1_protocol/test_suspend_resume.rs`'s
+`subscribe_never_delivers_lifecycle_annotations`, pin exactly the two §3.2
+MUST NOTs above at both the storage layer and the live-delivery layer,
+through the real gRPC boundary. A future change that reclassified these
+entries would now fail loudly instead of silently.
+
+**The surviving sub-point — the silent `_ => {}` arm on an unrecognized
+`Internal` entry type — is closed by Phase 3** of the same plan: `replay.rs`
+now logs a structured `tracing::warn!` instead of ignoring it silently.
+
+## 10. `make_internal_entry`'s second clock read can drop a session at startup — **DONE** (7c652b6)
 **Found 2026-09-11 by the Phase 10 verifier of
 `plans/backlog-closeout-2026-09.md`, with the consequence analysis corrected
-upward from the executor's first read.**
+upward from the executor's first read. Fixed in `7c652b6`; the `banked_ms`
+half closed separately by `plans/session-lifecycle-entries-9-10.md` Phase 2
+(2026-09-29).**
 
-`RuntimeCore::suspend_session` (`src/runtime.rs:870`) and `resume_session`
-(`:923`) each take their own `Utc::now()` for the session mutation, while
-`make_internal_entry` (`:272`) takes a **second** `Utc::now()` for the log
-entry. So live `accumulated_suspended_ms` and the value replay reconstructs
-from recorded `received_at_ms` can differ.
+**The bug as originally found:** `RuntimeCore::suspend_session` and
+`resume_session` each took their own `Utc::now()` for the session mutation,
+while `make_internal_entry` took a **second** `Utc::now()` for the log entry,
+so live `accumulated_suspended_ms` and the value replay reconstructs from
+recorded `received_at_ms` could differ by up to ±1 ms at a tick boundary —
+small, but capable of flipping an implicit-accept accept/reject decision at
+the deadline, which made a live-`Resolved` session fail replay entirely and
+silently vanish from the registry on restart (`src/main.rs`, "failed to
+replay session; skipping"), or abort startup under `MACP_STRICT_RECOVERY=1`.
 
-**The window is genuinely tiny, and for a better reason than "it's fast":**
-between the two reads there is no `.await`, no lock acquisition and no I/O —
-two `to_string()`s and one `prost::encode_to_vec`, with the session mutex
-already held. It is not widened by fsync latency, lock contention or tokio
-scheduling, only by an OS preemption landing between two adjacent synchronous
-statements. Better still, the two errors **cancel**:
-`replay_banked − live_banked = δ_resume − δ_suspend`, a difference of two
-identically-shaped windows rather than a sum. Realistic bound: **±1 ms** from
-millisecond truncation at a tick boundary.
+**Fixed in `7c652b6`.** `make_internal_entry` now takes its clock as an
+injected `at_ms: i64` parameter (`src/runtime.rs:282-305`) rather than reading
+it itself, exactly as `make_incoming_entry(env, received_at_ms)` already did.
+Every call site now shares its caller's single clock read: `suspend_session`
+and `resume_session` (`src/runtime.rs`, both pass their own already-read
+`now_ms`), `cancel_session` (`now_ms`), and the two `TtlExpired` sites in
+`maybe_expire_session` and its startup-sweep counterpart (both pass `now`).
+One clock read per entry removes the whole class, not just the suspend/resume
+instance originally reported.
 
-**But the consequence is worse than a 1 ms deadline shift.** Since Phase 10
-this value feeds an implicit-accept accept/reject decision. If a 1 ms flip
-lands — only when unsuspended elapsed sits within 1 ms of
-`implicit_accept_timeout_ms` — the live session **Resolved** while replay
-yields `InvalidPayload`, so `replay_session` returns `Err`, `src/main.rs:385`
-logs `"failed to replay session; skipping"`, and **the session is never
-inserted into the registry**: it silently vanishes on restart. Under
-`MACP_STRICT_RECOVERY=1` startup aborts instead. `validate_replay_consistency`
-never runs in that arm, and would not catch it anyway — it compares neither
-`mode_state` nor `accumulated_suspended_ms` (see item 11). Probability tiny,
-severity high.
+**`tests/integration_mode_lifecycle.rs`'s
+`suspend_resume_entries_share_the_session_mutation_clock`** (originally added
+alongside the fix, at line 556) pins this: it asserts the live session's
+`accumulated_suspended_ms` and the value replay reconstructs from the
+recorded entry timestamps are identical, not merely close, across a
+suspend/resume cycle.
 
-**The fix is one line and kills the class for TTL banking too:** thread the
-already-read `now_ms` into `make_internal_entry` as a parameter, exactly as
-`make_incoming_entry(env, accepted_at)` already does (`runtime.rs:247`, `:540`,
-`:669`). Deferred out of Phase 10 only because Phase 11 already touches
-`runtime.rs`; it should land there.
-
-Related, same code path, much smaller: `SessionResumePayload.banked_ms`
-(`runtime.rs:924-931`) is computed from the live clock, while replay recomputes
-banking from `received_at_ms` (`replay.rs:159-166`) and **ignores the field
-entirely**. The log therefore persists a `banked_ms` that can disagree with the
-value replay derives. Dead and mildly misleading — either consume it on replay
-or document it as informational.
+**The related `banked_ms` half, flagged here as "dead and mildly
+misleading," is now closed by `plans/session-lifecycle-entries-9-10.md`
+Phase 2 (2026-09-29).** That phase corrected
+`SessionResumePayload.banked_ms` to record the RFC-normative quantity
+(`deadline − suspend_time`, RFC-MACP-0001 §7.5, RFC-MACP-0003 §2) rather than
+the live-clock-derived pause duration this item originally described, and
+documented — rather than resolved — the remaining asymmetry: replay still
+does not consume the field, by deliberate choice (see that plan's Q3), not
+because doing so was infeasible.
 
 ## 11. `validate_replay_consistency` compares neither `mode_state` nor suspension state
 Pre-existing, but its priority rose on 2026-09-11. `src/replay.rs:172-215`

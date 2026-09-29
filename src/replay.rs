@@ -136,6 +136,11 @@ fn replay_entry(
                 session.seen_message_ids.insert(replay_env.message_id);
             }
         }
+        // Every arm here replays a runtime-authored entry that, per
+        // RFC-MACP-0006 §3.2:117/:122, consumed no accepted ordinal and was
+        // never delivered on a subscribe stream when it was written
+        // (`src/runtime.rs`'s `make_internal_entry`) — replay does not change
+        // that, it only rebuilds session state from the recorded stamp.
         EntryKind::Internal => match entry.message_type.as_str() {
             "TtlExpired" => {
                 session.state = SessionState::Expired;

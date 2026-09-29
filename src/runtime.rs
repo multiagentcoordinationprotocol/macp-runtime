@@ -279,6 +279,21 @@ impl Runtime {
     /// of the deadline could make a live-`Resolved` session fail replay
     /// entirely and be skipped at startup (`src/main.rs`, "failed to replay
     /// session; skipping"). One clock read per entry removes the whole class.
+    ///
+    /// # Ordinal and delivery contract
+    ///
+    /// Every entry this helper produces is `EntryKind::Internal`. Per
+    /// RFC-MACP-0006 §3.2:117, `SessionSuspend`, `SessionResume`,
+    /// `SessionCancel`, TTL expiry, and checkpoint entries are runtime
+    /// bookkeeping, not accepted envelopes: they **consume no accepted
+    /// ordinal** (`crates/macp-storage/src/log_store.rs`'s `get_incoming_after`
+    /// filters to `EntryKind::Incoming` only) and, per §3.2:122, **MUST NOT be
+    /// delivered on a subscribe stream** (`Runtime::publish_accepted_envelope`
+    /// is never called from any of this helper's callers). This is the
+    /// deliberate opposite of [`Self::synthesize_due_accept`], whose synthetic
+    /// implicit-accept entry is `EntryKind::Incoming` and therefore does both —
+    /// see that method's rustdoc for the contrast and the RFC-MACP-0010
+    /// §5.1(2)/(3) argument for why it must.
     fn make_internal_entry(
         message_type: &str,
         payload: &[u8],
@@ -718,6 +733,18 @@ impl Runtime {
     ///    `message_id` is never inserted — only the synthetic's deterministic
     ///    id is — so re-sending a corrected message with that same id is still
     ///    accepted. No existing dedup-invariant test needed weakening.
+    ///
+    /// # Contrast with runtime-internal entries
+    ///
+    /// This is the one place the runtime originates an `EntryKind::Incoming`
+    /// entry rather than an `EntryKind::Internal` one (see
+    /// [`Self::make_internal_entry`]). The difference is not accidental: the
+    /// synthetic implicit accept is a *mode message* with a sender the RFC
+    /// pins (RFC-MACP-0010 §5.1(3)), so it consumes an accepted ordinal and is
+    /// published to `StreamSession` subscribers like any other accepted
+    /// envelope — whereas `SessionSuspend`/`SessionResume`/`SessionCancel`/TTL
+    /// expiry/checkpoint entries are bookkeeping RFC-MACP-0006 §3.2:117/:122
+    /// require be neither counted nor delivered.
     async fn synthesize_due_accept(
         &self,
         session_id: &str,
@@ -1029,6 +1056,8 @@ impl Runtime {
             reason: reason.to_string(),
             cancelled_by: cancelled_by.to_string(),
         };
+        // Internal, non-ordinal-consuming, not delivered — see
+        // `make_internal_entry`'s rustdoc for the RFC-MACP-0006 §3.2 contract.
         let cancel_entry = Self::make_internal_entry(
             "SessionCancel",
             &prost::Message::encode_to_vec(&cancel_payload),
@@ -1089,6 +1118,8 @@ impl Runtime {
             reason: reason.to_string(),
             suspended_by: suspended_by.to_string(),
         };
+        // Internal, non-ordinal-consuming, not delivered — see
+        // `make_internal_entry`'s rustdoc for the RFC-MACP-0006 §3.2 contract.
         let entry = Self::make_internal_entry(
             "SessionSuspend",
             &prost::Message::encode_to_vec(&payload),
@@ -1180,6 +1211,8 @@ impl Runtime {
             resumed_by: resumed_by.to_string(),
             banked_ms,
         };
+        // Internal, non-ordinal-consuming, not delivered — see
+        // `make_internal_entry`'s rustdoc for the RFC-MACP-0006 §3.2 contract.
         let entry = Self::make_internal_entry(
             "SessionResume",
             &prost::Message::encode_to_vec(&payload),
