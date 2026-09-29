@@ -1028,3 +1028,48 @@
   for the identical reason in `macp-sdk-python`. No specific evidence would definitively
   "confirm" this the way Phase 5 confirmed D50 — this stays open-ended low-priority
   observation, not a blocking question.
+
+## Item 9 (session-lifecycle backlog) is rejected, not implemented
+- **Plan:** `plans/session-lifecycle-entries-9-10.md` (Q1)
+- **Assumed:** The brief that produced this plan asked for an implementation plan for
+  `plans/defer/follow_ons.md` item 9 — routing `SessionSuspend`/`SessionResume`/`SessionCancel`
+  into `EntryKind::Incoming` so they consume accepted ordinals and reach subscribers, behind a
+  new `semantics_rev` gate — on the premise that this is "confirmed non-conformance" per
+  RFC-MACP-0001 §7.5's "they enter the accepted history" clause.
+- **Chose:** Rejected the premise instead. RFC-MACP-0006 §3.2:117 and :122 (dated 2026-08-30,
+  postdating §7.5's 2026-06-22 clause item 9 relied on) explicitly name these three envelope
+  types as bookkeeping that MUST NOT consume ordinals and MUST NOT be delivered on a subscribe
+  stream. Implementing item 9 would violate both verbatim MUST NOTs and would additionally break
+  replay outright (`replay_entry`'s `Incoming` arm calls `mode.authorize_sender` with
+  `sender == "_runtime"`, which every mode's default/handoff implementation refuses). Phase 1
+  of this plan instead pins the current (conformant) behavior with executable tests, so a future
+  attempt to implement item 9 as written reds the suite immediately.
+- **Alternatives:** Implement item 9 as briefed, accepting a `CURRENT_SEMANTICS_REV` bump to 4
+  and a considered local departure from RFC-MACP-0006 §3.2 (the plan's Q1 lays out the full
+  7-step alternative implementation in detail, should this decision be overridden).
+- **Blast radius if wrong:** Low to reverse locally (Phase 1's tests would simply need
+  inverting), but reversing it for real means shipping against two verbatim spec MUST NOTs
+  without an accepted upstream change first — see the companion upstream-issue asks in Phase 4.
+- **Status:** UNCONFIRMED — flagged for explicit user review because it reverses the original
+  brief, per the plan's own Q1. Not routed to Fable: the question is settled by two verbatim
+  MUST NOTs naming the exact envelope types, not a genuine judgment fork.
+
+## `SessionCancel` classified as an internal, non-ordinal-consuming annotation
+- **Plan:** `plans/session-lifecycle-entries-9-10.md` (Q2)
+- **Assumed:** RFC-MACP-0006 §3.2:117 enumerates `SessionSuspend`/`SessionResume`/TTL
+  expiry/checkpoints by name but not `SessionCancel`, which is covered only by the trailing
+  "and any other internal log entry." This is a genuine spec gap, not an explicit answer.
+- **Chose:** Treat `SessionCancel` as an internal annotation (no ordinal, no delivery) — i.e.,
+  no code change — on the strength of RFC-MACP-0001 §7.3:269 calling it a "terminal annotation"
+  (the same word §3.2:122 uses for what it prohibits delivering) and its structural similarity
+  to the other two named types (a Core control-plane side effect with an unspecified `sender`,
+  unlike the handoff synthetic accept whose `sender` the spec pins). Phase 1's
+  `cancel_session_does_not_consume_accepted_ordinals` test encodes this reading. Phase 4 files
+  an upstream issue asking for `SessionCancel` to be named explicitly in §3.2:117.
+- **Alternatives:** Treat the omission as meaning `SessionCancel` should consume an ordinal and
+  be delivered, i.e., implement it the way item 9 originally proposed for all three types.
+- **Blast radius if wrong:** Moderate — would require the same ordinal/delivery change item 9
+  proposes, scoped to just this one entry type, plus a `semantics_rev` gate for existing sessions.
+- **Status:** UNCONFIRMED — pending only in the sense that a future spec answer could contradict
+  this reading; the current behavior (which Phase 1 now pins with tests) is the defensible
+  default given the evidence above.

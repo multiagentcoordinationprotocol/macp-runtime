@@ -640,3 +640,218 @@ async fn suspend_resume_entries_share_the_session_mutation_clock() {
         session.accumulated_suspended_ms
     );
 }
+
+/// RFC-MACP-0006 §3.2:117 — `SessionSuspend`/`SessionResume` internal entries
+/// MUST NOT consume accepted ordinals. Client-visible ordinals stay
+/// contiguous across a suspend/resume cycle, and stay stable across a
+/// simulated runtime restart too (§3.2:123 — "An ordinal MUST be stable for
+/// the life of the session — across runtime restarts").
+///
+/// Every negative assertion here (the suspend/resume pair inserts no gap) is
+/// paired with a positive one (the exact expected ids and ordinals), so the
+/// test cannot pass by the feature having disappeared rather than by the
+/// invariant holding — see Phase 1 criterion 6 for the mutation proof that
+/// this test actually reds if `make_internal_entry` is changed to
+/// `EntryKind::Incoming`.
+#[tokio::test]
+async fn suspend_resume_does_not_consume_accepted_ordinals() {
+    let storage: Arc<dyn macp_runtime::storage::StorageBackend> = Arc::new(MemoryBackend);
+    let registry = Arc::new(SessionRegistry::new());
+    let log_store = Arc::new(LogStore::new());
+    let rt = Runtime::new(storage, registry, Arc::clone(&log_store));
+
+    let mode = "macp.mode.decision.v1";
+    let sid = new_sid();
+    rt.process(
+        &envelope(
+            mode,
+            "SessionStart",
+            "m1",
+            &sid,
+            "agent://coordinator",
+            session_start(vec!["agent://coordinator".into(), "agent://alice".into()]),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let proposal_before = macp_runtime::decision_pb::ProposalPayload {
+        proposal_id: "p1".into(),
+        option: "deploy".into(),
+        rationale: "before suspend".into(),
+        supporting_data: vec![],
+    }
+    .encode_to_vec();
+    rt.process(
+        &envelope(
+            mode,
+            "Proposal",
+            "m2",
+            &sid,
+            "agent://coordinator",
+            proposal_before,
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+
+    rt.suspend_session(&sid, "pause", "agent://coordinator")
+        .await
+        .unwrap();
+    rt.resume_session(&sid, "carry on", "agent://coordinator")
+        .await
+        .unwrap();
+
+    let proposal_after = macp_runtime::decision_pb::ProposalPayload {
+        proposal_id: "p2".into(),
+        option: "hold".into(),
+        rationale: "after resume".into(),
+        supporting_data: vec![],
+    }
+    .encode_to_vec();
+    rt.process(
+        &envelope(
+            mode,
+            "Proposal",
+            "m3",
+            &sid,
+            "agent://coordinator",
+            proposal_after,
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let ordinals = rt.log_store.get_incoming_after(&sid, 0).await.unwrap();
+    // Projected to (ordinal, message_id): `LogEntry` has no `PartialEq`
+    // (only `EntryKind` does), so a direct `assert_eq!` on the returned
+    // `Vec<(u64, LogEntry)>` does not compile.
+    let projection: Vec<(u64, String)> = ordinals
+        .iter()
+        .map(|(ordinal, entry)| (*ordinal, entry.message_id.clone()))
+        .collect();
+    assert_eq!(
+        projection,
+        vec![
+            (1, "m1".to_string()),
+            (2, "m2".to_string()),
+            (3, "m3".to_string())
+        ],
+        "SessionSuspend/SessionResume must not consume an accepted ordinal or \
+         appear in the ordinal-consuming sequence (RFC-MACP-0006 §3.2:117)"
+    );
+
+    let raw_log = log_store.get_log(&sid).await.unwrap();
+    assert_eq!(
+        raw_log.len(),
+        5,
+        "the durable log holds the 3 client envelopes plus the SessionSuspend \
+         and SessionResume internal annotations — proving the entries were \
+         written and excluded, not merely absent"
+    );
+
+    // Criterion 2a: the same projection survives a simulated restart.
+    // Deliberately NOT checked via `replay_session` on this same `LogStore` —
+    // `replay_session` rebuilds a `Session` and never touches the log, so
+    // that comparison would be vacuous. Build a fresh store and replay the
+    // collected entries into it the way startup does
+    // (`create_session_log` then `append` per entry, `src/main.rs:371-374`).
+    let restarted_store = LogStore::new();
+    restarted_store.create_session_log(&sid).await;
+    for entry in &raw_log {
+        restarted_store.append(&sid, entry.clone()).await;
+    }
+    let restarted_ordinals = restarted_store.get_incoming_after(&sid, 0).await.unwrap();
+    let restarted_projection: Vec<(u64, String)> = restarted_ordinals
+        .iter()
+        .map(|(ordinal, entry)| (*ordinal, entry.message_id.clone()))
+        .collect();
+    assert_eq!(
+        restarted_projection, projection,
+        "an ordinal must be stable across a runtime restart (RFC-MACP-0006 §3.2:123)"
+    );
+}
+
+/// RFC-MACP-0006 §3.2:117 — `SessionCancel` MUST NOT consume an accepted
+/// ordinal either. Runs on its own session, separately from the
+/// suspend/resume test above, because `cancel_session` is terminal and
+/// triggers `maybe_compact_log`, whose behavior forks on the storage backend:
+///
+/// - On `MemoryBackend` (used here), `replace_log` resolves to the trait's
+///   default impl, which returns `Err(Unsupported)`, so compaction fails and
+///   `force_insert_checkpoint` appends a `Checkpoint` entry with
+///   `compacted_incoming_ordinals: 0` instead — the log grows by **two**
+///   non-ordinal-consuming entries (`SessionCancel` + `Checkpoint`), and the
+///   before/after ordinal projection is unaffected.
+/// - On `FileBackend`, compaction succeeds and collapses the log to a single
+///   checkpoint with a nonzero `compacted_incoming_ordinals` base, so
+///   `get_incoming_after(&sid, 0)` would instead return `Err(base)` — a
+///   different, also-correct shape this test does not exercise (see
+///   `tests/handoff_implicit_accept_live.rs`'s two harnesses for that case).
+///
+/// Comparing before against after is stronger than an absolute count here,
+/// and is immune to the force-inserted checkpoint (its
+/// `compacted_incoming_ordinals: 0` cannot reset a base set by an earlier
+/// real compaction — there is none in this test — because the base is a
+/// `.max()` over checkpoints).
+#[tokio::test]
+async fn cancel_session_does_not_consume_accepted_ordinals() {
+    let storage: Arc<dyn macp_runtime::storage::StorageBackend> = Arc::new(MemoryBackend);
+    let registry = Arc::new(SessionRegistry::new());
+    let log_store = Arc::new(LogStore::new());
+    let rt = Runtime::new(storage, registry, Arc::clone(&log_store));
+
+    let mode = "macp.mode.decision.v1";
+    let sid = new_sid();
+    rt.process(
+        &envelope(
+            mode,
+            "SessionStart",
+            "m1",
+            &sid,
+            "agent://coordinator",
+            session_start(vec!["agent://coordinator".into(), "agent://alice".into()]),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let before = rt.log_store.get_incoming_after(&sid, 0).await.unwrap();
+    let before_projection: Vec<(u64, String)> = before
+        .iter()
+        .map(|(ordinal, entry)| (*ordinal, entry.message_id.clone()))
+        .collect();
+    let raw_len_before = log_store.get_log(&sid).await.unwrap().len();
+
+    rt.cancel_session(&sid, "done", "agent://coordinator")
+        .await
+        .unwrap();
+
+    let after = rt.log_store.get_incoming_after(&sid, 0).await.unwrap();
+    let after_projection: Vec<(u64, String)> = after
+        .iter()
+        .map(|(ordinal, entry)| (*ordinal, entry.message_id.clone()))
+        .collect();
+    assert_eq!(
+        after_projection, before_projection,
+        "SessionCancel must not consume an accepted ordinal (RFC-MACP-0006 §3.2:117)"
+    );
+    assert!(
+        !before_projection.is_empty(),
+        "the projection must contain the SessionStart entry, else the equality above is vacuous"
+    );
+
+    let raw_len_after = log_store.get_log(&sid).await.unwrap().len();
+    assert_eq!(
+        raw_len_after,
+        raw_len_before + 2,
+        "on MemoryBackend, cancel appends SessionCancel plus a force-inserted \
+         Checkpoint (compaction has no replace_log override on this backend) \
+         — both non-ordinal-consuming, proving the entries were written and \
+         excluded rather than never written"
+    );
+}
