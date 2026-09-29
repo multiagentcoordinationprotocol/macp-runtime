@@ -95,7 +95,10 @@ impl LogStore {
     /// (SessionStart) is 1. `after_sequence` is EXCLUSIVE: `0` replays from
     /// the start, `n` resumes after the n-th accepted envelope. Internal and
     /// Checkpoint entries never consume ordinals, so client-visible sequences
-    /// are contiguous and stable regardless of interleaved internal records.
+    /// are contiguous and stable regardless of interleaved internal records —
+    /// concretely, `SessionSuspend`/`SessionResume`/`SessionCancel`/`TtlExpired`
+    /// entries (`EntryKind::Internal`, per §3.2:117) are exactly the kind of
+    /// interleaved record this filter excludes from the sequence.
     ///
     /// (The previous implementation compared against the raw combined log
     /// index inclusively — non-contiguous, shifting with internal entries,

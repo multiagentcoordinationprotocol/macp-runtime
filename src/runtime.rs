@@ -279,6 +279,21 @@ impl Runtime {
     /// of the deadline could make a live-`Resolved` session fail replay
     /// entirely and be skipped at startup (`src/main.rs`, "failed to replay
     /// session; skipping"). One clock read per entry removes the whole class.
+    ///
+    /// # Ordinal and delivery contract
+    ///
+    /// Every entry this helper produces is `EntryKind::Internal`. Per
+    /// RFC-MACP-0006 §3.2:117, `SessionSuspend`, `SessionResume`,
+    /// `SessionCancel`, TTL expiry, and checkpoint entries are runtime
+    /// bookkeeping, not accepted envelopes: they **consume no accepted
+    /// ordinal** (`crates/macp-storage/src/log_store.rs`'s `get_incoming_after`
+    /// filters to `EntryKind::Incoming` only) and, per §3.2:122, **MUST NOT be
+    /// delivered on a subscribe stream** (`Runtime::publish_accepted_envelope`
+    /// is never called from any of this helper's callers). This is the
+    /// deliberate opposite of [`Self::synthesize_due_accept`], whose synthetic
+    /// implicit-accept entry is `EntryKind::Incoming` and therefore does both —
+    /// see that method's rustdoc for the contrast and the RFC-MACP-0010
+    /// §5.1(2)/(3) argument for why it must.
     fn make_internal_entry(
         message_type: &str,
         payload: &[u8],
@@ -718,6 +733,18 @@ impl Runtime {
     ///    `message_id` is never inserted — only the synthetic's deterministic
     ///    id is — so re-sending a corrected message with that same id is still
     ///    accepted. No existing dedup-invariant test needed weakening.
+    ///
+    /// # Contrast with runtime-internal entries
+    ///
+    /// This is the one place the runtime originates an `EntryKind::Incoming`
+    /// entry rather than an `EntryKind::Internal` one (see
+    /// [`Self::make_internal_entry`]). The difference is not accidental: the
+    /// synthetic implicit accept is a *mode message* with a sender the RFC
+    /// pins (RFC-MACP-0010 §5.1(3)), so it consumes an accepted ordinal and is
+    /// published to `StreamSession` subscribers like any other accepted
+    /// envelope — whereas `SessionSuspend`/`SessionResume`/`SessionCancel`/TTL
+    /// expiry/checkpoint entries are bookkeeping RFC-MACP-0006 §3.2:117/:122
+    /// require be neither counted nor delivered.
     async fn synthesize_due_accept(
         &self,
         session_id: &str,
@@ -1029,6 +1056,8 @@ impl Runtime {
             reason: reason.to_string(),
             cancelled_by: cancelled_by.to_string(),
         };
+        // Internal, non-ordinal-consuming, not delivered — see
+        // `make_internal_entry`'s rustdoc for the RFC-MACP-0006 §3.2 contract.
         let cancel_entry = Self::make_internal_entry(
             "SessionCancel",
             &prost::Message::encode_to_vec(&cancel_payload),
@@ -1089,6 +1118,8 @@ impl Runtime {
             reason: reason.to_string(),
             suspended_by: suspended_by.to_string(),
         };
+        // Internal, non-ordinal-consuming, not delivered — see
+        // `make_internal_entry`'s rustdoc for the RFC-MACP-0006 §3.2 contract.
         let entry = Self::make_internal_entry(
             "SessionSuspend",
             &prost::Message::encode_to_vec(&payload),
@@ -1139,26 +1170,49 @@ impl Runtime {
         }
 
         let now_ms = chrono::Utc::now().timestamp_millis();
-        // `banked_ms` on the wire payload is **informational only**. Both this
-        // value and the `SessionResume` entry's `received_at_ms` now come from
-        // the single `now_ms` read above, so it is exactly
-        // `resume_entry.received_at_ms - suspend_entry.received_at_ms` — i.e.
-        // equal to the value replay derives by construction. Replay still
-        // ignores it and re-derives the banked duration from the two entry
-        // timestamps (see the `SessionSuspend`/`SessionResume` arms of
-        // `replay::replay_entry`). Keep it that way: starting to consume
-        // `banked_ms` would change how *legacy* logs replay, because entries
-        // written before this change recorded a second, independently-read
-        // clock and their `banked_ms` can disagree with their timestamps.
-        let banked_before = session
+        // `banked_ms` on the wire payload records the remaining TTL banked at
+        // suspend — `deadline − t_s` (RFC-MACP-0001 §7.5, RFC-MACP-0003 §2) —
+        // computed from `session.ttl_expiry` and `session.suspended_at_ms`
+        // *before* `session.resume` below mutates either. `Session::suspend`
+        // (crates/macp-core/src/session.rs) never touches `ttl_expiry`, so at
+        // this point it still holds the pre-suspension deadline: exactly the
+        // spec's `deadline`. `now_ms` is deliberately not an input to this
+        // value — do not reintroduce it here.
+        //
+        // The field is informational only: replay ignores it and re-derives
+        // the banked duration from the two entries' recorded timestamps (see
+        // the `SessionSuspend`/`SessionResume` arms of `replay::replay_entry`)
+        // rather than trusting this value — RFC-MACP-0003 §2's own determinism
+        // argument rests on those timestamps, not on `banked_ms`. Keep it that
+        // way: consuming the field would make logs written before the change
+        // below replay to a different deadline than they do today, since they
+        // recorded a different quantity under this same field name (next
+        // paragraph).
+        //
+        // A resume that force-expires the session (the cap-exceeded arm below)
+        // still appends this entry carrying this value: the payload is built
+        // and the entry appended before `session.resume` runs, and the
+        // recorded value is never applied to a deadline the session goes on to
+        // have.
+        //
+        // Entries written before the commit that introduced this expression
+        // (`git log -S banked_ms -- src/runtime.rs`, or the commit that added
+        // this comment) recorded the pause's *duration* (`t_r − t_s`) under
+        // this same field name instead — with no discriminator between the
+        // two quantities. That is a pre-existing, accepted divergence (see
+        // docs/deployment.md's `log.jsonl` audit note), not something
+        // detectable from the field alone.
+        let banked_ms = session
             .suspended_at_ms
-            .map(|at| (now_ms - at).max(0))
+            .map(|suspended_at| session.ttl_expiry.saturating_sub(suspended_at).max(0))
             .unwrap_or(0);
         let payload = crate::pb::SessionResumePayload {
             reason: reason.to_string(),
             resumed_by: resumed_by.to_string(),
-            banked_ms: banked_before,
+            banked_ms,
         };
+        // Internal, non-ordinal-consuming, not delivered — see
+        // `make_internal_entry`'s rustdoc for the RFC-MACP-0006 §3.2 contract.
         let entry = Self::make_internal_entry(
             "SessionResume",
             &prost::Message::encode_to_vec(&payload),

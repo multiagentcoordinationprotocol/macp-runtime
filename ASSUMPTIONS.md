@@ -1073,3 +1073,50 @@
 - **Status:** UNCONFIRMED — pending only in the sense that a future spec answer could contradict
   this reading; the current behavior (which Phase 1 now pins with tests) is the defensible
   default given the evidence above.
+
+## Replay does not consume the corrected `SessionResumePayload.banked_ms`
+- **Plan:** `plans/session-lifecycle-entries-9-10.md` (Q3, Phase 2)
+- **Assumed:** RFC-MACP-0001 §7.5:318 and RFC-MACP-0003 §2:48 both describe `banked_ms` as
+  "recorded … for replay," which reads as an instruction for replay to consume it now that
+  Phase 2 makes the field correct.
+- **Chose:** Leave replay re-deriving the banked duration from the two entries' recorded
+  timestamps (`session.resume(at)` off the `SessionResume` entry's own timestamp — see
+  `src/replay.rs`'s `SessionResume` arm), never decoding the payload. Three reasons, in order
+  of weight: (1) legacy logs written before Phase 2 record the *wrong* quantity (the pause
+  duration) under the same field name with no discriminator, so consuming the field would
+  make those logs replay to a different deadline than they do today — the exact class of
+  break `semantics_rev` exists to prevent, and adding a discriminator costs a semver-major
+  `LogEntry` field for a value nothing reads; (2) the spec's own determinism argument rests on
+  the suspend/resume event timestamps, not on `banked_ms` (RFC-MACP-0003 §2:48 concludes
+  "every input to this computation … is on the replayed timeline," naming the timestamps); (3)
+  re-deriving from two recorded timestamps is strictly more robust than trusting a third
+  recorded value that must already agree with them.
+- **Alternatives:** Have replay decode and trust `banked_ms` going forward, gated by
+  `semantics_rev` so only post-Phase-2 logs are read that way.
+- **Blast radius if wrong:** Low today (replay behavior is unchanged by Phase 2 either way) but
+  moderate if reversed later — introducing a reader for this field now requires a
+  `semantics_rev` bump and a discriminator to avoid misreading legacy logs.
+- **Status:** UNCONFIRMED — logged per the plan's explicit instruction (Q3); the current
+  behavior (unchanged from before Phase 2) is the defensible default given the evidence above.
+
+## `banked_ms` correction shipped as `fix(runtime):`, not `fix(runtime)!:`
+- **Plan:** `plans/session-lifecycle-entries-9-10.md` (Q4, Phase 2)
+- **Assumed:** Correcting a value permanently recorded into append-only history is the kind of
+  change that would normally warrant a breaking-change marker.
+- **Chose:** Ship as `fix(runtime):`, unbreaking and ungated, based on measured exposure:
+  `grep -rn banked_ms` over `src crates tests integration_tests benches docs README.md
+  CLAUDE.md` (re-run during Phase 2 verification) returns only the write site and its own
+  comments/tests — zero readers anywhere in this workspace, zero mentions in `docs/`,
+  `README.md`, or `CLAUDE.md` before this phase's own doc updates — and the field is not
+  deliverable to clients, since the `SessionResume` entry is `EntryKind::Internal` and so
+  reaches neither `StreamSession` nor passive subscribe. The one surface where an operator
+  could have observed the old value is the documented `log.jsonl` audit path
+  (`docs/deployment.md:140`), which this phase updates in the same commit.
+- **Alternatives:** `fix(runtime)!:` with a deployment note, if an external consumer is known
+  to parse `log.jsonl` for `banked_ms` directly.
+- **Blast radius if wrong:** Low for this repo and its published clients (none observed to read
+  the field), but this entry is exactly the kind a future maintainer should re-check before
+  assuming `banked_ms` has never been consumed anywhere downstream.
+- **Status:** UNCONFIRMED — the "no known external consumer" premise is a scope statement
+  about what was searched, not a certainty about every downstream deployment; flip the commit
+  marker if that premise is ever contradicted.

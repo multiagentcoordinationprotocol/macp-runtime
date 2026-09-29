@@ -81,7 +81,7 @@ The runtime overrides `envelope.sender` with the authenticated identity. If the 
 
 ### StreamSession
 
-Provides bidirectional streaming scoped to a single session. Clients send envelopes and receive all accepted envelopes for that session in real time.
+Provides bidirectional streaming scoped to a single session. Clients send envelopes and receive the ordinal-consuming accepted envelopes for that session in real time -- runtime-internal bookkeeping entries (`SessionSuspend`, `SessionResume`, `SessionCancel`, TTL expiry, checkpoints) consume no accepted ordinal and are never delivered on this stream (RFC-MACP-0006 §3.2:122).
 
 ```protobuf
 rpc StreamSession(stream StreamSessionRequest) returns (stream StreamSessionResponse)
@@ -189,6 +189,8 @@ rpc CancelSession(CancelSessionRequest) returns (CancelSessionResponse)
 
 Only the session initiator can cancel. The runtime writes a `SessionCancelPayload` to the log with `cancelled_by` set to the authenticated sender. If the session is already terminal, the current state is returned without error.
 
+The runtime is the sole emitter of this entry -- a client cannot submit a `SessionCancel` envelope via `Send`. It enters the durable, replayed history but consumes no accepted ordinal and is not delivered on a subscribe stream (RFC-MACP-0006 §3.2:117/:122).
+
 ### SuspendSession
 
 Suspends an `OPEN` session (RFC-MACP-0001 §7.5). Like `CancelSession`, this is a core control-plane operation restricted to the session initiator or policy-delegated roles -- mode authorization does not apply.
@@ -201,6 +203,8 @@ rpc SuspendSession(SuspendSessionRequest) returns (SuspendSessionResponse)
 
 While suspended, mode traffic into the session is rejected. Time spent suspended is banked against the session's `max_suspend_ms` bound (from `SessionStartPayload`, defaulting to the runtime cap when 0); exceeding it expires the session.
 
+The runtime records a `SessionSuspendPayload` in the durable log with `suspended_by` set to the authenticated sender. The runtime is the sole emitter of this entry -- it is not submittable via `Send` -- and it enters the durable, replayed history but consumes no accepted ordinal and is not delivered on a subscribe stream (RFC-MACP-0006 §3.2:117/:122).
+
 ### ResumeSession
 
 Resumes a `SUSPENDED` session back to `OPEN`, banking the suspended duration into the TTL deadline. Same authority model as `SuspendSession`.
@@ -210,6 +214,8 @@ rpc ResumeSession(ResumeSessionRequest) returns (ResumeSessionResponse)
 ```
 
 **Request fields**: `session_id` (string), `reason` (string, optional).
+
+The runtime is the sole emitter of this entry -- it is not submittable via `Send`. The runtime records a `SessionResumePayload` in the durable log (RFC-MACP-0001 §7.5, RFC-MACP-0003 §2), whose `banked_ms` field is the remaining TTL banked at suspend (`deadline - suspend_time`), not the pause's duration. This entry enters the durable, replayed history but consumes no accepted ordinal, is not delivered on a subscribe stream (RFC-MACP-0006 §3.2:117/:122), and replay re-derives the banked duration from the suspend/resume entries' own recorded timestamps rather than trusting this field.
 
 ## Background maintenance
 

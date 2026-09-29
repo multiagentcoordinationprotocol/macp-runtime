@@ -285,9 +285,9 @@ cargo test --workspace 2>&1 | grep -E '^(test .* FAILED|failures:)'
 | Phase | Status | Commit | Notes |
 |---|---|---|---|
 | 1 | DONE | `c173c9e` | Opus verifier, round 1, PASS. See checkpoint below. |
-| 2 | TODO | — | |
+| 2 | DONE | `c7166aa` | Opus verifier, round 1, PASS, no gaps. See checkpoint below. |
 | 3 | DONE | `0efa11a` | Opus verifier, round 1, PASS, no gaps. See checkpoint below. |
-| 4 | TODO | — | Record the two spec-issue URLs here |
+| 4 | DONE | `bb4d2e5` | Opus verifier, round 1, PASS. Issue URLs: multiagentcoordinationprotocol/multiagentcoordinationprotocol#159, #160. See checkpoint below. |
 
 **Execution order note:** phases run 1 → 3 → 2 → 4, not the plan's numeric 1-2-3-4
 order — Phase 3 explicitly says "sequenced after Phase 1 only for PR packaging,"
@@ -354,3 +354,117 @@ point of the two-PR split.
   then start Phase 2 (PR 2) once PR 1 has merged.
 pushed feat/session-lifecycle-ordinal-conformance b4351ee8d06e367dc6698f828f3c454003c8b776
 PR #206 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/206
+merged #206 (27220e8)
+
+### Checkpoint — Phase 2 (2026-09-29)
+
+- **Verdict:** PASS, round 1, no gaps, fresh Opus subagent.
+- **Branch:** `fix/session-resume-banked-ms`, created off `main` at `27220e8` (PR
+  #206's merge commit).
+- **Files touched:** `src/runtime.rs` (`resume_session`'s `banked_ms` expression
+  and its rustdoc), `tests/integration_mode_lifecycle.rs` (+4 tests: criterion
+  3+4 combined, criterion 5's cycle-shrink, and the two edge cases), `docs/API.md`
+  (`ResumeSession` section), `docs/deployment.md` (`log.jsonl` audit-path note).
+- **Verification performed:** full workspace suite (`cargo test --workspace
+  --no-fail-fast`, all 36 suites green, all 4 new tests pass), tier-1 + tier-2
+  integration suite (128 + 8 JWT + 5 Rig tests, all green, tier-3 ignored as
+  expected — no `OPENAI_API_KEY`), `cargo clippy --workspace --all-targets`
+  (force-rechecked via `cargo clean -p macp-runtime` first, per the Phase 1/3
+  stale-cache lesson — clean), `cargo fmt --all -- --check` (found 2 formatting
+  nits in the new tests, fixed with `cargo fmt`, re-verified clean) — all
+  independently re-run by the verifier. Verifier also independently confirmed
+  via `grep -rn banked_ms` over `src crates tests integration_tests benches docs
+  README.md CLAUDE.md` that the field has zero readers anywhere in the
+  workspace (only the write site and this phase's own comments/tests/docs), and
+  independently read `src/replay.rs`'s `SessionResume` arm to confirm replay
+  never decodes the payload — corroborating the rustdoc's "informational only"
+  claim rather than trusting it.
+- **Gaps:** none. One non-blocking observation from the verifier (this table
+  showing Phase 2 as TODO mid-verification) — resolved by this checkpoint.
+- **Assumptions logged:** Q3 (replay does not consume the corrected `banked_ms`)
+  and Q4 (`fix(runtime):` without `!`, on measured zero-reader exposure) — both
+  `UNCONFIRMED` in `ASSUMPTIONS.md`, per the plan's explicit instruction on Q3.
+- **Next:** Phase 4 (same PR, per PR strategy) — rustdoc cross-links, `docs/`
+  sweep, backlog rewrite, upstream spec issues — then `/ship` PR 2.
+
+### Checkpoint — Phase 4 (2026-09-29)
+
+- **Verdict:** PASS, round 1, fresh Opus subagent. One cosmetic gap found
+  (this table and this checkpoint were missing) — closed by this edit.
+- **Files touched:** `src/runtime.rs` (rustdoc on `make_internal_entry` +
+  reciprocal cross-link on `synthesize_due_accept`, plus a one-line pointer
+  comment at each of the three `make_internal_entry` call sites),
+  `src/replay.rs` (a note on the `Internal` match arm), `crates/macp-storage/src/log_store.rs`
+  (named the four entry types in `get_incoming_after`'s doc comment),
+  `docs/API.md` (`StreamSession` sharpened to the ordinal-consuming set;
+  `CancelSession`/`SuspendSession`/`ResumeSession` each gained the
+  sole-emitter/not-via-Send/no-ordinal/no-delivery paragraph),
+  `plans/defer/follow_ons.md` (item 9 → NOT A DEFECT — closed; item 10 →
+  DONE, citing `7c652b6` and this plan's Phase 2 for the `banked_ms` half).
+  No test changes — this phase is documentation/backlog/upstream-issues only,
+  as specified.
+- **Upstream issues filed** (folding the plan's ask #3 into ask #1, as the
+  plan's own approach permitted — two issues, not three):
+  [multiagentcoordinationprotocol/multiagentcoordinationprotocol#159](https://github.com/multiagentcoordinationprotocol/multiagentcoordinationprotocol/issues/159)
+  (`SessionCancel` classification + the §7.5/§7.3 → §3.2 cross-reference ask)
+  and
+  [multiagentcoordinationprotocol/multiagentcoordinationprotocol#160](https://github.com/multiagentcoordinationprotocol/multiagentcoordinationprotocol/issues/160)
+  (RFC-MACP-0010 §5.1(2)'s construction analogy and its wrong §7.5 anchor for
+  `SessionCancel`).
+- **Verification performed:** full workspace suite (`cargo test --workspace
+  --no-fail-fast`, all suites green — no test file touched by this phase, so
+  this confirms no regression from the doc-only diff), `cargo clippy
+  --workspace --all-targets` (clean), `cargo fmt --all -- --check` (clean),
+  and `cargo doc -p macp-runtime --no-deps --document-private-items` to
+  confirm the new intra-doc cross-links (`[`Self::make_internal_entry`]` /
+  `[`Self::synthesize_due_accept`]`) resolve with no broken-link warnings —
+  all independently re-run by the verifier. The verifier also independently
+  confirmed the "not submittable via `Send`" claim in the `docs/API.md`
+  edits against `src/server.rs`/`src/runtime.rs`'s actual message-type
+  dispatch (no mode recognizes `SessionCancel`/`SessionSuspend`/
+  `SessionResume` as a message type, so a client-submitted envelope of that
+  type cannot reach the internal-entry code path), and spot-checked the two
+  filed issues' RFC quotations character-for-character against the spec
+  repo's actual RFC text.
+- **Gaps found and closed:** this table's Phase 4 row and this checkpoint
+  section were missing when the verifier ran — a pure tracked-file omission,
+  not a code, test, or issue-content defect. Closed by this same edit.
+- **Next:** all four phases DONE. Hand off to `/implement`'s §4 whole-plan
+  finalization pass, then `/ship` PR 2.
+
+### Checkpoint — Whole-plan finalization pass (2026-09-29)
+
+- **Verdict:** PASS, fresh Opus subagent, reviewing the cumulative PR2 diff
+  (`27220e8...HEAD`, all 4 commits) against the plan as a whole — combined
+  `/implement` §4 finalization pass and `/ship` §2 verification gate in one
+  review, since both examine the same diff.
+- **Full suite re-run fresh:** `cargo test --workspace --no-fail-fast` (all
+  suites green), tier-1 gRPC (128), tier-1 JWT (8), tier-2 Rig (5), tier-3 (3
+  ignored, no `OPENAI_API_KEY` — expected), `clippy --workspace --all-targets`
+  (clean, force-rechecked via `cargo clean` across every workspace crate to
+  rule out a stale-cache false-clean), `fmt --check` (clean).
+- **One gap found and closed:** the verifier noted that `src/replay.rs`'s
+  `SessionResume` arm ignoring the payload (matching Phase 4's rustdoc claim)
+  had only indirect test coverage — no test constructed a `SessionResume`
+  entry whose `banked_ms` payload disagreed with the timestamp-derived value
+  and asserted replay follows the timestamp. Closed by adding
+  `replay_ignores_a_disagreeing_banked_ms_payload` to `src/replay.rs`'s test
+  module: constructs exactly that disagreement (payload says `10_000`ms,
+  timestamps say `250`ms) and asserts `session.ttl_expiry` reflects the
+  250ms figure. Mutation-proved directly: temporarily made the
+  `SessionResume` arm consume the payload's `banked_ms` into `ttl_expiry`,
+  confirmed the new test fails (`left: 71250, right: 61250`), then reverted.
+  Re-ran the full workspace suite, clippy, and fmt after the addition — all
+  clean.
+- **One item noted as pre-existing, out of scope for this diff, not fixed
+  here:** `PROGRESS.md`'s own Assumptions-to-log table lists A5 (Q5 — not
+  renaming `src/server.rs`'s test) alongside A1-A4, but no A5 entry exists in
+  `ASSUMPTIONS.md` — a miss from PR1's Phase 1 checkpoint (which logged only
+  Q1/Q2), not introduced by this diff. Q5 itself is a low-stakes style
+  decision already recorded in the plan's Open Questions section; left as a
+  future-cleanup note rather than backfilling an assumption entry on the
+  wrong PR's diff.
+- **Next:** `/ship` PR 2 — commit this test addition, push, open PR, watch
+  CI, merge.
+pushed fix/session-resume-banked-ms 8e85693
+PR #208 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/208
