@@ -285,7 +285,7 @@ cargo test --workspace 2>&1 | grep -E '^(test .* FAILED|failures:)'
 | Phase | Status | Commit | Notes |
 |---|---|---|---|
 | 1 | DONE | `c173c9e` | Opus verifier, round 1, PASS. See checkpoint below. |
-| 2 | DONE | (pending — committing next) | Opus verifier, round 1, PASS, no gaps. See checkpoint below. |
+| 2 | DONE | `c7166aa` | Opus verifier, round 1, PASS, no gaps. See checkpoint below. |
 | 3 | DONE | `0efa11a` | Opus verifier, round 1, PASS, no gaps. See checkpoint below. |
 | 4 | TODO | — | Record the two spec-issue URLs here |
 
