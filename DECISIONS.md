@@ -658,3 +658,114 @@ accepted for the same reason).
   `/plan`), independently corroborated by Opus against live code before Phase 1 was written,
   and confirmed by the actual shipped implementation and its test suite (`plans/parse-contribute-value-192.md`,
   `plans/parse-contribute-value-192-PROGRESS.md`).
+
+---
+
+## 2026-09-29 — `plans/session-lifecycle-entries-9-10.md` closeout (4 entries)
+
+Reconciled at the end of the whole plan (both PRs — #206 for Phases 1+3, #208 for Phases
+2+4 — merged). Ranked by blast radius; none was a genuine one-way door (no schema/public-API/
+auth/data-migration/external-dependency lock-in), so all four were recommended on at the
+Opus tier rather than escalated to Fable, per the Autonomy ladder.
+
+### D7 — Item 9 (session-lifecycle backlog) is rejected, not implemented → **CONFIRMED**
+
+- **Origin:** `ASSUMPTIONS.md` "Item 9 (session-lifecycle backlog) is rejected, not
+  implemented" (Q1). The plan was originally briefed to implement `plans/defer/follow_ons.md`
+  item 9 — routing `SessionSuspend`/`SessionResume`/`SessionCancel` into `EntryKind::Incoming`
+  so they consume accepted ordinals and reach subscribers — on the premise that this was
+  "confirmed non-conformance" per RFC-MACP-0001 §7.5.
+- **Assumed:** RFC-MACP-0006 §3.2:117 and :122 (dated 2026-08-30, postdating §7.5's
+  2026-06-22 "accepted history" clause item 9 relied on) name these three envelope types as
+  bookkeeping that MUST NOT consume ordinals and MUST NOT be delivered on a subscribe
+  stream — so implementing item 9 would violate two verbatim MUST NOTs and would additionally
+  break replay outright (`_runtime`-sender rejection in `authorize_sender`).
+- **Recommendation:** the plan's own drafting process already routed this as "settled by two
+  verbatim MUST NOTs naming the exact envelope types, not a genuine judgment fork" rather than
+  a Fable-worthy design fork. It was independently re-confirmed twice more during
+  implementation — once by the Phase 1 verifier, once by the whole-plan finalization
+  verifier — both reproducing the citations themselves rather than trusting the report.
+- **Verdict:** CONFIRMED — not via a fresh `/reconcile`-stage analysis, but because the user
+  had already reviewed and stated this exact conclusion directly, in their own words, in the
+  message that requested this plan be implemented and shipped: *"Item 9 is rejected on the
+  merits — would violate RFC-MACP-0006 §3.2 and would break replay."* Re-litigating a
+  conclusion the user already reached and acted on would have been redundant, not thorough.
+  Recorded here rather than silently folded into "auto-settled," per `/reconcile`'s own rule
+  that nothing is confirmed without being named.
+- **Decided by:** the user (directly, in-conversation), corroborated by the plan's own
+  drafting review and two independent Opus phase/finalization verifiers.
+
+### D8 — `SessionCancel` classified as an internal, non-ordinal-consuming annotation → **CONFIRMED**
+
+- **Origin:** `ASSUMPTIONS.md` "`SessionCancel` classified as an internal,
+  non-ordinal-consuming annotation" (Q2). RFC-MACP-0006 §3.2:117 names `SessionSuspend`/
+  `SessionResume`/TTL-expiry/checkpoints explicitly but reaches `SessionCancel` only through
+  a trailing "and any other internal log entry" catch-all — a genuine spec gap, not settled
+  text.
+- **Assumed:** `SessionCancel` should be treated the same as the three named types (no
+  ordinal, no delivery), on the strength of RFC-MACP-0001 §7.3 calling it a "terminal
+  annotation" (matching §3.2's own word for what it prohibits delivering) and its structural
+  similarity to the other two (unspecified `sender`, unlike the handoff synthetic accept).
+- **Recommendation:** CONFIRM. A fresh Opus analysis independently re-verified both RFC
+  citations against the sibling spec repo's actual text (`rfcs/RFC-MACP-0006-transport-bindings.md:117-122`,
+  unchanged since `110add2`; `RFC-MACP-0001-core.md`'s §7.3 wording), re-confirmed the code
+  matches (`src/runtime.rs`'s `cancel_session`/`make_internal_entry`, `authorize_sender` in
+  `crates/macp-modes/src/mode/mod.rs:169-174`), and checked upstream issue #159 (filed same
+  day, asking the spec to name `SessionCancel` explicitly) — still open, no response, nothing
+  new to weigh. Recommends treating the reading as settled for engineering purposes rather
+  than blocking further work on the issue's eventual answer, since reversal remains a clean,
+  additive `semantics_rev`-gated change either way (precedent: the handoff synthetic accept
+  already uses this exact mechanism).
+- **Verdict:** CONFIRMED, no code change.
+- **Decided by:** Opus (fresh subagent, independent re-verification of citations and code).
+
+### D9 — Replay does not consume the corrected `SessionResumePayload.banked_ms` → **CONFIRMED**
+
+- **Origin:** `ASSUMPTIONS.md` "Replay does not consume the corrected
+  `SessionResumePayload.banked_ms`" (Q3, Phase 2). RFC-MACP-0001 §7.5 and RFC-MACP-0003 §2
+  both describe `banked_ms` as "recorded … for replay," which could read as an instruction
+  for replay to consume it now that its value is correct.
+- **Assumed:** replay should keep re-deriving the banked duration from the two entries'
+  recorded timestamps rather than decoding the payload, because (1) legacy logs record the
+  wrong quantity under the same field name with no discriminator, (2) RFC-MACP-0003 §2's own
+  determinism proof names the timestamps as replay's required input, not `banked_ms`, and (3)
+  re-deriving from two timestamps is more robust than trusting a third value that must already
+  agree with them.
+- **Recommendation:** CONFIRM. A fresh Opus analysis independently read the RFC text and
+  judged "recorded … for replay" as descriptive (what the field contains), not prescriptive
+  (a mandate that replay decode it) — and pointed out RFC-MACP-0003 §2:48's own determinism
+  proof settles the ambiguity itself by naming the timestamps and the session-bound cap, not
+  `banked_ms`, as the computation's inputs. Independently confirmed the code
+  (`src/replay.rs`'s `SessionResume` arm never touches `entry.raw_payload`) and the new
+  regression test `replay_ignores_a_disagreeing_banked_ms_payload`, which mutation-proves the
+  claim rather than merely asserting it.
+- **Verdict:** CONFIRMED, no code change. Adding a `semantics_rev`-gated reader later remains
+  a cheap, additive option if a real consumer ever materializes — not a door this decision
+  closes.
+- **Decided by:** Opus (fresh subagent, independent RFC reading and code verification).
+
+### D10 — `banked_ms` correction shipped as `fix(runtime):`, not `fix(runtime)!:` → **CONFIRMED**
+
+- **Origin:** `ASSUMPTIONS.md` "`banked_ms` correction shipped as `fix(runtime):`, not
+  `fix(runtime)!:`" (Q4, Phase 2). Correcting a value permanently recorded into append-only
+  history is the kind of change that would normally warrant a breaking-change marker under
+  this repo's `version_group = "macp"` lockstep release process.
+- **Assumed:** an ordinary `fix(runtime):` (no `!`) was the right marker, based on measured
+  exposure — a workspace-wide grep found zero readers of the field anywhere in `src crates
+  tests integration_tests benches docs README.md CLAUDE.md`, and the field is undeliverable
+  to any client since its carrying entry is `EntryKind::Internal`.
+- **Recommendation:** CONFIRM. A fresh Opus analysis independently re-ran the same grep
+  (still zero readers today), independently confirmed `EntryKind::Internal`'s exclusion from
+  both `StreamSession` delivery and passive-subscribe replay (`get_incoming_after`'s
+  `Incoming`-only filter), and weighed the harder question directly: since this runtime is a
+  published, open-source crate, is "zero readers in this workspace" sufficient grounds to
+  skip a breaking marker for a durably-persisted field, given an external consumer could in
+  principle scrape `log.jsonl` directly? Judged that the `!` marker governs the crate's Rust
+  API surface (what `cargo-semver-checks` polices), not a wire payload's corrected computed
+  value — the field's type and shape are unchanged, only the value is corrected to match the
+  RFC, and the one documented audit surface (`docs/deployment.md:140`) was updated in the same
+  commit as the fix, serving as its own deployment note.
+- **Verdict:** CONFIRMED, no follow-up commit needed. Re-check this call specifically if a
+  `log.jsonl`-scraping consumer is ever reported.
+- **Decided by:** Opus (fresh subagent, independent re-verification and judgment on the
+  published-crate exposure question).

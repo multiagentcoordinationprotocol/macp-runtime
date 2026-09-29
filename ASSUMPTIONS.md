@@ -1050,9 +1050,10 @@
 - **Blast radius if wrong:** Low to reverse locally (Phase 1's tests would simply need
   inverting), but reversing it for real means shipping against two verbatim spec MUST NOTs
   without an accepted upstream change first — see the companion upstream-issue asks in Phase 4.
-- **Status:** UNCONFIRMED — flagged for explicit user review because it reverses the original
-  brief, per the plan's own Q1. Not routed to Fable: the question is settled by two verbatim
-  MUST NOTs naming the exact envelope types, not a genuine judgment fork.
+- **Status:** CONFIRMED (2026-09-29) — via `/reconcile`. The user reviewed this exact
+  conclusion directly, in their own words, in the message that requested this plan be
+  implemented and shipped ("Item 9 is rejected on the merits — would violate
+  RFC-MACP-0006 §3.2 and would break replay"). See `DECISIONS.md`.
 
 ## `SessionCancel` classified as an internal, non-ordinal-consuming annotation
 - **Plan:** `plans/session-lifecycle-entries-9-10.md` (Q2)
@@ -1070,9 +1071,11 @@
   be delivered, i.e., implement it the way item 9 originally proposed for all three types.
 - **Blast radius if wrong:** Moderate — would require the same ordinal/delivery change item 9
   proposes, scoped to just this one entry type, plus a `semantics_rev` gate for existing sessions.
-- **Status:** UNCONFIRMED — pending only in the sense that a future spec answer could contradict
-  this reading; the current behavior (which Phase 1 now pins with tests) is the defensible
-  default given the evidence above.
+- **Status:** CONFIRMED (2026-09-29) — via `/reconcile`, fresh Opus analysis. See
+  `DECISIONS.md`. Independently re-verified both RFC citations and the code, found upstream
+  issue #159 (which asks the spec to settle this) still open with no response — recommends
+  treating the reading as settled for engineering purposes rather than blocking on the
+  issue's answer, since reversal remains a clean `semantics_rev`-gated addition either way.
 
 ## Replay does not consume the corrected `SessionResumePayload.banked_ms`
 - **Plan:** `plans/session-lifecycle-entries-9-10.md` (Q3, Phase 2)
@@ -1096,8 +1099,10 @@
 - **Blast radius if wrong:** Low today (replay behavior is unchanged by Phase 2 either way) but
   moderate if reversed later — introducing a reader for this field now requires a
   `semantics_rev` bump and a discriminator to avoid misreading legacy logs.
-- **Status:** UNCONFIRMED — logged per the plan's explicit instruction (Q3); the current
-  behavior (unchanged from before Phase 2) is the defensible default given the evidence above.
+- **Status:** CONFIRMED (2026-09-29) — via `/reconcile`, fresh Opus analysis. See
+  `DECISIONS.md`. Independently confirmed the RFC's "recorded … for replay" language is
+  descriptive, not prescriptive, and that RFC-MACP-0003 §2's own determinism proof names the
+  timestamps — not `banked_ms` — as replay's required input.
 
 ## `banked_ms` correction shipped as `fix(runtime):`, not `fix(runtime)!:`
 - **Plan:** `plans/session-lifecycle-entries-9-10.md` (Q4, Phase 2)
@@ -1117,6 +1122,9 @@
 - **Blast radius if wrong:** Low for this repo and its published clients (none observed to read
   the field), but this entry is exactly the kind a future maintainer should re-check before
   assuming `banked_ms` has never been consumed anywhere downstream.
-- **Status:** UNCONFIRMED — the "no known external consumer" premise is a scope statement
-  about what was searched, not a certainty about every downstream deployment; flip the commit
-  marker if that premise is ever contradicted.
+- **Status:** CONFIRMED (2026-09-29) — via `/reconcile`, fresh Opus analysis. See
+  `DECISIONS.md`. Independently re-ran the zero-readers grep (still zero), confirmed the
+  `EntryKind::Internal`/undeliverable-to-clients claim against current code, and judged that
+  the `!` marker governs the crate's Rust API surface, not a wire payload's corrected
+  computed value — no public contract broke. Re-check this call if a `log.jsonl`-scraping
+  consumer is ever reported.
