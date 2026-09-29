@@ -287,7 +287,7 @@ cargo test --workspace 2>&1 | grep -E '^(test .* FAILED|failures:)'
 | 1 | DONE | `c173c9e` | Opus verifier, round 1, PASS. See checkpoint below. |
 | 2 | DONE | `c7166aa` | Opus verifier, round 1, PASS, no gaps. See checkpoint below. |
 | 3 | DONE | `0efa11a` | Opus verifier, round 1, PASS, no gaps. See checkpoint below. |
-| 4 | DONE | (pending — committing next) | Opus verifier, round 1, PASS. Issue URLs: multiagentcoordinationprotocol/multiagentcoordinationprotocol#159, #160. See checkpoint below. |
+| 4 | DONE | `bb4d2e5` | Opus verifier, round 1, PASS. Issue URLs: multiagentcoordinationprotocol/multiagentcoordinationprotocol#159, #160. See checkpoint below. |
 
 **Execution order note:** phases run 1 → 3 → 2 → 4, not the plan's numeric 1-2-3-4
 order — Phase 3 explicitly says "sequenced after Phase 1 only for PR packaging,"
