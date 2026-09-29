@@ -352,3 +352,4 @@ point of the two-PR split.
 - **Gaps:** none.
 - **Next:** both PR 1 phases (1, 3) are DONE — hand off to `/ship` for PR 1,
   then start Phase 2 (PR 2) once PR 1 has merged.
+pushed feat/session-lifecycle-ordinal-conformance b4351ee8d06e367dc6698f828f3c454003c8b776
