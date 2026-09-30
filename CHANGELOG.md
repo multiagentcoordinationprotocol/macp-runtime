@@ -6,6 +6,17 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.8.5](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.4...macp-runtime-v0.8.5) - 2026-09-29
+
+### Fixed
+
+- *(runtime)* correct SessionResumePayload.banked_ms to the normative quantity ([#208](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/208))
+
+### Other
+
+- reconcile session-lifecycle-entries-9-10 assumptions ([#209](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/209))
+- *(runtime)* pin RFC-MACP-0006 §3.2 session-lifecycle ordinal/delivery invariant ([#206](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/206))
+
 ## [0.8.4](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.3...macp-runtime-v0.8.4) - 2026-09-28
 
 ### Fixed
