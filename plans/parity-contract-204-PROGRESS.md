@@ -85,5 +85,7 @@ convention so `/implement` doesn't have to cross-reference.)
   plan's one judgment call (pin at spec `main` rather than `45406dd`) was
   already decided and recorded in the plan itself before execution, not made
   ambiguously during it.
-- **Next:** `/ship` — commit, push, open PR (`Closes #204`), watch CI, merge on
-  green. No action needed on #205 (already closed in favor of #204).
+- pushed feat/parity-contract-204-1.2.0 819e6ed
+- PR #210 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/210
+- **Next:** watch CI, merge on green. No action needed on #205 (already closed
+  in favor of #204).
