@@ -1,6 +1,6 @@
 {
   "$comment": "This file is NON-NORMATIVE: it projects values whose actual normative homes (where one exists) are named per-section via that section's `source` field. This manifest MUST NOT itself be cited as a normative source -- cite the named RFC/registry/proto file instead. See schemas/parity/README.md for full context, the applies_to/source semantics, and the versioning rules.",
-  "contract_version": "1.1.1",
+  "contract_version": "1.2.0",
   "sections": {
     "protocol": {
       "applies_to": [
@@ -95,10 +95,12 @@
         "macp-sdk-python",
         "macp-sdk-typescript"
       ],
-      "source": "convention -- no RFC/registry home; macp-sdk-python/src/macp_sdk/base_projection.py and macp-sdk-typescript/src/projections/base.ts agree on kind strings, field set, and field order (Python's `kind` is typed as plain `str`, TypeScript's as a closed 2-value union -- the same runtime values, a narrower static contract in TS; noted here, not treated as drift). The `kinds` list is convention-sourced, so this manifest MIRRORS the two SDKs' agreement rather than originating it: a new kind lands here only after both SDKs agree on it, as a MINOR bump -- see the convention-sourced-list rule in schemas/parity/README.md. The open question of whether a discarded competing TaskAccept or an already-settled Handoff message should also record an anomaly is the SDKs' to settle (it is an observability record, not an acceptance decision -- RFC-MACP-0009 Section 5 and RFC-MACP-0010 Section 5 already require rejecting those messages)",
+      "source": "convention -- no RFC/registry home; macp-sdk-python/src/macp_sdk/base_projection.py and macp-sdk-typescript/src/projections/base.ts agree on kind strings, field set, and field order (Python's `kind` is typed as plain `str`, TypeScript's as a closed 4-value union -- the same runtime values, a narrower static contract in TS; noted here, not treated as drift). The `kinds` list is convention-sourced, so this manifest MIRRORS the two SDKs' agreement rather than originating it: a new kind lands here only after both SDKs agree on it, as a MINOR bump -- see the convention-sourced-list rule in schemas/parity/README.md. `duplicate_task_accept` and `settled_handoff` arrived at 1.2.0 under exactly that rule, after macp-sdk-python PR #95 and macp-sdk-typescript PR #134 landed both strings with identical spelling and identical declaration order. Be precise about how much they settle: the `frozen pending cross-SDK agreement` marker stood at six sites, all six in macp-sdk-typescript, and five are now resolved -- but only three of those five record anything (a TaskAccept that loses the session's one assignee slot; a HandoffAccept and a HandoffDecline against an already-settled handoff_id). The other two resolved the opposite way, as deliberate silent no-ops: an accept or decline naming a handoff_id the projection never saw offered is not caller misuse, since a projection that joined mid-session may legitimately never have observed the offer. The sixth site -- macp-sdk-typescript's DecisionProjection guard against a Vote arriving after Commitment -- is unresolved, and is a session-terminality phase regression rather than a settlement discard: both SDKs already agree on its behaviour (the phase does not regress and nothing is recorded) and differ only on whether that behaviour should carry a kind at all. It is deferred rather than tracked; no open issue anywhere covers it, macp-sdk-typescript issue #128 having scoped it out deliberately and since closed. No wire behaviour was ever in question here -- RFC-MACP-0009 Section 5 and RFC-MACP-0010 Section 5 already require rejecting the duplicate-accept cases -- and the two new kinds still arrive with zero conformance coverage in this repo; see schemas/parity/README.md's Open items for both qualifications",
       "kinds": [
         "duplicate_vote",
-        "duplicate_ballot"
+        "duplicate_ballot",
+        "duplicate_task_accept",
+        "settled_handoff"
       ],
       "fields": [
         "kind",
