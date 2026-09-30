@@ -6,6 +6,12 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.8.6](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.5...macp-runtime-v0.8.6) - 2026-09-30
+
+### Other
+
+- *(parity)* re-vendor contract.json at 1.2.0, bump SPEC_REV to 18f2332 ([#210](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/210))
+
 ## [0.8.5](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.4...macp-runtime-v0.8.5) - 2026-09-29
 
 ### Fixed
