@@ -97,4 +97,5 @@ intermediate state to split across two PRs or two phases, same as the `#204` pre
   --all-targets -- -D warnings` (all clean), and confirmed both the plan's
   correction and this file's trail accurately describe what happened.
 - pushed feat/parity-contract-215-1.3.0 61f45e4
-- **Next:** open PR closing #215, watch CI, merge on green.
+- PR #217 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/217
+- **Next:** watch CI, merge on green.
