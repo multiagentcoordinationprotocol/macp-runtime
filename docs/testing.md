@@ -16,7 +16,7 @@ Unit tests live inside `src/` modules under `#[cfg(test)]` and cover mode state 
 
 ### Parity contract
 
-`tests/parity_contract.rs` asserts every macp-runtime-relevant section of the spec repo's `schemas/parity/contract.json` -- a small, non-normative manifest pinning cross-implementation-agreed values (protocol version, mode-id sets, defaults, error codes, commitment-hash format, Contribute payload encoding) shared with `macp-sdk-python` and `macp-sdk-typescript` -- against this runtime's real, live code: `macp_core::MACP_VERSION`, the mode-registry constants, `is_canonical_commitment_hash`/`parse_contribute_value`, `MacpError::error_code()`, and `PolicyRegistry::register`.
+`tests/parity_contract.rs` asserts every macp-runtime-relevant section of the spec repo's `schemas/parity/contract.json` -- a small, non-normative manifest pinning cross-implementation-agreed values (protocol version, mode-id sets, defaults, error codes, commitment-hash format, Contribute payload encoding, Proposal mode's disposition domain) shared with `macp-sdk-python` and `macp-sdk-typescript` -- against this runtime's real, live code: `macp_core::MACP_VERSION`, the mode-registry constants, `is_canonical_commitment_hash`/`parse_contribute_value`, `MacpError::error_code()`, `PolicyRegistry::register`, and `macp_modes::mode::proposal::ProposalDisposition`.
 
 ```bash
 cargo test --test parity_contract

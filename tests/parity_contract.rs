@@ -12,13 +12,14 @@
 //!
 //! This runner asserts every section naming `"macp-runtime"` in `applies_to`
 //! (`protocol`, `modes`, `defaults`, `error_codes`, `commitment_hash`,
-//! `contribute_payload`, `contribute_acceptance` -- see `HANDLED` below)
-//! against this runtime's real, live code: `macp_core::MACP_VERSION`, the
-//! mode-registry constants, the `#[doc(hidden)]` predicates
-//! `is_canonical_commitment_hash`/`parse_contribute_value`, `MacpError::
-//! error_code()`, and `PolicyRegistry::register`. `retry` and
-//! `projection_anomaly` are SDK-only sections (absent from `applies_to` here)
-//! and are deliberately not asserted.
+//! `contribute_payload`, `contribute_acceptance`, `proposal_disposition` --
+//! see `HANDLED` below) against this runtime's real, live code:
+//! `macp_core::MACP_VERSION`, the mode-registry constants, the
+//! `#[doc(hidden)]` predicates `is_canonical_commitment_hash`/
+//! `parse_contribute_value`, `MacpError::error_code()`, `PolicyRegistry::
+//! register`, and `macp_modes::mode::proposal::ProposalDisposition`. `retry`
+//! and `projection_anomaly` are SDK-only sections (absent from `applies_to`
+//! here) and are deliberately not asserted.
 //!
 //! The manifest file loaded is `tests/parity/contract.json` by default (a
 //! byte-identical vendored copy -- see `tests/parity/SOURCE.md`), or the path
@@ -40,6 +41,7 @@ use macp_core::session::{
 };
 use macp_core::MACP_VERSION;
 use macp_modes::mode::multi_round::parse_contribute_value;
+use macp_modes::mode::proposal::ProposalDisposition;
 use macp_modes::mode::util::is_canonical_commitment_hash;
 use macp_modes::mode::{EXTENSION_MODE_NAMES, STANDARD_MODE_NAMES};
 use macp_policy::defaults::DEFAULT_POLICY_ID;
@@ -60,10 +62,11 @@ const HANDLED: &[&str] = &[
     "commitment_hash",
     "contribute_payload",
     "contribute_acceptance",
+    "proposal_disposition",
 ];
 
 /// Every section name the canonical schema currently defines -- `HANDLED`'s
-/// seven macp-runtime-relevant entries plus the two SDK-only sections
+/// eight macp-runtime-relevant entries plus the two SDK-only sections
 /// (`retry`, `projection_anomaly`). Used only for the sections-map
 /// key-allowlist check in `root_and_sections_have_no_unexpected_keys`; the
 /// coverage guards above use `HANDLED`, not this. Conflating the two would
@@ -77,6 +80,7 @@ const ALL_SECTIONS: &[&str] = &[
     "commitment_hash",
     "contribute_payload",
     "contribute_acceptance",
+    "proposal_disposition",
     "retry",
     "projection_anomaly",
 ];
@@ -543,5 +547,65 @@ fn contribute_acceptance_empty_payload_is_rejected() {
         result.is_err(),
         "parse_contribute_value(&[]) must be rejected per the manifest's \
          contribute_acceptance.empty_payload: reject"
+    );
+}
+
+// ─── proposal_disposition ───────────────────────────────────────────────
+
+/// Compile-time exhaustiveness guard for
+/// `proposal_disposition_mode_state_set_matches_runtime_enum`'s hand-enumerated
+/// `variants` array below. A `match` with no wildcard arm fails to compile
+/// (E0004) the moment `ProposalDisposition` gains a variant that isn't listed
+/// here -- without this, a third variant would simply never appear in
+/// `variants`, never reach `produced`, and the test would stay green as long
+/// as the manifest's `mode_state_dispositions` also happened not to name it.
+fn assert_proposal_disposition_is_exhaustively_covered(d: &ProposalDisposition) {
+    match d {
+        ProposalDisposition::Live | ProposalDisposition::Withdrawn => {}
+    }
+}
+
+#[test]
+fn proposal_disposition_mode_state_set_matches_runtime_enum() {
+    let contract = load_contract();
+    let sec = section(&contract, "proposal_disposition");
+    let dispositions: HashSet<&str> = str_array(sec, "mode_state_dispositions")
+        .into_iter()
+        .collect();
+
+    // ProposalDisposition is a plain (non-#[non_exhaustive]) 2-variant enum
+    // with no serde rename attributes, so its real Serialize impl -- not a
+    // hand-written string match that could drift from it -- is what "real
+    // code" means here, same spirit as error_codes' .error_code() calls.
+    let variants = [ProposalDisposition::Live, ProposalDisposition::Withdrawn];
+    let produced: HashSet<String> = variants
+        .iter()
+        .map(|d| {
+            assert_proposal_disposition_is_exhaustively_covered(d);
+            serde_json::to_value(d)
+                .unwrap()
+                .as_str()
+                .unwrap_or_else(|| panic!("ProposalDisposition serializes to a non-string"))
+                .to_string()
+        })
+        .collect();
+    let produced: HashSet<&str> = produced.iter().map(String::as_str).collect();
+
+    assert_eq!(
+        produced, dispositions,
+        "runtime ProposalDisposition variants do not match the manifest's \
+         proposal_disposition.mode_state_dispositions set"
+    );
+
+    // Proposal mode's disposition domain deliberately has no Accepted value
+    // (unlike Handoff's HandoffDisposition) -- acceptance is tracked
+    // separately via the per-sender accepts map, per this section's own
+    // acceptance_tracking field. Guard the asymmetry against silently
+    // regressing.
+    assert!(
+        !dispositions.contains("Accepted"),
+        "proposal_disposition.mode_state_dispositions must not include an \
+         acceptance-shaped value -- acceptance is tracked per-sender \
+         (acceptance_tracking), not as a disposition"
     );
 }

@@ -1,6 +1,6 @@
 {
   "$comment": "This file is NON-NORMATIVE: it projects values whose actual normative homes (where one exists) are named per-section via that section's `source` field. This manifest MUST NOT itself be cited as a normative source -- cite the named RFC/registry/proto file instead. See schemas/parity/README.md for full context, the applies_to/source semantics, and the versioning rules.",
-  "contract_version": "1.2.0",
+  "contract_version": "1.3.0",
   "sections": {
     "protocol": {
       "applies_to": [
@@ -211,6 +211,24 @@
       ],
       "source": "convention -- macp-runtime is the sole acceptance gate for this mode and rejects an empty Contribute payload (crates/macp-modes/src/mode/multi_round.rs, parse_contribute_value). applies_to names it alone deliberately and permanently, not pending confirmation: macp-sdk-python and macp-sdk-typescript have each decided NOT to gate an empty payload at decode time, and neither raises -- macp-sdk-python returns None, its documented \"nothing decodable\" sentinel, and macp-sdk-typescript decodes zero bytes to {} under proto3 defaults, its decode layer being observational rather than an acceptance gate. Neither could distinguish the two cases anyway: canonical proto3 gives ContributePayload.value no field presence, so an explicitly-empty value and an absent payload are the same zero bytes. That shared non-gating IS the cross-SDK agreement here -- it settles the question rather than leaving it open, and it is not the kind of agreement that would ever add an SDK to this section's applies_to.",
       "empty_payload": "reject"
+    },
+    "proposal_disposition": {
+      "applies_to": [
+        "macp-runtime",
+        "macp-sdk-python",
+        "macp-sdk-typescript"
+      ],
+      "source": "RFC-MACP-0008 Section 5 rule 2a (every live proposal is tracked independently) and rule 4 (a withdrawn proposal MUST NOT later be accepted or committed) ground mode_state_dispositions, held to schemas/conformance/proposal_happy_path.json's disposition \"Live\" and schemas/conformance/proposal_reject_paths.json's disposition \"Withdrawn\". projection_status_values is convention-sourced: macp-sdk-python's ProposalRecord.status (src/macp_sdk/proposal.py) and macp-sdk-typescript's ProposalRecord.status (src/projections/proposal.ts) agree on the values open/rejected/withdrawn and their declaration order (Python types status as plain str, TypeScript as a closed 3-value union -- the same runtime values, a narrower static contract in TS, the same asymmetry already noted for projection_anomaly.kind; not treated as drift). acceptance_tracking is grounded in RFC-MACP-0008 Section 5 rule 5 (a participant may change its acceptance target; the latest Accept from a participant supersedes earlier ones) and Section 7 (\"the same live proposal set, the same acceptance set\"), and held to the corpus: acceptance is a separate per-sender relation, never denormalized onto the proposal record. macp-runtime's ProposalDisposition enum {Live, Withdrawn} and its sibling sender-keyed accepts map (crates/macp-modes/src/mode/proposal.rs) agree with both SDKs. By contrast, Handoff mode's disposition domain DOES include Accepted -- macp-runtime's HandoffDisposition enum, macp-sdk-python's handoff.py status field, and schemas/conformance/handoff_reject_paths.json's expected_mode_state.offers disposition all agree -- confirming this is a Proposal-mode-specific asymmetry, not an inconsistency. Proposal's phase field is deliberately NOT pinned here: macp-runtime's ProposalPhase reaches a Converged value neither SDK's projection represents, a three-way disagreement schemas/parity/README.md forbids this manifest from hosting. This mirrors a decision macp-sdk-python issue #112 already settled and both SDKs already encode in their own source; this manifest does not originate it.",
+      "mode_state_dispositions": [
+        "Live",
+        "Withdrawn"
+      ],
+      "projection_status_values": [
+        "open",
+        "rejected",
+        "withdrawn"
+      ],
+      "acceptance_tracking": "per_sender"
     }
   }
 }
