@@ -36,7 +36,7 @@ env:
   # of truth -- and files one tracked issue when upstream moves ahead of it in a
   # way that touches the mirrored trees. Pin without that watcher and the gate
   # quietly rots; that pairing is the whole design.
-  SPEC_REV: "18f233229e6cb1156351c68614610a9d3bb40497"
+  SPEC_REV: "7159afe384f50b67c9c090796d926441eaa9acf4"
 
 jobs:
   actionlint:
@@ -655,7 +655,7 @@ jobs:
           MACP_CONFORMANCE_FIXTURES_DIR: ${{ github.workspace }}/spec-repo/schemas/conformance
         run: cargo test --test conformance_loader
 
-      # tests/parity_contract.rs currently defines 17 #[test] functions; a
+      # tests/parity_contract.rs currently defines 18 #[test] functions; a
       # bare `cargo test` exit code can't tell a passing suite from a
       # silently-renamed-or-#[ignore]d one (it exits 0 either way), so this
       # asserts the reported passed-count directly, same idea as the
@@ -668,8 +668,8 @@ jobs:
           log="${RUNNER_TEMP:-/tmp}/parity-contract.log"
           cargo test --test parity_contract | tee "$log"
           passed=$(grep -oE '^test result: ok\. [0-9]+ passed' "$log" | grep -oE '[0-9]+' | head -1)
-          if [ -z "$passed" ] || [ "$passed" -lt 17 ]; then
-            echo "::error::expected at least 17 parity_contract tests to pass, got '${passed:-0}' -- was a test renamed, skipped, or #[ignore]d?"
+          if [ -z "$passed" ] || [ "$passed" -lt 18 ]; then
+            echo "::error::expected at least 18 parity_contract tests to pass, got '${passed:-0}' -- was a test renamed, skipped, or #[ignore]d?"
             exit 1
           fi
 
