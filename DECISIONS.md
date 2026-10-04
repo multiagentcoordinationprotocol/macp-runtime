@@ -769,3 +769,111 @@ Opus tier rather than escalated to Fable, per the Autonomy ladder.
   `log.jsonl`-scraping consumer is ever reported.
 - **Decided by:** Opus (fresh subagent, independent re-verification and judgment on the
   published-crate exposure question).
+
+---
+
+## 2026-10-03 — `/reconcile` sweep of 5 remaining `UNCONFIRMED` entries
+
+None was a genuine one-way door — all five were docs-only, test-only, or contained to one
+already-shipped, already-tested function (per their own "Blast radius if wrong" notes) — so
+all five were recommended on at the Opus tier rather than escalated, as part of a routine
+"check what's pending" pass across the whole repo (issues, PRs, plans, branches) rather than
+a specific plan closeout.
+
+### D52 — `MACP_POLICY_SCHEMAS_DIR` documented in `docs/deployment.md`, not `CONTRIBUTING.md` → **CONFIRMED**
+
+- **Origin:** `ASSUMPTIONS.md` "`MACP_POLICY_SCHEMAS_DIR` documented in the operator-facing env
+  table" (`plans/spec-99-schema-version-3.md`, Phase 1). The entry's own text flagged
+  `CONTRIBUTING.md` as "arguably the better home" without checking.
+- **Assumed:** the row's placement in `docs/deployment.md`, clearly labeled "Development and CI
+  only; the server never reads it," was adequate but possibly in the wrong file.
+- **Recommendation:** CONFIRM as-is. A fresh Opus analysis re-verified all four of the entry's
+  factual claims still hold (`crates/macp-policy/src/registry.rs:1856-1873`'s `canonical_schema_dir`
+  still panics by design on a set-but-missing directory; grep confirms zero non-test, non-CI
+  readers repo-wide) and checked the proposed alternative directly: `CONTRIBUTING.md` carries no
+  env-var table at all, only two inline test vars in code blocks — so it was never actually a
+  better-documented home. `docs/testing.md`'s Configuration table is the real precedent for
+  dev/CI-only vars and already names this one in prose.
+- **Verdict:** CONFIRMED, no change. The "better home" alternative was mis-identified at write
+  time; current placement is accurate and unambiguous.
+- **Decided by:** Opus (fresh subagent, independent repo-wide grep and file read).
+
+### D53 — Extra Phase 1 test (`register_empty_weights_map_for_another_mode_succeeds`) guarding the mode-guard placement → **CONFIRMED**
+
+- **Origin:** `ASSUMPTIONS.md` "An extra Phase 1 test guarding the mode-guard placement"
+  (`plans/spec-99-schema-version-3.md`, Phase 1).
+- **Assumed:** this test, added beyond the plan's stated criteria, is the sole guard against a
+  specific regression (the raw-JSON `weights` non-empty check being hoisted above the
+  `macp.mode.decision.v1 | "*"` mode guard) and remains correctly targeted and non-redundant.
+- **Recommendation:** CONFIRM. A fresh Opus analysis independently re-ran the mutation proof —
+  hoisting the check above the guard (now at `crates/macp-policy/src/registry.rs:440`, drifted 3
+  lines from comment additions) reds exactly this one test across all 36 workspace test binaries,
+  with both criterion-5 tests and the other 203 `macp-policy` lib tests staying green — then
+  reverted cleanly (`git diff --stat` and `git status --short -uall` both empty). Also confirmed
+  the nearest integration coverage (`test_policy_registry.rs:600-654`) only exercises `weights`
+  under the Decision mode, so it cannot see this hoist; this unit test remains the sole catcher.
+- **Verdict:** CONFIRMED, no change.
+- **Decided by:** Opus (fresh subagent, independent mutation-proof re-run).
+
+### D54 — Hoisting the critical-objection scan to "check 0" rather than filtering deny reasons after the fact → **CONFIRMED**
+
+- **Origin:** `ASSUMPTIONS.md` "Hoisting the critical-objection scan above check 1 rather than
+  filtering deny reasons" (spec #126 alignment, closing this runtime's spec issue #117).
+- **Assumed:** computing `critical_veto: Option<String>` once as "check 0"
+  (`crates/macp-policy/src/evaluator.rs:223`, drifted from `:230`) and deriving the waiver from it
+  (`:256`, drifted from `:251`) — rather than collecting denials into a tagged structure and
+  filtering at the end — remains the right long-term shape after ~3 weeks and releases 0.8.3-0.8.7.
+- **Recommendation:** CONFIRM. A fresh Opus analysis read the function in full, confirmed all
+  three consumers of `critical_veto` still push their own deny/allow reason independently (no
+  reason is filtered or deferred), and checked git history: only one commit has touched
+  `evaluate_decision_commitment_outcome` since this landed (`6e4ca34`, test-only, +275 lines in
+  `mod tests`), so no later gate has been added that risked "silently escaping the waiver" — the
+  exact failure mode the rejected tagged-filter alternative was chosen to avoid. All four named
+  mutation-proof tests and the conformance fixture (`conformance_decision_finalize_decline_quorum_waiver`)
+  still exist and pass.
+- **Verdict:** CONFIRMED, no change. Citations corrected for line drift.
+- **Decided by:** Opus (fresh subagent, independent code read and git-history check).
+
+### D55 — `docs/deployment.md` item 10 (DENY → ALLOW widening for the objection-authorized decline) → **CONFIRMED**; census sentence corrected
+
+- **Origin:** `ASSUMPTIONS.md` "`docs/deployment.md` item 10 for a DENY → ALLOW widening" (spec
+  #126 alignment, closing this runtime's spec issue #117).
+- **Assumed:** item 10, and the "Resolved" bullet in `docs/policy.md` that replaced the old
+  hazard bullet, still accurately describe shipped behavior.
+- **Recommendation:** CONFIRM the content, with one fix. A fresh Opus analysis traced item 10's
+  claims against `crates/macp-policy/src/evaluator.rs` line-for-line (the `!outcome_positive` gate,
+  the evaluation-block waiver, the `require_vote_quorum` and voting-tri-state waivers, all keyed
+  off the same hoisted `critical_veto`) and found them accurate, confirmed `docs/policy.md`'s
+  "Resolved" bullet keeps the reproducer and states the pairing carries no caveat, and confirmed
+  no commit between 0.8.4 and 0.8.7 touched this logic. It also found a real, unrelated-to-content
+  staleness: `docs/deployment.md:19`'s section-intro census sentence still said "Nine changes...
+  one correction that lowers a bar (item 9)," never updated when item 10 (a second bar-lowering
+  change) was added.
+- **Verdict:** CONFIRMED. `docs/deployment.md:19` corrected in the same pass to "Ten changes...
+  two that lower a bar (items 9 and 10)."
+- **Decided by:** Opus (fresh subagent, independent line-for-line code/doc cross-check).
+
+### D56 — Closing the Contribute-payload reverse-direction-residual entry instead of leaving it permanently `UNCONFIRMED` → **CONFIRMED**
+
+- **Origin:** `ASSUMPTIONS.md` "Accepting the reverse-direction residual in
+  `parse_contribute_value`'s canonicality tie-break (issue #192)" (`plans/parse-contribute-value-192.md`,
+  Phase 1). The design question itself was already settled at D51; this entry's own text said no
+  evidence could ever "confirm" its narrower residual sub-point, yet it stayed tagged
+  `UNCONFIRMED` indefinitely.
+- **Assumed:** the entry's status should reflect that it is closed, not pending.
+- **Recommendation:** CHANGE the framing, not the substance. A fresh Opus analysis re-verified
+  D51 still matches, confirmed the pinning test
+  (`reverse_direction_residual_is_a_documented_trade_off_at_rev3`,
+  `crates/macp-modes/src/mode/multi_round.rs:914`) is unchanged since `#196` and still green in CI,
+  and confirmed the `decode_order` cross-implementation pin
+  (`tests/parity/contract.json`'s `contribute_payload.decode_order`) is unchanged — then argued
+  directly that "forever-`UNCONFIRMED`" is the wrong status for an entry whose own text says no
+  evidence could ever resolve it: it makes this file produce a permanent false positive for anyone
+  scanning it for real pending work, while the other four entries in this same sweep were genuinely
+  open. Recommended closing it as an accepted, unfalsifiable residual, keeping the observation
+  itself as a permanent note.
+- **Verdict:** CONFIRMED (2026-10-03) — closed. The observation (no known encoder produces this
+  byte shape; a future one would misinterpret, not crash) is preserved verbatim in
+  `ASSUMPTIONS.md`.
+- **Decided by:** Opus (fresh subagent, independent re-verification plus a judgment call on the
+  tracking convention itself).
