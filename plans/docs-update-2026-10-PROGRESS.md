@@ -222,8 +222,8 @@ tracking note — do not silently rewrite the paragraph.**
 | 3 | `after_sequence` exclusivity ×4 files + 2 heading anchors | simple | DONE | `bde43af` |
 | 4 | `docs/sdk-guide.md` — SDK cross-refs, proto list, error registry | simple | DONE | `8f131f1` |
 | 5 | `docs/policy.md` + `docs/API.md` — FORBIDDEN carve-out, §4 deviation, pin, **escalation** | **complex** | DONE | `c788041` |
-| 6 | version / enumeration / env-var sweep | simple | not started | |
-| 7 | `tests/conformance/SOURCE.md`, pin-claim fix, docker-compose | simple | not started | |
+| 6 | version / enumeration / env-var sweep | simple | DONE | `3f0a7ec` |
+| 7 | `tests/conformance/SOURCE.md`, pin-claim fix, docker-compose | simple | DONE | `9174c5c` |
 | 8 | `CLAUDE.md` (untracked — not in PR diff) | simple | not started | |
 
 Land **2 and 3 first** if the sweep is cut short — highest value per unit of risk.
@@ -337,3 +337,25 @@ Land **2 and 3 first** if the sweep is cut short — highest value per unit of r
 - **Files touched:** `docs/policy.md`, `docs/API.md`, `docs/examples.md`,
   `docs/deployment.md`, `DECISIONS.md`.
 - **Next:** Phase 6 (version, enumeration, env-var sweep).
+
+### Checkpoint — Phases 6 and 7 (2026-10-03)
+
+- **Verdict:** Both PASS, batched into one verify round (both tagged
+  `Risk: simple`, adjacent in plan order). Phase 6: every acceptance-criteria
+  grep re-run by the verifier and clean; all code citations
+  (`src/runtime.rs:27-34`, `src/server.rs:820`, five `src/main.rs` env-var
+  sites) independently confirmed; the env-var completeness diff's one
+  apparent gap (`MACP_TEST_REDIS_URL`) confirmed correctly out of scope.
+  Phase 7: `tests/conformance/SOURCE.md` confirmed structurally parallel to
+  `tests/parity/SOURCE.md` with matching sha/date; the pin-claim fix
+  confirmed to resolve the contradiction with `docs/testing.md`; `cargo test
+  --test parity_contract` re-run by the verifier, 18/18; `check_dir`'s glob
+  independently confirmed to exclude `SOURCE.md`.
+- **No gaps found in either phase.** Zero out-of-scope files touched in
+  either commit (confirmed via `git show --stat`).
+- **Files touched:** Phase 6 -- `README.md`, `docs/API.md`, `docs/README.md`,
+  `docs/architecture.md`, `docs/deployment.md`, `docs/examples.md`,
+  `docs/getting-started.md`. Phase 7 -- `docs/deployment.md`,
+  `docs/testing.md`, `tests/conformance/SOURCE.md` (new).
+- **Next:** Phase 8 (`CLAUDE.md`, untracked -- not in PR diff). After that,
+  finalize and `/ship`.

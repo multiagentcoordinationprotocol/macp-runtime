@@ -730,6 +730,13 @@ conformance the code does not have.
 
 ### Phase 6 — version, enumeration, and env-var sweep
 
+**Status: DONE** (`3f0a7ec`; batched with Phase 7 into 1 verify round, PASS).
+No divergence from the plan -- all changes applied as specified and confirmed
+against source (`src/runtime.rs:27-34`, `src/server.rs:820`,
+`src/main.rs`'s five env-var read sites, and a repo-wide env-var completeness
+diff whose one apparent gap, `MACP_TEST_REDIS_URL`, is correctly out of scope
+inside a `#[cfg(test)]` module).
+
 **Delivers** every remaining `0.5.0`-era string, the stale enumerations, and
 five production env vars missing from the deployment reference.
 
@@ -797,6 +804,16 @@ correction it does need is in Phase 7, item 2.)
 ---
 
 ### Phase 7 — provenance and operations: conformance SOURCE.md, the pin claim, docker-compose
+
+**Status: DONE** (`9174c5c`; batched with Phase 6 into 1 verify round, PASS).
+Divergence from the plan: `CLAUDE.md`'s `MACP_POLICY_SCHEMAS_DIR` paragraph,
+checked directly, does **not** currently carry the "at main with no pinned
+ref" wrong claim the plan expected it to mirror -- the plan's note describing
+a needed Phase 8 fix there is stale; confirmed by both the executor and the
+verifier via `grep -n 'no pinned ref' CLAUDE.md`. `cargo test --test
+parity_contract` (18/18) confirmed adding `tests/conformance/SOURCE.md` did
+not regress the parity suite, and `check_dir`'s `*.json`-only glob confirmed
+the new file cannot red the `conformance-oracle` job.
 
 **Delivers** the third pin-discipline gap, one factually wrong sentence, and the
 one undocumented added artifact.
