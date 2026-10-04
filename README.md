@@ -1,87 +1,34 @@
-# macp-runtime v0.5.0
+# macp-runtime
 
 Reference runtime for the Multi-Agent Coordination Protocol (MACP).
 
 This runtime implements the current MACP core/service surface, five standards-track modes, and one built-in extension mode. The focus of this release is freeze-readiness for SDKs and real-world unary and streaming integrations: strict `SessionStart`, mode-semantic correctness, authenticated senders, bounded resources, durable restart recovery, and extension mode lifecycle management.
 
-## What changed in v0.5.0
+## Recent changes
 
-The improvement-plan release (see `CHANGELOG.md` for the complete list):
+Release-by-release history lives in [`CHANGELOG.md`](CHANGELOG.md), which is
+generated from the commit history. A few changes since the 0.5.x line need
+action from consumers rather than just reading:
 
-- **Security**: dev-mode auth is opt-in (`MACP_ALLOW_INSECURE=1` required with no auth configured); HS256 removed from the default JWT allowlist; `WatchSignals` authenticated; JWKS hardening (timeouts, stale-cache grace, kid selection, single-flight refresh); handoff implicit-accept timing no longer trusts client timestamps.
-- **Determinism**: session-bound `max_suspend_ms` (recorded at SessionStart, used by replay); passive-subscribe sequence contract (1-based accepted-envelope ordinals, exclusive `after_sequence`, compaction-stable); extension-mode version binding recorded and replayed.
-- **Durability**: RocksDB appends fsync before ack; atomic Redis `replace_log`; corrupt-entry parity across backends; crash-atomic snapshot writes.
-- **Throughput**: per-session locking replaces the global write lock (−38% on the fsync-contended path); bounded memory (eviction covers registry, log cache, stream channels); tonic limits + graceful shutdown.
-- **Operations**: opt-in Prometheus metrics endpoint; disk retention/GC; replay-consistency validation at recovery; `MACP_POLICIES_DIR` (RFC-0012 §9 read-only registry profile); pluggable ingress `PolicyEngine`.
-- **Wire**: `ext.multi_round.v1` on the canonical proto payload (JSON still accepted for replay compatibility); Task mode accepts an external orchestrator (RFC-0009 conformance); quorum `threshold` is the RFC-0012 §4.2 approval bar.
-
-## What changed in v0.4.0
-
-- **Strict canonical `SessionStart` for standard modes**
-  - no empty payloads
-  - no implicit default mode
-  - explicit `mode_version`, `configuration_version`, and positive `ttl_ms`
-  - explicit unique participants for standards-track modes
-- **Decision Mode authority clarified**
-  - initiator/coordinator may emit `Proposal` and `Commitment`
-  - participants emit `Evaluation`, `Objection`, and `Vote`
-  - duplicate `proposal_id` values are rejected
-  - votes are tracked per proposal, per sender
-- **Proposal Mode commitment gating fixed**
-  - `Commitment` is accepted only after acceptance convergence or a terminal rejection
-- **Security boundary added**
-  - TLS-capable startup
-  - authenticated sender derivation via bearer token or dev header mode
-  - per-request authorization
-  - payload size limits
-  - rate limiting
-- **Durable local persistence**
-  - per-session append-only log files and session snapshots via `FileBackend`
-  - crash recovery with dedup state reconciliation
-  - atomic writes (tmp file + rename) prevent partial-write corruption
-- **Authoritative accepted history**
-  - log append failures are now fatal — messages are not acknowledged without a durable record
-  - session state is rebuilt from append-only logs on startup via replay (no snapshot dependency)
-  - `LogEntry` enriched with `session_id`, `mode`, `macp_version` for self-describing replay
-- **Session ID security policy**
-  - session IDs must be UUID v4/v7 (hyphenated lowercase) or base64url tokens (22+ chars)
-  - weak/human-readable IDs are rejected with `INVALID_SESSION_ID`
-- **Signal enforcement**
-  - Signals are strictly ambient — non-empty `session_id` or `mode` is rejected
-- **StreamSession enabled**
-  - `Initialize` advertises `stream: true`
-  - `StreamSession` provides per-session bidirectional streaming of accepted envelopes
-  - Passive subscribe (RFC-MACP-0006-A1): a `subscribe_session_id` + `after_sequence` frame replays accepted history and then delivers live envelopes; allowed for declared participants, the initiator, or observer identities
-  - `WatchModeRegistry` fires live `RegistryChanged` events on mode register/unregister/promote
-  - `WatchRoots` implemented (basic: send initial state, hold stream open)
-- **Extension mode lifecycle**
-  - `multi_round` demoted from standards-track to built-in extension (`ext.multi_round.v1`)
-  - `ListExtModes` returns extension mode descriptors
-  - `RegisterExtMode` dynamically registers new extension modes with a passthrough handler
-  - `UnregisterExtMode` removes dynamically registered extensions (built-in modes protected)
-  - `PromoteMode` promotes extensions to standards-track with optional identifier rename
-- **Pluggable authentication chain**
-  - JWT bearer resolver validates signature, issuer, audience, and expiration against a JWKS (inline JSON or URL-fetched with TTL cache); default algorithm allowlist is `RS256`, `ES256` -- `HS256` requires explicit opt-in via `MACP_AUTH_JWT_ALGS=HS256`
-  - Static bearer resolver maps opaque tokens to identities via `MACP_AUTH_TOKENS_FILE`/`MACP_AUTH_TOKENS_JSON`
-  - Resolvers run in chain order (JWT → static); dev-mode fallback only when both are absent
-  - Identities carry capability flags: `allowed_modes`, `can_start_sessions`, `max_open_sessions`, `can_manage_mode_registry`, `is_observer`
-- **Governance policy framework (RFC-MACP-0012)**
-  - `RegisterPolicy`, `UnregisterPolicy`, `GetPolicy`, `ListPolicies`, `WatchPolicies` RPCs
-  - Per-mode rule schemas (voting, objection handling, quorum thresholds, acceptance, assignment, handoff acceptance)
-  - Policies evaluated at commitment time; version binding enforced at SessionStart
-  - `policy.default` plus the three reserved `policy.std.` governance profiles (`majority`, `supermajority`, `unanimous`) are pre-registered; the whole `policy.std.` namespace is reserved against registration and unregistration (RFC-MACP-0012 §2.2/§5.2)
-- **Session lifecycle observability**
-  - `ListSessions` enumerates current session metadata in bounded pages (`page_size` clamped to a server maximum; pass `next_page_token` back verbatim until it comes back empty)
-  - `WatchSessions` streams `Created`/`Resolved`/`Expired` events with a `Created` initial-sync on connect
-- **Session extension plumbing**
-  - `SessionExtensionProvider` trait and `ExtensionProviderRegistry` let hosts hook lifecycle callbacks for custom session-level extensions carried in the `extensions` map; provider errors are non-fatal
-- **Pluggable storage backends**
-  - File (default), in-memory, RocksDB (`rocksdb-backend` feature), Redis (`redis-backend` feature)
-  - Checkpoint-based replay and terminal-session log compaction
-- **Structured logging via `tracing`**
-  - use `RUST_LOG` env var to control log level (e.g. `RUST_LOG=info`)
-- **Per-mode metrics**
-  - tracked via `src/metrics.rs`
+- **The handoff implicit accept is recorded (0.8.0).** In a
+  `macp.mode.handoff.v1` session started at `semantics_rev >= 2`, the runtime
+  mints its own `HandoffAccept` when the offer deadline passes, as a real
+  history entry that consumes an accepted ordinal and reaches `StreamSession`
+  subscribers. The `implicit-accept:` `message_id` prefix is reserved against
+  client envelopes, and a client-sent `HandoffAccept` with `implicit = true` is
+  rejected. See
+  [Handoff implicit accept](docs/modes.md#implicit-accept-rfc-macp-0010-51).
+- **Mode-state records are sealed (0.8.0).** The `pub` records behind
+  `session.mode_state`, and `PersistedSession`, are `#[non_exhaustive]`, so code
+  outside the owning crate can no longer construct one by struct literal. This
+  is breaking for external callers that did, and makes every subsequent field
+  addition additive. See
+  [Mode-state records are sealed](docs/modes.md#mode-state-records-are-sealed).
+- **Governance policies are validated at registration time.** Rules the
+  canonical RFC-MACP-0012 schemas forbid are now refused when the policy is
+  registered or preloaded, so a policy file an older runtime accepted can refuse
+  a server start. See
+  [Upgrading into registration-time policy validation](docs/deployment.md#upgrading-into-registration-time-policy-validation).
 
 ## Implemented modes
 
@@ -108,7 +55,34 @@ For all standards-track modes and built-in extensions, `SessionStartPayload` mus
 - `configuration_version`
 - `ttl_ms`
 
-`policy_version` is optional unless your policy requires it. Empty `mode` is rejected. Empty `SessionStartPayload` is rejected.
+`policy_version` MUST be present in the payload (RFC-MACP-0001 §7.1), but MAY be
+empty — an empty value resolves the session to `policy.default`. See
+[Policy](docs/policy.md) for resolution and version-binding rules. Empty `mode`
+is rejected. Empty `SessionStartPayload` is rejected.
+
+### Mode authority
+
+Only `Commitment` authority is granted regardless of participant-list
+membership: the `SessionStart` sender may emit `Commitment` (and
+`CancelSession`) whether or not it appears in `participants`. Every
+mode-specific message — `Proposal`, `Evaluation`, `Objection`, `Vote`,
+`TaskAccept`, and the rest — is authorized only for declared participants, so
+an initiator that wants to send one MUST be included in `participants`
+(RFC-MACP-0007 §2). See [Modes](docs/modes.md) for the per-mode rules.
+
+### Streaming
+
+- `StreamSession` binds one gRPC stream to one session and emits accepted envelopes in order
+  - Passive subscribe (RFC-MACP-0006-A1): a `subscribe_session_id` + `after_sequence` frame replays accepted history and then delivers live envelopes; allowed for declared participants, the initiator, or observer identities
+- `WatchSignals` broadcasts ambient Signal envelopes to all subscribers in real time; Signals never enter session history
+
+### Session lifecycle observability
+
+`ListSessions` enumerates current session metadata in bounded pages (`page_size`
+is clamped to a server maximum; pass `next_page_token` back verbatim until it
+comes back empty). `WatchSessions` streams `Created`, `Resolved`, `Expired`,
+`Suspended`, `Resumed`, and `Cancelled` events, with a `Created` initial sync on
+connect — see [WatchSessions](docs/API.md#watchsessions).
 
 ### Security
 
@@ -236,6 +210,18 @@ cargo run --bin multi_round_client
 cargo run --bin fuzz_client
 ```
 
+## Client libraries
+
+This repository is the Rust reference runtime — the server side. Agent-side
+clients are maintained as separate SDKs:
+
+- [`macp-sdk-python`](https://github.com/multiagentcoordinationprotocol/macp-sdk-python)
+- [`macp-sdk-typescript`](https://github.com/multiagentcoordinationprotocol/macp-sdk-typescript)
+
+Installation, client configuration, and client-side usage are documented in
+those repositories, not here. The example clients in `src/bin` are Rust
+development aids for exercising a local server, not a supported SDK.
+
 ## Freeze-profile capability summary
 
 | RPC | Status |
@@ -247,6 +233,8 @@ cargo run --bin fuzz_client
 | `ListSessions` | implemented |
 | `WatchSessions` | implemented |
 | `CancelSession` | implemented |
+| `SuspendSession` | implemented (initiator-only; suspended time is banked against the session's `max_suspend_ms`) |
+| `ResumeSession` | implemented (returns a `SUSPENDED` session to `OPEN`, banking the pause into the TTL deadline) |
 | `GetManifest` | implemented |
 | `ListModes` | implemented |
 | `ListExtModes` | implemented |
@@ -378,7 +366,7 @@ MACP_TEST_BINARY=../target/debug/macp-runtime cargo test -- --test-threads=1
 
 The integration suite has three tiers:
 
-- **Tier 1 (Protocol)** — 116 scripted gRPC tests (including 8 JWT bearer auth tests): all modes, error paths, signals, version binding, dedup, suspend/resume, TLS transport, persistence/restart-replay, payload and rate limits, `ListSessions` pagination, concurrent senders, passive subscribe, policy registry (including the reserved `policy.std.` namespace and the RFC-MACP-0012 §5.2 outcome table) and watch streams, mode promotion, and RFC cross-cutting features
+- **Tier 1 (Protocol)** — scripted gRPC tests (including JWT bearer auth): all modes, error paths, signals, version binding, dedup, suspend/resume, TLS transport, persistence/restart-replay, payload and rate limits, `ListSessions` pagination, concurrent senders, passive subscribe, policy registry (including the reserved `policy.std.` namespace and the RFC-MACP-0012 §5.2 outcome table) and watch streams, mode promotion, and RFC cross-cutting features
 - **Tier 2 (Rig Tools)** — 5 tests using [Rig](https://rig.rs) agent framework `Tool` implementations for all MACP operations
 - **Tier 3 (E2E)** — 3 tests with real OpenAI GPT-4o-mini agents coordinating through the runtime (requires `OPENAI_API_KEY`)
 
@@ -386,35 +374,37 @@ See `docs/testing.md` for full details on running locally, in CI, or against a h
 
 ## Releasing
 
-The workspace publishes to crates.io as seven crates that share one version
-(`0.5.0`), pinned in `[workspace.package]`. Internal dependencies are declared
-as `{ version = "...", path = "..." }`, so the same manifests build locally
-from `path` and resolve from the registry once published.
+The workspace publishes to crates.io as seven crates that share one version,
+pinned in `[workspace.package]` in the root `Cargo.toml`. Internal dependencies
+are declared as `{ version = "...", path = "..." }`, so the same manifests build
+locally from `path` and resolve from the registry once published.
 
-Releases are automated by `.github/workflows/publish.yml`, triggered by pushing
-a version tag:
+**Releases are automated — do not bump versions or push tags by hand.** On every
+push to `main`, release-plz (`.github/workflows/release-plz.yml`, configured by
+`release-plz.toml`) opens or updates a **release PR** that bumps the shared
+workspace version and rewrites `CHANGELOG.md` from the
+conventional-commit history. It also runs `cargo semver-checks` while computing
+that PR, so an unintended API break blocks the release rather than shipping.
+Merging the PR creates the per-crate git tags and one GitHub Release, then calls
+two workflows directly: `publish.yml`, which runs `cargo publish --workspace`
+(cargo computes the seven-crate publish order itself and waits for index
+propagation, and a crate already live is skipped, so a re-run after a partial
+failure is safe), and `docker.yml`, which publishes the versioned GHCR image.
 
-```bash
-git tag v0.5.0
-git push origin v0.5.0
-```
+Both are **called** by `release-plz.yml` rather than triggered by the
+`macp-runtime-v*` tag. GitHub does not start workflow runs from events created
+with the default `GITHUB_TOKEN`, so that trigger never fires for release-plz's
+own tags — which is why 0.6.1 was tagged and never reached crates.io. The tag
+triggers survive only as a backstop for a tag pushed by a human or a PAT.
 
-The publish workflow verifies the tag against the workspace version, checks
-that `CHANGELOG.md` has a section for the release, runs `cargo semver-checks`
-against the last published release, publishes the workspace, and creates a
-GitHub Release with the CHANGELOG section as its notes.
-
-The workflow verifies the tag matches the workspace version, then publishes
-bottom-up so each crate's dependencies are already on the index:
-
-```
-macp-pb → macp-core → macp-storage → macp-policy → macp-modes → macp-auth → macp-runtime
-```
-
-A crate whose version is already live is skipped, so a re-run after a partial
-failure is safe. Publishing requires a `CARGO_REGISTRY_TOKEN` repository secret.
-To validate without uploading, run the workflow manually (`workflow_dispatch`)
-with the default `dry_run` enabled.
+Approving the release PR has one trap worth reading before you merge: a
+`sync-integration-lock` job regenerates `integration_tests/Cargo.lock` on the
+PR, which moves its head SHA, and the run you approve must be the one at the new
+SHA. See [Approving a release PR](CONTRIBUTING.md#approving-a-release-pr) for the
+procedure and [Published image tags](docs/deployment.md#published-image-tags)
+for the container tag contract. Publishing requires a `CARGO_REGISTRY_TOKEN`
+repository secret; `publish.yml` can also be dispatched manually (defaulting to
+a dry run) for recovery.
 
 ## Development notes
 
@@ -422,7 +412,6 @@ with the default `dry_run` enabled.
 - Five standards-track modes use the canonical `macp.mode.*` identifiers.
 - `multi_round` is a built-in extension (`ext.multi_round.v1`) — not standards-track, but ships with the runtime and enforces strict `SessionStart`.
 - Extension modes can be dynamically registered, unregistered, and promoted via `RegisterExtMode`, `UnregisterExtMode`, and `PromoteMode` RPCs.
-- `StreamSession` is enabled and binds one gRPC stream to one session, emitting accepted envelopes in order.
-- `WatchSignals` broadcasts ambient Signal envelopes to all subscribers in real time.
+- `StreamSession` and `WatchSignals` behavior is described under "Runtime behavior that SDKs should assume" above.
 
 See `docs/README.md` and `docs/examples.md` for the updated local development and usage guidance.
