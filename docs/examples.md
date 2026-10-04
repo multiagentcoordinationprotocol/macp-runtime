@@ -70,7 +70,7 @@ A coordinator starts a session using `ext.multi_round.v1`, participants exchange
 Key behaviors to note:
 
 - Use `SessionStart` to create a new session over the stream, or send a session-scoped message to attach to an existing one.
-- For observers and late joiners, send a passive-subscribe frame (`subscribe_session_id` + `after_sequence`) as the first frame -- the runtime replays accepted history starting at `after_sequence` and then delivers live envelopes on the same stream. Use `after_sequence = 0` to replay from session start.
+- For observers and late joiners, send a passive-subscribe frame (`subscribe_session_id` + `after_sequence`) as the first frame -- the runtime replays accepted history and then delivers live envelopes on the same stream. `after_sequence` is the 1-based ordinal of accepted session-scoped envelopes and is **exclusive**: replay resumes at `after_sequence + 1`, and `0` replays from the session's first accepted envelope (RFC-MACP-0006 §3.2 "Sequence semantics").
 - Mixed-session streams (envelopes targeting different sessions) are rejected.
 - A single frame must not carry both `envelope` and `subscribe_session_id` -- the stream terminates with `InvalidArgument`.
 - Application errors are delivered inline without closing the stream.

@@ -98,18 +98,23 @@ Use `Send` when you need an explicit acknowledgement per message, or for fire-an
 A `StreamSession` connection follows this pattern:
 
 1. Open a bidirectional stream.
-2. Send the first envelope, which binds the stream to that `session_id`. Alternatively, send a **passive subscribe** frame (RFC-MACP-0006-A1) where `envelope` is absent and `subscribe_session_id` is set -- the runtime replays accepted history from log index `after_sequence` and then delivers live envelopes on the same stream. Set `after_sequence = 0` to replay from session start; use a higher value to resume after a known checkpoint.
+2. Send the first envelope, which binds the stream to that `session_id`. Alternatively, send a **passive subscribe** frame (RFC-MACP-0006-A1) where `envelope` is absent and `subscribe_session_id` is set -- the runtime replays accepted history and then delivers live envelopes on the same stream. `after_sequence` is the 1-based ordinal of accepted session-scoped envelopes and is **exclusive**: replay resumes at `after_sequence + 1`, and `0` replays from the session's first accepted envelope (RFC-MACP-0006 §3.2 "Sequence semantics").
 3. Receive accepted envelopes from all participants in the session.
 4. Send additional envelopes as needed (not required for passive observers).
 5. The stream closes on client disconnect, lag overflow, auth failure, or server shutdown.
 
 All envelopes on a stream must target the same session. A single frame must not set both `envelope` and `subscribe_session_id` -- the stream terminates with `InvalidArgument` if both are set. Passive subscribe is authorized for the session initiator, declared participants, and observer identities; non-participants receive an inline `FORBIDDEN` error frame without closing the stream.
 
+Two further resume rules your SDK must implement (RFC-MACP-0006 §3.2 "Sequence semantics"):
+
+- **Compaction.** A resume whose `after_sequence` falls below the compacted base is rejected with `FAILED_PRECONDITION` -- `session history before ordinal {base} was compacted; resume with after_sequence >= {base} or re-read state via GetSession` -- so retry at or above the reported base rather than falling back to `0`.
+- **Redelivery.** Key duplicate detection on `message_id`, and do not let a redelivered envelope advance your sequence position -- only a distinct accepted envelope does.
+
 Application-level errors (validation failures, authorization denials) are delivered as inline `MACPError` messages and the stream stays open. Transport-level errors (unauthenticated, internal, unknown session on subscribe) close the stream.
 
 ### Handling stream lag
 
-The runtime's broadcast buffer holds 256 envelopes per session. If a client falls behind, the stream terminates with `ResourceExhausted`. Your SDK should detect this, reconnect with a new stream, and use a passive-subscribe frame with `after_sequence` set to the log index of the last envelope it saw -- the runtime will replay missed history and then resume live delivery on the same stream.
+The runtime's broadcast buffer holds 256 envelopes per session. If a client falls behind, the stream terminates with `ResourceExhausted`. Your SDK should detect this, reconnect with a new stream, and use a passive-subscribe frame with `after_sequence` set to the ordinal of the last accepted envelope it saw -- the runtime will replay missed history and then resume live delivery on the same stream.
 
 ### Observer identities
 

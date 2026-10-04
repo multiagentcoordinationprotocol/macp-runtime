@@ -152,7 +152,7 @@ The session initiator binds the terminal outcome. The commitment payload must ec
 
 The session is now terminal. Any subsequent messages targeting it are rejected with `SESSION_NOT_OPEN`.
 
-## Authentication
+## Authentication configuration
 
 ### Development mode
 

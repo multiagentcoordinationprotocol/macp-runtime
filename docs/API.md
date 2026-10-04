@@ -89,7 +89,7 @@ rpc StreamSession(stream StreamSessionRequest) returns (stream StreamSessionResp
 
 The first envelope on the stream binds it to a `session_id`. All subsequent envelopes must target the same session. Responses contain either an accepted `envelope` or an application-level `error` (the stream stays open for application errors). If the client falls behind the broadcast buffer, the stream terminates with `ResourceExhausted`.
 
-**Passive subscribe** (RFC-MACP-0006-A1). A client may observe a session without sending envelopes by sending a request frame where `envelope` is absent and `subscribe_session_id` is set. The runtime replays the session's accepted history starting at log index `after_sequence` (0 = replay from session start) and then delivers live envelopes on the same stream. A single frame must not contain both an `envelope` and `subscribe_session_id` -- the stream terminates with `InvalidArgument` if both are set. Subscribes bind the stream to the given session just like a first envelope; mixing session IDs on the same stream is rejected. Authorization: the caller must be the session initiator, a declared participant, or hold the `is_observer` identity capability. Non-participants receive an inline `FORBIDDEN` error frame and the stream stays open.
+**Passive subscribe** (RFC-MACP-0006-A1). A client may observe a session without sending envelopes by sending a request frame where `envelope` is absent and `subscribe_session_id` is set. The runtime replays the session's accepted history and then delivers live envelopes on the same stream. `after_sequence` is the 1-based ordinal of accepted session-scoped envelopes and is **exclusive**: replay resumes at `after_sequence + 1`, and `0` replays from the session's first accepted envelope (RFC-MACP-0006 §3.2 "Sequence semantics"). It is not an offset into the durable log -- the runtime-internal entries noted above and under [`CancelSession`](#cancelsession), [`SuspendSession`](#suspendsession) and [`ResumeSession`](#resumesession) consume no ordinal. A single frame must not contain both an `envelope` and `subscribe_session_id` -- the stream terminates with `InvalidArgument` if both are set. Subscribes bind the stream to the given session just like a first envelope; mixing session IDs on the same stream is rejected. Authorization: the caller must be the session initiator, a declared participant, or hold the `is_observer` identity capability. Non-participants receive an inline `FORBIDDEN` error frame and the stream stays open.
 
 ## Session Lifecycle
 
@@ -397,7 +397,7 @@ Five bounds on request size, request frequency, and response size:
 
 The same five variables appear in [`README.md`](../README.md) and [`docs/deployment.md`](deployment.md).
 
-### Rate limits
+### Rate limiting
 
 `MACP_SESSION_START_LIMIT_PER_MINUTE` and `MACP_MESSAGE_LIMIT_PER_MINUTE` are per-sender sliding-window limits on session creation and message throughput. When either is exceeded, the runtime returns `RATE_LIMITED`.
 
