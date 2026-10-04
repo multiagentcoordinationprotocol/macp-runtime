@@ -82,7 +82,7 @@ The runtime supports dynamic extension management through four RPCs:
 1. **`ListExtModes`** discovers available extensions (including `ext.multi_round.v1`).
 2. **`RegisterExtMode`** registers a new extension with a mode descriptor. The runtime creates a passthrough handler for it.
 3. **`UnregisterExtMode`** removes a dynamic extension (built-in modes are protected).
-4. **`PromoteMode`** promotes an extension to standards-track, optionally renaming it.
+4. **`PromoteMode`** promotes an extension to standards-track, optionally renaming it -- except into the reserved `macp.mode.*` namespace, which this runtime refuses unconditionally (RFC-MACP-0002 §12 permits it under conditions the runtime cannot verify, so it does not try).
 
 Extension mode names must not use the reserved `macp.mode.*` namespace. All registry changes are broadcast to `WatchModeRegistry` subscribers, and both `GetManifest` and `Initialize` include all modes.
 

@@ -877,3 +877,58 @@ a specific plan closeout.
   `ASSUMPTIONS.md`.
 - **Decided by:** Opus (fresh subagent, independent re-verification plus a judgment call on the
   tracking convention itself).
+
+---
+
+## 2026-10-03 — Phase 5 escalation: `docs/policy.md:288`'s `policy.std.*` schema_version claim
+
+Required investigation per `plans/docs-update-2026-10.md` Phase 5 item 1 ("ESCALATE, do not
+edit") before any edit to this paragraph was permitted.
+
+### D57 — `policy.std.*`'s claimed schema_version 1-vs-3 divergence (RFC-MACP-0012 §5.2) has no
+instance under this runtime's (spec-conformant) legacy-arm reading → **RFC-internal
+inconsistency, not a runtime deviation**
+
+- **Origin:** `plans/docs-update-2026-10.md` Phase 5 item 1. RFC-MACP-0012 §5.2 claims the three
+  reserved `policy.std.*` profiles "differ only where an empty decisive tally nonetheless clears
+  the participation floor... tallies that schema-version-1 semantics allow to support a positive
+  commitment and that `schema_version >= 3` denies" (a lone abstention clearing a `count: 1`/`2`
+  quorum). `docs/policy.md`'s own paragraph had already been corrected once before (2026-09-12,
+  PR #165/#168) to retract an earlier claim of divergence, but without explaining *why* §5.2's
+  claim doesn't hold or citing it directly — leaving the question re-litigable.
+- **Required procedure (1a):** determine empirically which is right by probing the shipped
+  `DefaultPolicyEvaluator` against the three canonical profiles at an empty decisive tally with
+  one abstention, at `schema_version` 1 and 3.
+- **Finding:** §4.1's "Legacy empty-tally rule," which actually governs `schema_version` 1 and 2,
+  states a blocked positive commitment there "is... governed **entirely** by
+  `commitment.require_vote_quorum`" — a bare boolean, with no dependence on whether
+  `voting.quorum`'s configured value was actually met. This runtime implements it exactly that
+  way (the `NoVotes` arm of `evaluate_decision_commitment_outcome`,
+  `crates/macp-policy/src/evaluator.rs`), and that reading is pinned by the spec's own
+  conformance corpus (`tests/conformance/decision_legacy_require_vote_quorum.json` denies an
+  empty tally at `schema_version: 2` with `require_vote_quorum: true`, independent of the
+  configured quorum value). Since all three `policy.std.*` profiles set
+  `require_vote_quorum: true`, §5.2's claimed divergence has **no possible instance**: all three
+  deny an empty decisive tally identically at `schema_version` 1 and 3, differing only in the
+  deny reason. No test in `crates/macp-policy`, `crates/macp-core`, or `tests/conformance/`
+  previously exercised this exact combination (lone abstention + `policy.std.*` + a
+  schema_version comparison) directly — the claim traced to a manual code-probe recorded in
+  `plans/spec-99-schema-version-3-PROGRESS.md` (2026-09-12), never a committed regression test —
+  but independently re-tracing the evaluator's control flow for each profile's quorum count
+  against a lone abstention reproduces the same conclusion.
+- **Branch taken (1b):** "§5.2's claim does not hold for this runtime for a legitimate reason" —
+  the runtime correctly implements §4.1's literal text and the conformance corpus; the defect is
+  in the RFC's own §5.2 prose, which describes a scenario §4.1's legacy arm cannot produce given
+  that all three profiles set `require_vote_quorum: true`. This is **not** a `macp-runtime`
+  conformance gap, so no runtime change and no `macp-runtime` issue. Filed upstream instead, since
+  the 2026-09-12 PROGRESS note had flagged "deserves a spec issue" and this was never followed
+  through on: [multiagentcoordinationprotocol#181](https://github.com/multiagentcoordinationprotocol/multiagentcoordinationprotocol/issues/181).
+- **Resolution:** `docs/policy.md`'s paragraph rewritten to state the conclusion, cite §5.2
+  directly, explain concretely why its claim doesn't hold (the bare-boolean legacy arm plus the
+  conformance fixture), and link the filed issue — so the next reader has the reasoning instead
+  of a bare "it was wrong."
+- **Decided by:** Opus (direct investigation: code trace of `evaluator.rs`'s `NoVotes` arm, the
+  `defaults.rs` profile definitions, the `decision_legacy_require_vote_quorum.json` fixture, and
+  RFC-MACP-0012 §4.1/§5.2 read in full from the spec repo; cross-checked against the historical
+  `plans/spec-99-schema-version-3-PROGRESS.md` finding from PR #165/#168, which reached the same
+  conclusion independently on 2026-09-12).
