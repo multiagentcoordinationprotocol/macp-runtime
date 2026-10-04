@@ -211,6 +211,8 @@ The runtime records a `SessionSuspendPayload` in the durable log with `suspended
 
 Resumes a `SUSPENDED` session back to `OPEN`, banking the suspended duration into the TTL deadline. Same authority model as `SuspendSession`.
 
+`resume` can force-expire the session instead of succeeding, via two independent triggers: (1) the cumulative suspended duration exceeding `max_suspend_ms` (RFC-MACP-0001 §7.5, the trigger documented under `SuspendSession` above), or (2) **with no basis in the spec** -- at `semantics_rev >= 2`, the session's count of completed suspend/resume cycles exceeding `MAX_SUSPENSION_CYCLES` (1024, `crates/macp-core/src/session.rs:65`). This cap applies to every mode, not just Handoff; it bounds the O(N²) total snapshot growth an unbounded, un-rate-limited suspend/resume loop would otherwise cause, since each cycle persists a full session snapshot including the growing `suspension_intervals` vec. A `semantics_rev <= 1` session instead silently stops recording past the cap and is never force-expired by it, keeping legacy replay bit-identical.
+
 ```protobuf
 rpc ResumeSession(ResumeSessionRequest) returns (ResumeSessionResponse)
 ```
