@@ -215,11 +215,17 @@ Two consequences worth knowing:
 | `MACP_AUTH_JWKS_JSON` | -- | Inline JWKS document (JSON) for JWT validation |
 | `MACP_AUTH_JWKS_URL` | -- | JWKS endpoint URL (fetched + cached) |
 | `MACP_AUTH_JWKS_TTL_SECS` | `300` | JWKS cache TTL when fetched from URL |
+| `MACP_AUTH_JWT_ALGS` | `RS256,ES256` | Comma-separated JWT algorithm allowlist (`HS256` requires explicit opt-in) |
 | `MACP_MAX_PAYLOAD_BYTES` | `1048576` | Maximum envelope payload size in bytes |
 | `MACP_SESSION_START_LIMIT_PER_MINUTE` | `60` | Per-sender session creation rate limit |
 | `MACP_MESSAGE_LIMIT_PER_MINUTE` | `600` | Per-sender message rate limit |
 | `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE` | `100` | `ListSessions` page size when the request sends `page_size = 0` |
 | `MACP_LIST_SESSIONS_MAX_PAGE_SIZE` | `1000` | Hard cap a requested `ListSessions` `page_size` is clamped to |
+| `MACP_METRICS_ADDR` | -- (off) | Prometheus text endpoint bind address, e.g. `127.0.0.1:9464` (`src/main.rs:584`) |
+| `MACP_CONCURRENCY_LIMIT_PER_CONNECTION` | `64` | tonic per-connection concurrency limit (`src/main.rs:456`) |
+| `MACP_MAX_CONCURRENT_STREAMS` | `128` | HTTP/2 max concurrent streams (`src/main.rs:460`) |
+| `MACP_REQUEST_TIMEOUT_SECS` | `30` | Per-request timeout (`src/main.rs:464`) |
+| `MACP_SHUTDOWN_DRAIN_SECS` | `10` | Graceful-shutdown drain deadline (`src/main.rs:524`) |
 | `MACP_CHECKPOINT_INTERVAL` | `0` (disabled) | Log entries between checkpoints |
 | `MACP_CLEANUP_INTERVAL_SECS` | `60` | Background maintenance interval in seconds: TTL expiry, memory eviction, disk GC, and eager observation of mode-computed deadlines (the handoff implicit accept, RFC-MACP-0010 §5.1(2)) |
 | `MACP_SESSION_RETENTION_SECS` | `3600` | Age (from session start) at which terminal sessions are evicted from **memory**; their durable data is kept |
@@ -289,7 +295,7 @@ to `ListSessions`, that no-signature decision must be re-analyzed first.
 
 The runtime applies a pluggable resolver chain assembled at startup:
 
-1. **JWT bearer** (active when `MACP_AUTH_ISSUER` is set) -- validates signature, issuer, audience, and expiration against a JWKS. Default algorithm allowlist: `RS256`, `ES256`; `HS256` (shared-secret) requires explicit opt-in via `MACP_AUTH_JWT_ALGS=HS256` (see CHANGELOG 0.5.0). The `sub` claim becomes the sender; an optional `macp_scopes` claim carries capability flags (`allowed_modes`, `can_start_sessions`, `max_open_sessions`, `can_manage_mode_registry`, `is_observer`).
+1. **JWT bearer** (active when `MACP_AUTH_ISSUER` is set) -- validates signature, issuer, audience, and expiration against a JWKS. Default algorithm allowlist: `RS256`, `ES256`; `HS256` (shared-secret) requires explicit opt-in via `MACP_AUTH_JWT_ALGS=HS256`. The `sub` claim becomes the sender; an optional `macp_scopes` claim carries capability flags (`allowed_modes`, `can_start_sessions`, `max_open_sessions`, `can_manage_mode_registry`, `is_observer`).
 2. **Static bearer** (active when `MACP_AUTH_TOKENS_FILE` or `MACP_AUTH_TOKENS_JSON` is set) -- looks up opaque tokens in a preloaded identity map. Accepts `Authorization: Bearer <token>` or the alternate `x-macp-token: <token>` header.
 3. **Dev-mode fallback** -- activates only when **neither** JWT nor static bearer is configured. Any `Authorization: Bearer <value>` header authenticates the caller as sender `<value>` with full capabilities. Intended strictly for local development.
 

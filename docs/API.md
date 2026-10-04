@@ -29,7 +29,7 @@ The client sends its supported protocol versions in descending preference order.
 | Field | Type | Description |
 |-------|------|-------------|
 | `selected_protocol_version` | string | Selected mutual version |
-| `runtime_info` | RuntimeInfo | `name: "macp-runtime"`, `version: "0.5.0"` (tracks the crate version) |
+| `runtime_info` | RuntimeInfo | `name: "macp-runtime"`, `version`: the running binary's crate version (`env!("CARGO_PKG_VERSION")`, `src/server.rs:820`) |
 | `capabilities` | Capabilities | Runtime capabilities (streaming, cancellation, policy, etc.) |
 | `supported_modes` | repeated string | All supported mode identifiers |
 | `instructions` | string | Optional human-readable guidance |

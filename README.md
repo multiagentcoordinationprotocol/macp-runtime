@@ -145,6 +145,7 @@ Unless `MACP_MEMORY_ONLY=1` is set, the runtime persists session and log snapsho
 | `MACP_AUTH_JWKS_JSON` | inline JWKS document used to validate JWTs | unset |
 | `MACP_AUTH_JWKS_URL` | JWKS endpoint URL (fetched + cached) | unset |
 | `MACP_AUTH_JWKS_TTL_SECS` | JWKS cache TTL when fetched from URL | `300` |
+| `MACP_AUTH_JWT_ALGS` | comma-separated JWT algorithm allowlist (`HS256` requires explicit opt-in) | `RS256,ES256` |
 
 Auth is layered as a resolver chain: configured JWT first, then static
 bearer, with a dev-mode fallback only when both are absent. JWT tokens
