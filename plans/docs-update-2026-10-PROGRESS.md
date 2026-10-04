@@ -221,7 +221,7 @@ tracking note — do not silently rewrite the paragraph.**
 | 2 | `docs/modes.md` — rev 3, multi_round encoding, `Withdraw`, RFC citations | simple | DONE | `f88849c`, `9333af5` (2 commits) |
 | 3 | `after_sequence` exclusivity ×4 files + 2 heading anchors | simple | DONE | `bde43af` |
 | 4 | `docs/sdk-guide.md` — SDK cross-refs, proto list, error registry | simple | DONE | `8f131f1` |
-| 5 | `docs/policy.md` + `docs/API.md` — FORBIDDEN carve-out, §4 deviation, pin, **escalation** | **complex** | not started | |
+| 5 | `docs/policy.md` + `docs/API.md` — FORBIDDEN carve-out, §4 deviation, pin, **escalation** | **complex** | DONE | `c788041` |
 | 6 | version / enumeration / env-var sweep | simple | not started | |
 | 7 | `tests/conformance/SOURCE.md`, pin-claim fix, docker-compose | simple | not started | |
 | 8 | `CLAUDE.md` (untracked — not in PR diff) | simple | not started | |
@@ -309,3 +309,31 @@ Land **2 and 3 first** if the sweep is cut short — highest value per unit of r
   should also fold in the carried-forward G9 finding from Phase 1
   (Commitment-authority-override claim is standards-track-only;
   `docs/policy.md:230` states it more strongly than README did).
+
+### Checkpoint — Phase 5 (2026-10-03)
+
+- **Verdict:** PASS, 1 verify round. The verifier independently re-derived
+  every substantive claim rather than trusting the commit message or
+  `DECISIONS.md` -- re-read RFC-MACP-0012 §4.1/§5.2/§4/§8/§10,
+  RFC-MACP-0002 §6.1/§12, RFC-MACP-0001 §7.1 and RFC-MACP-0011 §5 directly
+  from the spec repo; re-traced `evaluator.rs`'s `NoVotes` arm and the
+  separate `check_quorum` gate by hand to confirm the lone-abstention
+  scenario denies identically at schema_version 1 and 3; confirmed the
+  filed issue (`multiagentcoordinationprotocol#181`) and the closed issue
+  cited for the unknown-fields deviation (`#167`) both exist and say what
+  the docs now claim; confirmed every code citation (`check_commitment_authority`
+  call sites, `src/server.rs:762`'s FORBIDDEN mapping, the SPEC_REV/test/CI-job
+  names, `mode_registry.rs`'s unconditional rename refusal,
+  `session.rs`'s caps) against the actual source.
+- **No gaps found.** Zero `.rs` files touched (docs-only phase confirmed via
+  `git diff --stat`); the one scope divergence (`docs/deployment.md`) was
+  flagged as non-blocking per the plan's own acceptance criterion.
+- **G9 carried forward from Phase 1:** closed in this phase (`docs/policy.md`'s
+  "applies across all modes" corrected to scope `commitment.authority` to the
+  five standards-track modes, with an explicit extension-mode caveat).
+- **Escalation outcome:** RFC-internal inconsistency (§4.1 vs §5.2), not a
+  runtime conformance gap -- no code change, no `macp-runtime` issue. Spec
+  issue #181 filed; `DECISIONS.md` D57 recorded.
+- **Files touched:** `docs/policy.md`, `docs/API.md`, `docs/examples.md`,
+  `docs/deployment.md`, `DECISIONS.md`.
+- **Next:** Phase 6 (version, enumeration, env-var sweep).

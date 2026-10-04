@@ -576,6 +576,22 @@ links-plus-one-clause; grep the diff for `pip install`/`npm install`/`0.14`.
 
 ### Phase 5 — `docs/policy.md` + `docs/API.md`: normative gaps, and one escalation
 
+**Status: DONE** (`c788041`; 1 verify round, PASS). Divergence from the plan:
+(1) also fixed the carried-forward G9 finding from Phase 1
+(`docs/policy.md:230`'s "applies across all modes" claim for
+`commitment.authority` -- false for extension modes, which never call
+`check_commitment_authority`), per Phase 1's closeout note asking Phase 5
+to fix both README's and policy.md's versions together. (2) also fixed two
+instances of the same RFC-MACP-0011 §6/§4a miscitation in `docs/deployment.md`
+(outside this phase's stated file list) since the plan's own acceptance
+criterion demanded a clean repo-wide grep. Item 1's escalation resolved as
+branch (c): the runtime conforms to RFC-MACP-0012 §4.1's literal legacy-arm
+text and the conformance corpus; §5.2's claimed schema_version divergence is
+an RFC-internal inconsistency with no possible instance given all three
+`policy.std.*` profiles set `require_vote_quorum: true`. Filed upstream as
+[multiagentcoordinationprotocol#181](https://github.com/multiagentcoordinationprotocol/multiagentcoordinationprotocol/issues/181);
+recorded as `DECISIONS.md` D57. No runtime change, no `macp-runtime` issue.
+
 **Delivers** four policy-doc defects the release commits did **not** close —
 plus a finding that must be investigated, not edited.
 
