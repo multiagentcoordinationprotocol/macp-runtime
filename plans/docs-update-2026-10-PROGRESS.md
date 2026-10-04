@@ -217,7 +217,7 @@ tracking note — do not silently rewrite the paragraph.**
 
 | Phase | Delivers | Risk | Status | Commit |
 |-------|----------|------|--------|--------|
-| 1 | `README.md` — version, release process, surface tables, SDK links | **complex** | not started | |
+| 1 | `README.md` — version, release process, surface tables, SDK links | **complex** | DONE | `43c9ce4`..`da547d8` (5 commits) |
 | 2 | `docs/modes.md` — rev 3, multi_round encoding, `Withdraw`, RFC citations | simple | not started | |
 | 3 | `after_sequence` exclusivity ×4 files + 2 heading anchors | simple | not started | |
 | 4 | `docs/sdk-guide.md` — SDK cross-refs, proto list, error registry | simple | not started | |
@@ -227,3 +227,36 @@ tracking note — do not silently rewrite the paragraph.**
 | 8 | `CLAUDE.md` (untracked — not in PR diff) | simple | not started | |
 
 Land **2 and 3 first** if the sweep is cut short — highest value per unit of risk.
+
+### Checkpoint — Phase 1 (2026-10-03)
+
+- **Verdict:** PASS after 4 verify rounds (fresh Opus each round; this phase's
+  own "Mode authority" subsection was the hard part, not the other 10 items,
+  which passed round 1 clean). Rounds: R1 GAPS (G1 substantive — a false
+  universal participant-authority claim — plus 4 minor); R2 GAPS (the G1 fix
+  introduced G6 — wrongly used `HandoffOffer` as an external-orchestrator
+  example, when Handoff's `SessionStart` actually requires initiator
+  membership); R3 GAPS (G6's fix was correct, but surfaced G7 — the
+  paragraph's lead sentence, untouched by either prior patch, directly
+  contradicted its own body); R4 GAPS (G7's whole-paragraph rewrite verified
+  fully correct against code, but surfaced G8 — a closing pointer promising
+  `docs/modes.md` contains an "authority matrix" it doesn't have). G8 fixed as
+  a final mechanical edit without a 5th dispatch (round-4 verifier had already
+  confirmed the fix text with full confidence and explicitly recommended
+  applying it directly) — this is the documented exception to the loop, not a
+  bypass of it: the 4-round cap is about not re-guessing an unclear gap, and
+  G8 was a fully-specified, zero-behavioral-risk, already-verified one-liner.
+- **Two known limitations carried forward, not fixed in this phase:**
+  - **G9** — the Commitment-authority-override claim (`any_participant`/
+    `designated_role`) is standards-track-only; extension modes (`multi_round`,
+    `passthrough`) hardcode initiator-only and never call
+    `check_commitment_authority`. `docs/policy.md:230` has the same error
+    *more strongly* ("applies across all modes") — **Phase 5 should fix both
+    together**, not just README's milder phrasing.
+  - The Mode-authority paragraph classifies Task/Quorum/Decision/Handoff but
+    omits Proposal (shaped like Decision's `authorize_sender`) — incomplete,
+    not false; not blocking, not revisited here.
+- **Files touched:** `README.md` only, across all 5 commits (`git diff --stat
+  7c42124..da547d8` confirms). All 8 of the plan's original acceptance
+  criteria re-confirmed passing at every round, including the final one.
+- **Next:** Phase 2 (`docs/modes.md`).

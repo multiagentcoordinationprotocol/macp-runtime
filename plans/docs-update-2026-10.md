@@ -177,6 +177,17 @@ can land first if the sweep is ever cut short.
 
 ### Phase 1 — `README.md`: version header, release process, surface tables
 
+**Status: DONE** (`43c9ce4`..`da547d8`, 5 commits; 4 verify rounds — see
+`plans/docs-update-2026-10-PROGRESS.md`'s Phase 1 checkpoint for the full
+gap trail). Divergence from the plan as written: the new "Mode authority"
+subsection (item 3) needed 3 rounds of correction before it accurately
+scoped role-based vs. membership-based authority per mode — the plan's own
+item 3 text under-specified this as a single universal rule, same as
+`CLAUDE.md` §2 does. Two residue items carried to Phase 5 rather than fixed
+here: the Commitment-authority-override claim is standards-track-only
+(`docs/policy.md:230` has the same error more strongly), and the paragraph
+omits Proposal mode (incomplete, not false).
+
 **Delivers** the worst-stale file brought to `0.8.7`, including one statement
 that is wrong rather than merely stale.
 
