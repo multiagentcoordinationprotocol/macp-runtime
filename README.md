@@ -2,7 +2,7 @@
 
 Reference runtime for the Multi-Agent Coordination Protocol (MACP).
 
-This runtime implements the current MACP core/service surface, five standards-track modes, and one built-in extension mode. The focus of this release is freeze-readiness for SDKs and real-world unary and streaming integrations: strict `SessionStart`, mode-semantic correctness, authenticated senders, bounded resources, durable restart recovery, and extension mode lifecycle management.
+This runtime implements the current MACP core/service surface, five standards-track modes, and one built-in extension mode: strict `SessionStart`, mode-semantic correctness, authenticated senders, bounded resources, durable restart recovery, and extension mode lifecycle management.
 
 ## Recent changes
 
@@ -63,12 +63,16 @@ is rejected. Empty `SessionStartPayload` is rejected.
 ### Mode authority
 
 Only `Commitment` authority is granted regardless of participant-list
-membership: the `SessionStart` sender may emit `Commitment` (and
-`CancelSession`) whether or not it appears in `participants`. Every
-mode-specific message — `Proposal`, `Evaluation`, `Objection`, `Vote`,
-`TaskAccept`, and the rest — is authorized only for declared participants, so
-an initiator that wants to send one MUST be included in `participants`
-(RFC-MACP-0007 §2). See [Modes](docs/modes.md) for the per-mode rules.
+membership: the `SessionStart` sender may emit `Commitment` (and may invoke
+`CancelSession`, which the runtime — not the initiator — emits as a session
+entry) whether or not the initiator appears in `participants`. Authority for
+every other message is **mode-specific, not uniform**: Decision requires the
+initiator to be a declared participant to emit `Proposal`, `Evaluation`,
+`Objection`, or `Vote` (RFC-MACP-0007 §2), while Task's `TaskRequest` and
+Handoff's `HandoffOffer` are authorized by the initiator role itself, with no
+participant-list membership required — an external orchestrator can drive a
+session without listing itself. See [Modes](docs/modes.md) for the full
+per-mode authority rules.
 
 ### Streaming
 
@@ -412,6 +416,6 @@ a dry run) for recovery.
 - Five standards-track modes use the canonical `macp.mode.*` identifiers.
 - `multi_round` is a built-in extension (`ext.multi_round.v1`) — not standards-track, but ships with the runtime and enforces strict `SessionStart`.
 - Extension modes can be dynamically registered, unregistered, and promoted via `RegisterExtMode`, `UnregisterExtMode`, and `PromoteMode` RPCs.
-- `StreamSession` and `WatchSignals` behavior is described under "Runtime behavior that SDKs should assume" above.
+- `StreamSession` and `WatchSignals` behavior is described under [Runtime behavior that SDKs should assume](#runtime-behavior-that-sdks-should-assume) above.
 
 See `docs/README.md` and `docs/examples.md` for the updated local development and usage guidance.
