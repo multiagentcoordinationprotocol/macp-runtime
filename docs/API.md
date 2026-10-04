@@ -29,7 +29,7 @@ The client sends its supported protocol versions in descending preference order.
 | Field | Type | Description |
 |-------|------|-------------|
 | `selected_protocol_version` | string | Selected mutual version |
-| `runtime_info` | RuntimeInfo | `name: "macp-runtime"`, `version: "0.5.0"` (tracks the crate version) |
+| `runtime_info` | RuntimeInfo | `name: "macp-runtime"`, `version`: the running binary's crate version (`env!("CARGO_PKG_VERSION")`, `src/server.rs:820`) |
 | `capabilities` | Capabilities | Runtime capabilities (streaming, cancellation, policy, etc.) |
 | `supported_modes` | repeated string | All supported mode identifiers |
 | `instructions` | string | Optional human-readable guidance |
@@ -75,7 +75,9 @@ The runtime overrides `envelope.sender` with the authenticated identity. If the 
 
 **Reserved `message_id` namespace.** In a `macp.mode.handoff.v1` session started at `semantics_rev >= 2`, a client envelope whose `message_id` begins with the literal `implicit-accept:` is rejected with `INVALID_ENVELOPE`, whatever its `message_type` -- `SessionStart`, `Commitment` and `HandoffContext` included. The runtime mints its own implicit `HandoffAccept` under a deterministic id in that namespace (RFC-MACP-0010 §5.1(3), see [Handoff implicit accept](modes.md#implicit-accept-rfc-macp-0010-51)), and a client that squats the id a future offer would use would consume the runtime's dedup slot and strand the session short of commitment. The match is **case-sensitive**: `Implicit-Accept:h1` is an ordinary client id and is accepted. Sessions at `semantics_rev <= 1` are unaffected -- their wire behavior is byte-identical to earlier releases. In the same sessions, a `HandoffAccept` whose payload sets `implicit = true` is rejected with the same code; only the runtime may originate one.
 
-**`SessionStart` requirements.** For every standards-track mode (and `ext.multi_round.v1`) the `SessionStartPayload` must bind `mode_version`, `configuration_version`, a `ttl_ms` in `1..=86400000`, and a `participants` list of at most 1000 distinct non-empty entries; `max_suspend_ms` must not be negative. A payload missing any of these is rejected with `INVALID_ENVELOPE` and no session is created. (There is no distinct `INVALID_PAYLOAD` or `INVALID_TTL` code in the RFC vocabulary: `MacpError::InvalidPayload`, `InvalidTtl` and `InvalidModeState` all map to `INVALID_ENVELOPE` -- see `MacpError::error_code`.)
+**`SessionStart` requirements.** RFC-MACP-0001 §7.1 requires a `SessionStartPayload` to bind `intent` (MAY be empty, descriptive only), `mode_version`, `configuration_version`, a `ttl_ms` greater than zero, `participants` (when required by the Mode), and `policy_version` (MUST be present in the payload, MAY be empty -- an empty value resolves to `policy.default`). For every standards-track mode (and `ext.multi_round.v1`) a payload missing `mode_version`, `configuration_version`, or a positive `ttl_ms` is rejected with `INVALID_ENVELOPE` and no session is created. (There is no distinct `INVALID_PAYLOAD` or `INVALID_TTL` code in the RFC vocabulary: `MacpError::InvalidPayload`, `InvalidTtl` and `InvalidModeState` all map to `INVALID_ENVELOPE` -- see `MacpError::error_code`.)
+
+**Runtime limits, with no basis in the spec.** This runtime additionally caps `ttl_ms` at `86400000` and `participants` at 1000 distinct non-empty entries, and requires `max_suspend_ms` to be non-negative when present -- none of these ceilings are required by §7.1, which leaves `ttl_ms`'s only constraint as "greater than zero" and imposes no size bound on `participants` at all. A payload exceeding either cap is also rejected with `INVALID_ENVELOPE`.
 
 `participants` must be **non-empty for every mode except `macp.mode.decision.v1`**, which accepts an empty list. RFC-MACP-0001 §7.1 requires the field only "when required by the Mode", and RFC-MACP-0007 makes the Decision initiator's authority role-based rather than membership-based. A zero-participant Decision session is accepted and **inert**: `Proposal`, `Evaluation`, `Objection` and `Vote` are authorized only for declared participants, so with none declared every one of them is refused with `FORBIDDEN` -- including from the initiator -- no proposal can ever be accepted, and therefore no `Commitment` can be sealed. Such a session can only expire or be cancelled. Do not start one expecting to add participants later; the roster is bound at `SessionStart` and never changes.
 
@@ -89,7 +91,7 @@ rpc StreamSession(stream StreamSessionRequest) returns (stream StreamSessionResp
 
 The first envelope on the stream binds it to a `session_id`. All subsequent envelopes must target the same session. Responses contain either an accepted `envelope` or an application-level `error` (the stream stays open for application errors). If the client falls behind the broadcast buffer, the stream terminates with `ResourceExhausted`.
 
-**Passive subscribe** (RFC-MACP-0006-A1). A client may observe a session without sending envelopes by sending a request frame where `envelope` is absent and `subscribe_session_id` is set. The runtime replays the session's accepted history starting at log index `after_sequence` (0 = replay from session start) and then delivers live envelopes on the same stream. A single frame must not contain both an `envelope` and `subscribe_session_id` -- the stream terminates with `InvalidArgument` if both are set. Subscribes bind the stream to the given session just like a first envelope; mixing session IDs on the same stream is rejected. Authorization: the caller must be the session initiator, a declared participant, or hold the `is_observer` identity capability. Non-participants receive an inline `FORBIDDEN` error frame and the stream stays open.
+**Passive subscribe** (RFC-MACP-0006-A1). A client may observe a session without sending envelopes by sending a request frame where `envelope` is absent and `subscribe_session_id` is set. The runtime replays the session's accepted history and then delivers live envelopes on the same stream. `after_sequence` is the 1-based ordinal of accepted session-scoped envelopes and is **exclusive**: replay resumes at `after_sequence + 1`, and `0` replays from the session's first accepted envelope (RFC-MACP-0006 §3.2 "Sequence semantics"). It is not an offset into the durable log -- the runtime-internal entries noted above and under [`CancelSession`](#cancelsession), [`SuspendSession`](#suspendsession) and [`ResumeSession`](#resumesession) consume no ordinal. A single frame must not contain both an `envelope` and `subscribe_session_id` -- the stream terminates with `InvalidArgument` if both are set. Subscribes bind the stream to the given session just like a first envelope; mixing session IDs on the same stream is rejected. Authorization: the caller must be the session initiator, a declared participant, or hold the `is_observer` identity capability. Non-participants receive an inline `FORBIDDEN` error frame and the stream stays open.
 
 ## Session Lifecycle
 
@@ -304,7 +306,7 @@ rpc UnregisterExtMode(UnregisterExtModeRequest) returns (UnregisterExtModeRespon
 
 ### PromoteMode
 
-Promotes an extension mode to standards-track status, optionally assigning a new identifier.
+Promotes an extension mode to standards-track status, optionally assigning a new identifier. The new identifier is refused if it falls in the reserved `macp.mode.*` namespace: RFC-MACP-0002 §12 permits such a rename only when the mode has been published in the main MACP RFC repository or carries explicit community-governance approval, and this runtime has no way to verify either, so it refuses the rename unconditionally (`crates/macp-modes/src/mode_registry.rs`) rather than taking the RFC's word for it.
 
 ```protobuf
 rpc PromoteMode(PromoteModeRequest) returns (PromoteModeResponse)
@@ -316,9 +318,9 @@ rpc PromoteMode(PromoteModeRequest) returns (PromoteModeResponse)
 
 Registers a governance policy definition. The built-in `policy.default` cannot be overwritten, and the reserved `policy.std.` namespace only accepts the canonical RFC-MACP-0012 §5.2 definitions.
 
-The runtime does **not** run a JSON-Schema evaluator against the canonical `schemas/json/policy/*.schema.json` documents — it carries no `jsonschema` dependency and those documents live in the spec repository. It applies three layers of hand-written checks instead: the rules must deserialize into the target mode's Rust struct (unknown fields are ignored, so this catches type errors rather than misspelled keys); a named set of value-domain checks mirroring the canonical enums and numeric bounds; and the conditional constraints (for example, `weighted` algorithm requires a non-empty `weights` map). A rule the canonical schema forbids but that list does not name is accepted. Every rejection of the definition itself is reported with `INVALID_POLICY_DEFINITION` at the head of the message, because `RegisterPolicyResponse` carries no structured error code; a duplicate `policy_id` is a conflict rather than an invalid definition and is reported without that prefix.
+Every rejection of the definition itself is reported with `INVALID_POLICY_DEFINITION` at the head of the message, because `RegisterPolicyResponse` carries no structured error code; a duplicate `policy_id` is a conflict rather than an invalid definition and is reported without that prefix.
 
-See [Policy > What registration checks](policy.md#what-registration-checks) for the enforced list.
+See [Policy > What registration checks](policy.md#what-registration-checks) for the full three-layer registration contract, including the known deviation where this runtime's deserialization step ignores unknown keys rather than rejecting them as RFC-MACP-0012 §4 requires.
 
 ```protobuf
 rpc RegisterPolicy(RegisterPolicyRequest) returns (RegisterPolicyResponse)
@@ -397,7 +399,7 @@ Five bounds on request size, request frequency, and response size:
 
 The same five variables appear in [`README.md`](../README.md) and [`docs/deployment.md`](deployment.md).
 
-### Rate limits
+### Rate limiting
 
 `MACP_SESSION_START_LIMIT_PER_MINUTE` and `MACP_MESSAGE_LIMIT_PER_MINUTE` are per-sender sliding-window limits on session creation and message throughput. When either is exceeded, the runtime returns `RATE_LIMITED`.
 

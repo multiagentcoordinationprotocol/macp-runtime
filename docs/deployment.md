@@ -38,7 +38,7 @@ Note the interaction with the next item: because an unresolved policy makes the 
 
 ### 3. A persisted Quorum session with an out-of-domain policy threshold no longer replays
 
-RFC-MACP-0011 §6 makes a policy `threshold` *replace* the `ApprovalRequest`'s `required_approvals`, but nothing previously held the replacement to the same `1..=participants` domain the runtime enforces on the field it replaces. The Quorum mode now refuses an `ApprovalRequest` whose effective threshold falls outside that domain, and replay dispatches the same code -- so such a session fails to replay. It is skipped with a warning, or is fatal at startup under `MACP_STRICT_RECOVERY=1`.
+RFC-MACP-0011 §5 rule 6 makes a policy `threshold` *replace* the `ApprovalRequest`'s `required_approvals`, but nothing previously held the replacement to the same `1..=participants` domain the runtime enforces on the field it replaces. The Quorum mode now refuses an `ApprovalRequest` whose effective threshold falls outside that domain, and replay dispatches the same code -- so such a session fails to replay. It is skipped with a warning, or is fatal at startup under `MACP_STRICT_RECOVERY=1`.
 
 Detect it from the logs. The mode emits, at `WARN`:
 
@@ -51,7 +51,7 @@ naming the session, the bound policy, the computed threshold and the declared pa
 
 **What it takes to reach this.** Not a legacy *policy* -- an **`ApprovalRequest` this runtime accepted before the guard above existed**. Registration is no substitute for the guard, because registration has no participant count to bound the threshold against: `{"type": "n_of_m", "value": 66}` passes every check in [Policy](policy.md#what-registration-checks) under the **new** binary and still trips the guard on a three-participant session. Two classes of threshold reach it, and they are not equally benign:
 
-- **An out-of-domain numeric threshold** -- `n_of_m` or `count` above the declared participant count. The positive outcome was unreachable from the first message, and before this release `commitment_ready` carried no `counted > 0` guard, so `approvals + remaining < required` held with no ballot cast and the coordinator could seal a binding `quorum.rejected` with **zero** approvals (issue #145). That is the condition RFC-MACP-0011 §4a reads as grounds for a decline, reached without a vote. Such a session really was broken: the only outcome it could ever have sealed was a decline nobody cast a ballot for.
+- **An out-of-domain numeric threshold** -- `n_of_m` or `count` above the declared participant count. The positive outcome was unreachable from the first message, and before this release `commitment_ready` carried no `counted > 0` guard, so `approvals + remaining < required` held with no ballot cast and the coordinator could seal a binding `quorum.rejected` with **zero** approvals (issue #145). That is the condition RFC-MACP-0011 §5 rule 4a reads as grounds for a decline, reached without a vote. Such a session really was broken: the only outcome it could ever have sealed was a decline nobody cast a ballot for.
 - **`threshold.type: "weighted"`, or any unrecognised type.** This class **was working, and it stops replaying.** The old shared fallback arm read *any* unrecognised type as a raw approval count (`_ => rules.threshold.value as u32`), so `{"type": "weighted", "value": 2}` on three participants was a perfectly satisfiable bar of two approvals, and sessions under it sealed legitimate *positive* commitments. The type now resolves to `Unsatisfiable`, the `ApprovalRequest` is refused, and the session no longer loads. Do not read the warning as a report of a session that was already dead.
 
 The second class survives the upgrade through a **checkpoint**, not through the registry. A checkpoint serializes the resolved `policy_definition` inline and `try_replay_from_checkpoint` restores it verbatim without consulting the registry, so an old `weighted` definition is still live even though neither `RegisterPolicy` nor the `MACP_POLICIES_DIR` preload would accept it again. A session with no checkpoint re-resolves its `policy_version` against the live registry during full replay, and there a `weighted` policy file aborts startup at item 1 before recovery ever runs.
@@ -215,11 +215,17 @@ Two consequences worth knowing:
 | `MACP_AUTH_JWKS_JSON` | -- | Inline JWKS document (JSON) for JWT validation |
 | `MACP_AUTH_JWKS_URL` | -- | JWKS endpoint URL (fetched + cached) |
 | `MACP_AUTH_JWKS_TTL_SECS` | `300` | JWKS cache TTL when fetched from URL |
+| `MACP_AUTH_JWT_ALGS` | `RS256,ES256` | Comma-separated JWT algorithm allowlist (`HS256` requires explicit opt-in) |
 | `MACP_MAX_PAYLOAD_BYTES` | `1048576` | Maximum envelope payload size in bytes |
 | `MACP_SESSION_START_LIMIT_PER_MINUTE` | `60` | Per-sender session creation rate limit |
 | `MACP_MESSAGE_LIMIT_PER_MINUTE` | `600` | Per-sender message rate limit |
 | `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE` | `100` | `ListSessions` page size when the request sends `page_size = 0` |
 | `MACP_LIST_SESSIONS_MAX_PAGE_SIZE` | `1000` | Hard cap a requested `ListSessions` `page_size` is clamped to |
+| `MACP_METRICS_ADDR` | -- (off) | Prometheus text endpoint bind address, e.g. `127.0.0.1:9464` (`src/main.rs:584`) |
+| `MACP_CONCURRENCY_LIMIT_PER_CONNECTION` | `64` | tonic per-connection concurrency limit (`src/main.rs:456`) |
+| `MACP_MAX_CONCURRENT_STREAMS` | `128` | HTTP/2 max concurrent streams (`src/main.rs:460`) |
+| `MACP_REQUEST_TIMEOUT_SECS` | `30` | Per-request timeout (`src/main.rs:464`) |
+| `MACP_SHUTDOWN_DRAIN_SECS` | `10` | Graceful-shutdown drain deadline (`src/main.rs:524`) |
 | `MACP_CHECKPOINT_INTERVAL` | `0` (disabled) | Log entries between checkpoints |
 | `MACP_CLEANUP_INTERVAL_SECS` | `60` | Background maintenance interval in seconds: TTL expiry, memory eviction, disk GC, and eager observation of mode-computed deadlines (the handoff implicit accept, RFC-MACP-0010 §5.1(2)) |
 | `MACP_SESSION_RETENTION_SECS` | `3600` | Age (from session start) at which terminal sessions are evicted from **memory**; their durable data is kept |
@@ -232,7 +238,7 @@ Two consequences worth knowing:
 
 `MACP_POLICY_SCHEMAS_DIR` is listed here because it is otherwise documented nowhere, and a contributor changing a registration mirror needs it. It is read only by `macp-policy`'s parity unit test, which asserts the hand-written value-domain mirrors in `crates/macp-policy/src/registry.rs` still match the canonical schemas. Two warnings:
 
-- **Point it at a clean `git archive` export of the spec commit CI reads, never at a sibling working tree.** CI checks the spec repo out at `main` with no pinned ref, so a sibling checkout that is dirty, or on a local branch ahead of `main`, produces parity failures that do not exist in CI -- and it can move under you mid-session. Export first: `git -C <spec-repo> archive <sha> schemas/ | tar -x -C <tmpdir>`, then point the variable at `<tmpdir>/schemas/json/policy`.
+- **Point it at a clean `git archive` export of the spec commit CI reads, never at a sibling working tree.** CI checks the spec repo out at `SPEC_REV` (`.github/workflows/ci.yml`), so a sibling checkout that is dirty, or ahead of or behind that pin, produces parity failures that do not exist in CI -- and it can move under you mid-session. Export first: `git -C <spec-repo> archive <sha> schemas/ | tar -x -C <tmpdir>`, then point the variable at `<tmpdir>/schemas/json/policy`.
 - **A set-but-missing directory panics by design.** Setting the variable asserts the canonical schemas are available, so the test refuses to skip silently. Unset it to fall back to a sibling checkout, or to skip the parity check entirely when no checkout exists.
 
 ### Governance policy files
@@ -289,7 +295,7 @@ to `ListSessions`, that no-signature decision must be re-analyzed first.
 
 The runtime applies a pluggable resolver chain assembled at startup:
 
-1. **JWT bearer** (active when `MACP_AUTH_ISSUER` is set) -- validates signature, issuer, audience, and expiration against a JWKS. Default algorithm allowlist: `RS256`, `ES256`; `HS256` (shared-secret) requires explicit opt-in via `MACP_AUTH_JWT_ALGS=HS256` (see CHANGELOG 0.5.0). The `sub` claim becomes the sender; an optional `macp_scopes` claim carries capability flags (`allowed_modes`, `can_start_sessions`, `max_open_sessions`, `can_manage_mode_registry`, `is_observer`).
+1. **JWT bearer** (active when `MACP_AUTH_ISSUER` is set) -- validates signature, issuer, audience, and expiration against a JWKS. Default algorithm allowlist: `RS256`, `ES256`; `HS256` (shared-secret) requires explicit opt-in via `MACP_AUTH_JWT_ALGS=HS256`. The `sub` claim becomes the sender; an optional `macp_scopes` claim carries capability flags (`allowed_modes`, `can_start_sessions`, `max_open_sessions`, `can_manage_mode_registry`, `is_observer`).
 2. **Static bearer** (active when `MACP_AUTH_TOKENS_FILE` or `MACP_AUTH_TOKENS_JSON` is set) -- looks up opaque tokens in a preloaded identity map. Accepts `Authorization: Bearer <token>` or the alternate `x-macp-token: <token>` header.
 3. **Dev-mode fallback** -- activates only when **neither** JWT nor static bearer is configured. Any `Authorization: Bearer <value>` header authenticates the caller as sender `<value>` with full capabilities. Intended strictly for local development.
 

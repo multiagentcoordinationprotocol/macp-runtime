@@ -38,7 +38,7 @@ The decision mode tracks proposals, evaluations, objections, and votes through a
 - A nested map of votes keyed by `proposal_id` then by sender
 - A phase indicator that advances automatically as the session progresses
 
-**Phase progression** is automatic: the first `Evaluation` message moves the phase from Proposal to Evaluation, and the first `Vote` moves it to Voting. Once in the Voting phase, new proposals are no longer accepted. This progression is enforced by the runtime, not by agents.
+**Phase progression** is automatic: the first accepted `Proposal` moves the phase from Proposal to Evaluation, and the first accepted `Vote` moves it to Voting. Once in the Voting phase, **deliberation is closed to all three deliberation message types** -- a subsequent `Proposal`, `Evaluation` *or* `Objection` is rejected (RFC-MACP-0007 §5 rule 6: the first accepted `Vote` fixes the option set and the deliberation record from which the voting result and RFC-MACP-0012's objection-handling rules are computed, so admitting post-vote deliberation would let two conforming runtimes derive different commitment eligibility from identical accepted history). All three rejections surface as the wire code `INVALID_ENVELOPE`, from `MacpError::InvalidPayload` internally; the two gates covering them are `ensure_can_propose` (for `Proposal`) and `ensure_can_deliberate` (for `Evaluation` and `Objection`) in `crates/macp-modes/src/mode/decision.rs`, covered by its `proposal_after_voting_rejected`, `evaluation_after_voting_rejected` and `objection_after_voting_rejected` tests. This progression is enforced by the runtime, not by agents.
 
 **Value normalization**: Recommendation values, vote values, and severity levels are stored in a canonical form (uppercase for recommendations and votes, lowercase for severity) to ensure deterministic comparison during policy evaluation.
 
@@ -50,11 +50,19 @@ The decision mode tracks proposals, evaluations, objections, and votes through a
 
 **Source**: `crates/macp-modes/src/mode/proposal.rs` | **Identifier**: `macp.mode.proposal.v1`
 
-The proposal mode handles offer-and-counteroffer negotiation. Its internal state tracks live proposals, per-participant acceptance records, and any terminal rejections.
+The proposal mode handles offer-and-counteroffer negotiation. Its internal state tracks every proposal ever accepted into the session together with its **disposition**, per-participant acceptance records, and any terminal rejections. Acceptance is a separate sender-keyed relation (one proposal id per participant, latest wins per RFC-MACP-0008 §5 rule 5), never denormalized onto the proposal record.
 
 **Convergence detection** happens automatically after each message. The `refresh_phase()` method checks the session's acceptance criterion (configurable via policy as `all_parties`, `counterparty`, or `initiator`) and transitions the phase to Converged when the criterion is met. Convergence does not auto-resolve the session -- an explicit commitment is still required.
 
-**Counter-proposal semantics**: A `CounterProposal` creates a new entry with its own `proposal_id`. The `supersedes_proposal_id` field is informational only -- the original proposal stays live and participants can accept either. Round limits are enforced at counter-proposal submission time, not just at commitment.
+**Counter-proposal semantics**: A `CounterProposal` creates a new entry with its own `proposal_id`. The `supersedes_proposal_id` field is informational only -- unless withdrawn, the original proposal stays live and participants can accept either (RFC-MACP-0008 §5 rule 2a: the field records semantic intent but does not retire the original, and every live proposal is tracked independently). Round limits are enforced at counter-proposal submission time, not just at commitment.
+
+**Disposition and `Withdraw`**: each proposal record carries a disposition whose domain is `{Live, Withdrawn}` -- the `ProposalDisposition` enum in `crates/macp-modes/src/mode/proposal.rs`, pinned cross-implementation as `mode_state_dispositions` in `tests/parity/contract.json` → `sections.proposal_disposition`. A `Withdraw` message is authorized only for the referenced proposal's **author**; because a `CounterProposal` creates a new `proposal_id`, only the sender of that counter-proposal may withdraw it (RFC-MACP-0008 §2.1 authority matrix). An accepted `Withdraw` sets that one proposal's disposition to `Withdrawn`, and the consequences are scoped to it:
+
+- It can no longer be accepted, rejected, or committed. `Accept` and `Reject` both resolve their target through `live_proposal()`, which filters on `Live`, and convergence detection only considers `Live` proposals -- so a withdrawn proposal can never satisfy the acceptance criterion. RFC-MACP-0008 §5 rule 4 requires the accept and commit halves of this; refusing a `Reject` against a withdrawn proposal is the runtime's own consistency choice (§5 rule 3 asks only that `Accept`, `Reject` and `Withdraw` reference an *existing* proposal).
+- Any accepts naming it are dropped, and **its** terminal rejection is cleared -- which can take the session back out of the TerminalRejected phase. Terminal rejections recorded against *other* proposals survive untouched. Tests: `withdraw_clears_terminal_rejections`, `terminal_rejection_on_different_proposal_survives_withdraw`, `accept_on_withdrawn_proposal_rejected`, `reject_withdrawn_proposal_fails`.
+- Withdrawing an already-withdrawn proposal, or naming an empty/unknown `proposal_id`, is rejected; a `Withdraw` from anyone but the author is `FORBIDDEN`.
+
+Proposal's disposition domain deliberately excludes `Accepted`, where Handoff's `HandoffDisposition` includes it. That asymmetry is recorded as intentional (and not as drift) in `sections.proposal_disposition`'s `source` field, which also explains why the mode's `phase` is not pinned there.
 
 **Terminal rejection**: A `Reject` message with `terminal: true` immediately transitions the session phase to TerminalRejected, making the session eligible for a negative-outcome commitment.
 
@@ -64,9 +72,9 @@ The proposal mode handles offer-and-counteroffer negotiation. Its internal state
 
 The task mode manages bounded work delegation. Its internal state tracks the task request, the currently active assignee, any rejection records, progress updates, and the terminal report (complete or fail).
 
-**Assignment lifecycle**: After the initiator sends a `TaskRequest`, an eligible participant can accept with `TaskAccept`, which sets them as the active assignee. Only the active assignee can send `TaskUpdate` messages -- this is validated against the authenticated sender, not a payload field.
+**Assignment lifecycle**: After the initiator sends a `TaskRequest`, an eligible participant can accept with `TaskAccept`, which sets them as the active assignee (RFC-MACP-0009 §5 rule 3a -- the first accepted `TaskAccept` designates the assignee, and a later one is refused while an assignee stands). Only the active assignee can send `TaskUpdate` messages -- this is validated against the authenticated sender, not a payload field. **`TaskAccept` is irrevocable** absent a reassignment policy: a participant who has accepted may not then send `TaskReject` for the same task (RFC-MACP-0009 §5 rule 3b). The runtime enforces this as `POLICY_DENIED` rather than `FORBIDDEN`, since what is missing is a policy permission rather than sender authority.
 
-**Reassignment**: When the `allow_reassignment_on_reject` policy rule is enabled and the active assignee sends a `TaskReject`, the assignee is cleared. Other eligible participants can then send `TaskAccept` to take over the task.
+**Reassignment**: That irrevocability is exactly what the `allow_reassignment_on_reject` policy rule lifts (RFC-MACP-0009 §5 rule 3c). With it enabled, a `TaskReject` from the active assignee clears the assignee and returns the session to its pre-assignment state. Other eligible participants can then send `TaskAccept` to take over the task; no new `TaskRequest` is needed, since the original request remains active.
 
 **Terminal reports**: Either `TaskComplete` or `TaskFail` records the outcome, but neither resolves the session. An explicit commitment from the initiator is required to bind the result.
 
@@ -76,9 +84,9 @@ The task mode manages bounded work delegation. Its internal state tracks the tas
 
 The handoff mode manages responsibility transfer through serial offers. Its internal state tracks offers and their associated context messages.
 
-**Serial offer constraint**: Only one outstanding (unresolved) offer may exist at a time. Once an offer is accepted, no further offers can be issued in that session.
+**Serial offer constraint**: Only one outstanding (unresolved) offer may exist at a time, so a new `HandoffOffer` is refused while a prior one is still pending. Once an offer is accepted, no further offers can be issued in that session, and only one final `Commitment` resolves it. A session may still carry several *sequential* offers to different targets (RFC-MACP-0010 §5 rule 5).
 
-**Late context**: `HandoffContext` messages are accepted even after the offer they reference has been accepted or declined. The protocol allows this as supplementary documentation -- additional context that may be useful to the accepting agent after the transfer.
+**Late context**: `HandoffContext` messages are accepted even after the offer they reference has been accepted or declined. RFC-MACP-0010 §2.1 licenses this explicitly -- `HandoffContext` SHOULD precede the accept or decline, but late context "is permitted but serves only as supplementary documentation, not as input to the accept/decline decision". The §5 rule 2 requirement that it reference an existing `handoff_id` still applies.
 
 ### Implicit accept (RFC-MACP-0010 §5.1)
 
@@ -113,13 +121,20 @@ Both carry the wire code `INVALID_ENVELOPE`. The runtime distinguishes the two i
 
 Every session records the `semantics_rev` it was started under, and the runtime honors that revision for the session's whole life so an already-persisted history replays to the outcome it was accepted with (RFC-MACP-0003 §1). The revision is bound at `SessionStart`; there is no way to move an existing session forward.
 
-| `semantics_rev` | Implicit-accept behavior |
-|---|---|
-| `0` | Inferred inside `Commitment` handling, timed against the client-supplied `Envelope.timestamp_unix_ms`. Suspended time counts. |
-| `1` | Same inference, timed against the runtime's acceptance clock instead of the client's timestamp. Suspended time counts. |
-| `2` (current) | The synthetic history entry described above. Suspended time is excluded. Client-submitted implicit accepts and reserved ids are refused. |
+`semantics_rev` is one **shared counter across all modes**, not a per-mode version: each bump pins whatever behavior changed in the release that raised it, and the mode it concerns differs from row to row. Revisions 0-2 are all Handoff implicit-accept; revision 3 touches no Handoff behavior at all. The authoritative enumeration, with the reasoning for each step, is the doc comment on `macp_core::session::CURRENT_SEMANTICS_REV` (`crates/macp-core/src/session.rs`).
 
-Sessions started by this release are rev 2. Sessions restored from a log written by an earlier release keep their recorded revision and continue to resolve through the interim in-`Commitment` path, with no synthetic entry and no reserved-id restriction. **Rollback is not a revert**: once a rev-2 session has written a synthetic accept, an older binary replays that history differently, so the recovery path for a bad 0.8.0 deployment is to roll forward.
+| `semantics_rev` | Mode affected | What the revision gates |
+|---|---|---|
+| `0` | `macp.mode.handoff.v1` | Implicit accept inferred inside `Commitment` handling, timed against the client-supplied `Envelope.timestamp_unix_ms`. Suspended time counts. |
+| `1` | `macp.mode.handoff.v1` | Same inference, timed against the runtime's acceptance clock instead of the client's timestamp. Suspended time counts. |
+| `2` | `macp.mode.handoff.v1` | The synthetic history entry described above (§5.1(2)). Suspended time is excluded (§5.1(1)). Client-submitted implicit accepts and reserved `implicit-accept:` ids are refused (§5.1(3)). |
+| `3` (current) | `ext.multi_round.v1` | The `Contribute` decode gains a canonical-proto tie-break: a successful legacy-JSON parse is trusted only when the same bytes do **not** also round-trip byte-identically through the canonical `ContributePayload` proto encoding (issue #192 -- see [Multi-Round Mode](#built-in-extension-multi-round-mode)). Revisions 0-2 keep the unconditional JSON-first decode. |
+
+Sessions started by this release are rev 3. Because every existing gate on this field tests `>= 2` or `<= 1` (never `== 2`), raising the counter to 3 was additive for Handoff, Quorum, Proposal, Task and Decision: a rev-3 session gets exactly the rev-2 Handoff behavior in the table above.
+
+Sessions restored from a log written by an earlier release keep their recorded revision. A rev-0 or rev-1 handoff session continues to resolve through the interim in-`Commitment` path, with no synthetic entry and no reserved-id restriction; a rev-0, rev-1 or rev-2 multi-round session continues to decode `Contribute` JSON-first without the tie-break, including at the collision lengths, because that is how its history was originally accepted.
+
+**Rollback is not a revert.** Once a session has written history under a newer revision -- a synthetic handoff accept, or a contribution decoded under the tie-break -- an older binary replays that history differently. The recovery path for a bad deployment of any release that raised this counter is therefore to **roll forward** to a fixed build, not to roll back to the previous one.
 
 ## Quorum Mode
 
@@ -127,7 +142,7 @@ Sessions started by this release are rev 2. Sessions restored from a log written
 
 The quorum mode tracks approval requests and ballots against a threshold. Its internal state records the approval request and a map of ballots (approve, reject, or abstain) keyed by sender.
 
-**Threshold resolution**: A governance policy's `threshold` rule *replaces* the `required_approvals` value from the `ApprovalRequest` payload rather than supplementing it (RFC-MACP-0011 §6). The arithmetic is ceiling-rounded with a floor of one approval, and lives in `QuorumThreshold::effective` (`macp-core`) -- the same function the policy evaluator calls, so the mode and the evaluator cannot derive two different bars from one policy.
+**Threshold resolution**: A governance policy's `threshold` rule *replaces* the `required_approvals` value from the `ApprovalRequest` payload rather than supplementing it (RFC-MACP-0011 §5 rule 6). The arithmetic is ceiling-rounded with a floor of one approval, and lives in `QuorumThreshold::effective` (`macp-core`) -- the same function the policy evaluator calls, so the mode and the evaluator cannot derive two different bars from one policy.
 
 **Reading the threshold from outside the runtime**: two public accessors on `QuorumMode` report the bar the runtime itself enforces, so a caller never has to re-derive it from policy rules and participant counts:
 
@@ -145,18 +160,20 @@ The session-level form decodes the accepted request out of `session.mode_state` 
 - `Ok(None)` -- no `ApprovalRequest` has been accepted yet, so there is nothing to resolve. Deliberately distinct from `Unsatisfiable`: "not yet" and "never" are different answers.
 - `Err(MacpError::InvalidModeState)` -- `session.mode_state` is not decodable quorum state, so no answer would be honest.
 
-**Commitment readiness**: the runtime accepts a commitment when the approval threshold is met, or when it has become mathematically unreachable and at least one ballot has been cast -- the latter being RFC-MACP-0011 §4a's trigger for a *negative* commitment:
+**Commitment readiness**: the runtime accepts a commitment when the approval threshold is met, or when it has become mathematically unreachable and at least one ballot has been cast -- the unreachability half being RFC-MACP-0011 §5 rule 4a's trigger for a *negative* commitment:
 
 ```text
 approvals >= required || (counted > 0 && approvals + remaining < required)
                                          // remaining = participants - counted
 ```
 
-The `counted > 0` guard stops a coordinator sealing a binding `quorum.rejected` before anyone has voted, which an over-participant policy threshold could otherwise reach. Every decline the RFC describes has at least one ballot behind it.
+The `counted > 0` guard stops a coordinator sealing a binding `quorum.rejected` before anyone has voted, which an over-participant policy threshold could otherwise reach (issue #145).
+
+**This guard is a deliberate deviation from RFC-MACP-0011 §5 rule 6**, not a restatement of it. That rule says an `n_of_m` override above the eligible participant count "is not rejected at admission ... and simply makes the threshold unreachable, so the Session becomes eligible for `Commitment` under rule 4's second clause ... with the negative outcome of rule 4b" -- i.e. the RFC leaves such a session negatively committable with **zero** ballots cast. The runtime declines to: it requires at least one ballot before any decline is sealed. The reasoning is that every decline the RFC's own rules 4a and 4b *describe* has at least one ballot behind it (4a's arithmetic counts those who have voted; 4b's antecedent is abstentions and rejections), and rule 6 reaches a ballotless decline only as a side effect of an unreachable override that the schema admits because it cannot see a participant count. Sealing a binding `quorum.rejected` that no participant had any opportunity to influence is the defect class issue #145 was. A session with such an override therefore seals neither outcome until at least one participant ballots, at which point the decline the RFC expects becomes available.
 
 Because readiness fires on *either* outcome, it is **non-monotonic in the approval count**, and it depends on the whole ballot box rather than the approval count alone. On three participants with `required = 3`: three rejections (zero approvals) are ready, one approval plus two rejections is ready, two approvals with one participant yet to vote is *not* ready, three approvals are ready. Probing readiness to discover the threshold -- by binary search especially -- returns a confident wrong answer; call the accessors above instead.
 
-**Abstention handling**: `abstention.counts_toward_quorum` is **currently inert**. It is parsed into `AbstentionRules` and checked at registration, but no production path reads it: `QuorumThreshold::effective` divides a `percentage` threshold by the raw declared participant count, and Decision mode's `voting.quorum` percentage uses the same unadjusted denominator. An abstention therefore never shrinks a percentage denominator. The one abstention field that is read is `interpretation` -- and `evaluate_quorum_commitment` only *reports* it in the decision reasons rather than gating on it (see [Policy](policy.md#how-evaluation-works)). Separately, and not driven by these rules, Decision mode's *voting ratio* does exclude abstain ballots from its denominator, per RFC-MACP-0004.
+**Abstention handling**: `abstention.counts_toward_quorum` is **currently inert**. It is parsed into `AbstentionRules` and checked at registration, but no production path reads it: `QuorumThreshold::effective` divides a `percentage` threshold by the raw declared participant count, and Decision mode's `voting.quorum` percentage uses the same unadjusted denominator. An abstention therefore never shrinks a percentage denominator. The one abstention field that is read is `interpretation` -- and `evaluate_quorum_commitment` only *reports* it in the decision reasons rather than gating on it (see [Policy](policy.md#how-evaluation-works)). Separately, and not driven by these rules, Decision mode's *voting ratio* does exclude abstain ballots from its denominator -- that is RFC-MACP-0012 §4.1's **"Denominator"** rule, which fixes the denominator of the ratio-based algorithms (`majority`, `supermajority`, `weighted`) at the *decisive* votes, those cast as approve or reject.
 
 ## Built-in Extension: Multi-Round Mode
 
@@ -166,10 +183,18 @@ The multi-round mode is a built-in extension for iterative convergence. It is di
 
 Participants send `Contribute` messages with a `value` string. Each contribution overwrites the sender's previous value. When all declared participants have contributed the same value, the runtime marks the session as converged. Convergence does not auto-resolve the session -- an explicit commitment is required.
 
-Unlike the standards-track modes, multi-round uses JSON-encoded payloads rather than protobuf.
+**`Contribute` wire format.** Like the standards-track modes, multi-round has a canonical protobuf payload: `ContributePayload` in `macp/modes/multi_round/v1/multi_round.proto` (compiled into `macp-pb` alongside the five standards-track mode protos), a single field 1 `value` of type `string`. That is the encoding clients should send. A legacy JSON object `{"value": "..."}` predates the proto and is **still accepted**, because replay must parse already-persisted bytes identically forever (RFC-MACP-0003 §1).
+
+The decoder (`parse_contribute_value`, `crates/macp-modes/src/mode/multi_round.rs`) therefore tries JSON **first**, permanently -- trying proto first would let pathological JSON bytes decode as a *valid* proto message with a different value. The catch is that the reverse collision also exists: at certain value byte-lengths the proto tag byte and length varint are themselves insignificant JSON whitespace (or the literal `{`), so a genuine canonical-proto payload can also parse as a legacy JSON object. At `semantics_rev >= 3` the runtime applies a **canonicality tie-break** for this (issue #192): a successful JSON parse is trusted only when the same bytes do *not* also round-trip byte-identically through the canonical proto encoding; where they do, the proto reading wins. Revisions 0-2 keep the unconditional JSON-first reading -- see [Revision gating](#revision-gating).
+
+The byte-level collision vectors are pinned, cross-implementation, in `tests/parity/contract.json` → `sections.contribute_payload` (`vectors`, `collision_*`) rather than restated here; both SDKs apply the same tie-break (macp-sdk-typescript issue #104, macp-sdk-python PR #77), and that section's `source` field records the agreed band and the one length where the three implementations historically differed.
+
+One acceptance rule is this runtime's alone: an **empty** `Contribute` payload is rejected. `sections.contribute_acceptance` pins it with `applies_to: ["macp-runtime"]`, and that narrowing is deliberate and permanent, not pending agreement -- neither SDK gates an empty payload at decode time, and under proto3 `value` has no field presence, so an explicitly-empty contribution and an absent payload are the same zero bytes and indistinguishable to a decoder.
 
 ## Dynamic Extension Modes
 
 Extensions can be registered at runtime via `RegisterExtMode`. Each registered extension is backed by the passthrough handler (`crates/macp-modes/src/mode/passthrough.rs`), which accepts any message type listed in the extension's descriptor and requires an explicit commitment from the initiator to resolve the session.
 
-Extension mode names must not use the reserved `macp.mode.*` namespace. Built-in modes cannot be unregistered. Extensions can be promoted to standards-track status via `PromoteMode`, and all registry changes are broadcast to `WatchModeRegistry` subscribers.
+**This runtime refuses extension names in the reserved `macp.mode.*` namespace -- a deliberately stricter rule than the RFC's.** RFC-MACP-0002 §3 and §12 say only that implementation-defined and extension modes **SHOULD** avoid that namespace (§12 suggests `ext.*` or reverse-domain identifiers); the runtime makes it a MUST, rejecting both `RegisterExtMode` with such a name and any `PromoteMode` that would rename a mode into it (`crates/macp-modes/src/mode_registry.rs`). The promotion guard also drops the RFC's escape hatch: §12 permits such a rename when the mode has been published in the main MACP RFC repository or carries explicit community-governance approval, and the runtime has no way to verify either, so it refuses unconditionally. Without this, `RegisterExtMode("ext.x")` followed by `PromoteMode("ext.x" → "macp.mode.x")` would be a side door for a passthrough-backed extension to masquerade as a standards-track mode.
+
+Built-in modes cannot be unregistered. Extensions can be promoted to standards-track status via `PromoteMode` -- which grants standards-track status *on this runtime*, not RFC namespace membership -- and all registry changes are broadcast to `WatchModeRegistry` subscribers.
