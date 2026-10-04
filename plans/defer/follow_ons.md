@@ -362,11 +362,13 @@ deterministic. A future `HashMap`-backed mode state would emit spurious
 warnings. Warn-only, so harmless, but the invariant should be stated at
 `src/replay.rs:229-231` rather than rediscovered.
 
-Minor doc staleness from the same change: `docs/change-review-phases-a-e.md:504,513`
-enumerates the compared fields as "(state, dedup count, participants, bound
-versions)" and claims "diverged state+dedup → 2". Both are now incomplete. That
-file is a point-in-time change-review record rather than a living spec, so
-leaving it is defensible; a "widened in Phase 11a" note is the tidy option.
+`docs/change-review-phases-a-e.md` carried the same staleness as item 13's
+field list above (it enumerated the compared fields as "(state, dedup count,
+participants, bound versions)" and claimed "diverged state+dedup → 2", both
+incomplete after this change); moot now that the file was deleted (issue
+#225 — internal engineering review, not user documentation, git history
+retains it).
+
 ## 14. The `count` quorum-threshold alias is now a departure the spec ruled against
 **Status changed 2026-09-11 by spec #110** (`1bb30ad`, "close the threshold
 vocabulary — remove weighted, pin ceiling rounding"), which closed spec issue
