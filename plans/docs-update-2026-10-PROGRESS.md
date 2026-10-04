@@ -412,3 +412,4 @@ Land **2 and 3 first** if the sweep is cut short — highest value per unit of r
   for policy.std.* has no possible instance under §4.1's legacy arm",
   `multiagentcoordinationprotocol/multiagentcoordinationprotocol#181`.
 - pushed `docs/update-2026-10-sweep` `32e4002`
+- PR #221 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/221
