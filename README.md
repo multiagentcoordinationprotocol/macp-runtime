@@ -79,8 +79,10 @@ participant to emit `Proposal`, `Evaluation`, `Objection`, or `Vote`
 (RFC-MACP-0007 §2). Handoff mixes both: `HandoffOffer` is role-authorized, but
 `SessionStart` separately requires the initiator to be one of the declared
 parties, since the initiator is a transfer party rather than just a
-coordinator. See [Modes](docs/modes.md) for the full per-mode authority
-rules.
+coordinator. See [Modes](docs/modes.md) for per-mode implementation notes;
+the canonical authority matrices live in the
+[protocol mode docs](https://www.multiagentcoordinationprotocol.io/docs/modes)
+and the individual mode RFCs.
 
 ### Streaming
 
