@@ -980,6 +980,18 @@ only from the PR cannot complete this phase and must open `CLAUDE.md` directly.
 
 **Risk: simple.** Additive and corrective in an untracked file.
 
+**Status: DONE** (2026-10-03, PASS after 1 verify round). All 11 change items
+applied. Divergence: item 2's fix surfaced two spots the plan's single
+`:183` citation didn't name — the clarifying sentence itself initially used
+the literal phrase "dev header", and the pre-existing `### 4. Security
+boundary` bullet (`:204`) independently said "bearer token or dev header" —
+both reworded to satisfy the plan's own `grep -n 'dev header'` acceptance
+check. All 11 items and 7/8 acceptance criteria independently re-verified
+against the live file and the code; the 8th (PR body note) is a `/ship`-time
+criterion, not a content gap. No code commit — `CLAUDE.md` is gitignored; see
+`plans/docs-update-2026-10-PROGRESS.md`'s Phase 8 checkpoint for the full
+record.
+
 ---
 
 ## PR strategy

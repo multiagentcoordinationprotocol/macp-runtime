@@ -224,7 +224,7 @@ tracking note — do not silently rewrite the paragraph.**
 | 5 | `docs/policy.md` + `docs/API.md` — FORBIDDEN carve-out, §4 deviation, pin, **escalation** | **complex** | DONE | `c788041` |
 | 6 | version / enumeration / env-var sweep | simple | DONE | `3f0a7ec` |
 | 7 | `tests/conformance/SOURCE.md`, pin-claim fix, docker-compose | simple | DONE | `9174c5c` |
-| 8 | `CLAUDE.md` (untracked — not in PR diff) | simple | not started | |
+| 8 | `CLAUDE.md` (untracked — not in PR diff) | simple | DONE | (no code commit — untracked file; see checkpoint) |
 
 Land **2 and 3 first** if the sweep is cut short — highest value per unit of risk.
 
@@ -359,3 +359,36 @@ Land **2 and 3 first** if the sweep is cut short — highest value per unit of r
   `docs/testing.md`, `tests/conformance/SOURCE.md` (new).
 - **Next:** Phase 8 (`CLAUDE.md`, untracked -- not in PR diff). After that,
   finalize and `/ship`.
+
+### Checkpoint — Phase 8 (2026-10-03)
+
+- **Verdict:** PASS after 1 verify round (fresh Opus, re-ran every grep and
+  cross-check itself against the local file rather than trusting prose, per
+  the plan's own "verifier must open `CLAUDE.md` directly" instruction).
+- **Divergence from the plan:** applying item 2 (drop "bearer token or dev
+  header" → bearer-token-only) surfaced two spots the plan's one-line item
+  didn't anticipate: the new clarifying sentence drafted first ("not a
+  separate dev header -- `x-macp-agent-id` was removed...") itself contained
+  the literal string "dev header", and the pre-existing `### 4. Security
+  boundary` bullet list (`:204`, outside the plan's cited `:183`) still said
+  "bearer token or dev header" verbatim -- neither would have passed the
+  plan's own `grep -n 'dev header' CLAUDE.md` acceptance check. Both reworded
+  (the clarifying sentence to "not a second credential path"; the bullet to
+  "bearer token, including the dev-mode fallback") before dispatching the
+  verifier -- caught by the executor's own acceptance-criteria self-check,
+  not by the verifier.
+- **All 11 change items and 7 of 8 acceptance criteria independently
+  re-verified; the 8th (PR body states CLAUDE.md changes aren't in the diff)
+  is a `/ship`-time criterion, correctly deferred rather than flagged as a
+  gap.** §8a's 18-struct / 8-enum lists, the `MACP_*` env-var completeness
+  diff (including confirming `MACP_TEST_REDIS_URL` is test-only and correctly
+  excluded), `CURRENT_SEMANTICS_REV = 3`, the `reflection` feature entry, and
+  the dead-`x-macp-agent-id` claim were all independently re-derived from the
+  actual code by the verifier, not taken on the executor's word.
+- **No code commit** — `CLAUDE.md` is gitignored (`.gitignore:20`); this
+  checkpoint and the plan's own Phase 8 closeout note are the only durable
+  record of this phase's work. Nothing to stage or commit for this phase
+  itself.
+- **Files touched:** `CLAUDE.md` only (untracked, not part of any commit).
+- **Next:** Finalization pass across all 8 phases (§4 of `/implement`), then
+  `/ship`.
