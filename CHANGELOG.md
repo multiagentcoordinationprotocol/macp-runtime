@@ -6,6 +6,12 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.8.9](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.8...macp-runtime-v0.8.9) - 2026-10-04
+
+### Other
+
+- *(deps)* bump the actions group across 1 directory with 7 updates ([#214](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/214))
+
 ## [0.8.8](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.7...macp-runtime-v0.8.8) - 2026-10-04
 
 ### Other
