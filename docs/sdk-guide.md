@@ -4,6 +4,8 @@ This guide is for developers building client libraries that connect to the MACP 
 
 For protocol-level SDK conformance requirements, see the [protocol SDK parity documentation](https://www.multiagentcoordinationprotocol.io/docs/sdk-parity). For transport binding specifications, see the [protocol transports documentation](https://www.multiagentcoordinationprotocol.io/docs/transports).
 
+**Reference implementations.** [`macp-sdk-python`](https://github.com/multiagentcoordinationprotocol/macp-sdk-python) (`pip install macp-sdk-python`) and [`macp-sdk-typescript`](https://github.com/multiagentcoordinationprotocol/macp-sdk-typescript) (`npm install macp-sdk-typescript`) are full client implementations of the contract this page describes. Installation, language-specific API, and client usage patterns live in those repos' own docs -- this page specifies only the runtime-side gRPC contract an SDK must satisfy, not how to use either SDK.
+
 ## What your SDK should handle
 
 A well-built MACP SDK takes care of seven concerns so that application code can focus on coordination logic:
@@ -11,7 +13,7 @@ A well-built MACP SDK takes care of seven concerns so that application code can 
 1. **gRPC transport** -- Connection management, TLS configuration, and metadata injection.
 2. **Authentication** -- Storing the caller's bearer credential (opaque static token or JWT) and attaching it to every request as `Authorization: Bearer <token>`.
 3. **Envelope construction** -- Building protobuf-encoded envelopes with correct version and mode fields.
-4. **Message ID generation** -- Producing unique IDs for deduplication.
+4. **Message ID generation** -- Producing unique IDs for deduplication, and never generating one in the runtime-reserved `implicit-accept:` namespace.
 5. **Session ID generation** -- Creating IDs in an accepted format (UUID v4/v7 or base64url).
 6. **Error handling** -- Distinguishing transient from permanent failures and applying appropriate retry logic.
 7. **Streaming** -- Managing `StreamSession` connections (including passive subscribe), handling inline errors, and recovering from lag.
@@ -53,9 +55,11 @@ message Envelope {
 }
 ```
 
+This mirrors `macp-proto`'s own `Envelope` definition (RFC-MACP-0001 §6) -- diff against that crate if this table and the wire format ever disagree.
+
 The runtime overrides `envelope.sender` with the authenticated identity. If the SDK sets a sender that does not match, the request is rejected. The safest approach is to either leave `sender` empty or set it to the expected authenticated identity.
 
-**Message IDs** must be unique per sender. UUID v4 is a good default. The runtime deduplicates on `message_id`, so sending the same ID twice returns a duplicate acknowledgement without reprocessing.
+**Message IDs** must be unique per sender. UUID v4 is a good default. The runtime deduplicates on `message_id`, so sending the same ID twice returns a duplicate acknowledgement without reprocessing. In a `macp.mode.handoff.v1` session at `semantics_rev >= 2`, a client `message_id` must not begin with the literal `implicit-accept:` -- that namespace is reserved for the runtime's own synthetic accept and is rejected with `INVALID_ENVELOPE` whatever the message type. See [Runtime API § Send](API.md#send) for the full rule and RFC-MACP-0010 §5.1(3) for the normative source.
 
 **Session IDs** must be UUID v4/v7 (hyphenated lowercase, 36 characters) or base64url tokens (22+ characters). UUID v4 is the simplest choice.
 
@@ -65,11 +69,11 @@ The runtime overrides `envelope.sender` with the authenticated identity. If the 
 
 ### Error categories
 
-Errors fall into five categories, each with different retry semantics:
+The canonical error code list, with HTTP status mappings and the `permanent`/`deprecated` status each code carries, is the spec repo's [error code registry](https://github.com/multiagentcoordinationprotocol/multiagentcoordinationprotocol/blob/main/registries/error-codes.md) (`registries/error-codes.md`) -- this page does not restate it. The table below is **runtime-local operational advice layered on top of** that registry, not an alternate classification: the registry marks every code `permanent` (including `RATE_LIMITED` and `INTERNAL_ERROR`), and "Transient" below means *worth retrying in practice*, not a registry status.
 
 | Category | Examples | Retry? |
 |----------|---------|--------|
-| **Transient** | `RATE_LIMITED`, `INTERNAL_ERROR`, network timeout | Yes, with backoff |
+| **Transient** (operational advice, not a registry status) | `RATE_LIMITED`, `INTERNAL_ERROR`, network timeout | Yes, with backoff |
 | **Envelope errors** | `INVALID_ENVELOPE`, `INVALID_SESSION_ID`, `PAYLOAD_TOO_LARGE` | No -- fix the request |
 | **State errors** | `SESSION_NOT_FOUND`, `SESSION_NOT_OPEN`, `SESSION_ALREADY_EXISTS` | No -- session state is permanent |
 | **Auth errors** | `UNAUTHENTICATED`, `FORBIDDEN` | No -- fix credentials or permissions |
@@ -111,6 +115,8 @@ Two further resume rules your SDK must implement (RFC-MACP-0006 §3.2 "Sequence 
 - **Redelivery.** Key duplicate detection on `message_id`, and do not let a redelivered envelope advance your sequence position -- only a distinct accepted envelope does.
 
 Application-level errors (validation failures, authorization denials) are delivered as inline `MACPError` messages and the stream stays open. Transport-level errors (unauthenticated, internal, unknown session on subscribe) close the stream.
+
+In a `macp.mode.handoff.v1` session, a stream can deliver a `HandoffAccept` that **no participant sent**: the runtime's synthetic implicit accept. It consumes an accepted ordinal and replays identically to any other accepted envelope, but its payload carries `implicit = true` and its `timestamp_unix_ms` is the computed deadline, not the time your SDK observed it. A client must never originate one. See [Handoff implicit accept](modes.md#implicit-accept-rfc-macp-0010-51).
 
 ### Handling stream lag
 
@@ -165,7 +171,9 @@ MACP_ALLOW_INSECURE=1 cargo run
 
 ## Proto files
 
-Proto definitions are available in the `macp-proto` crate:
+Proto definitions are available in the `macp-proto` crate, currently pinned at `0.1.10`
+(root `Cargo.toml`'s `[workspace.dependencies]`) -- check that pin rather than trusting
+this list if a mode's `.proto` file is missing from it:
 
 ```
 macp/v1/envelope.proto                      -- Envelope, Ack, MACPError
@@ -176,6 +184,10 @@ macp/modes/proposal/v1/proposal.proto       -- Proposal mode payloads
 macp/modes/task/v1/task.proto               -- Task mode payloads
 macp/modes/handoff/v1/handoff.proto         -- Handoff mode payloads
 macp/modes/quorum/v1/quorum.proto           -- Quorum mode payloads
+macp/modes/multi_round/v1/multi_round.proto -- multi_round extension mode payloads (Contribute)
 ```
 
-Generate language-specific bindings using `protoc` or `buf`.
+Generate language-specific bindings using `protoc` or `buf`. The TypeScript SDK instead
+consumes these as a prebuilt package, `@multiagentcoordinationprotocol/proto`, distributed
+via GitHub Packages (requires an `.npmrc` entry and a GitHub PAT with `read:packages`
+scope) -- see that SDK's own README for setup.
