@@ -482,6 +482,11 @@ before renaming.
 
 ### Phase 4 — `docs/sdk-guide.md`: cross-references and the 0.8.0 client contracts
 
+**Status: DONE** (`8f131f1`; 1 verify round, PASS). No divergence from the
+plan as written -- all six changes applied as specified and confirmed against
+source (`crates/macp-pb/build.rs`, root `Cargo.toml`'s `macp-proto` pin, the
+spec repo's `registries/error-codes.md`, the TypeScript SDK's own README).
+
 **Delivers** the SDK-boundary fix (additive cross-refs, nothing moved out) and
 the client-facing half of the 0.8.0 major.
 

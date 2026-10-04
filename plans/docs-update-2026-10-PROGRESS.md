@@ -220,7 +220,7 @@ tracking note — do not silently rewrite the paragraph.**
 | 1 | `README.md` — version, release process, surface tables, SDK links | **complex** | DONE | `43c9ce4`..`da547d8` (5 commits) |
 | 2 | `docs/modes.md` — rev 3, multi_round encoding, `Withdraw`, RFC citations | simple | DONE | `f88849c`, `9333af5` (2 commits) |
 | 3 | `after_sequence` exclusivity ×4 files + 2 heading anchors | simple | DONE | `bde43af` |
-| 4 | `docs/sdk-guide.md` — SDK cross-refs, proto list, error registry | simple | not started | |
+| 4 | `docs/sdk-guide.md` — SDK cross-refs, proto list, error registry | simple | DONE | `8f131f1` |
 | 5 | `docs/policy.md` + `docs/API.md` — FORBIDDEN carve-out, §4 deviation, pin, **escalation** | **complex** | not started | |
 | 6 | version / enumeration / env-var sweep | simple | not started | |
 | 7 | `tests/conformance/SOURCE.md`, pin-claim fix, docker-compose | simple | not started | |
@@ -289,3 +289,23 @@ Land **2 and 3 first** if the sweep is cut short — highest value per unit of r
   "last accepted envelope it saw," the analogous fix made in
   `docs/sdk-guide.md:117` was not mirrored there; flagged for Phase 4/6 pickup
   since Phase 4 also touches `docs/sdk-guide.md`'s cross-references).
+
+### Checkpoint — Phase 4 (2026-10-03)
+
+- **Verdict:** PASS, 1 verify round, no gaps. All six changes (SDK reference-
+  implementations note, reserved `implicit-accept:` message-id clause,
+  synthetic `HandoffAccept` streaming note, error-registry citation +
+  retry-table relabel, Envelope canonical pointer, proto list +
+  `multi_round.proto` + `macp-proto` 0.1.10 pin + TypeScript GitHub-Packages
+  note) applied exactly as specified; verifier independently cross-checked
+  each against `crates/macp-pb/build.rs:12-20`, root `Cargo.toml`, the spec
+  repo's `registries/error-codes.md`, `docs/API.md`/`docs/modes.md` anchors,
+  and `macp-sdk-typescript/README.md`.
+- **No divergence from the plan.** No code touched, no tests applicable.
+- **Files touched:** `docs/sdk-guide.md` only.
+- **Next:** Phase 5 (`docs/policy.md` + `docs/API.md`) — complex, includes
+  the item-1 `:288` conformance investigation (empirical probe of
+  `DefaultPolicyEvaluator` against the three `policy.std.*` profiles) and
+  should also fold in the carried-forward G9 finding from Phase 1
+  (Commitment-authority-override claim is standards-track-only;
+  `docs/policy.md:230` states it more strongly than README did).
