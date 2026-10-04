@@ -62,20 +62,25 @@ is rejected. Empty `SessionStartPayload` is rejected.
 
 ### Mode authority
 
-Only `Commitment` authority is granted regardless of participant-list
-membership: the `SessionStart` sender may emit `Commitment` (and may invoke
-`CancelSession`, which the runtime — not the initiator — emits as a session
-entry) whether or not the initiator appears in `participants`. Authority for
-every other message is **mode-specific, not uniform**: Decision requires the
-initiator to be a declared participant to emit `Proposal`, `Evaluation`,
-`Objection`, or `Vote` (RFC-MACP-0007 §2), while Task's `TaskRequest` and
-Quorum's `ApprovalRequest` are authorized by the initiator role itself, with
-no participant-list membership required — an external orchestrator can drive
-either without listing itself. Handoff is the exception in the other
-direction: `HandoffOffer` is likewise role-authorized, but `SessionStart`
-itself requires the initiator to be one of the two declared parties, since
-the initiator is a transfer party rather than just a coordinator. See
-[Modes](docs/modes.md) for the full per-mode authority rules.
+Authority to send a given message is granted either by **role** (the
+`SessionStart` sender, i.e. the initiator) or by **participant-list
+membership**, and which applies is mode-specific rather than uniform.
+`Commitment` is role-based under the default policy — the initiator may emit
+it whether or not it appears in `participants` (a non-default policy can
+grant it to `any_participant` or a `designated_role` instead; see
+[Policy](docs/policy.md)) — and the initiator may also invoke `CancelSession`,
+a dedicated RPC the runtime itself emits as an internal, non-delivered entry,
+not something a client submits via `Send`. Several mode-specific messages are
+likewise role-based: Task's `TaskRequest` and Quorum's `ApprovalRequest` are
+authorized for the initiator with no participant-list membership required, so
+an external orchestrator can drive either mode without listing itself.
+Decision is membership-based instead: the initiator must be a declared
+participant to emit `Proposal`, `Evaluation`, `Objection`, or `Vote`
+(RFC-MACP-0007 §2). Handoff mixes both: `HandoffOffer` is role-authorized, but
+`SessionStart` separately requires the initiator to be one of the declared
+parties, since the initiator is a transfer party rather than just a
+coordinator. See [Modes](docs/modes.md) for the full per-mode authority
+rules.
 
 ### Streaming
 
