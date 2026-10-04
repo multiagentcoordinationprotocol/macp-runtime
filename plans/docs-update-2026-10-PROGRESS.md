@@ -218,8 +218,8 @@ tracking note — do not silently rewrite the paragraph.**
 | Phase | Delivers | Risk | Status | Commit |
 |-------|----------|------|--------|--------|
 | 1 | `README.md` — version, release process, surface tables, SDK links | **complex** | DONE | `43c9ce4`..`da547d8` (5 commits) |
-| 2 | `docs/modes.md` — rev 3, multi_round encoding, `Withdraw`, RFC citations | simple | not started | |
-| 3 | `after_sequence` exclusivity ×4 files + 2 heading anchors | simple | not started | |
+| 2 | `docs/modes.md` — rev 3, multi_round encoding, `Withdraw`, RFC citations | simple | DONE | `f88849c`, `9333af5` (2 commits) |
+| 3 | `after_sequence` exclusivity ×4 files + 2 heading anchors | simple | DONE | `bde43af` |
 | 4 | `docs/sdk-guide.md` — SDK cross-refs, proto list, error registry | simple | not started | |
 | 5 | `docs/policy.md` + `docs/API.md` — FORBIDDEN carve-out, §4 deviation, pin, **escalation** | **complex** | not started | |
 | 6 | version / enumeration / env-var sweep | simple | not started | |
@@ -259,4 +259,33 @@ Land **2 and 3 first** if the sweep is cut short — highest value per unit of r
 - **Files touched:** `README.md` only, across all 5 commits (`git diff --stat
   7c42124..da547d8` confirms). All 8 of the plan's original acceptance
   criteria re-confirmed passing at every round, including the final one.
-- **Next:** Phase 2 (`docs/modes.md`).
+### Checkpoint — Phase 2 (2026-10-03)
+
+- **Verdict:** PASS after 2 verify rounds. R1 found GAP 1 (substantive,
+  blocking: `docs/modes.md:198` cited `RFC-MACP-0002 §11` twice where it
+  meant `§12` — §11 is the unrelated mode-registration-lifecycle section;
+  the very next sentence in the same paragraph already correctly cited §12
+  for the escape hatch, so the paragraph was internally self-inconsistent)
+  and GAP 2 (cosmetic: `:41` said "the three gates are `ensure_can_propose`
+  and `ensure_can_deliberate`" for three rejected message types but named
+  only two functions). Both fixed in `9333af5`; R2 independently re-read
+  RFC-MACP-0002 §11 and §12 in the spec repo and `decision.rs`'s gate
+  call-sites and test bodies, and confirmed both corrected, with no new
+  issues in the surrounding text.
+- **Divergence from the plan:** the plan itself cited RFC-MACP-0008 §4 (for
+  Withdraw's authority rule) and RFC-MACP-0010 §5 rule 5 (for late-context
+  licensing); the executor read both RFCs directly and found the real
+  sections are RFC-MACP-0008 §2.1 and RFC-MACP-0010 §2.1 — the plan's own
+  conditional instruction on the latter ("drop the claim unless a section
+  licenses it") was satisfied by keeping the claim, not violated. R1
+  independently re-opened both RFCs and confirmed the executor over the
+  plan on both counts.
+- **No known limitations carried forward from this phase** (G9 and the
+  Proposal-mode omission were Phase 1 findings, already routed to Phase 5).
+- **Files touched:** `docs/modes.md` only, across both commits.
+- **Next:** Phase 4 (`docs/sdk-guide.md`) — Phase 3 already DONE
+  (`bde43af`, PASS with one non-blocking note: `docs/architecture.md:137`'s
+  parallel stream-lag sentence still says "last envelope it saw" instead of
+  "last accepted envelope it saw," the analogous fix made in
+  `docs/sdk-guide.md:117` was not mirrored there; flagged for Phase 4/6 pickup
+  since Phase 4 also touches `docs/sdk-guide.md`'s cross-references).

@@ -280,6 +280,17 @@ and preserve any referenced heading. Fully reversible in one revert.
 
 ### Phase 2 — `docs/modes.md`: `semantics_rev` 3, multi_round encoding, `Withdraw`, RFC citations
 
+**Status: DONE** (`f88849c`, `9333af5`; 2 verify rounds — see
+`plans/docs-update-2026-10-PROGRESS.md`'s Phase 2 checkpoint). Divergence from
+the plan as written: the plan itself cited two RFC sections wrong (Withdraw's
+authority rule is RFC-MACP-0008 §2.1, not §4; the late-context licensing is
+RFC-MACP-0010 §2.1, not §5 rule 5 — the executor verified against the RFCs
+directly and kept the claims the plan's own conditional instruction would
+have dropped). Round-1 verify found one blocking gap (`RFC-MACP-0002 §11`
+should read `§12` at `:198`, twice — §11 is the unrelated mode-registration-
+lifecycle section) and one cosmetic gap (`:41`'s "the three gates" named only
+two functions); both fixed in `9333af5` and confirmed closed in round 2.
+
 **Delivers** the headline stale finding plus four citation defects.
 
 **Files:** `docs/modes.md`
