@@ -12,7 +12,7 @@ make test-conformance             # JSON fixture-driven conformance suite
 make test-all                     # fmt -> clippy -> test -> integration -> conformance
 ```
 
-Unit tests live inside `src/` modules under `#[cfg(test)]` and cover mode state machines, policy evaluation algorithms, storage backends (including compaction, legacy-format migration, and crash-recovery paths), replay logic, metrics rendering, the extension registry, JWT auth including remote-JWKS fetch/caching/rotation, the auth resolver chain, and error handling. The conformance fixtures in `tests/conformance/` define mode lifecycles as JSON files and verify that each mode's happy path and reject paths produce the expected results.
+Unit tests live inside `src/` modules under `#[cfg(test)]` and cover mode state machines, policy evaluation algorithms, storage backends (including compaction, legacy-format migration, and crash-recovery paths), replay logic, metrics rendering, the extension registry, JWT auth including remote-JWKS fetch/caching/rotation, the auth resolver chain, and error handling. The conformance fixtures in `tests/conformance/` -- a byte-identical vendored copy of the spec repo's `schemas/conformance/` at `SPEC_REV` (see `tests/conformance/SOURCE.md` for provenance and the re-vendor command) -- define mode lifecycles as JSON files and verify that each mode's happy path and reject paths produce the expected results.
 
 ### Parity contract
 
@@ -102,6 +102,16 @@ make test-integration-e2e       # Tier 3
 make test-integration-hosted    # All tiers against MACP_TEST_ENDPOINT
 ```
 
+Or run it in a container via `docker-compose.yml`, which builds the runtime binary from this checkout and drives it through the real gRPC boundary (`integration_tests/Dockerfile`), passing through `OPENAI_API_KEY` (from a gitignored root `.env` or the host) and `RUST_LOG` (default `warn`):
+
+```bash
+docker compose build integration-tests
+docker compose run --rm integration-tests                                                          # tier 1 + 2 (default CMD)
+docker compose run --rm integration-tests cargo test --test tier3 -- --ignored --test-threads=1    # tier 3, real LLM
+```
+
+**CI does not use this** -- the `integration` job in `ci.yml` runs the suite directly on the runner. `docker-compose.yml` is a contributor convenience for a reproducible local environment, not the canonical test path.
+
 ### Configuration
 
 | Variable | Purpose | Default |
@@ -113,6 +123,7 @@ make test-integration-hosted    # All tiers against MACP_TEST_ENDPOINT
 | `MACP_TEST_BACKEND` | Run the storage-backend smoke test on `rocksdb`/`redis`/`file` (binary must be built with the matching feature) | Test skips if unset |
 | `MACP_TEST_REDIS_URL` | Redis endpoint for the redis backend smoke test | `redis://127.0.0.1:6379` |
 | `OPENAI_API_KEY` | Required for Tier 3 tests | Tier 3 tests skip if unset |
+| `MACP_CONFORMANCE_FIXTURES_DIR` | Run `tests/conformance_loader.rs`'s suite against an external fixtures directory instead of the vendored `tests/conformance/` copy (also set by `ci.yml`'s `conformance-oracle` job) | Uses the vendored copy |
 
 ## Policy tests
 

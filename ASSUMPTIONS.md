@@ -408,13 +408,16 @@
   reads it.**", followed by both warnings: it must point at a clean `git archive` export of the spec
   commit CI reads, never at the sibling working tree (which sits ahead of `main` and produces parity
   failures that do not exist in CI), and `canonical_schema_dir`
-  (`crates/macp-policy/src/registry.rs:1739-1755`) **panics by design** via `assert!` on a set-but-
+  (`crates/macp-policy/src/registry.rs:1856-1873`) **panics by design** via `assert!` on a set-but-
   missing directory.
 - **Alternatives:** omit it (contradicts the plan and leaves it documented nowhere);
   put it in `CONTRIBUTING.md` instead — arguably the better home, since it is a contributor concern
   rather than a deployment one, but not what the plan says.
 - **Blast radius if wrong:** docs only. Moving it to `CONTRIBUTING.md` is a two-line change.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-10-03) — see `DECISIONS.md` (D52). `CONTRIBUTING.md` turned out to
+  carry no env-var table at all (only two inline test vars in code blocks), so it was never actually
+  the better home; `docs/testing.md`'s Configuration table is the real precedent for dev/CI-only
+  vars, and already cites this one in prose.
 
 ## An extra Phase 1 test guarding the mode-guard placement
 - **Plan:** plans/spec-99-schema-version-3.md (Phase 1)
@@ -424,11 +427,13 @@
 - **Chose:** added `register_empty_weights_map_for_another_mode_succeeds` (a Task-mode policy
   carrying `voting.weights: {}`) beyond the stated criteria. Independently confirmed as the **sole**
   red when the check is hoisted above the `matches!(mode, "macp.mode.decision.v1" | "*")` guard at
-  `crates/macp-policy/src/registry.rs:437`, while both criterion-5 tests stay green.
+  `crates/macp-policy/src/registry.rs:440` (drifted 3 lines from comment additions since), while
+  both criterion-5 tests stay green.
 - **Alternatives:** rely on the criterion-5 pair alone — mutation-proven inadequate.
 - **Blast radius if wrong:** one test. The cost of *not* having it is a wildcard-mode policy carrying
   an empty `weights` map being wrongly refused, for rules the Decision schema does not govern.
-- **Status:** UNCONFIRMED (2026-09-11)
+- **Status:** CONFIRMED (2026-10-03) — see `DECISIONS.md` (D53). Mutation proof independently
+  re-run: hoisting the check still reds only this one test across all 36 workspace test binaries.
 
 ## `suspension_intervals` added to `validate_replay_consistency` (11b's "optional fourth comparison")
 - **Plan:** plans/backlog-closeout-2026-09.md (Phase 11b, criterion 4: "11a's widened consistency
@@ -531,7 +536,8 @@
   so `objection_authorized_decline` had to become known before the first gate. The task named two
   candidate shapes: hoist the scan, or collect gate denials and filter them at the end.
 - **Chose:** hoist. The scan becomes a single `Option<String>` (`critical_veto`) computed as
-  "check 0" at `crates/macp-policy/src/evaluator.rs:230`, with the waiver derived from it at `:251`;
+  "check 0" at `crates/macp-policy/src/evaluator.rs:223` (drifted from `:230` on rustdoc additions
+  since), with the waiver derived from it at `:256`;
   every deny/allow reason is still pushed from the numbered check that owns it, in the original
   order. One source of truth for "is there a standing veto?", no duplicated objection scanning,
   and — measured — byte-identical reason vectors for every non-waived commitment, which is what
@@ -545,7 +551,10 @@
   four separate one-line reversions each turn exactly one of the four new named tests red and
   leave the other three green, and reverting the check-4 conjunct also turns
   `conformance_decision_finalize_decline_quorum_waiver` red.
-- **Status:** UNCONFIRMED (2026-09-12)
+- **Status:** CONFIRMED (2026-10-03) — see `DECISIONS.md` (D54). Re-verified at `8115e75`: only
+  one commit has touched `evaluate_decision_commitment_outcome` since (`6e4ca34`, test-only), so no
+  gate has been added that risked silently escaping the waiver — the risk the rejected alternative
+  was chosen specifically to avoid.
 
 ## `docs/deployment.md` item 10 for a DENY → ALLOW widening
 - **Plan:** spec #126 alignment (RFC-MACP-0007 §6.2, closing this runtime's spec issue #117)
@@ -563,7 +572,10 @@
   anyone still running the workaround); leave `deployment.md` untouched on the grounds that nothing
   breaks (true, but the whole point of the section is that item 9 documents a widening too).
 - **Blast radius if wrong:** docs only.
-- **Status:** UNCONFIRMED (2026-09-12)
+- **Status:** CONFIRMED (2026-10-03) — see `DECISIONS.md` (D55). `docs/deployment.md`'s section-intro
+  census sentence (`:19`) had not been updated for item 10 (still said "nine changes... one
+  correction that lowers a bar"); corrected alongside this confirmation to "ten changes... two that
+  lower a bar (items 9 and 10)".
 
 ## Committing a replay test that pins today's *pre-11d* refusal of the synthetic shape
 - **Plan:** Phase 11c of `plans/backlog-closeout-2026-09.md` (the client boundary)
@@ -1021,13 +1033,13 @@
   encoder produces. If ever hit, the payload decodes as its proto reading instead of its
   legacy-JSON reading; both readings are internally valid, so this is a misinterpretation, not
   a crash or data-integrity failure with no valid reading at all.
-- **Status:** UNCONFIRMED — not in the sense of an open design question (the design question
-  itself is settled, see `DECISIONS.md` D51), but in the narrower sense that no evidence yet
-  exists that zero real traffic will ever construct this exact byte shape. Provably narrow in
-  construction; not further Fable-escalated, since the identical trade was already accepted
-  for the identical reason in `macp-sdk-python`. No specific evidence would definitively
-  "confirm" this the way Phase 5 confirmed D50 — this stays open-ended low-priority
-  observation, not a blocking question.
+- **Status:** CONFIRMED (2026-10-03) — see `DECISIONS.md` (D56). Closed as an accepted,
+  unfalsifiable residual rather than left permanently `UNCONFIRMED`: the design question itself was
+  already settled at D51, and no specific evidence could ever "confirm" the narrower sub-point the
+  way Phase 5 confirmed D50 — leaving it `UNCONFIRMED` indefinitely only made it a false positive
+  for anyone scanning this file for real pending work. The observation itself (no known encoder
+  produces this byte shape; if one ever does, the result is a misinterpretation, not a crash or
+  data-integrity failure) is unchanged and kept here as a permanent note.
 
 ## Item 9 (session-lifecycle backlog) is rejected, not implemented
 - **Plan:** `plans/session-lifecycle-entries-9-10.md` (Q1)

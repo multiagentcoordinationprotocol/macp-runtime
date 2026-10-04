@@ -6,6 +6,20 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.8.8](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.7...macp-runtime-v0.8.8) - 2026-10-04
+
+### Other
+
+- document the second resume force-expire trigger (semantics_rev 2) ([#222](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/222))
+- bring living docs current for 0.7.3 → 0.8.7 ([#221](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/221))
+- reconcile 5 remaining UNCONFIRMED assumptions entries ([#219](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/219))
+
+## [0.8.7](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.6...macp-runtime-v0.8.7) - 2026-10-03
+
+### Other
+
+- *(parity)* re-vendor contract 1.3.0, wire up proposal_disposition ([#215](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/215)) ([#217](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/217))
+
 ## [0.8.6](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.5...macp-runtime-v0.8.6) - 2026-09-30
 
 ### Other

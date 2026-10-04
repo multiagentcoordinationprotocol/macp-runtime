@@ -1,6 +1,6 @@
 # MACP Runtime Documentation
 
-**Version**: v0.5.0 | **Protocol**: MACP 1.0 | **Language**: Rust
+**Protocol**: MACP 1.0 | **Language**: Rust
 
 The MACP Runtime is the reference implementation of the [Multi-Agent Coordination Protocol](https://www.multiagentcoordinationprotocol.io). It is a coordination kernel written in Rust that enforces session boundaries, validates messages, manages append-only history, and serializes concurrent agent interactions over gRPC.
 

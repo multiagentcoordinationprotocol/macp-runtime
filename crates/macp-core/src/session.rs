@@ -76,7 +76,9 @@ pub const MAX_SUSPENSION_CYCLES: usize = 1024;
 ///   (`MessageContext::accepted_at_ms`).
 /// - 2 — the Handoff implicit accept becomes a **recorded event** rather than
 ///   an inference, and its deadline excludes suspended time (RFC-MACP-0010
-///   §5.1). Two changes, one revision:
+///   §5.1); independently, `resume` gains a session-level cap on completed
+///   suspend/resume cycles ([`MAX_SUSPENSION_CYCLES`]) that applies to every
+///   mode, not just Handoff. Three changes, one revision:
 ///   - *The synthetic entry.* Once an outstanding offer's
 ///     `implicit_accept_timeout_ms` has elapsed, the runtime appends a
 ///     synthetic `HandoffAccept` envelope to accepted history — sender = the
@@ -96,17 +98,24 @@ pub const MAX_SUSPENSION_CYCLES: usize = 1024;
 ///     offer record snapshots `accumulated_suspended_ms` at offer time and the
 ///     timeout arithmetic subtracts the suspension accrued since the offer.
 ///     Revisions 0 and 1 keep counting suspended time.
+///   - *The suspension-cycle cap.* See [`MAX_SUSPENSION_CYCLES`] for the full
+///     argument: once a session's completed suspend/resume pairs exceed the
+///     cap, `resume` force-expires the session (`MacpError::TtlExpired`)
+///     instead of succeeding. Revisions 0 and 1 instead silently stop
+///     recording the overflow and never force-expire for it, so a legacy
+///     history replays bit-identically.
 /// - 3 — `ext.multi_round.v1` `Contribute` decode gains a canonical-proto tie-
 ///   break (macp-runtime issue #192): a successful legacy-JSON parse is
 ///   trusted only when the same bytes do NOT also round-trip byte-identically
 ///   through the canonical `ContributePayload` proto encoding. Revisions 0-2
 ///   keep the unconditional JSON-first decode, including its known collision
 ///   at value lengths 13/32/123 — byte-for-byte faithful to how those
-///   sessions were originally accepted. Unlike revisions 0-2 (all
-///   Handoff-specific), this revision changes no Handoff, Quorum, Proposal,
-///   Task, or Decision behavior — every existing gate on this field is `>= 2`
-///   or `<= 1` (never `== 2`), so bumping the shared counter to 3 is additive
-///   for every other consumer.
+///   sessions were originally accepted. Unlike revisions 0-1 (Handoff-
+///   specific) and the session-level suspension-cycle cap introduced at
+///   revision 2, this revision changes no Handoff, Quorum, Proposal, Task, or
+///   Decision behavior — every existing gate on this field is `>= 2` or
+///   `<= 1` (never `== 2`), so bumping the shared counter to 3 is additive for
+///   every other consumer.
 pub const CURRENT_SEMANTICS_REV: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

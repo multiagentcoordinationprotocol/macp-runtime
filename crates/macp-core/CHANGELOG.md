@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.8](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-core-v0.8.7...macp-core-v0.8.8) - 2026-10-04
+
+### Other
+
+- document the second resume force-expire trigger (semantics_rev 2) ([#222](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/222))
+
 ## [0.8.3](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-core-v0.8.2...macp-core-v0.8.3) - 2026-09-25
 
 ### Fixed
