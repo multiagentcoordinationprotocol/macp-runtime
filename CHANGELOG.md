@@ -6,6 +6,13 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.8.8](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.7...macp-runtime-v0.8.8) - 2026-10-04
+
+### Other
+
+- bring living docs current for 0.7.3 → 0.8.7 ([#221](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/221))
+- reconcile 5 remaining UNCONFIRMED assumptions entries ([#219](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/219))
+
 ## [0.8.7](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.6...macp-runtime-v0.8.7) - 2026-10-03
 
 ### Other
