@@ -392,3 +392,23 @@ Land **2 and 3 first** if the sweep is cut short — highest value per unit of r
 - **Files touched:** `CLAUDE.md` only (untracked, not part of any commit).
 - **Next:** Finalization pass across all 8 phases (§4 of `/implement`), then
   `/ship`.
+
+### Finalization + ship (2026-10-03)
+
+- **Finalization pass:** full-branch diff vs. `origin/main` confirmed
+  docs-only (15 files: `DECISIONS.md`, `README.md`, `docs/*.md`,
+  `plans/docs-update-2026-10*.md`, `tests/conformance/SOURCE.md` -- zero
+  `src/`/`crates/`/CI files touched). Branch was 0 commits behind
+  `origin/main` (no rebase needed). `cargo check --workspace` and `cargo
+  clippy --workspace --all-targets -- -D warnings` both clean (needed
+  `RUSTC_WRAPPER="" SDKROOT=.../MacOSX26.sdk` -- local-machine linker
+  workaround, unrelated to this diff). `cargo fmt --check` clean.
+  `ASSUMPTIONS.md` has no `UNCONFIRMED` entries tagged to this plan -- the
+  one genuinely judgment-laden item (Phase 5's §5.2 escalation) was resolved
+  directly via a filed issue + `DECISIONS.md` D57, never logged as an
+  assumption -- so no `/reconcile` pass is needed for this plan.
+- **Spec-repo issue #181** (filed during Phase 5) independently re-confirmed
+  still open: "RFC-MACP-0012 §5.2's claimed schema_version 1-vs-3 divergence
+  for policy.std.* has no possible instance under §4.1's legacy arm",
+  `multiagentcoordinationprotocol/multiagentcoordinationprotocol#181`.
+- pushed `docs/update-2026-10-sweep` `32e4002`
