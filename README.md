@@ -69,10 +69,13 @@ entry) whether or not the initiator appears in `participants`. Authority for
 every other message is **mode-specific, not uniform**: Decision requires the
 initiator to be a declared participant to emit `Proposal`, `Evaluation`,
 `Objection`, or `Vote` (RFC-MACP-0007 §2), while Task's `TaskRequest` and
-Handoff's `HandoffOffer` are authorized by the initiator role itself, with no
-participant-list membership required — an external orchestrator can drive a
-session without listing itself. See [Modes](docs/modes.md) for the full
-per-mode authority rules.
+Quorum's `ApprovalRequest` are authorized by the initiator role itself, with
+no participant-list membership required — an external orchestrator can drive
+either without listing itself. Handoff is the exception in the other
+direction: `HandoffOffer` is likewise role-authorized, but `SessionStart`
+itself requires the initiator to be one of the two declared parties, since
+the initiator is a transfer party rather than just a coordinator. See
+[Modes](docs/modes.md) for the full per-mode authority rules.
 
 ### Streaming
 
