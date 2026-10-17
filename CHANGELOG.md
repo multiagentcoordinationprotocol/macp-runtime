@@ -6,6 +6,20 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.8...macp-runtime-v0.9.0) - 2026-10-17
+
+### Added
+
+- [**breaking**] Seam upstream 0.9.0 — library acceptance/step/replay, S1/S4/S5/S6/S7/S12/S13 ([#229](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/229))
+
+### Fixed
+
+- fix(policy)+feat(core): Seam upstream 0.8.9 slice — value-domain admission, schema_version, RFC-0013 verify ([#228](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/228))
+
+### Other
+
+- *(deps)* bump the actions group across 1 directory with 7 updates ([#214](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/214))
+
 ## [0.8.8](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.7...macp-runtime-v0.8.8) - 2026-10-04
 
 ### Other

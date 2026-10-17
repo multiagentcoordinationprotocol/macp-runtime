@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-auth-v0.8.8...macp-auth-v0.9.0) - 2026-10-17
+
+### Added
+
+- [**breaking**] Seam upstream 0.9.0 — library acceptance/step/replay, S1/S4/S5/S6/S7/S12/S13 ([#229](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/229))
+
 ## [0.7.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-auth-v0.7.0...macp-auth-v0.7.1) - 2026-08-31
 
 ### Other

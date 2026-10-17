@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-modes-v0.8.8...macp-modes-v0.9.0) - 2026-10-17
+
+### Added
+
+- [**breaking**] Seam upstream 0.9.0 — library acceptance/step/replay, S1/S4/S5/S6/S7/S12/S13 ([#229](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/229))
+
+### Fixed
+
+- fix(policy)+feat(core): Seam upstream 0.8.9 slice — value-domain admission, schema_version, RFC-0013 verify ([#228](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/228))
+
 ## [0.8.4](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-modes-v0.8.3...macp-modes-v0.8.4) - 2026-09-28
 
 ### Fixed
