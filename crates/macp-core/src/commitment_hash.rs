@@ -10,11 +10,36 @@
 //! 3. Hashing the domain-separated preimage with SHA-256 and hex-encoding
 //!    the digest.
 //!
-//! This module has exactly one job and does it unconditionally: it never
-//! validates the payload and never fails (see [`commitment_hash`]'s doc for
-//! the D3 guarantee). Semantic validation of `CommitmentPayload` (matching
-//! session-bound versions, well-formed `supersedes`, etc.) is a separate
-//! concern handled elsewhere (see `macp-modes::mode::util`).
+//! [`commitment_hash`] never validates the payload and never fails (see its
+//! doc for the D3 guarantee). Semantic validation of `CommitmentPayload`
+//! (matching session-bound versions, well-formed `supersedes`, etc.) is a
+//! separate concern handled elsewhere (see `macp-modes::mode::util`).
+//!
+//! # Verification (RFC-MACP-0013 §5, §6)
+//!
+//! Verification is a separate operation from computation, because it has a
+//! third outcome computation cannot express. [`verify_commitment_hash`] takes
+//! the payload's **protobuf wire encoding** — not a decoded
+//! [`CommitmentPayload`] — and a claimed hash, and returns exactly one
+//! [`VerifyOutcome`]:
+//!
+//! - [`VerifyOutcome::Match`] — the label covers the payload and the hash
+//!   agrees.
+//! - [`VerifyOutcome::Mismatch`] — the label covers the payload and the hash
+//!   disagrees, **or** the claimed value is not canonical (§9: the literal
+//!   `sha256:` prefix and 64 lowercase hex characters, nothing else — no
+//!   trimming, no uppercase, no bare hex).
+//! - [`VerifyOutcome::CannotVerify`] — the payload carries a field outside the
+//!   nine-field `macp-commitment-hash/1` set (or a field other than tags 1–2
+//!   inside `supersedes`), or the bytes are not a decodable
+//!   `CommitmentPayload`. §5 forbids treating that as a match on the fields
+//!   the label does cover.
+//!
+//! The wire encoding is required because a decoder silently drops unknown
+//! fields: once bytes are a `CommitmentPayload` struct, a tenth field is no
+//! longer observable and a verifier would "match" a payload the label does not
+//! cover. That is also why there is deliberately no `verify` overload taking a
+//! decoded struct.
 
 use macp_pb::pb::CommitmentPayload;
 use sha2::{Digest, Sha256};
@@ -57,6 +82,204 @@ pub fn commitment_hash(payload: &CommitmentPayload) -> String {
         write!(out, "{byte:02x}").expect("write! to String never fails");
     }
     out
+}
+
+/// Check whether `s` is a canonical RFC-MACP-0013 commitment hash (§9): the
+/// literal prefix `sha256:` followed by exactly 64 lowercase hex characters.
+/// No trimming is performed — leading/trailing whitespace is a rejection, not
+/// something to be trimmed away before checking.
+pub fn is_canonical_commitment_hash(s: &str) -> bool {
+    match s.strip_prefix("sha256:") {
+        Some(rest) => {
+            rest.len() == 64
+                && rest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }
+        None => false,
+    }
+}
+
+/// The outcome of [`verify_commitment_hash`] (RFC-MACP-0013 §5, §6).
+///
+/// `#[non_exhaustive]`: a future label may need a further outcome; match with
+/// a wildcard arm that treats anything unknown as "not verified".
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyOutcome {
+    /// The label covers the payload's shape and the claimed hash agrees.
+    Match,
+    /// The label covers the payload's shape but the claimed hash disagrees
+    /// with `computed`, or the claimed value is not canonical (§9).
+    Mismatch {
+        /// The hash recomputed from the wire bytes, for diagnostics.
+        computed: String,
+    },
+    /// The payload's shape is outside what `macp-commitment-hash/1` covers.
+    CannotVerify(CannotVerify),
+}
+
+impl VerifyOutcome {
+    /// `true` only for [`VerifyOutcome::Match`].
+    pub fn is_match(&self) -> bool {
+        matches!(self, VerifyOutcome::Match)
+    }
+}
+
+/// Why a payload is not hashable under `macp-commitment-hash/1`.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CannotVerify {
+    /// A field number outside the label's frozen set. `in_supersedes` is
+    /// `true` when it sits inside `supersedes` (`CommitmentRef`, tags 1–2)
+    /// rather than at the top level (`CommitmentPayload`, tags 1–9).
+    UnknownField {
+        /// The protobuf field number.
+        tag: u32,
+        /// Whether the field was inside `supersedes`.
+        in_supersedes: bool,
+    },
+    /// The bytes are not a well-formed `CommitmentPayload` encoding (truncated,
+    /// a known field with the wrong wire type, invalid UTF-8 in a string
+    /// field, a group, an invalid tag, ...).
+    Malformed {
+        /// Decoder detail, for diagnostics only — not a stable format.
+        detail: String,
+    },
+}
+
+impl std::fmt::Display for CannotVerify {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CannotVerify::UnknownField {
+                tag,
+                in_supersedes: false,
+            } => write!(
+                f,
+                "CommitmentPayload field {tag} is outside macp-commitment-hash/1"
+            ),
+            CannotVerify::UnknownField {
+                tag,
+                in_supersedes: true,
+            } => write!(
+                f,
+                "CommitmentPayload.supersedes field {tag} is outside macp-commitment-hash/1"
+            ),
+            CannotVerify::Malformed { detail } => {
+                write!(f, "not a decodable CommitmentPayload: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CannotVerify {}
+
+/// Fields 1–9 of `CommitmentPayload` (RFC-MACP-0013 §5 table).
+const PAYLOAD_TAGS: std::ops::RangeInclusive<u32> = 1..=9;
+/// `CommitmentPayload.supersedes` — the one nested message the label covers.
+const SUPERSEDES_TAG: u32 = 9;
+/// Fields 1–2 of `CommitmentRef` (`session_id`, `commitment_hash`).
+const COMMITMENT_REF_TAGS: std::ops::RangeInclusive<u32> = 1..=2;
+
+/// Compute the RFC-MACP-0013 commitment hash of a `CommitmentPayload`'s
+/// protobuf wire encoding, refusing a payload the label does not cover.
+///
+/// This is [`commitment_hash`] for bytes as received: it first scans every
+/// field number (top level, and inside `supersedes`), returning
+/// [`CannotVerify::UnknownField`] for any outside the label's set, then
+/// decodes and hashes. Repeated occurrences of a known field follow protobuf
+/// semantics (last scalar wins, `supersedes` merges), exactly as any conformant
+/// decoder of the same bytes would see them.
+pub fn commitment_hash_of_wire(wire: &[u8]) -> Result<String, CannotVerify> {
+    scan_known_fields(wire, PAYLOAD_TAGS, false)?;
+    let payload = <CommitmentPayload as prost::Message>::decode(wire).map_err(|e| {
+        CannotVerify::Malformed {
+            detail: e.to_string(),
+        }
+    })?;
+    Ok(commitment_hash(&payload))
+}
+
+/// Verify `claimed` against the `CommitmentPayload` encoded in `wire`
+/// (RFC-MACP-0013 §5, §6). See the [module docs](self) for the three
+/// outcomes. `claimed` must be the full wire form, `sha256:` prefix included.
+///
+/// Comparison is over the canonical string, which carries no secret, so a
+/// constant-time comparison is not required.
+pub fn verify_commitment_hash(wire: &[u8], claimed: &str) -> VerifyOutcome {
+    let computed = match commitment_hash_of_wire(wire) {
+        Ok(h) => h,
+        Err(reason) => return VerifyOutcome::CannotVerify(reason),
+    };
+    if is_canonical_commitment_hash(claimed) && claimed == computed {
+        VerifyOutcome::Match
+    } else {
+        VerifyOutcome::Mismatch { computed }
+    }
+}
+
+/// Walk the top-level fields of a protobuf message, rejecting any field number
+/// outside `known`. When scanning a `CommitmentPayload`, the `supersedes`
+/// field's bytes are scanned recursively against `CommitmentRef`'s set.
+///
+/// Hand-written rather than via `prost::encoding` (which prost documents as
+/// not part of its public API). Only the wire types proto3 can emit are
+/// accepted; groups (3, 4) and the reserved wire types are [`Malformed`].
+///
+/// [`Malformed`]: CannotVerify::Malformed
+fn scan_known_fields(
+    mut buf: &[u8],
+    known: std::ops::RangeInclusive<u32>,
+    in_supersedes: bool,
+) -> Result<(), CannotVerify> {
+    let malformed = |detail: &str| CannotVerify::Malformed {
+        detail: detail.to_owned(),
+    };
+    while !buf.is_empty() {
+        let key = read_varint(&mut buf).ok_or_else(|| malformed("truncated field key"))?;
+        let wire_type = (key & 0x7) as u8;
+        let tag = u32::try_from(key >> 3).map_err(|_| malformed("field number overflows u32"))?;
+        if tag == 0 {
+            return Err(malformed("field number 0"));
+        }
+        if !known.contains(&tag) {
+            return Err(CannotVerify::UnknownField { tag, in_supersedes });
+        }
+        match wire_type {
+            0 => {
+                read_varint(&mut buf).ok_or_else(|| malformed("truncated varint"))?;
+            }
+            1 => buf = buf.get(8..).ok_or_else(|| malformed("truncated fixed64"))?,
+            5 => buf = buf.get(4..).ok_or_else(|| malformed("truncated fixed32"))?,
+            2 => {
+                let len = read_varint(&mut buf).ok_or_else(|| malformed("truncated length"))?;
+                let len = usize::try_from(len).map_err(|_| malformed("length overflows usize"))?;
+                if len > buf.len() {
+                    return Err(malformed("length-delimited field runs past the end"));
+                }
+                let (body, rest) = buf.split_at(len);
+                if !in_supersedes && tag == SUPERSEDES_TAG {
+                    scan_known_fields(body, COMMITMENT_REF_TAGS, true)?;
+                }
+                buf = rest;
+            }
+            _ => return Err(malformed("unsupported wire type (group or reserved)")),
+        }
+    }
+    Ok(())
+}
+
+/// Decode one base-128 varint (at most 10 bytes), advancing `buf`.
+fn read_varint(buf: &mut &[u8]) -> Option<u64> {
+    let mut value: u64 = 0;
+    for (i, &byte) in buf.iter().enumerate().take(10) {
+        value |= u64::from(byte & 0x7f) << (7 * i);
+        if byte & 0x80 == 0 {
+            *buf = &buf[i + 1..];
+            return Some(value);
+        }
+    }
+    None
 }
 
 /// Project `payload` to the RFC-MACP-0013 §3 JSON object and serialize it
@@ -326,6 +549,264 @@ mod tests {
             "sha256:03f8ac2b8172958504092ce9fe5154dbcfe300fd30a350453d4e4bd715822ab2",
             "cmt_hash_005_escapes: hash mismatch"
         );
+    }
+
+    // --- verification (RFC-MACP-0013 §5, §6; proposed cmt_hash_006..009) ---
+
+    fn vector_001() -> CommitmentPayload {
+        CommitmentPayload {
+            commitment_id: "c1".into(),
+            action: "decision.approved".into(),
+            authority_scope: "seam".into(),
+            reason: "sealed by seam".into(),
+            mode_version: "macp.mode.decision.v1".into(),
+            policy_version: "1.0.0".into(),
+            configuration_version: "1.0.0".into(),
+            outcome_positive: true,
+            supersedes: None,
+        }
+    }
+    const HASH_001: &str =
+        "sha256:9f58e9d114d11860d48aa2bcb8cda458b9618b1cc8560595a802b68c4af85d41";
+
+    fn wire(payload: &CommitmentPayload) -> Vec<u8> {
+        prost::Message::encode_to_vec(payload)
+    }
+
+    /// Append a length-delimited field `tag` carrying `body` to `buf`.
+    fn push_len_field(buf: &mut Vec<u8>, tag: u32, body: &[u8]) {
+        let mut key = u64::from(tag) << 3 | 2;
+        loop {
+            let byte = (key & 0x7f) as u8;
+            key >>= 7;
+            if key == 0 {
+                buf.push(byte);
+                break;
+            }
+            buf.push(byte | 0x80);
+        }
+        assert!(body.len() < 0x80, "test helper only encodes short bodies");
+        buf.push(body.len() as u8);
+        buf.extend_from_slice(body);
+    }
+
+    #[test]
+    fn verify_match_on_vector_001() {
+        assert_eq!(
+            verify_commitment_hash(&wire(&vector_001()), HASH_001),
+            VerifyOutcome::Match
+        );
+        assert_eq!(
+            commitment_hash_of_wire(&wire(&vector_001())).unwrap(),
+            HASH_001
+        );
+    }
+
+    /// Proposed `cmt_hash_006_unknown_field`: field 99 set at top level.
+    #[test]
+    fn cmt_hash_006_unknown_field_is_cannot_verify() {
+        let mut bytes = wire(&vector_001());
+        push_len_field(&mut bytes, 99, b"x");
+        assert_eq!(
+            verify_commitment_hash(&bytes, HASH_001),
+            VerifyOutcome::CannotVerify(CannotVerify::UnknownField {
+                tag: 99,
+                in_supersedes: false
+            })
+        );
+        // The decoded struct would have dropped field 99 and hashed to 001:
+        // the reason verification takes wire bytes.
+        let decoded = <CommitmentPayload as prost::Message>::decode(bytes.as_slice()).unwrap();
+        assert_eq!(commitment_hash(&decoded), HASH_001);
+        // Field 10 — "the tenth field" §5 warns about — is the same outcome.
+        let mut tenth = wire(&vector_001());
+        push_len_field(&mut tenth, 10, b"");
+        assert!(matches!(
+            verify_commitment_hash(&tenth, HASH_001),
+            VerifyOutcome::CannotVerify(CannotVerify::UnknownField { tag: 10, .. })
+        ));
+    }
+
+    /// Proposed `cmt_hash_007_mismatch`: one hex digit differs.
+    #[test]
+    fn cmt_hash_007_mismatch() {
+        let claimed = HASH_001.replacen("9f58", "9f59", 1);
+        assert_eq!(
+            verify_commitment_hash(&wire(&vector_001()), &claimed),
+            VerifyOutcome::Mismatch {
+                computed: HASH_001.into()
+            }
+        );
+    }
+
+    /// Proposed `cmt_hash_008_noncanonical_claim`: the right digest in
+    /// uppercase hex is still a mismatch (§9), as are the other spellings.
+    #[test]
+    fn cmt_hash_008_noncanonical_claim_is_mismatch() {
+        let upper = format!("sha256:{}", HASH_001["sha256:".len()..].to_uppercase());
+        for claimed in [
+            upper.as_str(),
+            &HASH_001["sha256:".len()..],
+            &format!(" {HASH_001}"),
+            &format!("{HASH_001}\n"),
+            &HASH_001.replacen("sha256:", "SHA256:", 1),
+        ] {
+            assert!(
+                matches!(
+                    verify_commitment_hash(&wire(&vector_001()), claimed),
+                    VerifyOutcome::Mismatch { .. }
+                ),
+                "{claimed:?}"
+            );
+        }
+    }
+
+    /// Proposed `cmt_hash_009_unknown_supersedes_field`.
+    #[test]
+    fn cmt_hash_009_unknown_supersedes_field_is_cannot_verify() {
+        let mut payload = vector_001();
+        payload.supersedes = Some(CommitmentRef {
+            session_id: "s0".into(),
+            commitment_hash: HASH_001.into(),
+        });
+        let claimed = commitment_hash(&payload);
+        let mut inner = prost::Message::encode_to_vec(payload.supersedes.as_ref().unwrap());
+        push_len_field(&mut inner, 3, b"z");
+        payload.supersedes = None;
+        let mut bytes = wire(&payload);
+        push_len_field(&mut bytes, SUPERSEDES_TAG, &inner);
+        assert_eq!(
+            verify_commitment_hash(&bytes, &claimed),
+            VerifyOutcome::CannotVerify(CannotVerify::UnknownField {
+                tag: 3,
+                in_supersedes: true
+            })
+        );
+    }
+
+    /// The exact `wire_hex` / `claimed_hash` values proposed for the spec's
+    /// `cmt_hash_006` and `cmt_hash_009` fixtures (computed independently and
+    /// cross-checked against vector 001). Pinned here so the published
+    /// fixtures and this implementation cannot drift apart.
+    #[test]
+    fn proposed_fixture_wire_hex_values() {
+        const WIRE_006: &str = "0a02633112116465636973696f6e2e617070726f7665641a047365616d220e7365616c6564206279207365616d2a156d6163702e6d6f64652e6465636973696f6e2e76313205312e302e303a05312e302e3040019a060178";
+        const WIRE_009: &str = "0a02633112116465636973696f6e2e617070726f7665641a047365616d220e7365616c6564206279207365616d2a156d6163702e6d6f64652e6465636973696f6e2e76313205312e302e303a05312e302e3040014a500a02733012477368613235363a396635386539643131346431313836306434386161326263623863646134353862393631386231636338353630353935613830326236386334616638356434311a017a";
+        const CLAIMED_009: &str =
+            "sha256:5b2e82b41d2a50095eef090cc4ef402e771a45e59e05895b6c77790f89fa2526";
+        assert_eq!(
+            verify_commitment_hash(&decode_hex(WIRE_006), HASH_001),
+            VerifyOutcome::CannotVerify(CannotVerify::UnknownField {
+                tag: 99,
+                in_supersedes: false
+            })
+        );
+        assert_eq!(
+            verify_commitment_hash(&decode_hex(WIRE_009), CLAIMED_009),
+            VerifyOutcome::CannotVerify(CannotVerify::UnknownField {
+                tag: 3,
+                in_supersedes: true
+            })
+        );
+        let mut covered = vector_001();
+        covered.supersedes = Some(CommitmentRef {
+            session_id: "s0".into(),
+            commitment_hash: HASH_001.into(),
+        });
+        assert_eq!(commitment_hash(&covered), CLAIMED_009);
+        // Vector 001's bytes are exactly 006's minus the trailing field 99.
+        assert_eq!(
+            wire(&vector_001()),
+            decode_hex(&WIRE_006[..WIRE_006.len() - "9a060178".len()])
+        );
+    }
+
+    #[test]
+    fn malformed_wire_is_cannot_verify() {
+        let good = wire(&vector_001());
+        let cases: Vec<Vec<u8>> = vec![
+            good[..good.len() - 1].to_vec(), // truncated string body
+            vec![0x0a],                      // key with no length
+            vec![0x0b],                      // field 1, wire type 3 (group)
+            vec![0x00, 0x00],                // field number 0
+            vec![0x0a, 0x01, 0xff],          // invalid UTF-8 in commitment_id
+            vec![0x40, 0x80],                // truncated varint for bool
+            vec![0x0d, 0, 0, 0, 0],          // field 1 as fixed32: wrong wire type
+        ];
+        for bytes in cases {
+            assert!(
+                matches!(
+                    verify_commitment_hash(&bytes, HASH_001),
+                    VerifyOutcome::CannotVerify(CannotVerify::Malformed { .. })
+                ),
+                "{bytes:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_wire_is_the_all_empty_payload() {
+        // Zero bytes are a valid proto3 encoding of the all-default message
+        // (vector 003), so this is hashable, not cannot-verify.
+        assert_eq!(
+            commitment_hash_of_wire(&[]).unwrap(),
+            commitment_hash(&base_payload())
+        );
+    }
+
+    /// Property: for any payload the label covers, the wire path agrees with
+    /// the struct path, verify matches its own hash, and appending any field
+    /// number outside 1..=9 flips the outcome to cannot-verify. A seeded
+    /// xorshift keeps the case set deterministic without a proptest dependency.
+    #[test]
+    fn property_wire_path_agrees_with_struct_path() {
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let alphabet: Vec<char> = "ab\"\\\t\n\u{1}é—\u{1F702}0".chars().collect();
+        let text = |seed: u64| -> String {
+            (0..seed % 6)
+                .map(|i| {
+                    alphabet[(seed.rotate_left(i as u32 * 5) % alphabet.len() as u64) as usize]
+                })
+                .collect()
+        };
+        for _ in 0..512 {
+            let r = next();
+            let payload = CommitmentPayload {
+                commitment_id: text(r),
+                action: text(r >> 3),
+                authority_scope: text(r >> 6),
+                reason: text(r >> 9),
+                mode_version: text(r >> 12),
+                policy_version: text(r >> 15),
+                configuration_version: text(r >> 18),
+                outcome_positive: r & 1 == 1,
+                supersedes: (r & 2 == 2).then(|| CommitmentRef {
+                    session_id: text(r >> 21),
+                    commitment_hash: text(r >> 24),
+                }),
+            };
+            let bytes = wire(&payload);
+            let expected = commitment_hash(&payload);
+            assert_eq!(commitment_hash_of_wire(&bytes).unwrap(), expected);
+            assert!(verify_commitment_hash(&bytes, &expected).is_match());
+
+            let unknown = 10 + (next() % 10_000) as u32;
+            let mut extended = bytes.clone();
+            push_len_field(&mut extended, unknown, b"");
+            assert_eq!(
+                verify_commitment_hash(&extended, &expected),
+                VerifyOutcome::CannotVerify(CannotVerify::UnknownField {
+                    tag: unknown,
+                    in_supersedes: false
+                })
+            );
+        }
     }
 
     // --- isolated escaping unit tests ---

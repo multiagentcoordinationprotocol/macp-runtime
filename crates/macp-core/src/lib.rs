@@ -11,7 +11,10 @@
 //! - [`policy`] — [`policy::PolicyDefinition`], [`policy::PolicyDecision`],
 //!   [`policy::PolicyError`], the shared [`policy::CommitmentRules`], and the
 //!   [`policy::PolicyEvaluator`] trait that modes call through
-//! - [`commitment_hash`] — the RFC-MACP-0013 canonical commitment hash
+//! - [`commitment_hash`] — the RFC-MACP-0013 canonical commitment hash:
+//!   compute ([`commitment_hash::commitment_hash`]) and wire-level verify
+//!   ([`commitment_hash::verify_commitment_hash`], match / mismatch /
+//!   cannot-verify)
 
 /// The MACP protocol version this runtime implements and negotiates
 /// (`Envelope.macp_version`, `Initialize`'s `supported_protocol_versions`/
