@@ -6,8 +6,16 @@
 //! and the [`PolicyEvaluator`] trait that modes call through. The concrete
 //! default evaluator lives in the `macp-policy` crate; a third party can supply
 //! its own `PolicyEvaluator` and inject it without forking the kernel.
+//!
+//! [`keys`] carries the key namespaces of a rules object (closed defined keys,
+//! `^[_$]` annotations, `x-` vendor extensions), the closed-object walk, §8
+//! equality, and the [`RuleExtension`] trait an embedder implements to admit a
+//! vendor extension.
 
+pub mod keys;
 pub mod rules;
+
+pub use keys::RuleExtension;
 
 use crate::decision::DecisionState;
 use serde::{Deserialize, Serialize};

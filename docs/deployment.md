@@ -227,6 +227,9 @@ Two consequences worth knowing:
 | `MACP_REQUEST_TIMEOUT_SECS` | `30` | Per-request timeout (`src/main.rs:464`) |
 | `MACP_SHUTDOWN_DRAIN_SECS` | `10` | Graceful-shutdown drain deadline (`src/main.rs:524`) |
 | `MACP_CHECKPOINT_INTERVAL` | `0` (disabled) | Log entries between checkpoints |
+| `MACP_AUDIT_LEVEL` | `debug` | `info` logs every accepted message at `info` ("message accepted (audit)"); replaces the pre-0.9 `rules.audit` policy block |
+| `MACP_AUDIT_INFO_POLICIES` | — | Comma-separated `policy_id`s whose sessions are audited at `info` |
+| `MACP_AUDIT_INFO_MODES` | — | Comma-separated mode names whose sessions are audited at `info` |
 | `MACP_CLEANUP_INTERVAL_SECS` | `60` | Background maintenance interval in seconds: TTL expiry, memory eviction, disk GC, and eager observation of mode-computed deadlines (the handoff implicit accept, RFC-MACP-0010 §5.1(2)) |
 | `MACP_SESSION_RETENTION_SECS` | `3600` | Age (from session start) at which terminal sessions are evicted from **memory**; their durable data is kept |
 | `MACP_SESSION_DISK_RETENTION_SECS` | `0` (keep forever) | Age (from session start) at which terminal sessions' **durable data** is deleted; `0` disables disk GC entirely |

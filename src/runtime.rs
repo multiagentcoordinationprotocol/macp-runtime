@@ -33,6 +33,70 @@ pub enum SessionLifecycleEvent {
     Cancelled { session_id: String },
 }
 
+/// Per-message audit verbosity: which accepted messages log at `info`
+/// ("message accepted (audit)") rather than `debug`.
+///
+/// Operational configuration, deliberately **not** policy content. It was
+/// once read from a `rules.audit.level` block on the bound policy, which
+/// RFC-MACP-0012 §4's closed rule objects forbid, and a logging level is not
+/// governance: two policies differing only in it would otherwise be distinct
+/// under §8 equality.
+///
+/// From the environment ([`AuditConfig::from_env`]):
+///
+/// | Variable | Effect |
+/// |---|---|
+/// | `MACP_AUDIT_LEVEL` | `info` audits every session; anything else (default `debug`) audits none, except as below |
+/// | `MACP_AUDIT_INFO_POLICIES` | comma-separated `policy_id`s whose sessions are audited at `info` |
+/// | `MACP_AUDIT_INFO_MODES` | comma-separated mode names whose sessions are audited at `info` |
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AuditConfig {
+    /// Audit every session at `info`.
+    pub all: bool,
+    /// Sessions bound to one of these `policy_version`s are audited at `info`.
+    pub policies: std::collections::BTreeSet<String>,
+    /// Sessions of one of these modes are audited at `info`.
+    pub modes: std::collections::BTreeSet<String>,
+}
+
+impl AuditConfig {
+    /// Read `MACP_AUDIT_LEVEL`, `MACP_AUDIT_INFO_POLICIES` and
+    /// `MACP_AUDIT_INFO_MODES`.
+    pub fn from_env() -> Self {
+        Self::from_values(
+            std::env::var("MACP_AUDIT_LEVEL").ok().as_deref(),
+            std::env::var("MACP_AUDIT_INFO_POLICIES").ok().as_deref(),
+            std::env::var("MACP_AUDIT_INFO_MODES").ok().as_deref(),
+        )
+    }
+
+    /// The parse behind [`Self::from_env`], separated so it is testable
+    /// without mutating the process environment.
+    pub fn from_values(level: Option<&str>, policies: Option<&str>, modes: Option<&str>) -> Self {
+        let list = |raw: Option<&str>| {
+            raw.unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        Self {
+            all: level.map(str::trim) == Some("info"),
+            policies: list(policies),
+            modes: list(modes),
+        }
+    }
+
+    /// Whether `session`'s accepted messages log at `info`.
+    pub fn is_verbose(&self, session: &Session) -> bool {
+        self.all
+            || self.policies.contains(&session.policy_version)
+            || self.modes.contains(&session.mode)
+    }
+}
+
 pub struct Runtime {
     pub storage: Arc<dyn StorageBackend>,
     pub registry: Arc<SessionRegistry>,
@@ -46,6 +110,7 @@ pub struct Runtime {
     extensions: Arc<ExtensionProviderRegistry>,
     metrics: Arc<RuntimeMetrics>,
     checkpoint_interval: usize,
+    audit: AuditConfig,
 }
 
 impl Runtime {
@@ -104,7 +169,14 @@ impl Runtime {
             extensions: Arc::new(ExtensionProviderRegistry::new()),
             metrics: Arc::new(RuntimeMetrics::new()),
             checkpoint_interval,
+            audit: AuditConfig::from_env(),
         }
+    }
+
+    /// Replace the audit verbosity read from the environment at construction.
+    pub fn with_audit_config(mut self, audit: AuditConfig) -> Self {
+        self.audit = audit;
+        self
     }
 
     /// Returns all mode names the runtime can handle (standards-track + extensions).
@@ -230,18 +302,6 @@ impl Runtime {
         if !env.session_id.is_empty() {
             self.stream_bus.publish(&env.session_id, env.clone());
         }
-    }
-
-    /// Whether the session's bound policy requests info-level per-message
-    /// audit lines (`rules.audit.level == "info"`).
-    fn audit_verbose(session: &Session) -> bool {
-        session
-            .policy_definition
-            .as_ref()
-            .and_then(|p| p.rules.get("audit"))
-            .and_then(|a| a.get("level"))
-            .and_then(|l| l.as_str())
-            == Some("info")
     }
 
     fn make_incoming_entry(env: &Envelope, received_at_ms: i64) -> LogEntry {
@@ -926,11 +986,9 @@ impl Runtime {
             self.metrics.record_commitment_accepted(&session.mode);
         }
 
-        // Policy-driven audit verbosity (E3b): a bound policy may request
-        // per-message audit lines at info level via an `audit.level` rules
-        // block ("info"); default stays debug. Mode rule schemas ignore
-        // unknown blocks, so `audit` composes with any mode's rules.
-        if Self::audit_verbose(session) {
+        // Audit verbosity is runtime configuration (`AuditConfig`), not
+        // policy content; default stays debug.
+        if self.audit.is_verbose(session) {
             tracing::info!(
                 session_id = %env.session_id,
                 message_type = %env.message_type,
@@ -3043,22 +3101,32 @@ mod tests {
     }
 
     #[test]
-    fn audit_verbosity_reads_policy_rules() {
-        let mut session = Session::builder("s1", "macp.mode.decision.v1", "a").build();
-        assert!(!Runtime::audit_verbose(&session));
+    fn audit_verbosity_is_configuration_not_policy() {
+        let mut session = Session::builder("s1", "macp.mode.decision.v1", "a")
+            .policy_version("policy.audited")
+            .build();
+        assert!(!AuditConfig::default().is_verbose(&session));
+        assert!(AuditConfig::from_values(Some("info"), None, None).is_verbose(&session));
+        assert!(!AuditConfig::from_values(Some("debug"), None, None).is_verbose(&session));
+        assert!(
+            AuditConfig::from_values(None, Some(" other , policy.audited "), None)
+                .is_verbose(&session)
+        );
+        assert!(
+            AuditConfig::from_values(None, None, Some("macp.mode.decision.v1"))
+                .is_verbose(&session)
+        );
+        assert!(!AuditConfig::from_values(None, Some(""), Some(",")).is_verbose(&session));
 
+        // A legacy `rules.audit` block on a stored session's policy is inert.
         session.policy_definition = Some(macp_core::policy::PolicyDefinition {
-            policy_id: "policy.test.audit".into(),
+            policy_id: "policy.legacy".into(),
             mode: "*".into(),
-            description: "audited".into(),
+            description: "pre-0.9 audited".into(),
             rules: serde_json::json!({ "audit": { "level": "info" } }),
             schema_version: 1,
         });
-        assert!(Runtime::audit_verbose(&session));
-
-        session.policy_definition.as_mut().unwrap().rules =
-            serde_json::json!({ "audit": { "level": "debug" } });
-        assert!(!Runtime::audit_verbose(&session));
+        assert!(!AuditConfig::default().is_verbose(&session));
     }
 
     /// Post-commit-point coherence: once the SessionStart log entry is
