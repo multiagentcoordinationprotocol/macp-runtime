@@ -1,5 +1,6 @@
 use chrono::Utc;
 use macp_runtime::log_store::LogStore;
+use macp_runtime::macp_core::{Clock, ManualClock};
 use macp_runtime::pb::{CommitmentPayload, Envelope, SessionStartPayload};
 use macp_runtime::registry::SessionRegistry;
 use macp_runtime::replay::replay_session;
@@ -36,6 +37,29 @@ struct ConformanceFixture {
     expect_resolution_present: Option<bool>,
     #[serde(default = "default_true")]
     verify_replay_equivalence: bool,
+    /// Exact assertion on the fixture session's accepted history after its
+    /// `SessionStart`, synthetic entries included (README `expected_history`).
+    #[serde(default)]
+    expected_history: Option<Vec<ExpectedHistoryEntry>>,
+}
+
+#[derive(Deserialize)]
+struct ExpectedHistoryEntry {
+    message_type: String,
+    sender: String,
+    #[serde(default)]
+    payload: Option<Value>,
+    #[serde(default)]
+    synthetic: bool,
+}
+
+/// Per-step Envelope overrides (README `messages[].envelope`).
+#[derive(Default, Deserialize)]
+struct EnvelopeOverride {
+    session_id: Option<String>,
+    macp_version: Option<String>,
+    mode: Option<String>,
+    timestamp_unix_ms: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -47,6 +71,12 @@ struct ConformanceMessage {
     expect: String,
     #[serde(default)]
     expected_error_code: Option<String>,
+    /// The runtime's acceptance clock for this step (RFC-MACP-0001 §7.6
+    /// item 4), distinct from the Envelope timestamp. All-or-none.
+    #[serde(default)]
+    accepted_at_ms: Option<i64>,
+    #[serde(default)]
+    envelope: Option<EnvelopeOverride>,
 }
 
 fn default_true() -> bool {
@@ -57,11 +87,15 @@ fn new_sid() -> String {
     uuid::Uuid::new_v4().as_hyphenated().to_string()
 }
 
-fn make_runtime() -> Runtime {
+fn make_runtime(clock: Option<Arc<ManualClock>>) -> Runtime {
     let storage: Arc<dyn macp_runtime::storage::StorageBackend> = Arc::new(MemoryBackend);
     let registry = Arc::new(SessionRegistry::new());
     let log_store = Arc::new(LogStore::new());
-    Runtime::new(storage, registry, log_store)
+    let rt = Runtime::new(storage, registry, log_store);
+    match clock {
+        Some(clock) => rt.with_clock(clock),
+        None => rt,
+    }
 }
 
 fn encode_payload(fixture: &ConformanceFixture, msg: &ConformanceMessage) -> Vec<u8> {
@@ -69,6 +103,32 @@ fn encode_payload(fixture: &ConformanceFixture, msg: &ConformanceMessage) -> Vec
         // Canonical fully-qualified protobuf message names (conformance-pack
         // format): mode payloads are macp.modes.<mode>.v1.<Type>Payload and
         // the shared terminal is macp.v1.CommitmentPayload.
+        "macp.v1.SessionStartPayload" => {
+            let p = &msg.payload;
+            SessionStartPayload {
+                intent: p["intent"].as_str().unwrap_or_default().into(),
+                participants: p["participants"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                mode_version: p["mode_version"].as_str().unwrap_or_default().into(),
+                configuration_version: p["configuration_version"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .into(),
+                policy_version: p["policy_version"].as_str().unwrap_or_default().into(),
+                ttl_ms: p["ttl_ms"].as_i64().unwrap_or_default(),
+                context_id: String::new(),
+                extensions: std::collections::HashMap::new(),
+                roots: vec![],
+                max_suspend_ms: 0,
+            }
+            .encode_to_vec()
+        }
         "macp.v1.CommitmentPayload" => {
             let p = &msg.payload;
             CommitmentPayload {
@@ -308,6 +368,8 @@ fn expected_state(name: &str) -> SessionState {
         "Open" => SessionState::Open,
         "Resolved" => SessionState::Resolved,
         "Expired" => SessionState::Expired,
+        "Suspended" => SessionState::Suspended,
+        "Cancelled" => SessionState::Cancelled,
         other => panic!("Unknown expected_final_state: {other}"),
     }
 }
@@ -327,6 +389,37 @@ fn resolution_to_json(resolution: &[u8]) -> Option<Value> {
                 "outcome_positive": commitment.outcome_positive,
             })
         })
+}
+
+/// Decodes an accepted-history payload for `expected_history`'s subset match.
+/// Covers the shared terminal and every Handoff message (the only mode whose
+/// fixtures assert history today); anything else fails loudly rather than
+/// matching vacuously.
+fn history_payload_to_json(message_type: &str, raw: &[u8]) -> Value {
+    use macp_runtime::handoff_pb as h;
+    match message_type {
+        "Commitment" => resolution_to_json(raw).expect("Commitment payload decodes"),
+        "HandoffOffer" => {
+            let p = h::HandoffOfferPayload::decode(raw).unwrap();
+            json!({"handoff_id": p.handoff_id, "target_participant": p.target_participant,
+                   "scope": p.scope, "reason": p.reason})
+        }
+        "HandoffAccept" => {
+            let p = h::HandoffAcceptPayload::decode(raw).unwrap();
+            json!({"handoff_id": p.handoff_id, "accepted_by": p.accepted_by,
+                   "reason": p.reason, "implicit": p.implicit})
+        }
+        "HandoffDecline" => {
+            let p = h::HandoffDeclinePayload::decode(raw).unwrap();
+            json!({"handoff_id": p.handoff_id, "declined_by": p.declined_by, "reason": p.reason})
+        }
+        "HandoffContext" => {
+            let p = h::HandoffContextPayload::decode(raw).unwrap();
+            json!({"handoff_id": p.handoff_id, "content_type": p.content_type,
+                   "context": String::from_utf8_lossy(&p.context)})
+        }
+        other => panic!("expected_history payload decoding not implemented for {other}"),
+    }
 }
 
 fn mode_state_to_json(session: &Session) -> Option<Value> {
@@ -397,7 +490,22 @@ async fn run_conformance_fixture(path: &Path) {
     let fixture: ConformanceFixture = serde_json::from_str(&content)
         .unwrap_or_else(|e| panic!("Failed to parse fixture {}: {e}", path.display()));
 
-    let rt = make_runtime();
+    // `accepted_at_ms` is all-or-none (README). When present the harness
+    // drives the runtime's acceptance clock and opens the fixture session at
+    // acceptance time 0 with Envelope timestamp 0; otherwise the runtime's own
+    // wall clock runs, as it always has.
+    let stepped = fixture
+        .messages
+        .iter()
+        .filter(|m| m.accepted_at_ms.is_some())
+        .count();
+    assert!(
+        stepped == 0 || stepped == fixture.messages.len(),
+        "accepted_at_ms is all-or-none in {}",
+        path.display()
+    );
+    let clock = (stepped > 0).then(|| Arc::new(ManualClock::new(0)));
+    let rt = make_runtime(clock.clone());
     let sid = new_sid();
 
     // Register a fixture's inline policy (if any) before SessionStart, so a
@@ -431,7 +539,11 @@ async fn run_conformance_fixture(path: &Path) {
             message_id: "m0".into(),
             session_id: sid.clone(),
             sender: fixture.initiator.clone(),
-            timestamp_unix_ms: Utc::now().timestamp_millis(),
+            timestamp_unix_ms: if clock.is_some() {
+                0
+            } else {
+                Utc::now().timestamp_millis()
+            },
             payload: start_payload,
         },
         None,
@@ -441,14 +553,30 @@ async fn run_conformance_fixture(path: &Path) {
 
     for (i, msg) in fixture.messages.iter().enumerate() {
         let payload = encode_payload(&fixture, msg);
+        if let (Some(clock), Some(at)) = (&clock, msg.accepted_at_ms) {
+            assert!(
+                at >= clock.now_ms(),
+                "accepted_at_ms must be non-decreasing in {}",
+                path.display()
+            );
+            clock.set(at);
+        }
+        let no_override = EnvelopeOverride::default();
+        let ov = msg.envelope.as_ref().unwrap_or(&no_override);
         let env = Envelope {
-            macp_version: "1.0".into(),
-            mode: fixture.mode.clone(),
+            macp_version: ov.macp_version.clone().unwrap_or_else(|| "1.0".into()),
+            mode: ov.mode.clone().unwrap_or_else(|| fixture.mode.clone()),
             message_type: msg.message_type.clone(),
             message_id: format!("m{}", i + 1),
-            session_id: sid.clone(),
+            session_id: ov.session_id.clone().unwrap_or_else(|| sid.clone()),
             sender: msg.sender.clone(),
-            timestamp_unix_ms: Utc::now().timestamp_millis(),
+            timestamp_unix_ms: ov.timestamp_unix_ms.unwrap_or_else(|| {
+                if clock.is_some() {
+                    0
+                } else {
+                    Utc::now().timestamp_millis()
+                }
+            }),
             payload,
         };
 
@@ -522,6 +650,44 @@ async fn run_conformance_fixture(path: &Path) {
         assert_json_contains(&actual_mode_state, expected_mode_state);
     }
 
+    if let Some(expected_history) = &fixture.expected_history {
+        let submitted: std::collections::HashSet<String> = (1..=fixture.messages.len())
+            .map(|i| format!("m{i}"))
+            .collect();
+        let log = rt.log_store.get_log(&sid).await.unwrap_or_default();
+        let accepted: Vec<_> = log
+            .iter()
+            .filter(|e| e.entry_kind == macp_runtime::log_store::EntryKind::Incoming)
+            .filter(|e| e.message_id != "m0")
+            .collect();
+        let shape: Vec<String> = accepted
+            .iter()
+            .map(|e| format!("{} from {}", e.message_type, e.sender))
+            .collect();
+        assert_eq!(
+            accepted.len(),
+            expected_history.len(),
+            "accepted history length mismatch in {}: {shape:?}",
+            path.display()
+        );
+        for (idx, (actual, expected)) in accepted.iter().zip(expected_history).enumerate() {
+            let ctx = format!("history entry {idx} in {}", path.display());
+            assert_eq!(actual.message_type, expected.message_type, "{ctx}");
+            assert_eq!(actual.sender, expected.sender, "{ctx}");
+            assert_eq!(
+                !submitted.contains(&actual.message_id),
+                expected.synthetic,
+                "synthetic flag mismatch at {ctx} (message_id {})",
+                actual.message_id
+            );
+            if let Some(expected_payload) = &expected.payload {
+                let actual_payload =
+                    history_payload_to_json(&actual.message_type, &actual.raw_payload);
+                assert_json_contains(&actual_payload, expected_payload);
+            }
+        }
+    }
+
     if fixture.verify_replay_equivalence {
         assert_replay_equivalence(&rt, &sid, &session).await;
     }
@@ -589,6 +755,14 @@ conformance_test!(
     "handoff_negative_outcome.json"
 );
 conformance_test!(conformance_quorum_reject_paths, "quorum_reject_paths.json");
+conformance_test!(
+    conformance_handoff_implicit_accept,
+    "handoff_implicit_accept.json"
+);
+conformance_test!(
+    conformance_session_start_reject_paths,
+    "session_start_reject_paths.json"
+);
 conformance_test!(
     conformance_quorum_unreachable_override,
     "quorum_unreachable_override.json"
@@ -790,9 +964,11 @@ fn fixtures_conform_to_canonical_format() {
     // schema.json). Raised from 17 alongside the spec #99 corpus: the old floor
     // had drifted two fixtures below the real count, so it would have passed
     // with a fixture silently unvendored. Raised again to 32 by spec #111's
-    // `decision_zero_proposal_commitment.json`.
+    // `decision_zero_proposal_commitment.json`, and to 39 by the Seam-driven
+    // corpus (spec #192/#193: quorum overrides, handoff implicit accept,
+    // SessionStart obligations).
     assert!(
-        checked >= 32,
+        checked >= 39,
         "expected all fixtures checked, got {checked}"
     );
 }

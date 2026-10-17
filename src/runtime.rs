@@ -1,4 +1,4 @@
-use chrono::Utc;
+use macp_core::clock::{Clock, SystemClock};
 use std::sync::Arc;
 
 use crate::error::MacpError;
@@ -110,6 +110,7 @@ pub struct Runtime {
     metrics: Arc<RuntimeMetrics>,
     checkpoint_interval: usize,
     audit: AuditConfig,
+    clock: Arc<dyn Clock>,
 }
 
 impl Runtime {
@@ -169,7 +170,24 @@ impl Runtime {
             metrics: Arc::new(RuntimeMetrics::new()),
             checkpoint_interval,
             audit: AuditConfig::from_env(),
+            clock: Arc::new(SystemClock),
         }
+    }
+
+    /// Replace the acceptance clock (default: [`SystemClock`]). Every
+    /// time-dependent kernel decision -- TTL, the suspension cap, the
+    /// implicit-accept deadline, cancel/suspend/resume stamps, cleanup, GC --
+    /// reads this one clock, so injecting a [`macp_core::ManualClock`] makes
+    /// the kernel fully deterministic (conformance fixtures' `accepted_at_ms`,
+    /// simulation, tests). Production deployments keep the default.
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// The acceptance clock, in Unix milliseconds.
+    pub fn now_ms(&self) -> i64 {
+        self.clock.now_ms()
     }
 
     /// Replace the audit verbosity read from the environment at construction.
@@ -393,7 +411,7 @@ impl Runtime {
         session_id: &str,
         session: &mut Session,
     ) -> Result<bool, MacpError> {
-        let now = Utc::now().timestamp_millis();
+        let now = self.now_ms();
         // An Open session past its deadline, or a Suspended session that has
         // exceeded the MAX_SUSPEND_MS cap (RFC-MACP-0001 §7.5), expires. The
         // predicate is the one `macp_modes::step` uses, so the library and the
@@ -475,7 +493,7 @@ impl Runtime {
         // envelope's timestamp_unix_ms, not wall-clock time, falling back to
         // this acceptance clock when the envelope carries none. The resolved
         // suspension cap is bound and recorded likewise (RFC-MACP-0001 §7.5).
-        let accepted_at = Utc::now().timestamp_millis();
+        let accepted_at = self.now_ms();
         let validated = macp_modes::step::validate_session_start(env, accepted_at, &opts)
             .inspect_err(|err| {
                 if matches!(err, MacpError::InvalidEnvelope) {
@@ -544,7 +562,7 @@ impl Runtime {
                 return Err(MacpError::SessionAlreadyExists);
             }
             if let Some(max_open) = max_open_sessions {
-                let now = Utc::now().timestamp_millis();
+                let now = self.now_ms();
                 let mut count = 0usize;
                 for arc in map.values() {
                     // Never await a session mutex under the map lock: a
@@ -849,7 +867,12 @@ impl Runtime {
         // caller: it drives the phases here so it can interpose its append-only
         // write between validation and commit (a failed write must not consume a
         // dedup slot) — which a single all-in-one step could not preserve.
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        // One acceptance clock for the whole message: the prechecks, the mode
+        // call, the log entry and the commit all observe the same instant, so
+        // a message can never pass the TTL gate at one time and be stamped
+        // past its deadline at another -- and replay, which re-reads
+        // received_at_ms, observes the identical time.
+        let now_ms = self.now_ms();
         match macp_modes::step::check_preconditions(session, env, now_ms)? {
             macp_modes::step::Precheck::Duplicate => {
                 return Ok(ProcessResult {
@@ -887,9 +910,7 @@ impl Runtime {
         // `step::step` so it can interpose the durable append between
         // validation and commit.
         macp_modes::step::admit(session, env, mode.as_ref())?;
-        // One acceptance clock for both the mode call and the log entry, so
-        // replay (which re-reads received_at_ms) observes the identical time.
-        let accepted_at_ms = Utc::now().timestamp_millis();
+        let accepted_at_ms = now_ms;
         // RFC-MACP-0010 §5.1(2): anything the mode says is already due MUST
         // enter accepted history BEFORE this message is evaluated against the
         // state it changes. Lazy emission — the same clock reading the trigger
@@ -1042,7 +1063,7 @@ impl Runtime {
 
         // RFC-MACP-0001: runtime encodes a proper SessionCancelPayload with
         // `cancelled_by` set to the authenticated sender identity.
-        let now_ms = Utc::now().timestamp_millis();
+        let now_ms = self.now_ms();
         let cancel_payload = crate::pb::SessionCancelPayload {
             reason: reason.to_string(),
             cancelled_by: cancelled_by.to_string(),
@@ -1104,7 +1125,7 @@ impl Runtime {
             return Err(MacpError::SessionNotOpen);
         }
 
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = self.now_ms();
         let payload = crate::pb::SessionSuspendPayload {
             reason: reason.to_string(),
             suspended_by: suspended_by.to_string(),
@@ -1160,7 +1181,7 @@ impl Runtime {
             return Err(MacpError::SessionNotOpen);
         }
 
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = self.now_ms();
         // `banked_ms` on the wire payload records the remaining TTL banked at
         // suspend — `deadline − t_s` (RFC-MACP-0001 §7.5, RFC-MACP-0003 §2) —
         // computed from `session.ttl_expiry` and `session.suspended_at_ms`
@@ -1326,7 +1347,7 @@ impl Runtime {
                 return;
             }
         };
-        let now = Utc::now().timestamp_millis();
+        let now = self.now_ms();
         let checkpoint = LogEntry {
             message_id: String::new(),
             received_at_ms: now,
@@ -1385,7 +1406,7 @@ impl Runtime {
     /// Called by the background cleanup task to proactively transition
     /// stale sessions without waiting for the next incoming message.
     pub async fn cleanup_expired_sessions(&self) {
-        let now = Utc::now().timestamp_millis();
+        let now = self.now_ms();
         // Snapshot the shared handles under a brief map read; never hold the
         // map lock across per-session locks or storage I/O. Each session is
         // re-checked under its own mutex (it may have been touched since the
@@ -1495,7 +1516,7 @@ impl Runtime {
     ///
     /// Returns the number of synthetic entries appended.
     pub async fn sweep_due_synthetic_accepts(&self) -> usize {
-        let now = Utc::now().timestamp_millis();
+        let now = self.now_ms();
         // Snapshot the shared handles under a brief map read; never hold the
         // map lock across per-session locks or storage I/O. Mirrors
         // `cleanup_expired_sessions`.
@@ -1561,7 +1582,7 @@ impl Runtime {
     /// registry entry), deletes the session's snapshot+log, and clears any
     /// in-memory remnants. Returns the number of sessions deleted.
     pub async fn gc_disk_sessions(&self, retention_secs: u64) -> usize {
-        let now = Utc::now().timestamp_millis();
+        let now = self.now_ms();
         let cutoff = now - (retention_secs as i64 * 1000);
         let ids = match self.storage.list_session_ids().await {
             Ok(ids) => ids,
@@ -1615,7 +1636,7 @@ impl Runtime {
     /// the log cache and stream bus were never evicted at all). Sessions
     /// remain queryable from durable storage after eviction.
     pub async fn evict_stale_sessions(&self, retention_secs: u64) {
-        let now = Utc::now().timestamp_millis();
+        let now = self.now_ms();
         let cutoff = now - (retention_secs as i64 * 1000);
 
         let candidates: Vec<(String, crate::registry::SharedSession)> = {
@@ -1664,6 +1685,7 @@ mod tests {
     use super::*;
     use crate::decision_pb::ProposalPayload;
     use crate::pb::{CommitmentPayload, SessionStartPayload};
+    use chrono::Utc;
     use prost::Message;
 
     fn new_sid() -> String {
