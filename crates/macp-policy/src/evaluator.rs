@@ -205,6 +205,19 @@ pub fn evaluate_decision_commitment_outcome(
         Ok(r) => r,
         Err(deny) => return deny,
     };
+    // Defence in depth behind admission: a descriptor that never went through
+    // `PolicyRegistry::register` (a stored legacy definition, or one an
+    // embedder builds directly) can still carry an out-of-domain value. Deny
+    // rather than evaluate it — `veto_threshold: 0` would otherwise
+    // "objection-authorize" a decline with no objection on record.
+    if let Some(reason) = crate::registry::decision_value_domain_error(&rules) {
+        return PolicyDecision::Deny {
+            reasons: vec![format!(
+                "policy '{}' rules are out of domain at evaluation time: {reason}",
+                policy.policy_id
+            )],
+        };
+    }
 
     let mut deny_reasons: Vec<String> = Vec::new();
     let mut allow_reasons: Vec<String> = Vec::new();
@@ -1107,6 +1120,47 @@ mod tests {
             rules,
             schema_version: 1,
         }
+    }
+
+    /// A descriptor built without `PolicyRegistry::register` — so admission
+    /// never saw it — still fails closed on an out-of-domain value. At
+    /// `veto_threshold: 0` with `finalize_decline` the veto test holds with no
+    /// objection on record, which used to *allow* a decline with no ballot,
+    /// no evaluation and no objection behind it.
+    #[test]
+    fn out_of_domain_rules_deny_even_without_registration() {
+        let state = make_state_with_votes(vec![]);
+        let veto_zero = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 },
+            "objection_handling": {
+                "critical_severity_vetoes": true,
+                "veto_threshold": 0,
+                "critical_objection_action": "finalize_decline"
+            }
+        }));
+        for outcome_positive in [true, false] {
+            let decision = evaluate_decision_commitment_outcome(
+                &veto_zero,
+                &state,
+                &participants(),
+                outcome_positive,
+            );
+            match decision {
+                PolicyDecision::Deny { reasons } => assert!(
+                    reasons.iter().any(|r| r.contains("veto_threshold")),
+                    "{reasons:?}"
+                ),
+                other => panic!("veto_threshold 0 must deny, got {other:?}"),
+            }
+        }
+
+        let above_one = make_policy(serde_json::json!({
+            "evaluation": { "required_before_voting": true, "minimum_confidence": 1.5 }
+        }));
+        assert!(matches!(
+            evaluate_decision_commitment_outcome(&above_one, &state, &participants(), false),
+            PolicyDecision::Deny { .. }
+        ));
     }
 
     fn make_state_with_votes(vote_entries: Vec<(&str, &str, &str)>) -> DecisionState {

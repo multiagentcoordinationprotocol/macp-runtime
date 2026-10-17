@@ -47,6 +47,58 @@ const DECISION_VOTING_QUORUM_TYPES: [&str; 2] = ["count", "percentage"];
 /// list's ordinary enum check, like any other unknown type.
 const QUORUM_THRESHOLD_TYPES: [&str; 3] = ["n_of_m", "percentage", "count"];
 
+/// Legal values of `commitment.authority`, mirroring the `commitment` block of
+/// every `schemas/json/policy/*-rules.schema.json`
+/// (`properties.commitment.properties.authority.enum`, identical in all five).
+const COMMITMENT_AUTHORITIES: [&str; 3] = ["initiator_only", "any_participant", "designated_role"];
+
+/// Legal values of Proposal mode's `acceptance.criterion`, mirroring
+/// `schemas/json/policy/proposal-rules.schema.json`
+/// (`properties.acceptance.properties.criterion.enum`).
+const PROPOSAL_ACCEPTANCE_CRITERIA: [&str; 3] = ["all_parties", "counterparty", "initiator"];
+
+/// Legal values of Quorum mode's `abstention.interpretation`, mirroring
+/// `schemas/json/policy/quorum-rules.schema.json`
+/// (`properties.abstention.properties.interpretation.enum`).
+const QUORUM_ABSTENTION_INTERPRETATIONS: [&str; 3] = ["neutral", "implicit_reject", "ignored"];
+
+/// The Decision-mode value domains that the evaluator re-checks at commitment
+/// time, mirroring `schemas/json/policy/decision-rules.schema.json`:
+///
+/// - `properties.objection_handling.properties.veto_threshold.minimum` — `1`.
+///   At `0` the veto test `blocking >= veto_threshold` holds with **no**
+///   objection on record, so every positive commitment is vetoed and, under
+///   `critical_objection_action: "finalize_decline"`, a decline is
+///   "objection-authorized" by an objection nobody raised — waiving the
+///   evaluation, quorum and voting gates RFC-MACP-0007 §6.2 reserves for a
+///   real one. Negative and fractional values are already refused by the
+///   `u32` field type.
+/// - `properties.evaluation.properties.minimum_confidence.{minimum,maximum}` —
+///   `[0, 1]`, both inclusive (the schema's `$comment` forbids tightening the
+///   floor). Above `1` no evaluation can qualify; `NaN` fails the evaluator's
+///   `> 0.0` guard and silently disables the confidence gate.
+///
+/// Shared with the evaluator (`evaluate_decision_commitment_outcome`) so a
+/// descriptor that never went through [`PolicyRegistry::register`] — a stored
+/// legacy definition, or one an embedder constructs directly — fails closed
+/// instead of being evaluated with an out-of-domain value.
+pub(crate) fn decision_value_domain_error(rules: &DecisionPolicyRules) -> Option<String> {
+    if rules.objection_handling.veto_threshold < 1 {
+        return Some(format!(
+            "objection_handling.veto_threshold {} is out of range: must be >= 1",
+            rules.objection_handling.veto_threshold
+        ));
+    }
+    let confidence = rules.evaluation.minimum_confidence;
+    if !(0.0..=1.0).contains(&confidence) {
+        return Some(format!(
+            "evaluation.minimum_confidence {confidence} is out of range: \
+             must be between 0.0 and 1.0 inclusive"
+        ));
+    }
+    None
+}
+
 /// Every standards-track mode a policy may target, which is exactly the set a
 /// `mode: "*"` policy targets: `Runtime::handle_session_start` binds a wildcard
 /// to any mode's session. Registration therefore holds a wildcard to all of
@@ -440,6 +492,9 @@ impl PolicyRegistry {
         if matches!(mode, "macp.mode.decision.v1" | "*") {
             if let Ok(decision) = serde_json::from_value::<DecisionPolicyRules>(rules.clone()) {
                 Self::validate_decision_voting(&decision.voting)?;
+                if let Some(reason) = decision_value_domain_error(&decision) {
+                    return Err(format!("INVALID_POLICY_DEFINITION: {reason}"));
+                }
                 if decision.voting.algorithm == "weighted" && decision.voting.weights.is_empty() {
                     return Err(
                         "INVALID_POLICY_DEFINITION: voting.algorithm 'weighted' requires non-empty voting.weights".into(),
@@ -525,9 +580,48 @@ impl PolicyRegistry {
             }
         }
 
-        // All modes: commitment.designated_roles required when authority is designated_role
+        // Proposal mode (and wildcard) `acceptance.criterion`. An off-enum value
+        // reaches `check_acceptance_criterion`'s `_` arm and is silently read
+        // as `all_parties`, so a typo'd `initiator` changes who must accept.
+        if matches!(mode, "macp.mode.proposal.v1" | "*") {
+            if let Ok(proposal) = serde_json::from_value::<ProposalPolicyRules>(rules.clone()) {
+                let criterion = proposal.acceptance.criterion.as_str();
+                if !PROPOSAL_ACCEPTANCE_CRITERIA.contains(&criterion) {
+                    return Err(format!(
+                        "INVALID_POLICY_DEFINITION: acceptance.criterion '{criterion}' is not one of: {}",
+                        PROPOSAL_ACCEPTANCE_CRITERIA.join(", ")
+                    ));
+                }
+            }
+        }
+
+        // Quorum mode (and wildcard) `abstention.interpretation`. An off-enum
+        // value is silently read as `neutral` by the evaluator's `_` arm.
+        if matches!(mode, "macp.mode.quorum.v1" | "*") {
+            if let Ok(quorum) = serde_json::from_value::<QuorumPolicyRules>(rules.clone()) {
+                let interpretation = quorum.abstention.interpretation.as_str();
+                if !QUORUM_ABSTENTION_INTERPRETATIONS.contains(&interpretation) {
+                    return Err(format!(
+                        "INVALID_POLICY_DEFINITION: abstention.interpretation '{interpretation}' \
+                         is not one of: {}",
+                        QUORUM_ABSTENTION_INTERPRETATIONS.join(", ")
+                    ));
+                }
+            }
+        }
+
+        // All modes: `commitment.authority` enum, and designated_roles
+        // required when authority is designated_role. An off-enum authority is
+        // silently read as `initiator_only` by `check_commitment_authority`.
         if let Some(commitment) = rules.get("commitment") {
             if let Ok(cr) = serde_json::from_value::<CommitmentRules>(commitment.clone()) {
+                if !COMMITMENT_AUTHORITIES.contains(&cr.authority.as_str()) {
+                    return Err(format!(
+                        "INVALID_POLICY_DEFINITION: commitment.authority '{}' is not one of: {}",
+                        cr.authority,
+                        COMMITMENT_AUTHORITIES.join(", ")
+                    ));
+                }
                 if cr.authority == "designated_role" && cr.designated_roles.is_empty() {
                     return Err(
                         "INVALID_POLICY_DEFINITION: commitment.authority 'designated_role' requires non-empty commitment.designated_roles".into(),
@@ -1234,6 +1328,114 @@ mod tests {
 
     fn accept(definition: PolicyDefinition) {
         PolicyRegistry::new().register(definition).unwrap();
+    }
+
+    fn policy_for(mode: &str, rules: serde_json::Value) -> PolicyDefinition {
+        PolicyDefinition {
+            policy_id: "policy.test.domain".into(),
+            mode: mode.into(),
+            description: "value domain under test".into(),
+            rules,
+            schema_version: 3,
+        }
+    }
+
+    /// `objection_handling.veto_threshold.minimum: 1` — at the boundary and
+    /// one past it, for the exact mode and for the wildcard that binds to
+    /// decision sessions too.
+    #[test]
+    fn veto_threshold_zero_is_refused_and_one_admitted() {
+        for mode in ["macp.mode.decision.v1", "*"] {
+            let err = refuse(policy_for(
+                mode,
+                serde_json::json!({ "objection_handling": { "veto_threshold": 0 } }),
+            ));
+            assert!(err.contains("veto_threshold 0"), "{mode}: {err}");
+            accept(policy_for(
+                mode,
+                serde_json::json!({ "objection_handling": { "veto_threshold": 1 } }),
+            ));
+        }
+    }
+
+    /// `evaluation.minimum_confidence` is `[0, 1]`, both ends inclusive.
+    #[test]
+    fn minimum_confidence_bounds_are_inclusive_zero_to_one() {
+        for mode in ["macp.mode.decision.v1", "*"] {
+            for bad in [1.0001, 1.5, -0.0001] {
+                let err = refuse(policy_for(
+                    mode,
+                    serde_json::json!({ "evaluation": { "minimum_confidence": bad } }),
+                ));
+                assert!(err.contains("minimum_confidence"), "{mode} {bad}: {err}");
+            }
+            for good in [0.0, 1.0, 0.5] {
+                accept(policy_for(
+                    mode,
+                    serde_json::json!({ "evaluation": { "minimum_confidence": good } }),
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn commitment_authority_off_enum_is_refused_for_every_mode() {
+        for mode in STANDARDS_TRACK_POLICY_MODES.iter().copied().chain(["*"]) {
+            let err = refuse(policy_for(
+                mode,
+                serde_json::json!({ "commitment": { "authority": "anyone" } }),
+            ));
+            assert!(
+                err.contains("commitment.authority 'anyone'"),
+                "{mode}: {err}"
+            );
+            for authority in ["initiator_only", "any_participant"] {
+                accept(policy_for(
+                    mode,
+                    serde_json::json!({ "commitment": { "authority": authority } }),
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn proposal_acceptance_criterion_off_enum_is_refused() {
+        for mode in ["macp.mode.proposal.v1", "*"] {
+            let err = refuse(policy_for(
+                mode,
+                serde_json::json!({ "acceptance": { "criterion": "majority" } }),
+            ));
+            assert!(
+                err.contains("acceptance.criterion 'majority'"),
+                "{mode}: {err}"
+            );
+            for criterion in PROPOSAL_ACCEPTANCE_CRITERIA {
+                accept(policy_for(
+                    mode,
+                    serde_json::json!({ "acceptance": { "criterion": criterion } }),
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn quorum_abstention_interpretation_off_enum_is_refused() {
+        for mode in ["macp.mode.quorum.v1", "*"] {
+            let err = refuse(policy_for(
+                mode,
+                serde_json::json!({ "abstention": { "interpretation": "reject" } }),
+            ));
+            assert!(
+                err.contains("abstention.interpretation 'reject'"),
+                "{mode}: {err}"
+            );
+            for interpretation in QUORUM_ABSTENTION_INTERPRETATIONS {
+                accept(policy_for(
+                    mode,
+                    serde_json::json!({ "abstention": { "interpretation": interpretation } }),
+                ));
+            }
+        }
     }
 
     #[test]
@@ -1992,7 +2194,50 @@ mod tests {
             "the supermajority threshold floor has drifted from decision-rules.schema.json"
         );
 
+        let objection = &decision["properties"]["objection_handling"]["properties"];
+        assert_eq!(
+            objection["veto_threshold"]["minimum"],
+            serde_json::json!(1),
+            "objection_handling.veto_threshold's lower bound has drifted"
+        );
+        assert_eq!(
+            objection["veto_threshold"]["type"],
+            serde_json::json!("integer")
+        );
+        let confidence = &decision["properties"]["evaluation"]["properties"]["minimum_confidence"];
+        assert_eq!(confidence["minimum"], serde_json::json!(0));
+        assert_eq!(confidence["maximum"], serde_json::json!(1));
+
+        for file in [
+            "decision-rules.schema.json",
+            "proposal-rules.schema.json",
+            "task-rules.schema.json",
+            "handoff-rules.schema.json",
+            "quorum-rules.schema.json",
+        ] {
+            assert_eq!(
+                enum_values(
+                    &schema(&dir, file)["properties"]["commitment"]["properties"]["authority"]
+                ),
+                sorted(&COMMITMENT_AUTHORITIES),
+                "commitment.authority has drifted from {file}"
+            );
+        }
+        assert_eq!(
+            enum_values(
+                &schema(&dir, "proposal-rules.schema.json")["properties"]["acceptance"]
+                    ["properties"]["criterion"]
+            ),
+            sorted(&PROPOSAL_ACCEPTANCE_CRITERIA),
+            "acceptance.criterion has drifted from proposal-rules.schema.json"
+        );
+
         let quorum = schema(&dir, "quorum-rules.schema.json");
+        assert_eq!(
+            enum_values(&quorum["properties"]["abstention"]["properties"]["interpretation"]),
+            sorted(&QUORUM_ABSTENTION_INTERPRETATIONS),
+            "abstention.interpretation has drifted from quorum-rules.schema.json"
+        );
         let threshold = &quorum["properties"]["threshold"];
         // One deliberate departure, documented on the constant: `count` is
         // accepted as an alias this runtime documents. `weighted` was the

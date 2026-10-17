@@ -66,6 +66,13 @@ The runtime does **not** run a JSON-Schema evaluator: it carries no `jsonschema`
    | `voting.quorum.value` | `>= 0` (a number, not necessarily an integer); `0` is the vacuous participation floor at `schema_version >= 3`, see below |
    | Quorum `threshold.type` | One of `n_of_m`, `percentage`, `count`. `weighted` is refused — the canonical vocabulary no longer contains it, see below |
    | Quorum `threshold.value` | A positive **integer** when the key is supplied (`> 0`, **exclusive**); additionally `<= 100` when `threshold.type` is `percentage` |
+   | `objection_handling.veto_threshold` | `>= 1` (Decision, `"*"`). At `0` the veto fires with no objection on record — under `finalize_decline` that "objection-authorized" a decline nobody objected to |
+   | `evaluation.minimum_confidence` | Between `0.0` and `1.0`, **both inclusive** (Decision, `"*"`) |
+   | `commitment.authority` | One of `initiator_only`, `any_participant`, `designated_role` (every mode, `"*"`). An off-enum value used to be read silently as `initiator_only` |
+   | Proposal `acceptance.criterion` | One of `all_parties`, `counterparty`, `initiator` (Proposal, `"*"`). An off-enum value used to be read silently as `all_parties` |
+   | Quorum `abstention.interpretation` | One of `neutral`, `implicit_reject`, `ignored` (Quorum, `"*"`). An off-enum value used to be read silently as `neutral` |
+
+   The Decision evaluator re-checks `veto_threshold` and `minimum_confidence` at commitment time and **denies** an out-of-domain value, so a descriptor that never went through the registry (a stored legacy definition, or one an embedder builds directly) fails closed rather than being evaluated.
 
    A wildcard (`"*"`) policy must satisfy **every** standards-track mode's schema and every mode's constraints above, not just Decision's, because `SessionStart` binds it to every mode's sessions. Before this release it was validated against the Decision schema alone, which has no top-level `threshold` — so a Quorum `threshold` inside a `"*"` policy was silently dropped at registration and then read, unchecked, by the Quorum mode. A `"*"` policy carrying an out-of-domain `threshold` is now refused. Fields one mode's schema does not know are still ignored rather than refused, so a Decision-shaped wildcard (including the built-in `policy.default`) registers unchanged.
 
