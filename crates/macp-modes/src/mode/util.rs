@@ -73,27 +73,11 @@ pub fn validate_commitment_payload_for_session(
     Ok(commitment)
 }
 
-/// Check whether `s` is a canonical RFC-MACP-0013 commitment hash: the
-/// literal prefix `sha256:` followed by exactly 64 lowercase hex characters.
-/// No trimming is performed — leading/trailing whitespace is a rejection,
-/// not something to be trimmed away before checking.
-///
-/// `#[doc(hidden)] pub` solely so `tests/parity_contract.rs` (in the root
-/// `macp-runtime` crate) can assert this predicate directly, against
-/// `schemas/parity/contract.json`'s `commitment_hash` vectors, instead of
-/// reimplementing it. Not a stability promise.
+/// Re-export of [`macp_core::commitment_hash::is_canonical_commitment_hash`],
+/// the stable home since 0.8.9. Kept at this path (`#[doc(hidden)]`, as it
+/// always was) so `tests/parity_contract.rs` and existing callers resolve.
 #[doc(hidden)]
-pub fn is_canonical_commitment_hash(s: &str) -> bool {
-    match s.strip_prefix("sha256:") {
-        Some(rest) => {
-            rest.len() == 64
-                && rest
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        }
-        None => false,
-    }
-}
+pub use macp_core::commitment_hash::is_canonical_commitment_hash;
 
 /// Validate that `outcome_positive` is consistent with the `action` field.
 /// Actions ending in `rejected`, `failed`, or `declined` must have `outcome_positive = false`.
