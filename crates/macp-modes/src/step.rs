@@ -10,6 +10,10 @@
 //! clock (the caller injects `now_ms`) — and the gRPC server's kernel calls
 //! the same functions, so a library embedder and the server cannot drift.
 //!
+//! Embedder obligations (RFC-MACP-0001 §7.6), the clock rule and the
+//! durable-consumer split are documented in `docs/embedding.md`; replay of a
+//! recorded history is [`crate::replay`].
+//!
 //! Session creation has the same split: [`accept_session_start`] (or its two
 //! halves, [`validate_session_start`] and [`ValidatedStart::accept`]) is the
 //! only supported way to turn a client `SessionStart` into a [`Session`].
@@ -226,9 +230,9 @@ pub fn next_synthetic(
 /// Apply a [`Synthetic`]: consume its dedup slot and apply its mode response.
 /// Durable consumers call this only after appending `syn.envelope`.
 ///
-/// Deliberately **no** participant activity: replay never records activity for
-/// any entry, so crediting the synthetic's sender live would diverge from what
-/// a rebuild produces — and the sender did not act.
+/// Deliberately **no** participant activity: the sender did not act, and
+/// [`crate::replay`] never credits a [`crate::replay::ReplayEvent::Synthetic`]
+/// either, so crediting it live would diverge from what a rebuild produces.
 pub fn commit_synthetic(session: &mut Session, syn: Synthetic) -> Envelope {
     session
         .seen_message_ids

@@ -6,6 +6,8 @@ Not every state transition a client observes comes from an RPC: [Background main
 
 For protocol-level transport semantics, see the [protocol transports documentation](https://www.multiagentcoordinationprotocol.io/docs/transports).
 
+Driving sessions in-process instead, with no gRPC? The same acceptance and replay code is a library API: see [Embedding the coordination kernel](embedding.md).
+
 ## Protocol Handshake
 
 ### Initialize
