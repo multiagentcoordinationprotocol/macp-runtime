@@ -338,6 +338,12 @@ pub struct StartOptions {
     pub default_max_suspend_ms: Option<i64>,
     /// Overrides the session-id format check.
     pub session_id_validator: Option<SessionIdValidator>,
+    /// A deployment cap on `ttl_ms`: a start asking for more is refused with
+    /// [`MacpError::InvalidTtl`], like any out-of-range TTL. It can only
+    /// tighten [`MAX_TTL_MS`](macp_core::session::MAX_TTL_MS), never loosen
+    /// it. Replay needs no copy of it: every recorded start was accepted under
+    /// it.
+    pub max_ttl_ms: Option<i64>,
 }
 
 impl std::fmt::Debug for StartOptions {
@@ -346,6 +352,7 @@ impl std::fmt::Debug for StartOptions {
             .field("strict", &self.strict)
             .field("descriptor_mode_version", &self.descriptor_mode_version)
             .field("default_max_suspend_ms", &self.default_max_suspend_ms)
+            .field("max_ttl_ms", &self.max_ttl_ms)
             .field(
                 "session_id_validator",
                 &self.session_id_validator.as_ref().map(|_| "custom"),
@@ -368,6 +375,11 @@ impl StartOptions {
     /// See [`StartOptions::default_max_suspend_ms`].
     pub fn with_default_max_suspend_ms(mut self, ms: i64) -> Self {
         self.default_max_suspend_ms = Some(ms);
+        self
+    }
+    /// See [`StartOptions::max_ttl_ms`].
+    pub fn with_max_ttl_ms(mut self, ms: i64) -> Self {
+        self.max_ttl_ms = Some(ms);
         self
     }
     /// See [`StartOptions::session_id_validator`].
@@ -409,7 +421,8 @@ pub struct ValidatedStart {
 /// The mode- and policy-independent half of [`accept_session_start`], in
 /// order: envelope shape and `message_type == "SessionStart"` → the session-id
 /// format → payload decode → the canonical contract (when strict) →
-/// `mode_version` against the descriptor → `ttl_ms`. Pure.
+/// `mode_version` against the descriptor → `ttl_ms` (and
+/// [`StartOptions::max_ttl_ms`]). Pure.
 ///
 /// Split out so a durable consumer can interpose its own checks between the
 /// halves — the server checks for an existing session and resolves the policy
@@ -445,6 +458,9 @@ pub fn validate_session_start(
         None
     };
     let ttl_ms = extract_ttl_ms(&payload)?;
+    if opts.max_ttl_ms.is_some_and(|cap| ttl_ms > cap) {
+        return Err(MacpError::InvalidTtl);
+    }
     let ttl_base = if env.timestamp_unix_ms > 0 {
         env.timestamp_unix_ms
     } else {

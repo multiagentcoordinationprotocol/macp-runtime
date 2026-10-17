@@ -292,3 +292,26 @@ fn step_refuses_malformed_envelopes_without_consuming_dedup() {
         }
     ));
 }
+
+#[test]
+fn a_deployment_ttl_cap_refuses_a_longer_ttl() {
+    let opts = StartOptions::default().with_max_ttl_ms(60_000);
+    // At the cap: accepted.
+    assert!(validate_session_start(&start(SID, &payload()), NOW, &opts).is_ok());
+    // One past it: refused like any out-of-range ttl_ms.
+    let mut p = payload();
+    p.ttl_ms = 60_001;
+    assert!(matches!(
+        validate_session_start(&start(SID, &p), NOW, &opts),
+        Err(MacpError::InvalidTtl)
+    ));
+    // Without the option the protocol bound alone applies.
+    assert!(validate_session_start(&start(SID, &p), NOW, &StartOptions::default()).is_ok());
+    // A cap can only tighten: one above MAX_TTL_MS leaves the protocol bound.
+    let loose = StartOptions::default().with_max_ttl_ms(i64::MAX);
+    p.ttl_ms = macp_core::session::MAX_TTL_MS + 1;
+    assert!(matches!(
+        validate_session_start(&start(SID, &p), NOW, &loose),
+        Err(MacpError::InvalidTtl)
+    ));
+}

@@ -101,6 +101,7 @@ The error a doubly-invalid start reports is the same either way.
 | `with_strict(bool)` | `session::requires_strict_session_start(mode)`, so the five standards-track modes are strict | Applies the canonical contract to an extension mode, or lifts it from one |
 | `with_descriptor_mode_version(v)` | none | Refuses a payload that names another version, and binds `v` when the payload names none. Record the result, `ValidatedStart::bound_mode_version`, for replay |
 | `with_default_max_suspend_ms(ms)` | `session::MAX_SUSPEND_MS` (7 days) | The suspension cap to bind when the payload sets none. Resolution matches `session::resolve_max_suspend_ms` |
+| `with_max_ttl_ms(ms)` | `session::MAX_TTL_MS` (24 hours) only | A deployment cap on `ttl_ms`. A start asking for more gets `INVALID_TTL`. It can only tighten the protocol bound. Replay needs no copy of it, because every recorded start was accepted under it |
 | `with_session_id_validator(f)` | `validate_session_id_for_acceptance` | A stricter id rule for your deployment |
 
 Do not build a client's session with `Session::builder`. It does no
