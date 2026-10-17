@@ -91,7 +91,7 @@ async fn rig_tools_drive_decision_lifecycle() {
             serde_json::json!({
                 "session_id": &sid,
                 "proposal_id": "p1",
-                "vote": "approve",
+                "vote": "APPROVE",
                 "reason": "looks good to me"
             })
             .to_string(),

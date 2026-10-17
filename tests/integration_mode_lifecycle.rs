@@ -119,7 +119,7 @@ async fn decision_full_lifecycle_through_runtime() {
 
     let vote = VotePayload {
         proposal_id: "p1".into(),
-        vote: "approve".into(),
+        vote: "APPROVE".into(),
         reason: "good".into(),
     }
     .encode_to_vec();

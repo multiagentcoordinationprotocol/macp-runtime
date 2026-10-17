@@ -14,6 +14,14 @@ Before exposing the runtime to production traffic, ensure these four items are c
 
 4. **Bind address** -- Set `MACP_BIND_ADDR` to the desired listen address. The default `127.0.0.1:50051` only accepts local connections.
 
+## Upgrading to 0.9.0
+
+### 1. Quorum: an over-participant policy threshold is accepted and declinable at once
+
+A deliberate reversal of issue #145, made to follow RFC-MACP-0011 §5 rule 6 (Seam finding S4; owner decision 2026-10-16). A policy `threshold` above the declared participant count -- `{"type": "n_of_m", "value": 5}` on three participants -- no longer refuses the `ApprovalRequest`, and the `counted > 0` gate is gone, so the coordinator may seal `quorum.rejected` before any ballot. A `percentage` threshold can never exceed the pool (100% of 3 is 3), so it is unaffected: a negative commitment there still waits for the ballots that make the bar unreachable. The positive outcome under an over-pool bar remains impossible.
+
+Who it reaches: only sessions bound to a policy whose `n_of_m`/`count` value exceeds the session's participant count. Persisted sessions of that kind that 0.8 skipped at replay (item 3 of the next section) now **load again** -- and are immediately declinable. If such a session must not be declined without a vote, correct the policy before upgrading. An `Unsatisfiable` threshold (unrecognised `type`) is still refused at `ApprovalRequest`.
+
 ## Upgrading into registration-time policy validation
 
 This release tightens what the governance policy registry accepts, what the Quorum mode will bind, how the Decision evaluator reads a `weighted` round, when a decline may be finalized over a passing vote, and how a `percentage` Quorum threshold is computed. Ten changes are operationally visible -- seven tightenings, one relaxation (item 7, which cannot affect an existing deployment) and two corrections that *lower* a bar (items 9 and 10) -- and **item 6 is the only one that can change how an already-stored session replays** -- read it first if you have any persisted Decision session at all. Item 6 carries two independent predicates and **only one of them involves `weighted`**: the other reaches any Decision policy that sets `commitment.allow_decline_over_approval: true`, `majority` policies included. Read this section before upgrading any deployment that sets `MACP_POLICIES_DIR`, or that has persisted sessions bound to a policy with a Quorum `threshold`, a `weighted` `voting.algorithm`, or `commitment.allow_decline_over_approval: true`. `CHANGELOG.md` is generated from commit subjects and does not carry this detail.
@@ -37,6 +45,8 @@ When a policy file blocks startup, the natural fix is to delete it. **Correct th
 Note the interaction with the next item: because an unresolved policy makes the Quorum mode fall back to the `ApprovalRequest`'s own `required_approvals` -- a value the mode already constrains to `1..=participants` -- deleting the policy also makes the replay failure below disappear. The two symptoms clear together, and the reason they clear is that the governance bar is no longer being applied.
 
 ### 3. A persisted Quorum session with an out-of-domain policy threshold no longer replays
+
+> **Superseded in 0.9.0 for numeric thresholds** -- see [Upgrading to 0.9.0](#1-quorum-an-over-participant-policy-threshold-is-accepted-and-declinable-at-once). What follows still holds for `weighted`/unrecognised types.
 
 RFC-MACP-0011 §5 rule 6 makes a policy `threshold` *replace* the `ApprovalRequest`'s `required_approvals`, but nothing previously held the replacement to the same `1..=participants` domain the runtime enforces on the field it replaces. The Quorum mode now refuses an `ApprovalRequest` whose effective threshold falls outside that domain, and replay dispatches the same code -- so such a session fails to replay. It is skipped with a warning, or is fatal at startup under `MACP_STRICT_RECOVERY=1`.
 

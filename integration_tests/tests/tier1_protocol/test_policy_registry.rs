@@ -399,7 +399,7 @@ async fn policy_enforcement_blocks_commitment_in_decision_mode() {
             &new_message_id(),
             &session_id,
             participant,
-            vote_payload("p1", "reject", "not ready"),
+            vote_payload("p1", "REJECT", "not ready"),
         ),
     )
     .await
@@ -508,7 +508,7 @@ async fn default_policy_allows_commitment() {
             &new_message_id(),
             &session_id,
             participant,
-            vote_payload("p1", "approve", "ok"),
+            vote_payload("p1", "APPROVE", "ok"),
         ),
     )
     .await
@@ -893,8 +893,8 @@ async fn commit_under_std_policy(
     let session_id = new_session_id();
 
     let voters: Vec<(String, &str)> = (0..approve)
-        .map(|i| (format!("agent://std-a{i}-{run}"), "approve"))
-        .chain((0..reject).map(|i| (format!("agent://std-r{i}-{run}"), "reject")))
+        .map(|i| (format!("agent://std-a{i}-{run}"), "APPROVE"))
+        .chain((0..reject).map(|i| (format!("agent://std-r{i}-{run}"), "REJECT")))
         .collect();
     let silent_agents: Vec<String> = (0..silent)
         .map(|i| format!("agent://std-s{i}-{run}"))
@@ -952,7 +952,7 @@ async fn commit_under_std_policy(
 
     let mut voters = voters;
     if initiator_approves {
-        voters.push((orchestrator.clone(), "approve"));
+        voters.push((orchestrator.clone(), "APPROVE"));
     }
 
     for (voter, vote) in &voters {

@@ -52,7 +52,7 @@ async fn decision_happy_path() {
             &new_message_id(),
             &sid,
             voter,
-            evaluation_payload("p1", "approve", 0.9, "looks good"),
+            evaluation_payload("p1", "APPROVE", 0.9, "looks good"),
         ),
     )
     .await
@@ -69,7 +69,7 @@ async fn decision_happy_path() {
             &new_message_id(),
             &sid,
             voter,
-            vote_payload("p1", "approve", "consensus"),
+            vote_payload("p1", "APPROVE", "consensus"),
         ),
     )
     .await

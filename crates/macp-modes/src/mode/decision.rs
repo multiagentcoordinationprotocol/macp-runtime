@@ -17,6 +17,47 @@ pub use macp_core::decision::{
     DecisionPhase, DecisionState, Evaluation, Objection, Proposal, Vote,
 };
 
+/// First `semantics_rev` at which Decision's wire enums are case-exact and
+/// `Objection.severity` is required (macp-runtime#187, Seam finding S7).
+pub const STRICT_WIRE_ENUMS_REV: u32 = 4;
+
+#[derive(Clone, Copy)]
+enum Case {
+    Upper,
+    Lower,
+}
+
+/// Read a Decision wire enum under the session's revision.
+///
+/// From [`STRICT_WIRE_ENUMS_REV`] the value is taken exactly as sent: a value
+/// in the wrong case, or an empty one, fails the caller's membership check
+/// and is `INVALID_ENVELOPE`. Earlier revisions keep the rule their histories
+/// were accepted under -- case-insensitive input folded to the canonical case,
+/// and `legacy_default` for an empty value -- so they replay unchanged
+/// (RFC-MACP-0003 §1).
+fn wire_enum(
+    session: &Session,
+    raw: &str,
+    case: Case,
+    legacy_default: Option<&str>,
+) -> Result<String, MacpError> {
+    if session.semantics_rev >= STRICT_WIRE_ENUMS_REV {
+        if raw.is_empty() {
+            return Err(MacpError::InvalidPayload);
+        }
+        return Ok(raw.to_string());
+    }
+    if raw.is_empty() {
+        if let Some(default) = legacy_default {
+            return Ok(default.to_string());
+        }
+    }
+    Ok(match case {
+        Case::Upper => raw.to_uppercase(),
+        Case::Lower => raw.to_lowercase(),
+    })
+}
+
 pub struct DecisionMode {
     evaluator: std::sync::Arc<dyn macp_core::policy::PolicyEvaluator>,
 }
@@ -175,10 +216,14 @@ impl Mode for DecisionMode {
             "Evaluation" => {
                 let payload = EvaluationPayload::decode(&*env.payload)
                     .map_err(|_| MacpError::InvalidPayload)?;
-                // RFC-MACP-0004: valid recommendation values
-                match payload.recommendation.to_uppercase().as_str() {
-                    "APPROVE" | "REVIEW" | "BLOCK" | "REJECT" => {}
-                    _ => return Err(MacpError::InvalidPayload),
+                // RFC-MACP-0004 / RFC-MACP-0007 §4: UPPER_CASE, exactly.
+                let recommendation =
+                    wire_enum(session, &payload.recommendation, Case::Upper, None)?;
+                if !matches!(
+                    recommendation.as_str(),
+                    "APPROVE" | "REVIEW" | "BLOCK" | "REJECT"
+                ) {
+                    return Err(MacpError::InvalidPayload);
                 }
                 // RFC-MACP-0004 §2.2: confidence must be a normalized value in [0.0, 1.0]
                 if payload.confidence < 0.0 || payload.confidence > 1.0 {
@@ -186,11 +231,9 @@ impl Mode for DecisionMode {
                 }
                 Self::ensure_can_deliberate(&state)?;
                 Self::ensure_known_proposal(&state, &payload.proposal_id)?;
-                // RFC-MACP-0007 §4: all enum-like values MUST be stored in UPPER_CASE
-                let normalized_recommendation = payload.recommendation.to_uppercase();
                 state.evaluations.push(Evaluation {
                     proposal_id: payload.proposal_id,
-                    recommendation: normalized_recommendation,
+                    recommendation,
                     confidence: payload.confidence,
                     reason: payload.reason,
                     sender: env.sender.clone(),
@@ -200,15 +243,12 @@ impl Mode for DecisionMode {
             "Objection" => {
                 let payload = ObjectionPayload::decode(&*env.payload)
                     .map_err(|_| MacpError::InvalidPayload)?;
-                // RFC-MACP-0004 §2.3: severity must be one of {critical, high, medium, low}
-                let severity = if payload.severity.is_empty() {
-                    "medium".into()
-                } else {
-                    match payload.severity.to_lowercase().as_str() {
-                        "critical" | "high" | "medium" | "low" => payload.severity.to_lowercase(),
-                        _ => return Err(MacpError::InvalidPayload),
-                    }
-                };
+                // RFC-MACP-0004 §2.3: one of {critical, high, medium, low},
+                // lowercase, and required.
+                let severity = wire_enum(session, &payload.severity, Case::Lower, Some("medium"))?;
+                if !matches!(severity.as_str(), "critical" | "high" | "medium" | "low") {
+                    return Err(MacpError::InvalidPayload);
+                }
                 Self::ensure_can_deliberate(&state)?;
                 Self::ensure_known_proposal(&state, &payload.proposal_id)?;
                 state.objections.push(Objection {
@@ -222,11 +262,10 @@ impl Mode for DecisionMode {
             "Vote" => {
                 let payload =
                     VotePayload::decode(&*env.payload).map_err(|_| MacpError::InvalidPayload)?;
-                // RFC-MACP-0007: valid vote values (case-insensitive input, stored UPPERCASE)
-                let normalized_vote = payload.vote.to_uppercase();
-                match normalized_vote.as_str() {
-                    "APPROVE" | "REJECT" | "ABSTAIN" => {}
-                    _ => return Err(MacpError::InvalidPayload),
+                // RFC-MACP-0007 §4: UPPER_CASE, exactly.
+                let normalized_vote = wire_enum(session, &payload.vote, Case::Upper, None)?;
+                if !matches!(normalized_vote.as_str(), "APPROVE" | "REJECT" | "ABSTAIN") {
+                    return Err(MacpError::InvalidPayload);
                 }
                 Self::ensure_can_vote(&state)?;
                 Self::ensure_known_proposal(&state, &payload.proposal_id)?;
@@ -485,7 +524,7 @@ mod tests {
         apply(&mut session, resp);
         mode.on_message(
             &session,
-            &env("agent://fraud", "Vote", vote("p1", "abstain")),
+            &env("agent://fraud", "Vote", vote("p1", "ABSTAIN")),
         )
         .unwrap();
     }
@@ -575,21 +614,21 @@ mod tests {
         let resp = mode
             .on_message(
                 &session,
-                &env("agent://fraud", "Vote", vote("p1", "approve")),
+                &env("agent://fraud", "Vote", vote("p1", "APPROVE")),
             )
             .unwrap();
         apply(&mut session, resp);
         let resp = mode
             .on_message(
                 &session,
-                &env("agent://fraud", "Vote", vote("p2", "approve")),
+                &env("agent://fraud", "Vote", vote("p2", "APPROVE")),
             )
             .unwrap();
         apply(&mut session, resp);
         assert_eq!(
             mode.on_message(
                 &session,
-                &env("agent://fraud", "Vote", vote("p1", "reject"))
+                &env("agent://fraud", "Vote", vote("p1", "REJECT"))
             )
             .unwrap_err()
             .to_string(),
@@ -655,7 +694,7 @@ mod tests {
         assert_eq!(
             mode.on_message(
                 &session,
-                &env("agent://fraud", "Vote", vote("p1", "approve"))
+                &env("agent://fraud", "Vote", vote("p1", "APPROVE"))
             )
             .unwrap_err()
             .to_string(),
@@ -684,7 +723,7 @@ mod tests {
         let resp = mode
             .on_message(
                 &session,
-                &env("agent://fraud", "Vote", vote("p1", "approve")),
+                &env("agent://fraud", "Vote", vote("p1", "APPROVE")),
             )
             .unwrap();
         apply(&mut session, resp);
@@ -720,7 +759,7 @@ mod tests {
         let resp = mode
             .on_message(
                 &session,
-                &env("agent://fraud", "Vote", vote("p1", "approve")),
+                &env("agent://fraud", "Vote", vote("p1", "APPROVE")),
             )
             .unwrap();
         apply(&mut session, resp);
@@ -756,7 +795,7 @@ mod tests {
         let resp = mode
             .on_message(
                 &session,
-                &env("agent://fraud", "Vote", vote("p1", "approve")),
+                &env("agent://fraud", "Vote", vote("p1", "APPROVE")),
             )
             .unwrap();
         apply(&mut session, resp);
@@ -880,7 +919,7 @@ mod tests {
         let resp = mode
             .on_message(
                 &session,
-                &env("agent://fraud", "Vote", vote("p1", "approve")),
+                &env("agent://fraud", "Vote", vote("p1", "APPROVE")),
             )
             .unwrap();
         apply(&mut session, resp);
@@ -966,7 +1005,7 @@ mod tests {
         let resp = mode
             .on_message(
                 &session,
-                &env("agent://fraud", "Vote", vote("p1", "reject")),
+                &env("agent://fraud", "Vote", vote("p1", "REJECT")),
             )
             .unwrap();
         apply(&mut session, resp);
@@ -1027,14 +1066,14 @@ mod tests {
         let resp = mode
             .on_message(
                 &session,
-                &env("agent://fraud", "Vote", vote("p1", "reject")),
+                &env("agent://fraud", "Vote", vote("p1", "REJECT")),
             )
             .unwrap();
         apply(&mut session, resp);
         let resp = mode
             .on_message(
                 &session,
-                &env("agent://growth", "Vote", vote("p1", "reject")),
+                &env("agent://growth", "Vote", vote("p1", "REJECT")),
             )
             .unwrap();
         apply(&mut session, resp);
@@ -1121,7 +1160,7 @@ mod tests {
         let resp = mode
             .on_message(
                 &session,
-                &env("agent://fraud", "Vote", vote("p1", "approve")),
+                &env("agent://fraud", "Vote", vote("p1", "APPROVE")),
             )
             .unwrap();
         apply(&mut session, resp);
@@ -1383,10 +1422,109 @@ mod tests {
         }
     }
 
-    #[test]
-    fn objection_severity_case_normalized() {
+    /// A session with proposal `p1` open, at `semantics_rev`.
+    fn deliberating_at(semantics_rev: u32) -> (DecisionMode, Session) {
         let mode = DecisionMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
         let mut session = test_session();
+        session.semantics_rev = semantics_rev;
+        let resp = mode
+            .on_session_start(
+                &session,
+                &env("agent://orchestrator", "SessionStart", vec![]),
+            )
+            .unwrap();
+        apply(&mut session, resp);
+        let resp = mode
+            .on_message(
+                &session,
+                &env("agent://orchestrator", "Proposal", proposal("p1")),
+            )
+            .unwrap();
+        apply(&mut session, resp);
+        (mode, session)
+    }
+
+    fn evaluation_with(recommendation: &str) -> Vec<u8> {
+        EvaluationPayload {
+            proposal_id: "p1".into(),
+            recommendation: recommendation.into(),
+            confidence: 0.5,
+            reason: "r".into(),
+        }
+        .encode_to_vec()
+    }
+
+    fn objection_with(severity: &str) -> Vec<u8> {
+        ObjectionPayload {
+            proposal_id: "p1".into(),
+            reason: "r".into(),
+            severity: severity.into(),
+        }
+        .encode_to_vec()
+    }
+
+    #[test]
+    fn s7_wire_enums_are_case_exact_and_severity_is_required() {
+        // macp-runtime#187 / Seam finding S7 (owner decision 2026-10-16:
+        // the spec wins). RFC-MACP-0007 §4 fixes UPPER_CASE for
+        // `recommendation` and `vote` and RFC-MACP-0004 §2.3 lowercase for
+        // `severity`; there is no default severity. Each vector is
+        // INVALID_ENVELOPE (`InvalidPayload`).
+        let (mode, session) = deliberating_at(macp_core::session::CURRENT_SEMANTICS_REV);
+        let vectors: [(&str, Vec<u8>); 4] = [
+            ("Vote", vote("p1", "approve")),
+            ("Evaluation", evaluation_with("Approve")),
+            ("Objection", objection_with("CRITICAL")),
+            ("Objection", objection_with("")),
+        ];
+        for (message_type, payload) in vectors {
+            let err = mode
+                .on_message(&session, &env("agent://fraud", message_type, payload))
+                .unwrap_err();
+            assert_eq!(err.to_string(), "InvalidPayload", "{message_type}");
+            assert_eq!(err.error_code(), "INVALID_ENVELOPE");
+        }
+        // The canonical spellings are accepted.
+        for (message_type, payload) in [
+            ("Evaluation", evaluation_with("APPROVE")),
+            ("Objection", objection_with("critical")),
+        ] {
+            mode.on_message(&session, &env("agent://fraud", message_type, payload))
+                .unwrap_or_else(|e| panic!("{message_type}: {e}"));
+        }
+    }
+
+    #[test]
+    fn s7_strictness_is_gated_so_legacy_histories_replay() {
+        // A session started before revision 4 was accepted under the
+        // case-insensitive rule with the "medium" severity default, and its
+        // persisted history must replay to the same outcome (RFC-MACP-0003
+        // §1), so the legacy normalization is kept for it.
+        let (mode, mut session) = deliberating_at(3);
+        let resp = mode
+            .on_message(
+                &session,
+                &env("agent://fraud", "Objection", objection_with("")),
+            )
+            .unwrap();
+        apply(&mut session, resp);
+        let resp = mode
+            .on_message(
+                &session,
+                &env("agent://growth", "Evaluation", evaluation_with("Approve")),
+            )
+            .unwrap();
+        apply(&mut session, resp);
+        let state = decode(&session);
+        assert_eq!(state.objections[0].severity, "medium");
+        assert_eq!(state.evaluations[0].recommendation, "APPROVE");
+    }
+
+    #[test]
+    fn objection_severity_case_normalized_on_legacy_sessions() {
+        let mode = DecisionMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = test_session();
+        session.semantics_rev = 3;
         let resp = mode
             .on_session_start(
                 &session,

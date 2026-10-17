@@ -709,7 +709,7 @@ async fn rejected_message_does_not_consume_dedup_slot() {
             &shared_mid,
             &sid,
             voter,
-            vote_payload("p1", "approve", "premature"),
+            vote_payload("p1", "APPROVE", "premature"),
         ),
     )
     .await
@@ -743,7 +743,7 @@ async fn rejected_message_does_not_consume_dedup_slot() {
             &shared_mid,
             &sid,
             voter,
-            vote_payload("p1", "approve", "now valid"),
+            vote_payload("p1", "APPROVE", "now valid"),
         ),
     )
     .await

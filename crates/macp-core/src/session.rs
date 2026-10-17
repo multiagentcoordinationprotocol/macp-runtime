@@ -116,7 +116,17 @@ pub const MAX_SUSPENSION_CYCLES: usize = 1024;
 ///   Decision behavior — every existing gate on this field is `>= 2` or
 ///   `<= 1` (never `== 2`), so bumping the shared counter to 3 is additive for
 ///   every other consumer.
-pub const CURRENT_SEMANTICS_REV: u32 = 3;
+/// - 4 — `macp.mode.decision.v1` wire enums become case-exact
+///   (macp-runtime#187, Seam finding S7): `Vote.vote` and
+///   `Evaluation.recommendation` must be UPPER_CASE (RFC-MACP-0007 §4),
+///   `Objection.severity` lowercase (RFC-MACP-0004 §2.3), and an empty
+///   severity is refused instead of defaulting to `"medium"`. Revisions 0-3
+///   keep the case-folding, defaulting decode their histories were accepted
+///   under. The gate is `>= 4` (`decision::STRICT_WIRE_ENUMS_REV`), additive
+///   for every other mode. (Quorum's S4 change in the same release is a
+///   *loosening* -- everything an older revision accepted is still accepted
+///   -- so it needs no gate and applies to every session.)
+pub const CURRENT_SEMANTICS_REV: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SessionState {

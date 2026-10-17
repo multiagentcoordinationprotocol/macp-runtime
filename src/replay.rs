@@ -499,7 +499,7 @@ mod tests {
         .encode_to_vec();
         let vote = VotePayload {
             proposal_id: "p1".into(),
-            vote: "approve".into(),
+            vote: "APPROVE".into(),
             reason: "lgtm".into(),
         }
         .encode_to_vec();
@@ -638,7 +638,7 @@ mod tests {
         let registry = make_registry();
         let vote = VotePayload {
             proposal_id: "p1".into(),
-            vote: "approve".into(),
+            vote: "APPROVE".into(),
             reason: String::new(),
         }
         .encode_to_vec();
@@ -763,7 +763,7 @@ mod tests {
         // A vote after the checkpoint
         let vote = VotePayload {
             proposal_id: "p1".into(),
-            vote: "approve".into(),
+            vote: "APPROVE".into(),
             reason: "lgtm".into(),
         }
         .encode_to_vec();

@@ -113,7 +113,7 @@ async fn file_backend_full_lifecycle() {
 
     let vote = macp_runtime::decision_pb::VotePayload {
         proposal_id: "p1".into(),
-        vote: "approve".into(),
+        vote: "APPROVE".into(),
         reason: "good".into(),
     }
     .encode_to_vec();
