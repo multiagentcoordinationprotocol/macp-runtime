@@ -14,7 +14,10 @@ use base64::Engine;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use macp_integration_tests::server_manager::ServerManager;
 use macp_runtime::pb::macp_runtime_service_client::MacpRuntimeServiceClient;
-use macp_runtime::pb::{Envelope, GetSessionRequest, SendRequest, SessionStartPayload};
+use macp_runtime::pb::{
+    Envelope, GetSessionRequest, SendRequest, SessionStartPayload, SignalPayload,
+    WatchSignalsRequest,
+};
 use prost::Message;
 use serde::Serialize;
 use std::sync::OnceLock;
@@ -182,6 +185,72 @@ async fn valid_jwt_authenticates_and_derives_sender_from_sub() {
     let meta = get.into_inner().metadata.unwrap();
     assert_eq!(meta.initiator, "agent://jwt-alice");
     assert_eq!(meta.session_id, sid);
+}
+
+/// RFC-MACP-0004 §4.1 / RFC-MACP-0006 §3.4: a Signal whose sender was
+/// authenticated (here, by JWT `sub`) reaches `WatchSignals` subscribers with
+/// `sender_authenticated = true`. The dev-mode `false` side is a unit test in
+/// `src/server.rs`.
+#[tokio::test]
+async fn signals_from_a_jwt_sender_are_marked_authenticated() {
+    let mut watcher = client().await;
+    let mut sender = client().await;
+    let token = |sub| {
+        sign(&Claims {
+            sub,
+            iss: ISSUER,
+            aud: AUDIENCE,
+            exp: now_plus(300),
+            macp_scopes: None,
+        })
+    };
+    let mut stream = watcher
+        .watch_signals(with_bearer(
+            &token("agent://jwt-watcher"),
+            WatchSignalsRequest {},
+        ))
+        .await
+        .expect("watch_signals")
+        .into_inner();
+
+    let message_id = new_message_id();
+    let signal = Envelope {
+        macp_version: "1.0".into(),
+        mode: String::new(),
+        message_type: "Signal".into(),
+        message_id: message_id.clone(),
+        session_id: String::new(),
+        sender: String::new(),
+        timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+        payload: SignalPayload {
+            signal_type: "progress".into(),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+    };
+    let ack = sender
+        .send(with_bearer(
+            &token("agent://jwt-alice"),
+            SendRequest {
+                envelope: Some(signal),
+            },
+        ))
+        .await
+        .expect("send")
+        .into_inner()
+        .ack
+        .unwrap();
+    assert!(ack.ok, "ack error: {:?}", ack.error);
+
+    let delivered = tokio::time::timeout(std::time::Duration::from_secs(5), stream.message())
+        .await
+        .expect("signal delivered in time")
+        .expect("stream ok")
+        .expect("one response");
+    let envelope = delivered.envelope.expect("envelope");
+    assert_eq!(envelope.message_id, message_id);
+    assert_eq!(envelope.sender, "agent://jwt-alice");
+    assert!(delivered.sender_authenticated);
 }
 
 #[tokio::test]

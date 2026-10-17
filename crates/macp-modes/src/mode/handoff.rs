@@ -132,6 +132,10 @@ pub struct HandoffState {
     pub contexts: BTreeMap<String, Vec<HandoffContextRecord>>,
 }
 
+/// First `semantics_rev` at which RFC-MACP-0010 §5 rule 3a bars a new offer to
+/// a target that declined earlier in the Session (Seam finding S5, #185).
+pub const DECLINED_TARGET_BAR_REV: u32 = 4;
+
 pub struct HandoffMode {
     evaluator: std::sync::Arc<dyn macp_core::policy::PolicyEvaluator>,
 }
@@ -498,6 +502,19 @@ impl HandoffMode {
                         .offers
                         .values()
                         .any(|o| o.disposition == HandoffDisposition::Accepted)
+                {
+                    return Err(MacpError::InvalidPayload);
+                }
+                // RFC-MACP-0010 §5 rule 3a: the new target must not have
+                // declined an offer earlier in the Session. Derived from the
+                // offers already in state -- a decline is never erased -- so
+                // no extra record is kept. An offer still `Offered` (expired
+                // unanswered, no implicit-accept policy) bars nobody.
+                if session.semantics_rev >= DECLINED_TARGET_BAR_REV
+                    && state.offers.values().any(|o| {
+                        o.disposition == HandoffDisposition::Declined
+                            && o.target_participant == payload.target_participant
+                    })
                 {
                     return Err(MacpError::InvalidPayload);
                 }
@@ -1435,6 +1452,67 @@ mod tests {
         mode.on_message(
             &session,
             &env("owner", "HandoffOffer", make_offer("h2", "other")),
+        )
+        .unwrap();
+    }
+
+    /// owner offers h1 to `target`, who declines, at `semantics_rev`.
+    fn declined_at(rev: u32) -> (HandoffMode, Session) {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = base_session();
+        session.semantics_rev = rev;
+        session.participants = vec!["owner".into(), "target".into(), "other".into()];
+        let result = mode
+            .on_session_start(&session, &env("owner", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+        let result = mode
+            .on_message(
+                &session,
+                &env("owner", "HandoffOffer", make_offer("h1", "target")),
+            )
+            .unwrap();
+        apply(&mut session, result);
+        let result = mode
+            .on_message(
+                &session,
+                &env("target", "HandoffDecline", make_decline("h1", "target")),
+            )
+            .unwrap();
+        apply(&mut session, result);
+        (mode, session)
+    }
+
+    #[test]
+    fn s5_a_target_that_declined_cannot_be_offered_again() {
+        // RFC-MACP-0010 §5 rule 3a (Seam finding S5, #185): a new offer must
+        // name a target that has not declined earlier in the Session, else
+        // INVALID_ENVELOPE -- an owner cannot re-offer until the target gives in.
+        let (mode, session) = declined_at(macp_core::session::CURRENT_SEMANTICS_REV);
+        let err = mode
+            .on_message(
+                &session,
+                &env("owner", "HandoffOffer", make_offer("h2", "target")),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), "InvalidPayload");
+        assert_eq!(err.error_code(), "INVALID_ENVELOPE");
+        // A target that has not declined is still offerable.
+        mode.on_message(
+            &session,
+            &env("owner", "HandoffOffer", make_offer("h2", "other")),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn s5_legacy_sessions_may_still_re_offer_to_a_decliner() {
+        // Rev <= 3 histories may contain such a re-offer, accepted under the
+        // old wording; they must replay to the same outcome.
+        let (mode, session) = declined_at(3);
+        mode.on_message(
+            &session,
+            &env("owner", "HandoffOffer", make_offer("h2", "target")),
         )
         .unwrap();
     }
@@ -2475,7 +2553,7 @@ mod tests {
         );
         e.message_id = reserved_id("h1");
         assert!(matches!(
-            crate::step::validate_message(&session, &e, &mode).unwrap_err(),
+            crate::step::validate_message(&session, &e, &mode, 0).unwrap_err(),
             MacpError::Forbidden
         ));
 
@@ -2483,7 +2561,7 @@ mod tests {
         let mut authorized = e.clone();
         authorized.sender = "target".into();
         assert!(matches!(
-            crate::step::validate_message(&session, &authorized, &mode).unwrap_err(),
+            crate::step::validate_message(&session, &authorized, &mode, 0).unwrap_err(),
             MacpError::InvalidEnvelope
         ));
     }

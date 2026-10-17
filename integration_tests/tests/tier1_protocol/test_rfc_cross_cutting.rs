@@ -709,7 +709,7 @@ async fn rejected_message_does_not_consume_dedup_slot() {
             &shared_mid,
             &sid,
             voter,
-            vote_payload("p1", "approve", "premature"),
+            vote_payload("p1", "APPROVE", "premature"),
         ),
     )
     .await
@@ -743,7 +743,7 @@ async fn rejected_message_does_not_consume_dedup_slot() {
             &shared_mid,
             &sid,
             voter,
-            vote_payload("p1", "approve", "now valid"),
+            vote_payload("p1", "APPROVE", "now valid"),
         ),
     )
     .await
@@ -894,8 +894,12 @@ async fn initialize_rejects_unsupported_protocol_version() {
     let status = result.unwrap_err();
     assert_eq!(
         status.code(),
-        tonic::Code::FailedPrecondition,
-        "Expected FAILED_PRECONDITION for version mismatch"
+        tonic::Code::InvalidArgument,
+        "Expected INVALID_ARGUMENT for version mismatch (registry, S13)"
+    );
+    assert_eq!(
+        status.metadata().get("macp-error-code").unwrap(),
+        "UNSUPPORTED_PROTOCOL_VERSION"
     );
 }
 
@@ -954,4 +958,53 @@ async fn watch_signals_requires_authentication() {
         .await
         .expect_err("unauthenticated WatchSignals must be rejected");
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn control_plane_statuses_name_their_registry_code() {
+    // 0.9.0: bare control-plane statuses gained `macp-error-code` metadata;
+    // the gRPC status each returns is unchanged.
+    let mut client = common::grpc_client().await;
+    let code = |s: &tonic::Status| {
+        s.metadata()
+            .get("macp-error-code")
+            .map(|v| v.to_str().unwrap().to_owned())
+    };
+
+    let s = client
+        .get_session(with_sender(
+            "agent://probe",
+            macp_runtime::pb::GetSessionRequest {
+                session_id: new_session_id(),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(s.code(), tonic::Code::NotFound);
+    assert_eq!(code(&s).as_deref(), Some("SESSION_NOT_FOUND"));
+
+    let s = client
+        .list_sessions(with_sender(
+            "agent://probe",
+            macp_runtime::pb::ListSessionsRequest {
+                page_size: -1,
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(s.code(), tonic::Code::InvalidArgument);
+    assert_eq!(code(&s).as_deref(), Some("INVALID_REQUEST"));
+
+    let s = client
+        .get_manifest(with_sender(
+            "agent://probe",
+            GetManifestRequest {
+                agent_id: "agent://not-hosted-here".into(),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(s.code(), tonic::Code::NotFound);
+    assert_eq!(code(&s).as_deref(), Some("AGENT_NOT_FOUND"));
 }

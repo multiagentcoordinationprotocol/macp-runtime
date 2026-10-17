@@ -1,0 +1,68 @@
+{
+  "_comment": "Pins RFC-MACP-0011 Section 5 rule 6 as written (seam-embedder-findings proposal S4, owner decision 2026-10-16). An n_of_m override greater than the declared participant count is admitted, because the rule schema cannot see participant counts. It is evaluated as given, and it replaces required_approvals. Five approvals can never come from three participants, so rule 4's second clause makes the Session eligible for a negative Commitment at once, with no ballot cast. A runtime that rejects the ApprovalRequest, or that requires at least one counted ballot before a negative Commitment, diverges from rule 6.",
+  "description": "Quorum Mode: an n_of_m 5 override over 3 participants is unreachable from the start, so a negative Commitment is accepted before any ballot.",
+  "mode": "macp.mode.quorum.v1",
+  "initiator": "agent://coordinator",
+  "participants": [
+    "agent://alice",
+    "agent://bob",
+    "agent://carol"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.quorum.n-of-m-5-unreachable",
+    "mode": "macp.mode.quorum.v1",
+    "schema_version": 3,
+    "description": "n_of_m threshold of 5 over a 3-participant session; deliberately unreachable.",
+    "rules": {
+      "threshold": {
+        "type": "n_of_m",
+        "value": 5
+      }
+    }
+  },
+  "policy_version": "policy.quorum.n-of-m-5-unreachable",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "_comment": "Rule 2 bounds only this payload (required_approvals 2 <= 3 participants). The policy override is not subject to rule 2, so the request MUST be accepted.",
+      "sender": "agent://coordinator",
+      "message_type": "ApprovalRequest",
+      "payload_type": "macp.modes.quorum.v1.ApprovalRequestPayload",
+      "payload": {
+        "request_id": "r1",
+        "action": "deploy",
+        "summary": "Deploy v2",
+        "details": [],
+        "required_approvals": 2
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Rule 4's second clause: the remaining possible approvals (3) cannot reach the effective threshold (5), so a negative Commitment is accepted with zero ballots. Rule 4b supplies the outcome shape.",
+      "sender": "agent://coordinator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "quorum.rejected",
+        "authority_scope": "test",
+        "reason": "threshold unreachable",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.quorum.n-of-m-5-unreachable",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "quorum.rejected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": false
+  }
+}

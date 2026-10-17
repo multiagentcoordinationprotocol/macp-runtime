@@ -88,7 +88,7 @@ and the individual mode RFCs.
 
 - `StreamSession` binds one gRPC stream to one session and emits accepted envelopes in order
   - Passive subscribe (RFC-MACP-0006-A1): a `subscribe_session_id` + `after_sequence` frame replays accepted history and then delivers live envelopes; allowed for declared participants, the initiator, or observer identities
-- `WatchSignals` broadcasts ambient Signal envelopes to all subscribers in real time; Signals never enter session history
+- `WatchSignals` broadcasts ambient Signal envelopes to all subscribers in real time; Signals never enter session history. Each response's `sender_authenticated` is `true` only under configured auth (JWT/static bearer) -- dev-mode Signals are marked `false`
 
 ### Session lifecycle observability
 
@@ -350,7 +350,7 @@ runtime/
 Set `MACP_ALLOW_INSECURE=1` for local development, or provide `MACP_TLS_CERT_PATH` and `MACP_TLS_KEY_PATH` for production.
 
 **`InvalidSessionId` error**
-Session IDs must be UUID v4/v7 in hyphenated lowercase form (36 chars) or base64url tokens (22+ chars). Short or human-readable IDs like `"s1"` or `"my-session"` are rejected.
+Session IDs must be UUID v4/v7 in hyphenated lowercase form (36 chars) or base64url tokens (22–128 chars; 128 bytes is the RFC-MACP-0004 §11.2 portability floor and this runtime's cap). Short or human-readable IDs like `"s1"` or `"my-session"` are rejected.
 
 **`InvalidPayload` on `SessionStart`**
 For standards-track modes and built-in extensions (including `ext.multi_round.v1`), `SessionStartPayload` must include non-empty `participants`, `mode_version`, `configuration_version`, and a positive `ttl_ms`. Empty payloads are rejected.

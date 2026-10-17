@@ -1,0 +1,99 @@
+{
+  "_comment": "Pins RFC-MACP-0001 Section 7.6 items 1, 2 and 3. The fixture's own Decision session is opened implicitly by the harness, as in every fixture, and stays Open. Each message is a SessionStart for a DIFFERENT session (envelope.session_id), and each is otherwise valid so it fails on exactly one obligation. There is deliberately no uppercase-UUID case: item 2's UUID and base64url forms are non-exhaustive examples of formats that meet RFC-MACP-0004 Section 11.2, not a normative format list, so no specific well-formed format is required to be rejected.",
+  "description": "SessionStart acceptance obligations: short session_id, unsupported macp_version, policy bound to another mode.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://lead",
+  "participants": [
+    "agent://lead",
+    "agent://peer"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.session-start-reject",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Decision-mode policy that case (c) binds to a Task-mode SessionStart.",
+    "rules": {
+      "voting": {
+        "algorithm": "none"
+      },
+      "commitment": {
+        "authority": "initiator_only"
+      }
+    }
+  },
+  "policy_version": "policy.decision.session-start-reject",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "_comment": "(a) RFC-MACP-0001 Section 7.6 item 2: 's1' is two characters, and no format could carry the entropy RFC-MACP-0004 Section 11.2 requires in that length.",
+      "sender": "agent://lead",
+      "message_type": "SessionStart",
+      "payload_type": "macp.v1.SessionStartPayload",
+      "payload": {
+        "intent": "short id",
+        "participants": [
+          "agent://lead",
+          "agent://peer"
+        ],
+        "mode_version": "1.0.0",
+        "configuration_version": "cfg-1",
+        "policy_version": "",
+        "ttl_ms": 60000
+      },
+      "envelope": {
+        "session_id": "s1"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_SESSION_ID"
+    },
+    {
+      "_comment": "(b) RFC-MACP-0001 Section 7.6 item 1: macp_version '2.0' is not a supported version. The session_id is a lowercase UUID v4.",
+      "sender": "agent://lead",
+      "message_type": "SessionStart",
+      "payload_type": "macp.v1.SessionStartPayload",
+      "payload": {
+        "intent": "future version",
+        "participants": [
+          "agent://lead",
+          "agent://peer"
+        ],
+        "mode_version": "1.0.0",
+        "configuration_version": "cfg-1",
+        "policy_version": "",
+        "ttl_ms": 60000
+      },
+      "envelope": {
+        "session_id": "6f1c2a4e-8b3d-4c5e-9a7f-1b2c3d4e5f60",
+        "macp_version": "2.0"
+      },
+      "expect": "reject",
+      "expected_error_code": "UNSUPPORTED_PROTOCOL_VERSION"
+    },
+    {
+      "_comment": "(c) RFC-MACP-0001 Section 7.6 item 3 and RFC-MACP-0012 Section 6.1 step 5: a Task-mode SessionStart binds the registered Decision-mode policy. The session_id is a lowercase UUID v4.",
+      "sender": "agent://lead",
+      "message_type": "SessionStart",
+      "payload_type": "macp.v1.SessionStartPayload",
+      "payload": {
+        "intent": "policy bound to another mode",
+        "participants": [
+          "agent://lead",
+          "agent://peer"
+        ],
+        "mode_version": "1.0.0",
+        "configuration_version": "cfg-1",
+        "policy_version": "policy.decision.session-start-reject",
+        "ttl_ms": 60000
+      },
+      "envelope": {
+        "session_id": "0b7e9d3c-2f4a-4b6e-8c1d-5a9f7e3b2c10",
+        "mode": "macp.mode.task.v1"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_POLICY_DEFINITION"
+    }
+  ],
+  "expected_final_state": "Open"
+}

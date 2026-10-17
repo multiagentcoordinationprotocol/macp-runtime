@@ -399,7 +399,7 @@ async fn policy_enforcement_blocks_commitment_in_decision_mode() {
             &new_message_id(),
             &session_id,
             participant,
-            vote_payload("p1", "reject", "not ready"),
+            vote_payload("p1", "REJECT", "not ready"),
         ),
     )
     .await
@@ -439,6 +439,20 @@ async fn policy_enforcement_blocks_commitment_in_decision_mode() {
         ack.error.as_ref().map(|e| e.code.as_str()) == Some("POLICY_DENIED"),
         "error code should be POLICY_DENIED, got: {:?}",
         ack.error
+    );
+    // RFC-MACP-0012 §6.2 through the real boundary: structured denials with a
+    // stable code beside the legacy `reasons` strings.
+    let details: serde_json::Value =
+        serde_json::from_slice(&ack.error.as_ref().unwrap().details).expect("details are JSON");
+    let denials = details["denials"].as_array().expect("structured denials");
+    assert!(
+        denials.iter().any(|d| d["code"] == "threshold_not_met"),
+        "a unanimous shortfall is `threshold_not_met`: {details}"
+    );
+    assert_eq!(
+        details["reasons"].as_array().map(Vec::len),
+        Some(denials.len()),
+        "legacy `reasons` mirrors `denials`: {details}"
     );
 }
 
@@ -494,7 +508,7 @@ async fn default_policy_allows_commitment() {
             &new_message_id(),
             &session_id,
             participant,
-            vote_payload("p1", "approve", "ok"),
+            vote_payload("p1", "APPROVE", "ok"),
         ),
     )
     .await
@@ -879,8 +893,8 @@ async fn commit_under_std_policy(
     let session_id = new_session_id();
 
     let voters: Vec<(String, &str)> = (0..approve)
-        .map(|i| (format!("agent://std-a{i}-{run}"), "approve"))
-        .chain((0..reject).map(|i| (format!("agent://std-r{i}-{run}"), "reject")))
+        .map(|i| (format!("agent://std-a{i}-{run}"), "APPROVE"))
+        .chain((0..reject).map(|i| (format!("agent://std-r{i}-{run}"), "REJECT")))
         .collect();
     let silent_agents: Vec<String> = (0..silent)
         .map(|i| format!("agent://std-s{i}-{run}"))
@@ -938,7 +952,7 @@ async fn commit_under_std_policy(
 
     let mut voters = voters;
     if initiator_approves {
-        voters.push((orchestrator.clone(), "approve"));
+        voters.push((orchestrator.clone(), "APPROVE"));
     }
 
     for (voter, vote) in &voters {
@@ -1016,7 +1030,8 @@ async fn std_supermajority_matches_the_rfc_outcome_table() {
     // §5.2 determinism note: 2/3, 4/6, 20/30 and 67/100 clear the binary64
     // two-thirds bar; 66/100 does not.
     for (approve, total) in [(2usize, 3usize), (4, 6), (20, 30), (67, 100)] {
-        let ack = commit_under_std_policy(STD_SUPERMAJORITY, approve, total - approve, 0, false).await;
+        let ack =
+            commit_under_std_policy(STD_SUPERMAJORITY, approve, total - approve, 0, false).await;
         assert!(
             ack.ok,
             "{approve} of {total} should approve: {:?}",

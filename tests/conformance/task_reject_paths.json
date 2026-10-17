@@ -1,9 +1,11 @@
 {
+  "_comment": "Broadcast task (requested_assignee empty) so RFC-MACP-0009 Section 5 rule 2a is reachable: w1 declines before anyone is assigned, which MUST NOT bar w2 from accepting (no policy is bound, so allow_reassignment_on_reject is not in play and MUST NOT be what decides it), and w1 can never accept afterwards.",
   "mode": "macp.mode.task.v1",
   "initiator": "agent://planner",
   "participants": [
     "agent://planner",
-    "agent://worker"
+    "agent://w1",
+    "agent://w2"
   ],
   "mode_version": "1.0.0",
   "configuration_version": "cfg-1",
@@ -11,14 +13,14 @@
   "ttl_ms": 60000,
   "messages": [
     {
-      "sender": "agent://worker",
+      "sender": "agent://w1",
       "message_type": "TaskRequest",
       "payload_type": "macp.modes.task.v1.TaskRequestPayload",
       "payload": {
         "task_id": "t1",
         "title": "Build",
         "instructions": "Do it",
-        "requested_assignee": "agent://worker",
+        "requested_assignee": "",
         "deadline_unix_ms": 0
       },
       "expect": "reject",
@@ -32,7 +34,7 @@
         "task_id": "t1",
         "title": "Build",
         "instructions": "Do it",
-        "requested_assignee": "agent://worker",
+        "requested_assignee": "",
         "deadline_unix_ms": 0
       },
       "expect": "accept"
@@ -45,22 +47,61 @@
         "task_id": "t2",
         "title": "Another",
         "instructions": "Do more",
-        "requested_assignee": "agent://worker",
+        "requested_assignee": "",
         "deadline_unix_ms": 0
       },
       "expect": "reject",
       "expected_error_code": "INVALID_ENVELOPE"
     },
     {
-      "sender": "agent://worker",
+      "_comment": "RFC-MACP-0009 Section 5 rules 2 and 2a: an eligible participant MAY decline a broadcast task while no assignee is active; it records w1's decline only.",
+      "sender": "agent://w1",
+      "message_type": "TaskReject",
+      "payload_type": "macp.modes.task.v1.TaskRejectPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://w1",
+        "reason": "busy"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 5 rule 2a: a participant that has declined MUST NOT later send TaskAccept. No assignee is active yet, so rule 3a does not apply and this rejection isolates rule 2a.",
+      "sender": "agent://w1",
       "message_type": "TaskAccept",
       "payload_type": "macp.modes.task.v1.TaskAcceptPayload",
       "payload": {
         "task_id": "t1",
-        "assignee": "agent://worker",
+        "assignee": "agent://w1",
+        "reason": "changed my mind"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 5 rules 2a and 3a: w1's decline does not change w2's eligibility, so w2's first TaskAccept designates it the active assignee.",
+      "sender": "agent://w2",
+      "message_type": "TaskAccept",
+      "payload_type": "macp.modes.task.v1.TaskAcceptPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://w2",
         "reason": "ready"
       },
       "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 5 rules 2a and 3a: w1 declined, and an assignee is now active.",
+      "sender": "agent://w1",
+      "message_type": "TaskAccept",
+      "payload_type": "macp.modes.task.v1.TaskAcceptPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://w1",
+        "reason": "ready now"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
     },
     {
       "_comment": "RFC-MACP-0009 Section 4 and Section 5 rule 4: TaskUpdate does not carry an explicit assignee field -- authorship is validated via the Envelope sender, which MUST match the active assignee. A non-assignee sender (here, the requester) MUST be rejected.",
@@ -77,7 +118,7 @@
       "expected_error_code": "FORBIDDEN"
     },
     {
-      "sender": "agent://worker",
+      "sender": "agent://w2",
       "message_type": "TaskUpdate",
       "payload_type": "macp.modes.task.v1.TaskUpdatePayload",
       "payload": {

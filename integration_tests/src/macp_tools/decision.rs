@@ -108,7 +108,7 @@ impl Tool for EvaluateTool {
                 "properties": {
                     "session_id": { "type": "string" },
                     "proposal_id": { "type": "string" },
-                    "recommendation": { "type": "string" },
+                    "recommendation": { "type": "string", "enum": ["APPROVE", "REVIEW", "BLOCK", "REJECT"], "description": "UPPER_CASE, exactly (RFC-MACP-0007 §4)" },
                     "confidence": { "type": "number" },
                     "reason": { "type": "string" }
                 },
@@ -175,7 +175,7 @@ impl Tool for VoteTool {
                 "properties": {
                     "session_id": { "type": "string" },
                     "proposal_id": { "type": "string" },
-                    "vote": { "type": "string", "description": "approve or reject" },
+                    "vote": { "type": "string", "enum": ["APPROVE", "REJECT", "ABSTAIN"], "description": "UPPER_CASE, exactly (RFC-MACP-0007 §4)" },
                     "reason": { "type": "string" }
                 },
                 "required": ["session_id", "proposal_id", "vote", "reason"]

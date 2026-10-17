@@ -3,7 +3,7 @@ use macp_core::policy::rules::{
     CriticalObjectionAction, DecisionPolicyRules, EffectiveThreshold, HandoffPolicyRules,
     ProposalPolicyRules, QuorumPolicyRules, TaskPolicyRules,
 };
-use macp_core::policy::{PolicyDecision, PolicyDefinition};
+use macp_core::policy::{DenyCode, DenyReason, PolicyDecision, PolicyDefinition};
 use std::collections::BTreeMap;
 
 // RFC-MACP-0012 §3: "A runtime MUST accept every schema version it supports
@@ -26,9 +26,12 @@ pub use crate::SUPPORTED_SCHEMA_VERSIONS;
 fn check_schema_version(policy: &PolicyDefinition) -> Option<PolicyDecision> {
     if !SUPPORTED_SCHEMA_VERSIONS.contains(&policy.schema_version) {
         Some(PolicyDecision::Deny {
-            reasons: vec![format!(
-                "unsupported policy schema version: {} (supported: {:?})",
-                policy.schema_version, SUPPORTED_SCHEMA_VERSIONS
+            reasons: vec![DenyReason::new(
+                DenyCode::UNSUPPORTED_SCHEMA_VERSION,
+                format!(
+                    "unsupported policy schema version: {} (supported: {:?})",
+                    policy.schema_version, SUPPORTED_SCHEMA_VERSIONS
+                ),
             )],
         })
     } else {
@@ -44,9 +47,12 @@ fn parse_rules<T: serde::de::DeserializeOwned>(
     policy: &PolicyDefinition,
 ) -> Result<T, PolicyDecision> {
     serde_json::from_value(policy.rules.clone()).map_err(|e| PolicyDecision::Deny {
-        reasons: vec![format!(
-            "policy '{}' rules failed to parse at evaluation time: {e}",
-            policy.policy_id
+        reasons: vec![DenyReason::new(
+            DenyCode::INVALID_RULES,
+            format!(
+                "policy '{}' rules failed to parse at evaluation time: {e}",
+                policy.policy_id
+            ),
         )],
     })
 }
@@ -212,14 +218,17 @@ pub fn evaluate_decision_commitment_outcome(
     // "objection-authorize" a decline with no objection on record.
     if let Some(reason) = crate::registry::decision_value_domain_error(&rules) {
         return PolicyDecision::Deny {
-            reasons: vec![format!(
-                "policy '{}' rules are out of domain at evaluation time: {reason}",
-                policy.policy_id
+            reasons: vec![DenyReason::new(
+                DenyCode::INVALID_RULES,
+                format!(
+                    "policy '{}' rules are out of domain at evaluation time: {reason}",
+                    policy.policy_id
+                ),
             )],
         };
     }
 
-    let mut deny_reasons: Vec<String> = Vec::new();
+    let mut deny_reasons: Vec<DenyReason> = Vec::new();
     let mut allow_reasons: Vec<String> = Vec::new();
 
     // 0. Scan for a standing critical-objection veto, once.
@@ -233,26 +242,33 @@ pub fn evaluate_decision_commitment_outcome(
     // still pushed from the numbered check that owns it, in the original
     // order, so nothing observable changes for a commitment the waiver does
     // not cover.
-    let critical_veto: Option<String> = if rules.objection_handling.critical_severity_vetoes {
-        let blocking: Vec<&str> = state
-            .objections
-            .iter()
-            .filter(|o| o.severity == "critical")
-            .map(|o| o.sender.as_str())
-            .collect();
-        if blocking.len() >= rules.objection_handling.veto_threshold as usize {
-            Some(format!(
-                "{} blocking objection(s) (veto threshold: {}), from: {}",
-                blocking.len(),
-                rules.objection_handling.veto_threshold,
-                blocking.join(", ")
-            ))
+    //
+    // The objectors are carried beside the text, never inside it (RFC-MACP-0012
+    // §6.2): a deployment that must not tell the submitter who objected drops
+    // `DenyReason::participants` instead of parsing prose.
+    let critical_veto: Option<(String, Vec<String>)> =
+        if rules.objection_handling.critical_severity_vetoes {
+            let blocking: Vec<&str> = state
+                .objections
+                .iter()
+                .filter(|o| o.severity == "critical")
+                .map(|o| o.sender.as_str())
+                .collect();
+            if blocking.len() >= rules.objection_handling.veto_threshold as usize {
+                Some((
+                    format!(
+                        "{} blocking objection(s) (veto threshold: {})",
+                        blocking.len(),
+                        rules.objection_handling.veto_threshold,
+                    ),
+                    blocking.iter().map(|s| s.to_string()).collect(),
+                ))
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
     // RFC-MACP-0007 §6.2 "Objection-authorized decline": when a standing
     // critical objection blocks the positive direction under
@@ -297,36 +313,55 @@ pub fn evaluate_decision_commitment_outcome(
                 .iter()
                 .any(|e| e.confidence >= rules.evaluation.minimum_confidence);
             if qualifying_evaluations.is_empty() || !meets_confidence {
-                deny_reasons.push(format!(
-                    "no qualifying evaluation meets minimum confidence threshold: {:.2}",
-                    rules.evaluation.minimum_confidence
+                deny_reasons.push(DenyReason::new(
+                    DenyCode::CONFIDENCE_BELOW_MINIMUM,
+                    format!(
+                        "no qualifying evaluation meets minimum confidence threshold: {:.2}",
+                        rules.evaluation.minimum_confidence
+                    ),
                 ));
             }
         } else if rules.evaluation.required_before_voting && qualifying_evaluations.is_empty() {
-            deny_reasons.push("evaluations required before voting but none provided (REVIEW evaluations are informational only)".into());
+            deny_reasons.push(DenyReason::new(
+                DenyCode::EVALUATION_REQUIRED,
+                "evaluations required before voting but none provided (REVIEW evaluations are informational only)",
+            ));
         }
     }
 
     // 2. Resolve a standing critical-objection veto per `critical_objection_action`
     //    (default `deny` = historical hard-stop).
-    if let Some(detail) = critical_veto {
+    if let Some((detail, objectors)) = critical_veto {
         match rules.objection_handling.critical_objection_action {
             CriticalObjectionAction::Deny => {
-                deny_reasons.push(format!("blocked by {detail}"));
+                deny_reasons.push(
+                    DenyReason::new(DenyCode::VETO, format!("blocked by {detail}"))
+                        .with_participants(objectors),
+                );
             }
             CriticalObjectionAction::Hold => {
                 // Deny at the evaluator layer (which leaves the session
                 // open); the reason marks it as an escalation hold rather
                 // than a permanent denial.
-                deny_reasons.push(format!(
-                    "held for escalation by {detail} (critical_objection_action=hold)"
-                ));
+                deny_reasons.push(
+                    DenyReason::new(
+                        DenyCode::VETO_HOLD,
+                        format!("held for escalation by {detail} (critical_objection_action=hold)"),
+                    )
+                    .with_participants(objectors),
+                );
             }
             CriticalObjectionAction::FinalizeDecline => {
                 if outcome_positive {
-                    deny_reasons.push(format!(
-                        "veto blocks a positive commitment: {detail} (critical_objection_action=finalize_decline)"
-                    ));
+                    deny_reasons.push(
+                        DenyReason::new(
+                            DenyCode::VETO,
+                            format!(
+                                "veto blocks a positive commitment: {detail} (critical_objection_action=finalize_decline)"
+                            ),
+                        )
+                        .with_participants(objectors),
+                    );
                 } else {
                     allow_reasons.push(format!(
                         "critical-objection veto finalized as a decline: {detail}"
@@ -364,12 +399,15 @@ pub fn evaluate_decision_commitment_outcome(
         participant_count,
     );
     if rules.commitment.require_vote_quorum && !quorum_met && !objection_authorized_decline {
-        deny_reasons.push(format!(
-            "vote quorum not met: {} voters of {} participants (quorum: {} {})",
-            total_voters,
-            participant_count,
-            rules.voting.quorum.value,
-            rules.voting.quorum.quorum_type
+        deny_reasons.push(DenyReason::new(
+            DenyCode::QUORUM_NOT_MET,
+            format!(
+                "vote quorum not met: {} voters of {} participants (quorum: {} {})",
+                total_voters,
+                participant_count,
+                rules.voting.quorum.value,
+                rules.voting.quorum.quorum_type
+            ),
         ));
     }
 
@@ -397,8 +435,11 @@ pub fn evaluate_decision_commitment_outcome(
                 if outcome_positive {
                     allow_reasons.push(reason);
                 } else if !rules.commitment.allow_decline_over_approval {
-                    deny_reasons.push(format!(
-                        "vote passed the approval threshold but a decline was requested; set commitment.allow_decline_over_approval to permit an executive override ({reason})"
+                    deny_reasons.push(DenyReason::new(
+                        DenyCode::DECLINE_OVER_APPROVAL,
+                        format!(
+                            "vote passed the approval threshold but a decline was requested; set commitment.allow_decline_over_approval to permit an executive override ({reason})"
+                        ),
                     ));
                 } else if decisive_reject_count > 0 {
                     allow_reasons.push(format!(
@@ -428,14 +469,17 @@ pub fn evaluate_decision_commitment_outcome(
                         "no REJECT was cast; neither an abstention nor a missing ballot is a \
                          rejection"
                     };
-                    deny_reasons.push(format!(
-                        "allow_decline_over_approval permits a decline over a passing vote, but no decisive reject backs it ({detail}): {reason}"
+                    deny_reasons.push(DenyReason::new(
+                        DenyCode::DECLINE_NOT_BACKED,
+                        format!(
+                            "allow_decline_over_approval permits a decline over a passing vote, but no decisive reject backs it ({detail}): {reason}"
+                        ),
                     ));
                 }
             }
             VotingResult::Failed(reason) => {
                 if outcome_positive {
-                    deny_reasons.push(reason);
+                    deny_reasons.push(DenyReason::new(DenyCode::THRESHOLD_NOT_MET, reason));
                 } else if decisive_reject_count > 0 {
                     // Decline guard satisfied: the approval bar was not met and
                     // there is at least one decisive explicit reject backing
@@ -445,8 +489,11 @@ pub fn evaluate_decision_commitment_outcome(
                     // Approval failed only through incomplete participation
                     // (no decisive explicit reject) — must not finalize an
                     // adverse decline.
-                    deny_reasons.push(format!(
-                        "approval threshold not met but no decisive reject to justify a decline (incomplete participation is not a rejection): {reason}"
+                    deny_reasons.push(DenyReason::new(
+                        DenyCode::DECLINE_NOT_BACKED,
+                        format!(
+                            "approval threshold not met but no decisive reject to justify a decline (incomplete participation is not a rejection): {reason}"
+                        ),
                     ));
                 }
             }
@@ -467,14 +514,17 @@ pub fn evaluate_decision_commitment_outcome(
                     // descriptor's* declared version (§8 item 3), not the
                     // runtime's release, so nothing here consults `semantics_rev`.
                     if policy.schema_version >= 3 {
-                        deny_reasons.push(format!(
-                            "no decisive votes cast: under policy schema_version {} the '{}' \
-                             voting algorithm is binding on an empty tally and does not \
-                             authorize a positive commitment (RFC-MACP-0012 §4.1)",
-                            policy.schema_version, rules.voting.algorithm
+                        deny_reasons.push(DenyReason::new(
+                            DenyCode::NO_VOTES,
+                            format!(
+                                "no decisive votes cast: under policy schema_version {} the '{}' \
+                                 voting algorithm is binding on an empty tally and does not \
+                                 authorize a positive commitment (RFC-MACP-0012 §4.1)",
+                                policy.schema_version, rules.voting.algorithm
+                            ),
                         ));
                     } else if rules.commitment.require_vote_quorum {
-                        deny_reasons.push("no votes cast".into());
+                        deny_reasons.push(DenyReason::new(DenyCode::NO_VOTES, "no votes cast"));
                     }
                 } else {
                     // "decisive" rather than merely "explicit", to stay
@@ -483,10 +533,10 @@ pub fn evaluate_decision_commitment_outcome(
                     // `REJECT` from a participant outside `voting.weights` is
                     // not enough, which is exactly how this arm becomes
                     // reachable on a complete ballot set.
-                    deny_reasons.push(
-                        "no votes cast; a decline requires at least one decisive explicit reject vote"
-                            .into(),
-                    );
+                    deny_reasons.push(DenyReason::new(
+                        DenyCode::DECLINE_NOT_BACKED,
+                        "no votes cast; a decline requires at least one decisive explicit reject vote",
+                    ));
                 }
             }
         }
@@ -853,16 +903,19 @@ pub fn evaluate_proposal_commitment_outcome(
         Err(deny) => return deny,
     };
 
-    let mut deny_reasons: Vec<String> = Vec::new();
+    let mut deny_reasons: Vec<DenyReason> = Vec::new();
     let mut allow_reasons: Vec<String> = Vec::new();
 
     if rules.counter_proposal.max_rounds > 0
         && counter_proposal_count > rules.counter_proposal.max_rounds
     {
         if outcome_positive {
-            deny_reasons.push(format!(
-                "counter-proposal limit exceeded: {} of {} allowed",
-                counter_proposal_count, rules.counter_proposal.max_rounds
+            deny_reasons.push(DenyReason::new(
+                DenyCode::CRITERION_NOT_MET,
+                format!(
+                    "counter-proposal limit exceeded: {} of {} allowed",
+                    counter_proposal_count, rules.counter_proposal.max_rounds
+                ),
             ));
         } else {
             allow_reasons
@@ -912,12 +965,15 @@ pub fn evaluate_task_commitment_outcome(
         Err(deny) => return deny,
     };
 
-    let mut deny_reasons: Vec<String> = Vec::new();
+    let mut deny_reasons: Vec<DenyReason> = Vec::new();
     let mut allow_reasons: Vec<String> = Vec::new();
 
     if rules.completion.require_output && !has_output {
         if outcome_positive {
-            deny_reasons.push("policy requires task output before commitment".into());
+            deny_reasons.push(DenyReason::new(
+                DenyCode::OUTPUT_REQUIRED,
+                "policy requires task output before commitment",
+            ));
         } else {
             allow_reasons
                 .push("negative outcome (task failure): output requirement not applicable".into());
@@ -1033,7 +1089,7 @@ pub fn evaluate_quorum_commitment_outcome(
         Err(deny) => return deny,
     };
 
-    let mut deny_reasons: Vec<String> = Vec::new();
+    let mut deny_reasons: Vec<DenyReason> = Vec::new();
     let mut allow_reasons: Vec<String> = Vec::new();
 
     // Approval threshold (RFC-0012 §4.2). Resolved by
@@ -1051,9 +1107,15 @@ pub fn evaluate_quorum_commitment_outcome(
         EffectiveThreshold::Approvals(required) => {
             let required = required as usize;
             if outcome_positive && approve_count < required {
-                deny_reasons.push(format!(
-                    "approval threshold not met: {} of {} required approvals ({} {})",
-                    approve_count, required, rules.threshold.value, rules.threshold.threshold_type
+                deny_reasons.push(DenyReason::new(
+                    DenyCode::THRESHOLD_NOT_MET,
+                    format!(
+                        "approval threshold not met: {} of {} required approvals ({} {})",
+                        approve_count,
+                        required,
+                        rules.threshold.value,
+                        rules.threshold.threshold_type
+                    ),
                 ));
             } else if !outcome_positive {
                 allow_reasons
@@ -1069,10 +1131,13 @@ pub fn evaluate_quorum_commitment_outcome(
             // unreachable threshold the legitimate trigger for a negative
             // commitment.
             if outcome_positive {
-                deny_reasons.push(format!(
-                    "approval threshold '{}' cannot be satisfied by this runtime \
-                     ({} participants): no positive commitment is possible",
-                    rules.threshold.threshold_type, total_participants
+                deny_reasons.push(DenyReason::new(
+                    DenyCode::THRESHOLD_NOT_MET,
+                    format!(
+                        "approval threshold '{}' cannot be satisfied by this runtime \
+                         ({} participants): no positive commitment is possible",
+                        rules.threshold.threshold_type, total_participants
+                    ),
                 ));
             } else {
                 allow_reasons
@@ -1147,7 +1212,7 @@ mod tests {
             );
             match decision {
                 PolicyDecision::Deny { reasons } => assert!(
-                    reasons.iter().any(|r| r.contains("veto_threshold")),
+                    reasons.iter().any(|r| r.message.contains("veto_threshold")),
                     "{reasons:?}"
                 ),
                 other => panic!("veto_threshold 0 must deny, got {other:?}"),
@@ -1773,7 +1838,7 @@ mod tests {
         let PolicyDecision::Deny { reasons } = &decision else {
             panic!("an empty decisive tally must deny a positive commitment at v3: {decision:?}");
         };
-        let joined = reasons.join(" | ");
+        let joined = macp_core::policy::deny::join_messages(reasons, " | ");
         assert!(
             !joined.contains("vote quorum not met"),
             "the participation floor must not narrow with the electorate — two ballots \
@@ -1954,7 +2019,9 @@ mod tests {
             );
         };
         assert!(
-            reasons.iter().any(|r| r.contains("no decisive votes cast")),
+            reasons
+                .iter()
+                .any(|r| r.message.contains("no decisive votes cast")),
             "the denial must come from the empty-tally rule, got: {reasons:?}"
         );
     }
@@ -1989,7 +2056,7 @@ mod tests {
             policy.schema_version = 3;
             match evaluate_decision_commitment(&policy, &empty, &participants()) {
                 PolicyDecision::Deny { reasons } => {
-                    let joined = reasons.join(" | ");
+                    let joined = macp_core::policy::deny::join_messages(&reasons, " | ");
                     assert!(
                         joined.contains("no decisive votes cast")
                             && joined.contains("schema_version 3")
@@ -2040,7 +2107,7 @@ mod tests {
         binding.schema_version = 2;
         match evaluate_decision_commitment(&binding, &empty, &participants()) {
             PolicyDecision::Deny { reasons } => assert!(
-                reasons.iter().any(|r| r == "no votes cast"),
+                reasons.iter().any(|r| r.message == "no votes cast"),
                 "the legacy denial keeps its exact reason string, got: {reasons:?}"
             ),
             other => panic!("expected a deny, got {other:?}"),
@@ -2235,7 +2302,7 @@ mod tests {
         let result = evaluate_decision_commitment(&policy, &state, &participants());
         assert!(matches!(result, PolicyDecision::Deny { .. }));
         if let PolicyDecision::Deny { reasons } = &result {
-            assert!(reasons.iter().any(|r| r.contains("quorum")));
+            assert!(reasons.iter().any(|r| r.message.contains("quorum")));
         }
     }
 
@@ -2434,7 +2501,9 @@ mod tests {
         gated.schema_version = 3;
         match evaluate_decision_commitment_outcome(&gated, &state, &participants(), true) {
             PolicyDecision::Deny { reasons } => assert!(
-                reasons.iter().any(|r| r.contains("vote quorum not met")),
+                reasons
+                    .iter()
+                    .any(|r| r.message.contains("vote quorum not met")),
                 "expected a quorum-not-met denial, got: {reasons:?}"
             ),
             other => panic!("expected Deny, got {other:?}"),
@@ -2477,7 +2546,7 @@ mod tests {
         gated.schema_version = 2;
         match evaluate_decision_commitment(&gated, &empty, &participants()) {
             PolicyDecision::Deny { reasons } => assert!(
-                reasons.iter().any(|r| r == "no votes cast"),
+                reasons.iter().any(|r| r.message == "no votes cast"),
                 "the legacy denial keeps its exact reason string, got: {reasons:?}"
             ),
             other => panic!("expected Deny, got {other:?}"),
@@ -3393,7 +3462,7 @@ mod tests {
         let PolicyDecision::Deny { reasons } = &result else {
             panic!("an all-approve round has no dissent to finalize a decline on, got: {result:?}");
         };
-        let joined = reasons.join(" | ");
+        let joined = macp_core::policy::deny::join_messages(reasons, " | ");
         // Assert the *reason*, not only the variant: the `Deny` alone would
         // also be produced by an implementation that had broken
         // `allow_decline_over_approval` outright.
@@ -3541,7 +3610,7 @@ mod tests {
         assert!(matches!(result, PolicyDecision::Deny { .. }));
         if let PolicyDecision::Deny { reasons } = result {
             assert!(
-                reasons.iter().any(|r| r.contains("escalation")),
+                reasons.iter().any(|r| r.message.contains("escalation")),
                 "hold should surface an escalation reason, got: {reasons:?}"
             );
         }
@@ -3624,7 +3693,7 @@ mod tests {
         let PolicyDecision::Deny { reasons } = &result else {
             panic!("a veto must still block a positive commitment, got: {result:?}");
         };
-        let joined = reasons.join(" | ");
+        let joined = macp_core::policy::deny::join_messages(reasons, " | ");
         assert!(
             joined.contains("veto blocks a positive commitment"),
             "the veto denial must survive (critical_objection_action=finalize_decline), \
@@ -3652,7 +3721,7 @@ mod tests {
             );
         };
         assert!(
-            reasons.iter().any(|r| r
+            reasons.iter().any(|r| r.message
                 == "no votes cast; a decline requires at least one decisive explicit reject vote"),
             "the denial must come from the decline guard, got: {reasons:?}"
         );
@@ -3673,9 +3742,36 @@ mod tests {
             panic!("the default `deny` action must still hard-stop a decline, got: {result:?}");
         };
         assert!(
-            reasons.iter().any(|r| r.contains("blocked by")),
+            reasons.iter().any(|r| r.message.contains("blocked by")),
             "the default action keeps its hard-stop reason, got: {reasons:?}"
         );
+    }
+
+    /// RFC-MACP-0012 §6.2: a veto denial names its objectors in
+    /// `participants`, never only inside the message, and carries the stable
+    /// `veto` code.
+    #[test]
+    fn a_veto_denial_carries_its_objectors_beside_the_message() {
+        let mut policy = make_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "threshold": 0.5 },
+            "objection_handling": { "critical_severity_vetoes": true, "veto_threshold": 1 }
+        }));
+        policy.schema_version = 3;
+        let result = decline(&policy, &objection_only_state(), &participants());
+        let PolicyDecision::Deny { reasons } = &result else {
+            panic!("expected a veto denial, got: {result:?}");
+        };
+        let veto = reasons
+            .iter()
+            .find(|r| r.code == DenyCode::VETO)
+            .expect("a `veto`-coded reason");
+        assert_eq!(veto.participants, vec!["agent://compliance".to_string()]);
+        assert!(
+            !veto.message.contains("agent://compliance"),
+            "participant ids must not be embedded in the message: {}",
+            veto.message
+        );
+        assert!(veto.redacted().participants.is_empty());
     }
 
     #[test]
@@ -3893,7 +3989,9 @@ mod tests {
             );
         };
         assert!(
-            reasons.iter().any(|r| r.contains("vote quorum not met")),
+            reasons
+                .iter()
+                .any(|r| r.message.contains("vote quorum not met")),
             "the denial must come from the quorum gate, got: {reasons:?}"
         );
     }
@@ -3916,7 +4014,7 @@ mod tests {
         let PolicyDecision::Deny { reasons } = &result else {
             panic!("a positive commitment under a standing veto must be denied, got: {result:?}");
         };
-        let joined = reasons.join(" | ");
+        let joined = macp_core::policy::deny::join_messages(reasons, " | ");
         for expected in [
             "veto blocks a positive commitment",
             "vote quorum not met",
@@ -4130,7 +4228,7 @@ mod tests {
                     evaluate_decision_commitment_outcome(&policy, &empty, &participants(), false);
                 match result {
                     PolicyDecision::Deny { reasons } => assert!(
-                        reasons.iter().any(|r| r == EXPECTED),
+                        reasons.iter().any(|r| r.message == EXPECTED),
                         "the decline denial keeps its version-independent reason \
                          (schema_version={schema_version}, require_vote_quorum={require_quorum}), \
                          got: {reasons:?}"

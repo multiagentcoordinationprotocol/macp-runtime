@@ -25,6 +25,7 @@ Internally the runtime is a Cargo workspace with a one-way dependency graph: the
 - [**API Reference**](API.md) -- All 24 gRPC RPCs with request/response fields, authentication, and rate limiting
 - [**Modes**](modes.md) -- Runtime implementation details for each mode's state machine
 - [**Policy**](policy.md) -- Policy registration, JSON rule examples, evaluation internals, and error handling
+- [**Embedding**](embedding.md) -- Driving sessions in-process with `macp-modes` (no server): the RFC-MACP-0001 §7.6 obligations, the step and replay APIs, and the clock rule
 
 ### Operations
 - [**Deployment**](deployment.md) -- Production configuration, storage backends, crash recovery, containers, and monitoring

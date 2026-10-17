@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let evaluation = EvaluationPayload {
         proposal_id: "p1".into(),
-        recommendation: "approve".into(),
+        recommendation: "APPROVE".into(),
         confidence: 0.94,
         reason: "operational risk is low".into(),
     };

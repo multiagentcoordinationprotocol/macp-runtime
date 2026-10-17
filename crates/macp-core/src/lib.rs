@@ -23,6 +23,7 @@
 /// wire-level check, so it is a plain, stable `pub const`.
 pub const MACP_VERSION: &str = "1.0";
 
+pub mod clock;
 pub mod commitment_hash;
 pub mod decision;
 pub mod error;
@@ -31,6 +32,7 @@ pub mod policy;
 pub mod session;
 
 // Flat re-exports for the most commonly used types.
+pub use clock::{Clock, ManualClock, SystemClock};
 pub use error::MacpError;
 pub use mode::ModeResponse;
 pub use policy::{PolicyDecision, PolicyDefinition, PolicyError, PolicyEvaluator};

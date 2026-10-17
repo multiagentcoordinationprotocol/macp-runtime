@@ -61,7 +61,7 @@ The runtime overrides `envelope.sender` with the authenticated identity. If the 
 
 **Message IDs** must be unique per sender. UUID v4 is a good default. The runtime deduplicates on `message_id`, so sending the same ID twice returns a duplicate acknowledgement without reprocessing. In a `macp.mode.handoff.v1` session at `semantics_rev >= 2`, a client `message_id` must not begin with the literal `implicit-accept:` -- that namespace is reserved for the runtime's own synthetic accept and is rejected with `INVALID_ENVELOPE` whatever the message type. See [Runtime API § Send](API.md#send) for the full rule and RFC-MACP-0010 §5.1(3) for the normative source.
 
-**Session IDs** must be UUID v4/v7 (hyphenated lowercase, 36 characters) or base64url tokens (22+ characters). UUID v4 is the simplest choice.
+**Session IDs** must be UUID v4/v7 (hyphenated lowercase, 36 characters) or base64url tokens (22–128 characters; ids over 128 bytes are refused with `INVALID_SESSION_ID`, per RFC-MACP-0004 §11.2). UUID v4 is the simplest choice.
 
 **Payloads** are protobuf-encoded bytes. Import the mode-specific `.proto` files, serialize the payload struct, and set `envelope.payload` to the resulting bytes.
 
@@ -111,10 +111,23 @@ All envelopes on a stream must target the same session. A single frame must not 
 
 Two further resume rules your SDK must implement (RFC-MACP-0006 §3.2 "Sequence semantics"):
 
-- **Compaction.** A resume whose `after_sequence` falls below the compacted base is rejected with `FAILED_PRECONDITION` -- `session history before ordinal {base} was compacted; resume with after_sequence >= {base} or re-read state via GetSession` -- so retry at or above the reported base rather than falling back to `0`.
+- **Compaction.** A resume whose `after_sequence` falls below the compacted base is refused with an inline `INVALID_ENVELOPE` error frame (the stream stays open) -- `session history before ordinal {base} was compacted; resume with after_sequence >= {base} or re-read state via GetSession` -- so retry at or above the reported base rather than falling back to `0`. (Before 0.9.0 the frame's `code` carried that message text instead of a registry code.)
 - **Redelivery.** Key duplicate detection on `message_id`, and do not let a redelivered envelope advance your sequence position -- only a distinct accepted envelope does.
 
-Application-level errors (validation failures, authorization denials) are delivered as inline `MACPError` messages and the stream stays open. Transport-level errors (unauthenticated, internal, unknown session on subscribe) close the stream.
+Application-level errors (validation failures, authorization denials, policy denials) are delivered as inline `MACPError` messages and the stream stays open; since 0.9.0 their `code` is the registry code (`INVALID_ENVELOPE`, `POLICY_DENIED`, ...) with the same `details` a unary `Ack` carries and the rejected envelope's `message_id` -- before, `code` held the status message text and `message_id` was empty. Transport-level errors (unauthenticated, rate limits, payload size, internal, unknown session on subscribe, stream binding violations) close the stream. Which errors terminate is decided per error, not per gRPC status, so the 0.9.0 registry status mapping (below) did not change it.
+
+**gRPC status (0.9.0, S13).** Where a MACP error escapes as a gRPC `Status`, its code is the error-codes registry's gRPC column -- `POLICY_DENIED`/`FORBIDDEN` → `PERMISSION_DENIED`, `SESSION_NOT_FOUND`/`UNKNOWN_POLICY_VERSION` → `NOT_FOUND`, `INVALID_ENVELOPE`/`MODE_NOT_SUPPORTED`/`UNSUPPORTED_PROTOCOL_VERSION`/`INVALID_SESSION_ID`/`INVALID_POLICY_DEFINITION` → `INVALID_ARGUMENT`, `DUPLICATE_MESSAGE`/`SESSION_ALREADY_EXISTS` → `ALREADY_EXISTS`, `SESSION_NOT_OPEN` → `FAILED_PRECONDITION`, `PAYLOAD_TOO_LARGE`/`RATE_LIMITED` → `RESOURCE_EXHAUSTED`, `INTERNAL_ERROR` → `INTERNAL` -- and the registry code is in the `macp-error-code` metadata key. Branch on that key, not on the status: several codes share one status. Before 0.9.0 most codes surfaced as `FAILED_PRECONDITION`, including `Initialize`'s version mismatch.
+
+**Control-plane codes (0.9.0).** The same metadata is now on *every* `Status` the runtime returns, not only those built from a kernel error: `GetSession`/`CancelSession`/`SuspendSession`/`ResumeSession` on an unknown session → `SESSION_NOT_FOUND`, a non-member or non-initiator → `FORBIDDEN`, `GetPolicy` on an unknown id → `UNKNOWN_POLICY_VERSION`, and stream subscribe/binding errors → `INVALID_ENVELOPE`/`SESSION_NOT_FOUND`. Four codes are new, `provisional` in the spec registry (spec #195); their gRPC status is unchanged from what clients saw before, so only the metadata is new:
+
+| Code | gRPC | HTTP | Raised by |
+|------|------|------|-----------|
+| `REGISTRY_READ_ONLY` | `FAILED_PRECONDITION` | 409 | `RegisterPolicy`/`UnregisterPolicy` when policies are file-loaded (`MACP_POLICIES_DIR`) |
+| `INVALID_REQUEST` | `INVALID_ARGUMENT` | 400 | `ListSessions` negative `page_size` or bad `page_token`; a missing descriptor; `Initialize` with no versions |
+| `STREAM_LAGGED` | `RESOURCE_EXHAUSTED` | 503 | `StreamSession` and the `Watch*` streams when a subscriber falls behind -- resubscribe (see [Handling stream lag](#handling-stream-lag)) |
+| `AGENT_NOT_FOUND` | `NOT_FOUND` | 404 | `GetManifest` for an agent this runtime does not host |
+
+A client that does not recognise a code should fall back to the gRPC status.
 
 In a `macp.mode.handoff.v1` session, a stream can deliver a `HandoffAccept` that **no participant sent**: the runtime's synthetic implicit accept. It consumes an accepted ordinal and replays identically to any other accepted envelope, but its payload carries `implicit = true` and its `timestamp_unix_ms` is the computed deadline, not the time your SDK observed it. A client must never originate one. See [Handoff implicit accept](modes.md#implicit-accept-rfc-macp-0010-51).
 

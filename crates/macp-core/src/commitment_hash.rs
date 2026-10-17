@@ -551,7 +551,8 @@ mod tests {
         );
     }
 
-    // --- verification (RFC-MACP-0013 §5, §6; proposed cmt_hash_006..009) ---
+    // --- verification (RFC-MACP-0013 §5, §6; cmt_hash_006..010, vendored and
+    // run end to end by `tests/cmt_hash_vectors.rs`) ---
 
     fn vector_001() -> CommitmentPayload {
         CommitmentPayload {
@@ -602,7 +603,7 @@ mod tests {
         );
     }
 
-    /// Proposed `cmt_hash_006_unknown_field`: field 99 set at top level.
+    /// Spec `cmt_hash_006_unknown_field`: field 99 set at top level.
     #[test]
     fn cmt_hash_006_unknown_field_is_cannot_verify() {
         let mut bytes = wire(&vector_001());
@@ -627,7 +628,7 @@ mod tests {
         ));
     }
 
-    /// Proposed `cmt_hash_007_mismatch`: one hex digit differs.
+    /// Spec `cmt_hash_007_mismatch`: one hex digit differs.
     #[test]
     fn cmt_hash_007_mismatch() {
         let claimed = HASH_001.replacen("9f58", "9f59", 1);
@@ -639,7 +640,7 @@ mod tests {
         );
     }
 
-    /// Proposed `cmt_hash_008_noncanonical_claim`: the right digest in
+    /// Spec `cmt_hash_008_noncanonical_claim`: the right digest in
     /// uppercase hex is still a mismatch (§9), as are the other spellings.
     #[test]
     fn cmt_hash_008_noncanonical_claim_is_mismatch() {
@@ -661,7 +662,7 @@ mod tests {
         }
     }
 
-    /// Proposed `cmt_hash_009_unknown_supersedes_field`.
+    /// Spec `cmt_hash_009_unknown_supersedes_field`.
     #[test]
     fn cmt_hash_009_unknown_supersedes_field_is_cannot_verify() {
         let mut payload = vector_001();
@@ -684,12 +685,13 @@ mod tests {
         );
     }
 
-    /// The exact `wire_hex` / `claimed_hash` values proposed for the spec's
+    /// The exact `wire_hex` / `claimed_hash` values of the spec's
     /// `cmt_hash_006` and `cmt_hash_009` fixtures (computed independently and
-    /// cross-checked against vector 001). Pinned here so the published
-    /// fixtures and this implementation cannot drift apart.
+    /// cross-checked against vector 001; spec #190 published them unchanged).
+    /// Pinned here too, so this crate's own tests catch a drift without the
+    /// root crate's vendored-vector runner.
     #[test]
-    fn proposed_fixture_wire_hex_values() {
+    fn spec_fixture_wire_hex_values() {
         const WIRE_006: &str = "0a02633112116465636973696f6e2e617070726f7665641a047365616d220e7365616c6564206279207365616d2a156d6163702e6d6f64652e6465636973696f6e2e76313205312e302e303a05312e302e3040019a060178";
         const WIRE_009: &str = "0a02633112116465636973696f6e2e617070726f7665641a047365616d220e7365616c6564206279207365616d2a156d6163702e6d6f64652e6465636973696f6e2e76313205312e302e303a05312e302e3040014a500a02733012477368613235363a396635386539643131346431313836306434386161326263623863646134353862393631386231636338353630353935613830326236386334616638356434311a017a";
         const CLAIMED_009: &str =

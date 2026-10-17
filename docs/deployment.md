@@ -14,6 +14,65 @@ Before exposing the runtime to production traffic, ensure these four items are c
 
 4. **Bind address** -- Set `MACP_BIND_ADDR` to the desired listen address. The default `127.0.0.1:50051` only accepts local connections.
 
+## Upgrading to 0.9.0
+
+### 1. Quorum: an over-participant policy threshold is accepted and declinable at once
+
+A deliberate reversal of issue #145, made to follow RFC-MACP-0011 §5 rule 6 (Seam finding S4; owner decision 2026-10-16). A policy `threshold` above the declared participant count -- `{"type": "n_of_m", "value": 5}` on three participants -- no longer refuses the `ApprovalRequest`, and the `counted > 0` gate is gone, so the coordinator may seal `quorum.rejected` before any ballot. A `percentage` threshold can never exceed the pool (100% of 3 is 3), so it is unaffected: a negative commitment there still waits for the ballots that make the bar unreachable. The positive outcome under an over-pool bar remains impossible.
+
+Who it reaches: only sessions bound to a policy whose `n_of_m`/`count` value exceeds the session's participant count. Persisted sessions of that kind that 0.8 skipped at replay (item 3 of the next section) now **load again** -- and are immediately declinable. If such a session must not be declined without a vote, correct the policy before upgrading. An `Unsatisfiable` threshold (unrecognised `type`) is still refused at `ApprovalRequest`.
+
+### 2. Revision 4: three validation tightenings for new sessions
+
+Sessions started by 0.9.0 are bound to `semantics_rev` 4. A session started
+by an older release keeps its revision across the upgrade, so it replays
+and continues under the rules it was accepted under. Only new sessions see
+the following, and each refusal is `INVALID_ENVELOPE`:
+
+- **Decision (Seam S7, RFC-MACP-0007 §4).** `Vote.vote` and
+  `Evaluation.recommendation` must be UPPER_CASE, exactly as written
+  (`APPROVE`, not `approve`). `Objection.severity` must be lowercase and
+  non-empty; it no longer defaults to `medium`. **Clients that send
+  lowercase votes must change before they open new sessions.**
+- **Handoff (Seam S5, RFC-MACP-0010 §5 rule 3a).** After a target declines
+  an offer, the owner can't offer that target anything else in the same
+  Session. Offer to a different participant, or commit negatively.
+- **Task (Seam S6, RFC-MACP-0009 §5 rule 2a).** A `TaskReject` sent before
+  anyone is assigned declines the task for that participant only:
+  - That participant can never `TaskAccept` the task.
+  - Other participants can still accept it.
+    `assignment.allow_reassignment_on_reject` now applies only to a reject
+    from the *active assignee*. Before 0.9.0, a decline from anyone blocked
+    every later accept unless the policy allowed reassignment.
+  - If the task names a `requested_assignee` and that participant declines,
+    no one is left who can take it. The initiator may then send a negative
+    `Commitment` without a terminal report.
+
+### 3. Every gRPC `Status` names its registry code
+
+Control-plane RPCs that used to return a bare status (unknown session, read-only policy registry, bad `ListSessions` paging, stream lag, unknown manifest agent) now carry `macp-error-code` metadata like `Send` does. The gRPC status code itself did not change for any of them, so a client that branches on the status keeps working. Four codes are new, provisional in the spec registry (spec #195): `REGISTRY_READ_ONLY`, `INVALID_REQUEST`, `STREAM_LAGGED` and `AGENT_NOT_FOUND`. See the "Control-plane codes" table in [the SDK guide](sdk-guide.md). Alerting that groups on `macp-error-code` sees these codes where it used to see none.
+
+### 4. `session_id` is capped at 128 bytes
+
+`SessionStart` now refuses a `session_id` longer than 128 bytes with `INVALID_SESSION_ID`. That is the RFC-MACP-0004 §11.2 floor (spec #194): every conformant runtime must accept ids up to 128 bytes, so ids within the cap are portable. A persisted session with a longer id still replays, because the cap applies only at admission. UUIDs (36 chars) are unaffected.
+
+### 5. Replay now restores the TTL deadline and default policy that the live runtime bound
+
+Up to 0.8.x, replay could rebuild a session from its log with two bindings that differed from what the live runtime had set at `SessionStart`. Startup recovery serves the replayed session and saves it over the snapshot, so these values changed on every restart:
+
+- **The TTL deadline.** Live acceptance computes it as the `SessionStart` envelope's `timestamp_unix_ms` plus `ttl_ms`, as RFC-MACP-0003 §2 requires. Replay used the runtime's own acceptance clock instead. When the client's clock disagreed with the runtime's, a restarted session expired that much earlier or later than it would have without the restart.
+- **The default policy.** When `policy_version` is empty, live acceptance binds `policy.default` and stores that definition (RFC-MACP-0012 §6.1). Replay left `policy_version` empty and stored no definition. So after a restart, `GetSession` reported an empty policy.
+
+Both now replay to the live values. On the first boot after upgrading, a session that a 0.8.x runtime had already restarted may log a single warning like this, and it does not recur:
+
+```
+WARN replay/snapshot ttl_expiry mismatch
+```
+
+This is the same benign pattern as the `suspension_intervals` warning described below. The snapshot holds the shifted deadline, while replay restores the original one, and the original is the deadline the runtime then serves. The `ttl_expiry` field is new to the consistency check (`validate_replay_consistency`), and it is why the divergence was invisible until now.
+
+The replay logic itself now lives in the library, as `macp_modes::replay`, and the server's log replay is a thin mapping onto it. An embedder that drives sessions through `macp_modes::step` and records the start and each event gets the same rebuild the server performs. See `docs/embedding.md`.
+
 ## Upgrading into registration-time policy validation
 
 This release tightens what the governance policy registry accepts, what the Quorum mode will bind, how the Decision evaluator reads a `weighted` round, when a decline may be finalized over a passing vote, and how a `percentage` Quorum threshold is computed. Ten changes are operationally visible -- seven tightenings, one relaxation (item 7, which cannot affect an existing deployment) and two corrections that *lower* a bar (items 9 and 10) -- and **item 6 is the only one that can change how an already-stored session replays** -- read it first if you have any persisted Decision session at all. Item 6 carries two independent predicates and **only one of them involves `weighted`**: the other reaches any Decision policy that sets `commitment.allow_decline_over_approval: true`, `majority` policies included. Read this section before upgrading any deployment that sets `MACP_POLICIES_DIR`, or that has persisted sessions bound to a policy with a Quorum `threshold`, a `weighted` `voting.algorithm`, or `commitment.allow_decline_over_approval: true`. `CHANGELOG.md` is generated from commit subjects and does not carry this detail.
@@ -37,6 +96,8 @@ When a policy file blocks startup, the natural fix is to delete it. **Correct th
 Note the interaction with the next item: because an unresolved policy makes the Quorum mode fall back to the `ApprovalRequest`'s own `required_approvals` -- a value the mode already constrains to `1..=participants` -- deleting the policy also makes the replay failure below disappear. The two symptoms clear together, and the reason they clear is that the governance bar is no longer being applied.
 
 ### 3. A persisted Quorum session with an out-of-domain policy threshold no longer replays
+
+> **Superseded in 0.9.0 for numeric thresholds** -- see [Upgrading to 0.9.0](#1-quorum-an-over-participant-policy-threshold-is-accepted-and-declinable-at-once). What follows still holds for `weighted`/unrecognised types.
 
 RFC-MACP-0011 §5 rule 6 makes a policy `threshold` *replace* the `ApprovalRequest`'s `required_approvals`, but nothing previously held the replacement to the same `1..=participants` domain the runtime enforces on the field it replaces. The Quorum mode now refuses an `ApprovalRequest` whose effective threshold falls outside that domain, and replay dispatches the same code -- so such a session fails to replay. It is skipped with a warning, or is fatal at startup under `MACP_STRICT_RECOVERY=1`.
 
@@ -227,13 +288,16 @@ Two consequences worth knowing:
 | `MACP_REQUEST_TIMEOUT_SECS` | `30` | Per-request timeout (`src/main.rs:464`) |
 | `MACP_SHUTDOWN_DRAIN_SECS` | `10` | Graceful-shutdown drain deadline (`src/main.rs:524`) |
 | `MACP_CHECKPOINT_INTERVAL` | `0` (disabled) | Log entries between checkpoints |
+| `MACP_AUDIT_LEVEL` | `debug` | `info` logs every accepted message at `info` ("message accepted (audit)"); replaces the pre-0.9 `rules.audit` policy block |
+| `MACP_AUDIT_INFO_POLICIES` | — | Comma-separated `policy_id`s whose sessions are audited at `info` |
+| `MACP_AUDIT_INFO_MODES` | — | Comma-separated mode names whose sessions are audited at `info` |
 | `MACP_CLEANUP_INTERVAL_SECS` | `60` | Background maintenance interval in seconds: TTL expiry, memory eviction, disk GC, and eager observation of mode-computed deadlines (the handoff implicit accept, RFC-MACP-0010 §5.1(2)) |
 | `MACP_SESSION_RETENTION_SECS` | `3600` | Age (from session start) at which terminal sessions are evicted from **memory**; their durable data is kept |
 | `MACP_SESSION_DISK_RETENTION_SECS` | `0` (keep forever) | Age (from session start) at which terminal sessions' **durable data** is deleted; `0` disables disk GC entirely |
 | `MACP_STRICT_RECOVERY` | off | Set to `1` to fail on any recovery error |
 | `MACP_POLICIES_DIR` | -- | Directory of governance policy JSON files preloaded at startup; a file that fails validation aborts startup, and the wire registry becomes read-only |
 | `MACP_POLICIES_DRY_RUN` | off | Set to `1` to validate `MACP_POLICIES_DIR` and exit `0`/`1` without starting the server |
-| `MACP_POLICY_SCHEMAS_DIR` | -- | **Development and CI only; the server never reads it.** Path to the spec repository's `schemas/json/policy` directory, used by the `enum_lists_match_the_canonical_schemas` parity test -- see the warning below |
+| `MACP_POLICY_SCHEMAS_DIR` | -- | **Development and CI only; the server never reads it.** Path to the spec repository's `schemas/json/policy` directory, used by the `enum_lists_match_the_canonical_schemas`, `closed_key_sets_match_the_canonical_schemas` and `canonical_schema_fixtures_register_or_are_refused` parity tests (all three run in the `conformance-oracle` CI job) -- see the warning below |
 | `RUST_LOG` | `info` | Log level filter |
 
 `MACP_POLICY_SCHEMAS_DIR` is listed here because it is otherwise documented nowhere, and a contributor changing a registration mirror needs it. It is read only by `macp-policy`'s parity unit test, which asserts the hand-written value-domain mirrors in `crates/macp-policy/src/registry.rs` still match the canonical schemas. Two warnings:

@@ -1,0 +1,108 @@
+{
+  "_comment": "Pins RFC-MACP-0001 Section 7.6 items 4 and 5 through RFC-MACP-0010 Section 5.1. The offer is accepted at acceptance time 1000; the bound policy's implicit_accept_timeout_ms is 1000, so the deadline is 2000. The Commitment is evaluated at 2500, after the deadline, and nothing else ran in between: no timer or sweep is required, so the runtime MUST observe the deadline at that evaluation and append the synthetic HandoffAccept before evaluating the Commitment (item 5). expected_history pins it immediately before the Commitment. Every Envelope timestamp_unix_ms is 0, so a runtime that measured the timeout on the Envelope clock (contrary to item 4 and Section 5.1(1)) would find no deadline elapsed, emit no synthetic accept, and reject the positive Commitment. A suspend/resume variant is omitted: SessionSuspend and SessionResume are emitted by the runtime through the SuspendSession/ResumeSession RPCs and MUST NOT be submitted via Send (RFC-MACP-0001 Section 7.5), and every fixture step is a Send-submitted envelope.",
+  "description": "Handoff Mode: the synthetic HandoffAccept is due and appended before a Commitment evaluated after the implicit-accept deadline.",
+  "mode": "macp.mode.handoff.v1",
+  "initiator": "agent://owner",
+  "participants": [
+    "agent://owner",
+    "agent://target"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.handoff.implicit-accept-1000",
+    "mode": "macp.mode.handoff.v1",
+    "schema_version": 3,
+    "description": "Implicit accept after 1000 ms of unanswered offer; initiator-only commitment.",
+    "rules": {
+      "acceptance": {
+        "implicit_accept_timeout_ms": 1000
+      },
+      "commitment": {
+        "authority": "initiator_only"
+      }
+    }
+  },
+  "policy_version": "policy.handoff.implicit-accept-1000",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://owner",
+      "message_type": "HandoffOffer",
+      "payload_type": "macp.modes.handoff.v1.HandoffOfferPayload",
+      "payload": {
+        "handoff_id": "h1",
+        "target_participant": "agent://target",
+        "scope": "support",
+        "reason": "escalate"
+      },
+      "accepted_at_ms": 1000,
+      "envelope": {
+        "timestamp_unix_ms": 0
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Acceptance time 2500 is past the deadline of 2000. The positive Commitment depends on h1 being accepted, which only the synthetic HandoffAccept supplies.",
+      "sender": "agent://owner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "handoff.accepted",
+        "authority_scope": "test",
+        "reason": "implicitly accepted",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.handoff.implicit-accept-1000",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "accepted_at_ms": 2500,
+      "envelope": {
+        "timestamp_unix_ms": 0
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_history": [
+    {
+      "message_type": "HandoffOffer",
+      "sender": "agent://owner",
+      "payload": {
+        "handoff_id": "h1"
+      }
+    },
+    {
+      "_comment": "RFC-MACP-0010 Section 5.1(3): Envelope sender is the target, implicit is true and accepted_by is the target.",
+      "message_type": "HandoffAccept",
+      "sender": "agent://target",
+      "payload": {
+        "handoff_id": "h1",
+        "accepted_by": "agent://target",
+        "implicit": true
+      },
+      "synthetic": true
+    },
+    {
+      "message_type": "Commitment",
+      "sender": "agent://owner",
+      "payload": {
+        "commitment_id": "c1"
+      }
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expected_resolution": {
+    "action": "handoff.accepted",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  },
+  "expected_mode_state": {
+    "offers": {
+      "h1": {
+        "disposition": "Accepted"
+      }
+    }
+  }
+}

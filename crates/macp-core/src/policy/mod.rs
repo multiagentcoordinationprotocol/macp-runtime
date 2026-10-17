@@ -6,8 +6,18 @@
 //! and the [`PolicyEvaluator`] trait that modes call through. The concrete
 //! default evaluator lives in the `macp-policy` crate; a third party can supply
 //! its own `PolicyEvaluator` and inject it without forking the kernel.
+//!
+//! [`keys`] carries the key namespaces of a rules object (closed defined keys,
+//! `^[_$]` annotations, `x-` vendor extensions), the closed-object walk, §8
+//! equality, and the [`RuleExtension`] trait an embedder implements to admit a
+//! vendor extension.
 
+pub mod deny;
+pub mod keys;
 pub mod rules;
+
+pub use deny::{DenyCode, DenyReason};
+pub use keys::RuleExtension;
 
 use crate::decision::DecisionState;
 use serde::{Deserialize, Serialize};
@@ -23,11 +33,15 @@ pub struct PolicyDefinition {
 
 /// `#[non_exhaustive]`: consumers MUST treat any non-`Allow` decision as a
 /// denial (fail closed). Never `if let Deny` — that fails open on new variants.
+///
+/// `Allow` reasons are informational log text. `Deny` reasons are structured
+/// ([`DenyReason`], RFC-MACP-0012 §6.2) because they reach the submitter as
+/// `POLICY_DENIED` detail; a `String` converts with `.into()`.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub enum PolicyDecision {
     Allow { reasons: Vec<String> },
-    Deny { reasons: Vec<String> },
+    Deny { reasons: Vec<DenyReason> },
 }
 
 #[non_exhaustive]

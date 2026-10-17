@@ -1,15 +1,16 @@
-use std::collections::HashMap;
-use std::sync::RwLock;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 
 use super::defaults::{
     canonical_std_policy, default_policy, std_policies, DEFAULT_POLICY_ID, STD_POLICY_PREFIX,
 };
+use macp_core::policy::keys::{self as rule_keys, KeyViolation};
 use macp_core::policy::rules::{
     CommitmentRules, DecisionPolicyRules, HandoffPolicyRules, ProposalPolicyRules,
     QuorumPolicyRules, TaskPolicyRules,
 };
-use macp_core::policy::{PolicyDefinition, PolicyError};
+use macp_core::policy::{PolicyDefinition, PolicyError, RuleExtension};
 
 /// Legal values of `voting.algorithm`, mirroring
 /// `schemas/json/policy/decision-rules.schema.json`
@@ -135,6 +136,10 @@ pub struct PolicyFileOutcome {
 pub struct PolicyRegistry {
     entries: RwLock<HashMap<String, PolicyDefinition>>,
     change_tx: broadcast::Sender<()>,
+    /// Vendor-extension implementations (proposal S1), keyed by their
+    /// top-level `x-` key. Fixed at construction: admission of an `x-` key
+    /// must not change under a policy already admitted with it.
+    rule_extensions: BTreeMap<String, Arc<dyn RuleExtension>>,
 }
 
 impl PolicyRegistry {
@@ -155,7 +160,63 @@ impl PolicyRegistry {
         Self {
             entries: RwLock::new(entries),
             change_tx,
+            rule_extensions: BTreeMap::new(),
         }
+    }
+
+    /// Admit the given vendor-extension keys (proposal S1,
+    /// multiagentcoordinationprotocol#186), each validated at registration by
+    /// its [`RuleExtension`].
+    ///
+    /// With **no** extensions registered — the default — every `x-` key is
+    /// refused as an undefined key, which is the RFC-MACP-0012 §4 (1.4.0)
+    /// closed-object behaviour. S1 is a proposal, so admitting an `x-` key is
+    /// an explicit embedder opt-in, never a default.
+    ///
+    /// Enforcement of an extension's meaning is the embedder's job and is
+    /// restrict-only; standard evaluation ignores `x-` keys.
+    ///
+    /// # Errors
+    ///
+    /// A key that is not a well-formed vendor-extension key
+    /// ([`macp_core::policy::keys::VENDOR_EXTENSION_KEY_PATTERN`]), or one
+    /// supplied twice, is refused — a misconfigured embedder fails at startup,
+    /// not at the first registration that happens to use it.
+    pub fn with_rule_extensions(
+        mut self,
+        extensions: impl IntoIterator<Item = (String, Arc<dyn RuleExtension>)>,
+    ) -> Result<Self, String> {
+        for (key, extension) in extensions {
+            if !rule_keys::is_vendor_extension_key(&key) {
+                return Err(format!(
+                    "rule extension key '{key}' does not match {}",
+                    rule_keys::VENDOR_EXTENSION_KEY_PATTERN
+                ));
+            }
+            if self
+                .rule_extensions
+                .insert(key.clone(), extension)
+                .is_some()
+            {
+                return Err(format!("rule extension key '{key}' supplied twice"));
+            }
+        }
+        Ok(self)
+    }
+
+    /// The vendor-extension keys this registry admits, sorted — the value the
+    /// runtime advertises in `PolicyRegistryCapability.rule_extensions`
+    /// (`policy.proto` field 4, RFC-MACP-0012 §4).
+    pub fn rule_extension_names(&self) -> Vec<String> {
+        self.rule_extensions.keys().cloned().collect()
+    }
+
+    /// An empty-of-user-policies registry sharing this one's extensions, for
+    /// dry-run validation.
+    fn scratch(&self) -> Self {
+        let mut scratch = Self::new();
+        scratch.rule_extensions = self.rule_extensions.clone();
+        scratch
     }
 
     /// Register a new policy definition.
@@ -168,7 +229,7 @@ impl PolicyRegistry {
     /// - A policy with this id already exists
     /// - The schema_version is 0, or not in [`crate::SUPPORTED_SCHEMA_VERSIONS`]
     pub fn register(&self, definition: PolicyDefinition) -> Result<(), String> {
-        Self::validate_definition(&definition)?;
+        self.validate_definition(&definition)?;
 
         let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
         if guard.contains_key(&definition.policy_id) {
@@ -298,8 +359,20 @@ impl PolicyRegistry {
     /// `policy.std.*` entries — while leaving `self` untouched. Only a
     /// directory that cannot be read at all is an `Err`; every per-file
     /// problem is an `Err` inside a [`PolicyFileOutcome`].
+    ///
+    /// Validates against a registry with **no** vendor extensions; an
+    /// embedder that registers some uses [`Self::validate_dir_with`].
     pub fn validate_dir(dir: &std::path::Path) -> Result<Vec<PolicyFileOutcome>, String> {
-        let scratch = Self::new();
+        Self::new().validate_dir_with(dir)
+    }
+
+    /// [`Self::validate_dir`], admitting this registry's vendor extensions.
+    /// `self` is not modified.
+    pub fn validate_dir_with(
+        &self,
+        dir: &std::path::Path,
+    ) -> Result<Vec<PolicyFileOutcome>, String> {
+        let scratch = self.scratch();
         let mut outcomes = Vec::new();
         for path in Self::policy_files_in(dir)? {
             let result = std::fs::read_to_string(&path)
@@ -340,7 +413,7 @@ impl PolicyRegistry {
     /// RFC-MACP-0012 mandates has to travel in the text. Downstream consumers
     /// branch on that prefix (the control plane maps it to HTTP 400), so it is
     /// wire-visible contract, not decoration.
-    fn validate_definition(definition: &PolicyDefinition) -> Result<(), String> {
+    fn validate_definition(&self, definition: &PolicyDefinition) -> Result<(), String> {
         if definition.policy_id.trim().is_empty() {
             return Err("INVALID_POLICY_DEFINITION: policy_id must not be empty".into());
         }
@@ -363,11 +436,49 @@ impl PolicyRegistry {
         if !definition.rules.is_object() {
             return Err("INVALID_POLICY_DEFINITION: rules must be a JSON object".into());
         }
+        // Closed objects (RFC-MACP-0012 §4) before the typed parse, so a
+        // misspelled key is reported by path rather than silently defaulted.
+        self.validate_rule_keys(&definition.mode, &definition.rules)?;
         Self::validate_reserved_namespace(definition)?;
         // Validate that rules deserialize into the mode-specific schema.
         Self::validate_rules_for_mode(&definition.mode, &definition.rules)?;
         // Validate conditional constraints (RFC-MACP-0012).
         Self::validate_conditional_constraints(&definition.mode, &definition.rules)?;
+        Ok(())
+    }
+
+    /// RFC-MACP-0012 §4 closed rule objects, plus proposal S1's vendor
+    /// extensions: every key at every closed level is defined by the mode's
+    /// schema (the union of all five for `"*"`), an `^[_$]` annotation, or —
+    /// top level only — a vendor-extension key this registry implements, whose
+    /// [`RuleExtension::validate`] then accepts its value. Extension modes'
+    /// rules are opaque and skip this entirely.
+    fn validate_rule_keys(&self, mode: &str, rules: &serde_json::Value) -> Result<(), String> {
+        let Some(shapes) = rule_keys::rule_shape_for_mode(mode) else {
+            return Ok(());
+        };
+        if let Some(violation) = rule_keys::closed_key_violation(rules, &shapes) {
+            return Err(format!("INVALID_POLICY_DEFINITION: {violation}"));
+        }
+        for key in rule_keys::vendor_extension_keys(rules) {
+            let Some(extension) = self.rule_extensions.get(key) else {
+                // Unimplemented: never silently dropped. With none registered
+                // this is the plain closed-object refusal of §4.
+                return Err(format!(
+                    "INVALID_POLICY_DEFINITION: {}; this runtime implements no vendor extension \
+                     '{key}' (implemented: {:?})",
+                    KeyViolation::Undefined {
+                        path: key.to_string()
+                    },
+                    self.rule_extension_names()
+                ));
+            };
+            extension.validate(&rules[key]).map_err(|reason| {
+                format!(
+                    "INVALID_POLICY_DEFINITION: rules.{key} rejected by its extension: {reason}"
+                )
+            })?;
+        }
         Ok(())
     }
 
@@ -412,6 +523,18 @@ impl PolicyRegistry {
     fn resolves_to_same_rules(candidate: &PolicyDefinition, canonical: &PolicyDefinition) -> bool {
         if candidate.mode != canonical.mode || candidate.schema_version != canonical.schema_version
         {
+            return false;
+        }
+        // The typed parse below drops vendor-extension keys, but §8 counts
+        // them (proposal S1): a reserved profile plus an `x-` restriction is
+        // a different policy, not the canonical one.
+        let extensions = |rules: &serde_json::Value| -> Vec<(String, serde_json::Value)> {
+            rule_keys::vendor_extension_keys(rules)
+                .into_iter()
+                .map(|k| (k.to_string(), rules[k].clone()))
+                .collect()
+        };
+        if extensions(&candidate.rules) != extensions(&canonical.rules) {
             return false;
         }
         let resolve = |rules: &serde_json::Value| {
@@ -977,6 +1100,8 @@ mod tests {
         registry.register(test_policy("policy.decision")).unwrap();
         let mut task_policy = test_policy("policy.task");
         task_policy.mode = "macp.mode.task.v1".into();
+        // `voting` is not a task-rules key (RFC-MACP-0012 §4, closed objects).
+        task_policy.rules = serde_json::json!({});
         registry.register(task_policy).unwrap();
 
         let decision_policies = registry.list(Some("macp.mode.decision.v1"));
@@ -1660,12 +1785,20 @@ mod tests {
     fn register_empty_weights_map_for_another_mode_succeeds() {
         // The `weights` non-emptiness mirror lives inside the Decision mode
         // guard. Hoisted out, it would refuse rules registered for a mode whose
-        // schema does not govern `voting.weights` at all.
+        // schema does not govern `voting.weights` at all. Since closed rule
+        // objects (§4) a standards-track mode other than Decision refuses
+        // `voting` outright, so the property is observable only on an
+        // extension mode, whose rules are opaque.
+        let mut policy = decision_policy(serde_json::json!({
+            "voting": { "algorithm": "majority", "weights": {} }
+        }));
+        policy.mode = "ext.custom.v1".to_string();
+        accept(policy);
         let mut policy = decision_policy(serde_json::json!({
             "voting": { "algorithm": "majority", "weights": {} }
         }));
         policy.mode = "macp.mode.task.v1".to_string();
-        accept(policy);
+        assert!(refuse(policy).contains("rules.voting is not a defined key"));
     }
 
     #[test]
@@ -1951,7 +2084,8 @@ mod tests {
         // The `policy.std.*` profiles must additionally survive the full
         // registration path, which a client may legitimately re-send.
         for policy in std_policies() {
-            PolicyRegistry::validate_definition(&policy)
+            PolicyRegistry::new()
+                .validate_definition(&policy)
                 .unwrap_or_else(|e| panic!("{} would be refused: {e}", policy.policy_id));
         }
     }
@@ -2316,6 +2450,331 @@ mod tests {
         assert_eq!(
             threshold["allOf"][0]["then"]["properties"]["value"]["maximum"],
             serde_json::json!(100)
+        );
+    }
+
+    // ── Closed rule objects (RFC-MACP-0012 §4) and vendor extensions (S1) ──
+
+    struct RequireFlag;
+    impl RuleExtension for RequireFlag {
+        fn validate(&self, value: &serde_json::Value) -> Result<(), String> {
+            match value.get("require_reason") {
+                Some(serde_json::Value::Bool(_)) => Ok(()),
+                _ => Err("require_reason must be a boolean".into()),
+            }
+        }
+    }
+
+    fn with_gov_extension() -> PolicyRegistry {
+        PolicyRegistry::new()
+            .with_rule_extensions([(
+                "x-com.example.gov".to_string(),
+                Arc::new(RequireFlag) as Arc<dyn RuleExtension>,
+            )])
+            .unwrap()
+    }
+
+    #[test]
+    fn undefined_keys_are_refused_at_every_level_with_their_path() {
+        for (mode, rules, path) in [
+            (
+                "macp.mode.decision.v1",
+                serde_json::json!({"seam": {}}),
+                "rules.seam",
+            ),
+            (
+                "macp.mode.decision.v1",
+                serde_json::json!({"objection_handling": {"veto_threshhold": 2}}),
+                "rules.objection_handling.veto_threshhold",
+            ),
+            (
+                "macp.mode.quorum.v1",
+                serde_json::json!({"threshold": {"type": "n_of_m", "value": 1, "min": 1}}),
+                "rules.threshold.min",
+            ),
+            (
+                "macp.mode.handoff.v1",
+                serde_json::json!({"acceptance": {"criterion": "all_parties"}}),
+                "rules.acceptance.criterion",
+            ),
+            (
+                "*",
+                serde_json::json!({"audit": {"level": "info"}}),
+                "rules.audit",
+            ),
+        ] {
+            let err = refuse(policy_for(mode, rules));
+            assert!(
+                err.contains(&format!("{path} is not a defined key")),
+                "{mode}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn annotation_keys_are_admitted_at_every_closed_level() {
+        accept(policy_for(
+            "macp.mode.decision.v1",
+            serde_json::json!({
+                "_why": "audit trail",
+                "voting": {"$comment": "x", "algorithm": "majority", "threshold": 0.5},
+                "commitment": {"_owner": "ops"}
+            }),
+        ));
+    }
+
+    #[test]
+    fn vendor_extension_is_refused_unless_implemented() {
+        let rules = serde_json::json!({"x-com.example.gov": {"require_reason": true}});
+        // No extensions: today's (1.4.0) closed-object refusal.
+        let err = refuse(policy_for("macp.mode.decision.v1", rules.clone()));
+        assert!(
+            err.contains("rules.x-com.example.gov is not a defined key"),
+            "{err}"
+        );
+        assert!(err.contains("implements no vendor extension"), "{err}");
+        // Implemented: admitted, and the validator sees the value.
+        let registry = with_gov_extension();
+        registry
+            .register(policy_for("macp.mode.decision.v1", rules))
+            .unwrap();
+        assert_eq!(registry.rule_extension_names(), vec!["x-com.example.gov"]);
+        let mut bad = policy_for(
+            "macp.mode.decision.v1",
+            serde_json::json!({"x-com.example.gov": {"require_reason": "yes"}}),
+        );
+        bad.policy_id = "policy.test.bad".into();
+        let err = registry.register(bad).unwrap_err();
+        assert!(err.starts_with("INVALID_POLICY_DEFINITION"), "{err}");
+        assert!(err.contains("require_reason must be a boolean"), "{err}");
+        // A different, unimplemented extension is still refused.
+        let mut other = policy_for("*", serde_json::json!({"x-org.other.thing": {}}));
+        other.policy_id = "policy.test.other".into();
+        assert!(registry.register(other).is_err());
+    }
+
+    #[test]
+    fn s1_vendor_extension_vectors() {
+        let registry = with_gov_extension();
+        // vendor-extension-nested.json, -non-object.json, -bad-name.json
+        for (rules, needle) in [
+            (
+                serde_json::json!({"voting": {"x-com.example.gov": {"require_reason": true}}}),
+                "legal only at the top level",
+            ),
+            (
+                serde_json::json!({"x-com.example.gov": true}),
+                "must be a JSON object",
+            ),
+            (
+                serde_json::json!({"x-seam": {}}),
+                "rules.x-seam is not a defined key",
+            ),
+        ] {
+            let err = registry
+                .register(policy_for("macp.mode.decision.v1", rules))
+                .unwrap_err();
+            assert!(err.contains(needle), "{err}");
+        }
+    }
+
+    #[test]
+    fn with_rule_extensions_refuses_malformed_or_duplicate_keys() {
+        let ext = || Arc::new(RequireFlag) as Arc<dyn RuleExtension>;
+        assert!(PolicyRegistry::new()
+            .with_rule_extensions([("x-seam".to_string(), ext())])
+            .is_err());
+        assert!(PolicyRegistry::new()
+            .with_rule_extensions([
+                ("x-com.a.b".to_string(), ext()),
+                ("x-com.a.b".to_string(), ext())
+            ])
+            .is_err());
+    }
+
+    #[test]
+    fn std_profile_plus_a_vendor_extension_is_not_the_canonical_profile() {
+        // §8 counts vendor-extension keys (S1), and the typed comparison
+        // behind §2.2 would otherwise drop them.
+        let mut candidate = canonical_std_policy("policy.std.majority").unwrap();
+        candidate.rules["x-com.example.gov"] = serde_json::json!({"require_reason": true});
+        let err = with_gov_extension().register(candidate).unwrap_err();
+        assert!(err.contains("canonical §5.2 definition verbatim"), "{err}");
+        // An annotation does not change identity: still the canonical
+        // profile, so the refusal is the duplicate one.
+        let mut annotated = canonical_std_policy("policy.std.majority").unwrap();
+        annotated.rules["_note"] = serde_json::json!("ours");
+        let err = PolicyRegistry::new().register(annotated).unwrap_err();
+        assert!(err.contains("already registered"), "{err}");
+    }
+
+    #[test]
+    fn validate_dir_with_admits_this_registrys_extensions() {
+        let tmp = std::env::temp_dir().join(format!(
+            "macp-policy-ext-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("gov.json"),
+            serde_json::to_string(&policy_for(
+                "macp.mode.decision.v1",
+                serde_json::json!({"x-com.example.gov": {"require_reason": true}}),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let plain = PolicyRegistry::validate_dir(&tmp).unwrap();
+        assert!(plain[0].result.is_err());
+        let registry = with_gov_extension();
+        let extended = registry.validate_dir_with(&tmp).unwrap();
+        assert!(extended[0].result.is_ok(), "{:?}", extended[0].result);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The closed-key trees in `macp_core::policy::keys` against the canonical
+    /// schemas' `properties` at every level — the same parity discipline as
+    /// [`enum_lists_match_the_canonical_schemas`].
+    #[test]
+    fn closed_key_sets_match_the_canonical_schemas() {
+        use macp_core::policy::keys::{RuleShape, STANDARDS_TRACK_RULE_SHAPES};
+        let Some(dir) = canonical_schema_dir() else {
+            println!(
+                "SKIP closed_key_sets_match_the_canonical_schemas: no canonical schema directory"
+            );
+            return;
+        };
+        fn compare(schema: &serde_json::Value, shape: RuleShape, path: &str, file: &str) {
+            match shape {
+                RuleShape::Closed(keys) => {
+                    assert_eq!(
+                        schema["additionalProperties"],
+                        serde_json::json!(false),
+                        "{file}: {path} is closed here but not in the schema"
+                    );
+                    let mut theirs: Vec<&str> = schema["properties"]
+                        .as_object()
+                        .unwrap_or_else(|| panic!("{file}: {path} has no properties"))
+                        .keys()
+                        .map(String::as_str)
+                        .collect();
+                    theirs.sort_unstable();
+                    let mut ours: Vec<&str> = keys.iter().map(|(k, _)| *k).collect();
+                    ours.sort_unstable();
+                    assert_eq!(ours, theirs, "{file}: key set at {path} has drifted");
+                    for (k, child) in keys {
+                        compare(
+                            &schema["properties"][k],
+                            *child,
+                            &format!("{path}.{k}"),
+                            file,
+                        );
+                    }
+                }
+                RuleShape::Map => assert!(
+                    schema.get("properties").is_none()
+                        && schema["additionalProperties"].is_object(),
+                    "{file}: {path} is an open map here but not in the schema"
+                ),
+                RuleShape::Leaf => assert!(
+                    schema.get("properties").is_none(),
+                    "{file}: {path} is a leaf here but an object in the schema"
+                ),
+            }
+        }
+        for (mode, shape) in STANDARDS_TRACK_RULE_SHAPES {
+            let file = format!(
+                "{}-rules.schema.json",
+                mode.trim_start_matches("macp.mode.")
+                    .trim_end_matches(".v1")
+            );
+            compare(&schema(&dir, &file), shape, "rules", &file);
+        }
+    }
+
+    /// Drive the spec's own schema fixtures (`schemas/json/tests/`) through
+    /// registration: every `valid-policy-rules/<mode>.json` registers, every
+    /// `invalid-*-rules/*.json` and `invalid-policy-descriptors/*.json` is
+    /// refused. This is the closest thing to a JSON-Schema run the runtime
+    /// has, and it is what proves the hand-written mirrors actually fire.
+    ///
+    /// Since spec `59ae57d` every valid fixture carries the vendor-extension
+    /// key `x-com.example.gov`. The schema leaves its value opaque, but
+    /// admission (RFC-MACP-0012 §4) refuses an extension the runtime does not
+    /// implement, so the valid fixtures register against a registry that
+    /// implements it ([`with_gov_extension`]) and are refused by one that
+    /// does not. The invalid fixtures are refused by the implementing
+    /// registry, so no refusal here is merely "extension not implemented".
+    #[test]
+    fn canonical_schema_fixtures_register_or_are_refused() {
+        let Some(dir) = canonical_schema_dir() else {
+            println!("SKIP canonical_schema_fixtures_register_or_are_refused: no canonical schema directory");
+            return;
+        };
+        let tests = dir.join("../tests");
+        let read = |path: &std::path::Path| -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        };
+        let json_files = |sub: &str| -> Vec<std::path::PathBuf> {
+            let mut v: Vec<_> = std::fs::read_dir(tests.join(sub))
+                .unwrap_or_else(|e| panic!("{sub}: {e}"))
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+                .collect();
+            v.sort();
+            v
+        };
+        let mut checked = 0;
+        for mode in ["decision", "proposal", "task", "handoff", "quorum"] {
+            let rules = read(&tests.join(format!("valid-policy-rules/{mode}.json")));
+            let policy = policy_for(&format!("macp.mode.{mode}.v1"), rules.clone());
+            with_gov_extension()
+                .register(policy)
+                .unwrap_or_else(|e| panic!("valid-policy-rules/{mode}.json refused: {e}"));
+            if rules.get("x-com.example.gov").is_some() {
+                let err = PolicyRegistry::new()
+                    .register(policy_for(&format!("macp.mode.{mode}.v1"), rules))
+                    .expect_err("an unimplemented vendor extension is admitted");
+                assert!(
+                    err.contains("implements no vendor extension 'x-com.example.gov'"),
+                    "valid-policy-rules/{mode}.json: {err}"
+                );
+            }
+            checked += 1;
+            let sub = if mode == "decision" {
+                "invalid-policy-rules".to_string()
+            } else {
+                format!("invalid-{mode}-rules")
+            };
+            for path in json_files(&sub) {
+                let policy = policy_for(&format!("macp.mode.{mode}.v1"), read(&path));
+                let err = with_gov_extension()
+                    .register(policy)
+                    .err()
+                    .unwrap_or_else(|| panic!("{} was admitted", path.display()));
+                assert!(
+                    err.starts_with("INVALID_POLICY_DEFINITION"),
+                    "{}: {err}",
+                    path.display()
+                );
+                checked += 1;
+            }
+        }
+        for path in json_files("invalid-policy-descriptors") {
+            let refused = serde_json::from_value::<PolicyDefinition>(read(&path))
+                .map_err(|e| e.to_string())
+                .and_then(|d| PolicyRegistry::new().register(d));
+            assert!(refused.is_err(), "{} was admitted", path.display());
+            checked += 1;
+        }
+        assert!(
+            checked > 30,
+            "only {checked} fixtures found under {}",
+            tests.display()
         );
     }
 }

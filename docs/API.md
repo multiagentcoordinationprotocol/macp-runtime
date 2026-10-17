@@ -6,6 +6,8 @@ Not every state transition a client observes comes from an RPC: [Background main
 
 For protocol-level transport semantics, see the [protocol transports documentation](https://www.multiagentcoordinationprotocol.io/docs/transports).
 
+Driving sessions in-process instead, with no gRPC? The same acceptance and replay code is a library API: see [Embedding the coordination kernel](embedding.md).
+
 ## Protocol Handshake
 
 ### Initialize
@@ -36,7 +38,7 @@ The client sends its supported protocol versions in descending preference order.
 
 Returns `UNSUPPORTED_PROTOCOL_VERSION` if no mutual version exists.
 
-**Capabilities advertised**: `sessions.stream`, `sessions.list_sessions`, `sessions.watch_sessions`, `cancellation.cancel_session`, `progress.progress`, `manifest.get_manifest`, `mode_registry.list_modes`, `mode_registry.list_changed`, `roots.list_roots`, `roots.list_changed`, `policy_registry.register_policy`, `policy_registry.list_policies`, `policy_registry.list_changed`.
+**Capabilities advertised**: `sessions.stream`, `sessions.list_sessions`, `sessions.watch_sessions`, `cancellation.cancel_session`, `progress.progress`, `manifest.get_manifest`, `mode_registry.list_modes`, `mode_registry.list_changed`, `roots.list_roots`, `roots.list_changed`, `policy_registry.register_policy`, `policy_registry.list_policies`, `policy_registry.list_changed`, and `policy_registry.rule_extensions` (the vendor-extension keys the policy registry admits, sorted; empty unless an embedder registered `RuleExtension`s -- advisory, admission is authoritative).
 
 ## Message Transport
 
@@ -361,6 +363,8 @@ rpc WatchRoots(WatchRootsRequest) returns (stream WatchRootsResponse)
 ### WatchSignals
 
 Server-streaming RPC that delivers ambient signal broadcasts. Signals have empty `session_id` and empty `mode`, carry a `SignalPayload` with `signal_type`, `data`, optional `confidence`, and optional `correlation_session_id`. Signals never enter session history.
+
+Each `WatchSignalsResponse` carries `sender_authenticated` (RFC-MACP-0004 §4.1, RFC-MACP-0006 §3.4). It is `true` only when the Signal's `sender` was derived from a credential this runtime verified -- JWT or static bearer. Under the dev-mode fallback the bearer value *is* the sender (self-assertion), so every Signal is delivered with `sender_authenticated = false`, and a subscriber MUST NOT let it influence operational decisions. `false` is also what a pre-0.9 runtime reports, since the field did not exist.
 
 ```protobuf
 rpc WatchSignals(WatchSignalsRequest) returns (stream WatchSignalsResponse)

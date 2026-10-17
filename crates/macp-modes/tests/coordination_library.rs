@@ -4,29 +4,45 @@
 //! using ONLY `macp-core` + `macp-modes` + `macp-policy`. There is no
 //! `macp-runtime`, gRPC server, storage backend, or tokio anywhere in this test:
 //! it constructs a mode with an injected evaluator and steps messages through
-//! `macp_modes::step`, exactly as an embedding library consumer would.
+//! `macp_modes::step`, exactly as an embedding library consumer would — the
+//! session itself comes from `accept_session_start`, the same acceptance path
+//! the server kernel runs.
 
 use std::sync::Arc;
 
 use macp_core::session::{Session, SessionState};
 use macp_modes::mode::decision::DecisionMode;
-use macp_modes::mode::Mode;
-use macp_modes::step::{step, StepOutcome};
+use macp_modes::step::{accept_session_start, step, StartOptions, StepOutcome};
 use macp_pb::decision_pb::ProposalPayload;
-use macp_pb::pb::{CommitmentPayload, Envelope};
+use macp_pb::pb::{CommitmentPayload, Envelope, SessionStartPayload};
 use prost::Message;
 
 const SESSION_ID: &str = "11111111-1111-4111-8111-111111111111";
 const MODE: &str = "macp.mode.decision.v1";
 const INITIATOR: &str = "agent://orchestrator";
 
-fn session() -> Session {
-    Session::builder(SESSION_ID, MODE, INITIATOR)
-        .ttl_ms(60_000)
-        .participants(vec![INITIATOR.into(), "agent://fraud".into()])
-        .mode_version("1.0.0")
-        .configuration_version("cfg-1")
-        .build()
+fn session(mode: &DecisionMode) -> Session {
+    let payload = SessionStartPayload {
+        intent: "release".into(),
+        participants: vec![INITIATOR.into(), "agent://fraud".into()],
+        mode_version: "1.0.0".into(),
+        configuration_version: "cfg-1".into(),
+        policy_version: String::new(),
+        ttl_ms: 60_000,
+        context_id: String::new(),
+        extensions: Default::default(),
+        roots: vec![],
+        max_suspend_ms: 0,
+    }
+    .encode_to_vec();
+    accept_session_start(
+        &env(INITIATOR, "SessionStart", "start", payload),
+        0,
+        mode,
+        None,
+        &StartOptions::default(),
+    )
+    .expect("session start accepted")
 }
 
 fn env(sender: &str, message_type: &str, message_id: &str, payload: Vec<u8>) -> Envelope {
@@ -46,13 +62,7 @@ fn env(sender: &str, message_type: &str, message_id: &str, payload: Vec<u8>) -> 
 fn drives_a_full_decision_session_without_the_runtime() {
     // A consumer supplies its own evaluator; here we reuse the default one.
     let mode = DecisionMode::new(Arc::new(macp_policy::DefaultPolicyEvaluator));
-    let mut s = session();
-
-    // Session start: the consumer initializes mode state from on_session_start.
-    let resp = mode
-        .on_session_start(&s, &env(INITIATOR, "SessionStart", "start", vec![]))
-        .expect("session start");
-    s.apply_mode_response(resp);
+    let mut s = session(&mode);
     assert_eq!(s.state, SessionState::Open);
 
     // A proposal from the initiator (a declared participant).
@@ -70,12 +80,13 @@ fn drives_a_full_decision_session_without_the_runtime() {
         1,
     )
     .expect("proposal accepted");
-    assert_eq!(
+    assert!(matches!(
         out,
         StepOutcome::Accepted {
-            state: SessionState::Open
+            state: SessionState::Open,
+            ..
         }
-    );
+    ));
 
     // The initiator commits — versions must match the session bindings.
     let commitment = CommitmentPayload {
@@ -99,12 +110,13 @@ fn drives_a_full_decision_session_without_the_runtime() {
     .expect("commitment accepted");
 
     // The session resolved — entirely through the library surface.
-    assert_eq!(
+    assert!(matches!(
         out,
         StepOutcome::Accepted {
-            state: SessionState::Resolved
+            state: SessionState::Resolved,
+            ..
         }
-    );
+    ));
     assert_eq!(s.state, SessionState::Resolved);
     assert!(s.resolution.is_some());
 }
@@ -114,11 +126,7 @@ fn rejected_message_does_not_consume_a_dedup_slot() {
     // The dedup invariant holds for a library consumer too: a non-participant's
     // message is rejected and its id stays available for a later valid message.
     let mode = DecisionMode::new(Arc::new(macp_policy::DefaultPolicyEvaluator));
-    let mut s = session();
-    let resp = mode
-        .on_session_start(&s, &env(INITIATOR, "SessionStart", "start", vec![]))
-        .unwrap();
-    s.apply_mode_response(resp);
+    let mut s = session(&mode);
 
     let proposal = ProposalPayload {
         proposal_id: "p1".into(),
@@ -146,10 +154,11 @@ fn rejected_message_does_not_consume_a_dedup_slot() {
         1,
     )
     .expect("re-used id accepted from a participant");
-    assert_eq!(
+    assert!(matches!(
         out,
         StepOutcome::Accepted {
-            state: SessionState::Open
+            state: SessionState::Open,
+            ..
         }
-    );
+    ));
 }

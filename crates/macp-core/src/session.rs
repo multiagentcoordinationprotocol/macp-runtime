@@ -28,6 +28,19 @@ pub const MAX_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 /// (RFC-MACP-0003 §2) — see [`Session::effective_max_suspend_ms`].
 pub const MAX_SUSPEND_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
+/// The suspension cap a new session binds: `SessionStart.max_suspend_ms`
+/// when positive, else [`MAX_SUSPEND_MS`]. Record the result on the session
+/// (and in durable history) rather than re-resolving at replay, so a later
+/// default change never moves an existing session's cap. Negative payload
+/// values are refused earlier by SessionStart validation.
+pub fn resolve_max_suspend_ms(payload_value: i64) -> i64 {
+    if payload_value > 0 {
+        payload_value
+    } else {
+        MAX_SUSPEND_MS
+    }
+}
+
 /// Cap on the number of completed suspend/resume *cycles* a session may
 /// record in [`Session::suspension_intervals`]. Enforced in
 /// [`Session::resume`] at **every** revision, but with revision-dependent
@@ -116,7 +129,25 @@ pub const MAX_SUSPENSION_CYCLES: usize = 1024;
 ///   Decision behavior — every existing gate on this field is `>= 2` or
 ///   `<= 1` (never `== 2`), so bumping the shared counter to 3 is additive for
 ///   every other consumer.
-pub const CURRENT_SEMANTICS_REV: u32 = 3;
+/// - 4 — three validation tightenings from the Seam embedder findings, each
+///   of which a stored history may contradict, so each is gated `>= 4` and
+///   revisions 0-3 keep the rule their histories were accepted under:
+///   - Decision (macp-runtime#187, S7; `decision::STRICT_WIRE_ENUMS_REV`):
+///     `Vote.vote` and `Evaluation.recommendation` must be UPPER_CASE
+///     (RFC-MACP-0007 §4), `Objection.severity` lowercase (RFC-MACP-0004
+///     §2.3), and an empty severity is refused instead of defaulting to
+///     `"medium"`.
+///   - Handoff (S5; `handoff::DECLINED_TARGET_BAR_REV`): RFC-MACP-0010 §5
+///     rule 3a -- no new offer to a target that declined earlier.
+///   - Task (S6; `task::PERSONAL_DECLINE_REV`): RFC-MACP-0009 §5 rule 2a -- a
+///     pre-assignment `TaskReject` is a personal decline: the decliner may
+///     never accept, nobody else is gated by `allow_reassignment_on_reject`,
+///     and a named assignee's decline makes a negative `Commitment` eligible.
+///
+///   Quorum's S4 change in the same release is a *loosening* -- everything
+///   an older revision accepted is still accepted -- so it needs no gate and
+///   applies to every session.
+pub const CURRENT_SEMANTICS_REV: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SessionState {
@@ -204,6 +235,14 @@ impl Session {
     /// Start building a `Session`. The three arguments are the fields with no
     /// meaningful default; everything else starts from documented defaults
     /// (see [`SessionBuilder`]) and is set with the builder's methods.
+    ///
+    /// Defaults worth knowing: `semantics_rev` is [`CURRENT_SEMANTICS_REV`]
+    /// and `ttl_expiry` is unbounded (`i64::MAX`). The builder performs **no**
+    /// SessionStart validation. An embedder accepting a client `SessionStart`
+    /// should use `macp_modes::step::accept_session_start`, which enforces the
+    /// session-id format, the canonical payload, TTL and the policy binding
+    /// exactly as the server kernel does; the builder is for replay, tests and
+    /// sessions the embedder has already validated.
     pub fn builder(
         session_id: impl Into<String>,
         mode: impl Into<String>,
@@ -332,6 +371,34 @@ impl Session {
             return Err(MacpError::SessionNotOpen);
         }
         self.state = SessionState::Cancelled;
+        self.suspended_at_ms = None;
+        Ok(())
+    }
+
+    /// Whether this session's deadline has passed as of `now_ms` and it must
+    /// be expired before anything else is processed: an `Open` session past
+    /// `ttl_expiry` (strict `>`, so a message exactly at the deadline is still
+    /// in time), or a `Suspended` session past its suspension cap
+    /// ([`Self::suspend_cap_exceeded`], RFC-MACP-0001 §7.5). Terminal sessions
+    /// never report `true`. The single predicate behind both the library
+    /// `step` and the server kernel, so they cannot disagree on expiry.
+    pub fn deadline_passed(&self, now_ms: i64) -> bool {
+        match self.state {
+            SessionState::Open => now_ms > self.ttl_expiry,
+            SessionState::Suspended => self.suspend_cap_exceeded(now_ms),
+            _ => false,
+        }
+    }
+
+    /// Move an `Open` or `Suspended` session to the terminal `Expired` state,
+    /// clearing any in-flight suspension. `Err(SessionNotOpen)` if already
+    /// terminal. Pure: a durable caller records its own expiry entry (the
+    /// server's internal `TtlExpired` log entry) at the time it observed.
+    pub fn expire(&mut self) -> Result<(), MacpError> {
+        if self.state.is_terminal() {
+            return Err(MacpError::SessionNotOpen);
+        }
+        self.state = SessionState::Expired;
         self.suspended_at_ms = None;
         Ok(())
     }
@@ -676,15 +743,24 @@ pub fn validate_strict_session_start_payload(
     validate_canonical_session_start_payload_for_mode(mode, payload)
 }
 
+/// This runtime's `session_id` length cap, in bytes of the UTF-8 encoding
+/// (RFC-MACP-0004 §11.2). Set at the spec's floor: every id the spec calls
+/// portable is accepted, and no id this runtime admits is refused by another
+/// conformant runtime. It bounds per-session state (registry keys, log
+/// paths, every Envelope on the session). Applied at `SessionStart` only, so
+/// a persisted session with a longer legacy id still replays.
+pub const MAX_SESSION_ID_BYTES: usize = 128;
+
 /// Validate that a session ID meets the acceptance policy.
 ///
-/// Accepts:
+/// Accepts, up to [`MAX_SESSION_ID_BYTES`]:
 /// - UUID v4/v7 in hyphenated lowercase canonical form (36 chars)
 /// - base64url tokens of 22+ chars (`[A-Za-z0-9_-]`)
 ///
-/// Rejects everything else (empty, short human-readable, uppercase UUID, etc.).
+/// Rejects everything else (empty, short human-readable, uppercase UUID,
+/// over-long, etc.).
 pub fn validate_session_id_for_acceptance(session_id: &str) -> Result<(), MacpError> {
-    if session_id.is_empty() {
+    if session_id.is_empty() || session_id.len() > MAX_SESSION_ID_BYTES {
         return Err(MacpError::InvalidSessionId);
     }
 
@@ -973,6 +1049,13 @@ mod tests {
     }
 
     #[test]
+    fn resolve_max_suspend_ms_binds_payload_or_default() {
+        assert_eq!(resolve_max_suspend_ms(1234), 1234);
+        assert_eq!(resolve_max_suspend_ms(0), MAX_SUSPEND_MS);
+        assert_eq!(resolve_max_suspend_ms(-1), MAX_SUSPEND_MS);
+    }
+
+    #[test]
     fn resume_exceeding_max_suspend_expires() {
         let mut s = open_session(10_000);
         s.suspend(0).unwrap();
@@ -1186,6 +1269,19 @@ mod tests {
         bytes[8] = (bytes[8] & 0x3F) | 0x80;
         let v1_id = uuid::Uuid::from_bytes(bytes).as_hyphenated().to_string();
         assert!(validate_session_id_for_acceptance(&v1_id).is_err());
+    }
+
+    /// RFC-MACP-0004 §11.2: ids up to 128 bytes MUST be accepted, longer
+    /// ones over the cap MUST be refused with INVALID_SESSION_ID.
+    #[test]
+    fn session_id_length_cap_is_the_spec_floor() {
+        let at_cap = "a".repeat(MAX_SESSION_ID_BYTES);
+        validate_session_id_for_acceptance(&at_cap).unwrap();
+        let over = "a".repeat(MAX_SESSION_ID_BYTES + 1);
+        assert!(matches!(
+            validate_session_id_for_acceptance(&over),
+            Err(MacpError::InvalidSessionId)
+        ));
     }
 
     #[test]

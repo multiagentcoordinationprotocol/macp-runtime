@@ -144,10 +144,10 @@ pub struct QuorumState {
 pub enum ApprovalThreshold {
     /// This many `Approve` ballots seal a **positive** commitment.
     ///
-    /// Never zero, and for a session whose `ApprovalRequest` the mode
-    /// accepted, never above the declared participant count: `on_message`
-    /// constrains both the payload field and any policy replacement for it to
-    /// `1..=participants`.
+    /// Never zero. The `ApprovalRequest` payload field is bounded to
+    /// `1..=participants` (RFC-MACP-0011 §5 rule 2), but a policy replacement
+    /// may exceed the participant count (rule 6): the threshold is then
+    /// unreachable and a negative commitment is eligible at once.
     Approvals(u32),
     /// The bound policy admits no positive commitment at any approval count.
     ///
@@ -263,8 +263,8 @@ impl QuorumMode {
     /// *negative* commitment:
     ///
     /// ```text
-    /// approvals >= required || (counted > 0 && approvals + remaining < required)
-    /// //                                       ^ remaining = participants - counted
+    /// approvals >= required || approvals + remaining < required
+    /// //                       ^ remaining = participants - counted
     /// ```
     ///
     /// So readiness is a function of the whole ballot box — how many ballots
@@ -313,18 +313,16 @@ impl QuorumMode {
         // mathematically unreachable (RFC-MACP-0011 §4a, which makes that the
         // trigger for a negative Commitment).
         //
-        // `counted > 0` guards the second branch. With no ballot cast,
-        // `approvals + remaining < required` reduces to
-        // `participants.len() < required` — a state reachable only through a
-        // policy threshold larger than the participant pool, which
-        // `on_message`'s ApprovalRequest arm now refuses up front and which
-        // replay could otherwise re-introduce by binding edited policy rules
-        // to an older session. Left ungated, it let the coordinator seal a
-        // binding `quorum.rejected` before anyone voted (issue #145). Every
-        // §4b decline the RFC describes — all-abstain, or abstentions plus
-        // rejections — has at least one ballot behind it, so this refuses no
-        // legitimate decline.
-        approvals >= required || (counted > 0 && approvals + remaining < required)
+        // No ballot is required for the second branch. With none cast it
+        // reduces to `participants.len() < required` — a policy override larger
+        // than the pool — and RFC-MACP-0011 §5 rule 6 says exactly that: the
+        // override "simply makes the threshold unreachable, so the Session
+        // becomes eligible for `Commitment` under rule 4's second clause".
+        // 0.6–0.8 gated this on `counted > 0` (issue #145); the owner decision
+        // on proposal S4 (2026-10-16) made the RFC normative and removed it. A
+        // deployment that must refuse such policies checks the participant
+        // count before binding one; the schema cannot see it.
+        approvals >= required || approvals + remaining < required
     }
 }
 
@@ -381,19 +379,20 @@ impl Mode for QuorumMode {
                     required_approvals: payload.required_approvals,
                     requested_by: env.sender.clone(),
                 };
-                // RFC-MACP-0011 §6 says a policy `threshold` *replaces*
-                // `required_approvals`, so the replacement must satisfy the
-                // same domain the check above just enforced on the field it
-                // replaces: 1..=participants. A bar outside it makes the
-                // positive outcome impossible from the first message, and the
-                // coordinator could then seal a binding negative Commitment
-                // with no ballot cast (issue #145). Refusing here reports the
-                // misconfiguration at once instead of at commitment time, and
-                // keeps a dead session from collecting ballots that can never
-                // matter.
+                // RFC-MACP-0011 §5: rule 2 bounds only the payload field
+                // (checked above); a policy override "is evaluated as given"
+                // (rule 6), so an override above the participant count is
+                // accepted and makes the threshold unreachable — a decline is
+                // then eligible at once (`commitment_ready`). 0.6–0.8 refused it
+                // here (issue #145); proposal S4 reversed that.
+                //
+                // What is still refused is a policy the runtime cannot
+                // evaluate at all (`Unsatisfiable`: an unimplemented
+                // `threshold.type`), under which neither outcome could ever
+                // seal — failing here reports it instead of opening a session
+                // that can only expire.
                 match Self::effective_threshold(session, &record) {
-                    ApprovalThreshold::Approvals(required)
-                        if required >= 1 && required <= session.participants.len() as u32 => {}
+                    ApprovalThreshold::Approvals(_) => {}
                     other => {
                         tracing::warn!(
                             session_id = %session.session_id,
@@ -404,7 +403,7 @@ impl Mode for QuorumMode {
                                 .unwrap_or(""),
                             effective_threshold = ?other,
                             participants = session.participants.len(),
-                            "quorum policy threshold is outside 1..=participants; \
+                            "quorum policy threshold cannot be evaluated; \
                              refusing the ApprovalRequest"
                         );
                         return Err(MacpError::InvalidPayload);
@@ -1959,80 +1958,83 @@ mod tests {
         );
     }
 
-    #[test]
-    fn over_participant_policy_threshold_refuses_the_approval_request() {
-        // RFC-MACP-0011 §6: a policy threshold *replaces* `required_approvals`,
-        // which this arm already constrains to 1..=participants. A replacement
-        // outside that domain makes the positive outcome impossible from the
-        // first message, and `commitment_ready`'s unreachable branch would let
-        // the coordinator seal a binding `quorum.rejected` with no ballot cast.
+    /// Start a 3-participant session under `rules` and accept r1.
+    fn requested_under(rules: serde_json::Value) -> (QuorumMode, Session) {
         let mode = QuorumMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
-        let mut session = session_with(
-            3,
-            serde_json::json!({ "threshold": { "type": "n_of_m", "value": 5 } }),
-        );
+        let mut session = session_with(3, rules);
         let result = mode
             .on_session_start(&session, &env("coordinator", "SessionStart", vec![]))
             .unwrap();
         apply(&mut session, result);
+        let result = mode
+            .on_message(
+                &session,
+                &env(
+                    "coordinator",
+                    "ApprovalRequest",
+                    make_approval_request("r1", 3),
+                ),
+            )
+            .expect("RFC-MACP-0011 §5 rule 6: an override is evaluated as given, not refused");
+        apply(&mut session, result);
+        (mode, session)
+    }
+
+    #[test]
+    fn over_participant_override_is_accepted_and_declinable_at_once() {
+        // RFC-MACP-0011 §5 rule 6 (proposal S4, owner decision 2026-10-16;
+        // reverses #145): `n_of_m 5` over 3 participants is not refused at
+        // ApprovalRequest; the threshold is unreachable, so rule 4's second
+        // clause makes the session eligible for a negative Commitment with no
+        // ballot cast.
+        let (mode, session) =
+            requested_under(serde_json::json!({ "threshold": { "type": "n_of_m", "value": 5 } }));
+        assert_eq!(
+            QuorumMode::effective_threshold_for_session(&session).unwrap(),
+            Some(ApprovalThreshold::Approvals(5))
+        );
+        let commit = mode
+            .on_message(
+                &session,
+                &env(
+                    "coordinator",
+                    "Commitment",
+                    commitment("quorum.rejected", false),
+                ),
+            )
+            .expect("unreachable threshold: negative Commitment is eligible immediately");
+        assert!(matches!(commit, ModeResponse::PersistAndResolve { .. }));
+        // ...and the positive outcome stays impossible: the session is
+        // commitment-eligible, so it is the governance evaluator that refuses
+        // an approval the bar cannot back.
         let err = mode
             .on_message(
                 &session,
                 &env(
                     "coordinator",
-                    "ApprovalRequest",
-                    make_approval_request("r1", 3),
+                    "Commitment",
+                    commitment("quorum.approved", true),
                 ),
             )
             .unwrap_err();
-        assert_eq!(err.to_string(), "InvalidPayload");
-        // A threshold exactly at the participant count is still fine.
-        session.policy_definition = Some(quorum_policy(
-            serde_json::json!({ "threshold": { "type": "n_of_m", "value": 3 } }),
-        ));
-        assert!(mode
-            .on_message(
-                &session,
-                &env(
-                    "coordinator",
-                    "ApprovalRequest",
-                    make_approval_request("r1", 3),
-                ),
-            )
-            .is_ok());
+        assert_eq!(err.to_string(), "PolicyDenied");
+        assert!(err
+            .deny_reasons()
+            .iter()
+            .any(|r| r.code == macp_core::policy::DenyCode::THRESHOLD_NOT_MET));
     }
 
     #[test]
-    fn zero_ballot_decline_is_refused_when_policy_rebinds_over_the_participant_pool() {
-        // The belt behind the ApprovalRequest guard: replay re-resolves
-        // `policy_version` against the registry, so a policy edited between
-        // runs can bind a larger threshold to a session whose request was
-        // already accepted. The unreachable-threshold branch must not fire
-        // with an empty ballot box.
-        let mode = QuorumMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
-        let mut session = session_with(
-            3,
-            serde_json::json!({ "threshold": { "type": "n_of_m", "value": 3 } }),
+    fn a_reachable_override_still_refuses_a_zero_ballot_decline() {
+        // S4's second vector: `percentage 100` over 3 is a bar of 3, still
+        // reachable before any ballot, so a negative Commitment is refused.
+        let (mode, session) = requested_under(
+            serde_json::json!({ "threshold": { "type": "percentage", "value": 100 } }),
         );
-        let result = mode
-            .on_session_start(&session, &env("coordinator", "SessionStart", vec![]))
-            .unwrap();
-        apply(&mut session, result);
-        let result = mode
-            .on_message(
-                &session,
-                &env(
-                    "coordinator",
-                    "ApprovalRequest",
-                    make_approval_request("r1", 3),
-                ),
-            )
-            .unwrap();
-        apply(&mut session, result);
-        // The policy is edited out from under the accepted request.
-        session.policy_definition = Some(quorum_policy(
-            serde_json::json!({ "threshold": { "type": "n_of_m", "value": 5 } }),
-        ));
+        assert_eq!(
+            QuorumMode::effective_threshold_for_session(&session).unwrap(),
+            Some(ApprovalThreshold::Approvals(3))
+        );
         let err = mode
             .on_message(
                 &session,
@@ -2040,6 +2042,29 @@ mod tests {
                     "coordinator",
                     "Commitment",
                     commitment("quorum.rejected", false),
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), "InvalidPayload");
+    }
+
+    #[test]
+    fn the_payload_bound_on_required_approvals_stays() {
+        // Rule 2 bounds the ApprovalRequest payload itself; rule 6 loosens
+        // only the policy override.
+        let mode = QuorumMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = session_with(3, serde_json::json!({}));
+        let result = mode
+            .on_session_start(&session, &env("coordinator", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+        let err = mode
+            .on_message(
+                &session,
+                &env(
+                    "coordinator",
+                    "ApprovalRequest",
+                    make_approval_request("r1", 4),
                 ),
             )
             .unwrap_err();

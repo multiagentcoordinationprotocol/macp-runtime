@@ -59,7 +59,7 @@ pub fn require_allow(decision: PolicyDecision, what: &str) -> Result<(), tonic::
         PolicyDecision::Allow { .. } => Ok(()),
         PolicyDecision::Deny { reasons } => Err(tonic::Status::permission_denied(format!(
             "policy engine denied {what}: {}",
-            reasons.join("; ")
+            macp_core::policy::deny::join_messages(&reasons, "; ")
         ))),
         other => Err(tonic::Status::permission_denied(format!(
             "policy engine returned unrecognized decision for {what} (fail closed): {other:?}"
