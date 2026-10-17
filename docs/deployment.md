@@ -56,6 +56,23 @@ Control-plane RPCs that used to return a bare status (unknown session, read-only
 
 `SessionStart` now refuses a `session_id` longer than 128 bytes with `INVALID_SESSION_ID`. That is the RFC-MACP-0004 §11.2 floor (spec #194): every conformant runtime must accept ids up to 128 bytes, so ids within the cap are portable. A persisted session with a longer id still replays, because the cap applies only at admission. UUIDs (36 chars) are unaffected.
 
+### 5. Replay now restores the TTL deadline and default policy that the live runtime bound
+
+Up to 0.8.x, replay could rebuild a session from its log with two bindings that differed from what the live runtime had set at `SessionStart`. Startup recovery serves the replayed session and saves it over the snapshot, so these values changed on every restart:
+
+- **The TTL deadline.** Live acceptance computes it as the `SessionStart` envelope's `timestamp_unix_ms` plus `ttl_ms`, as RFC-MACP-0003 §2 requires. Replay used the runtime's own acceptance clock instead. When the client's clock disagreed with the runtime's, a restarted session expired that much earlier or later than it would have without the restart.
+- **The default policy.** When `policy_version` is empty, live acceptance binds `policy.default` and stores that definition (RFC-MACP-0012 §6.1). Replay left `policy_version` empty and stored no definition. So after a restart, `GetSession` reported an empty policy.
+
+Both now replay to the live values. On the first boot after upgrading, a session that a 0.8.x runtime had already restarted may log a single warning like this, and it does not recur:
+
+```
+WARN replay/snapshot ttl_expiry mismatch
+```
+
+This is the same benign pattern as the `suspension_intervals` warning described below. The snapshot holds the shifted deadline, while replay restores the original one, and the original is the deadline the runtime then serves. The `ttl_expiry` field is new to the consistency check (`validate_replay_consistency`), and it is why the divergence was invisible until now.
+
+The replay logic itself now lives in the library, as `macp_modes::replay`, and the server's log replay is a thin mapping onto it. An embedder that drives sessions through `macp_modes::step` and records the start and each event gets the same rebuild the server performs. See `docs/embedding.md`.
+
 ## Upgrading into registration-time policy validation
 
 This release tightens what the governance policy registry accepts, what the Quorum mode will bind, how the Decision evaluator reads a `weighted` round, when a decline may be finalized over a passing vote, and how a `percentage` Quorum threshold is computed. Ten changes are operationally visible -- seven tightenings, one relaxation (item 7, which cannot affect an existing deployment) and two corrections that *lower* a bar (items 9 and 10) -- and **item 6 is the only one that can change how an already-stored session replays** -- read it first if you have any persisted Decision session at all. Item 6 carries two independent predicates and **only one of them involves `weighted`**: the other reaches any Decision policy that sets `commitment.allow_decline_over_approval: true`, `majority` policies included. Read this section before upgrading any deployment that sets `MACP_POLICIES_DIR`, or that has persisted sessions bound to a policy with a Quorum `threshold`, a `weighted` `voting.algorithm`, or `commitment.allow_decline_over_approval: true`. `CHANGELOG.md` is generated from commit subjects and does not carry this detail.

@@ -41,8 +41,8 @@ use macp_core::mode::MessageContext;
 use macp_core::policy::PolicyDefinition;
 use macp_core::session::{
     extract_ttl_ms, parse_session_start_payload, requires_strict_session_start,
-    validate_canonical_session_start_payload_for_mode, validate_session_id_for_acceptance, Session,
-    SessionState, CURRENT_SEMANTICS_REV, MAX_SUSPEND_MS,
+    resolve_max_suspend_ms, validate_canonical_session_start_payload_for_mode,
+    validate_session_id_for_acceptance, Session, SessionState, CURRENT_SEMANTICS_REV,
 };
 use macp_pb::pb::{Envelope, SessionStartPayload};
 use std::sync::Arc;
@@ -329,8 +329,8 @@ pub struct StartOptions {
     /// non-strict mode) is bound to this, so the Commitment version check is
     /// never vacuous.
     pub descriptor_mode_version: Option<String>,
-    /// The suspension cap bound when the payload sets none. `None`:
-    /// [`MAX_SUSPEND_MS`].
+    /// The suspension cap bound when the payload sets none. `None` (or a
+    /// non-positive value): [`MAX_SUSPEND_MS`](macp_core::session::MAX_SUSPEND_MS), via [`resolve_max_suspend_ms`].
     pub default_max_suspend_ms: Option<i64>,
     /// Overrides the session-id format check.
     pub session_id_validator: Option<SessionIdValidator>,
@@ -446,10 +446,9 @@ pub fn validate_session_start(
     } else {
         now_ms
     };
-    let max_suspend_ms = if payload.max_suspend_ms > 0 {
-        payload.max_suspend_ms
-    } else {
-        opts.default_max_suspend_ms.unwrap_or(MAX_SUSPEND_MS)
+    let max_suspend_ms = match opts.default_max_suspend_ms {
+        Some(default) if payload.max_suspend_ms <= 0 && default > 0 => default,
+        _ => resolve_max_suspend_ms(payload.max_suspend_ms),
     };
     Ok(ValidatedStart {
         ttl_expiry: ttl_base.saturating_add(ttl_ms),

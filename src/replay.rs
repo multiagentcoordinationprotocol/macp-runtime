@@ -4,10 +4,9 @@ use crate::mode_registry::ModeRegistry;
 use crate::pb::Envelope;
 use crate::policy::registry::PolicyRegistry;
 use crate::registry::PersistedSession;
-use crate::session::{
-    extract_ttl_ms, parse_session_start_payload, validate_canonical_session_start_payload_for_mode,
-    Session, SessionState,
-};
+use crate::session::{parse_session_start_payload, Session};
+use macp_modes::mode::Mode;
+use macp_modes::replay::{apply_event, replay_start, RecordedStart, ReplayEvent, ReplayOptions};
 
 /// Rebuild a `Session` from its append-only log.
 ///
@@ -71,104 +70,88 @@ fn try_replay_from_checkpoint(
 
     let mode = registry
         .get_mode(&session.mode)
-        .ok_or(MacpError::UnknownMode)?;
+        .ok_or(MacpError::UnknownMode)?
+        .instantiate()?;
 
     // Replay entries after the checkpoint
     for entry in &log_entries[idx + 1..] {
-        replay_entry(&mut session, session_id, entry, &mode)?;
+        replay_entry(&mut session, session_id, entry, mode.as_ref())?;
     }
 
     Ok(Some(session))
 }
 
-/// Replay a single log entry onto a session.
-fn replay_entry(
-    session: &mut Session,
-    session_id: &str,
-    entry: &LogEntry,
-    mode: &crate::mode_registry::ModeRef<'_>,
-) -> Result<(), MacpError> {
+/// The recorded acceptance clock of a log entry: `received_at_ms`, falling
+/// back to the envelope timestamp for legacy entries that recorded none.
+fn recorded_at(entry: &LogEntry) -> i64 {
+    if entry.received_at_ms != 0 {
+        entry.received_at_ms
+    } else {
+        entry.timestamp_unix_ms
+    }
+}
+
+/// Rebuild the envelope an `Incoming` entry recorded, filling the defaults
+/// legacy entries omitted.
+fn recorded_envelope(entry: &LogEntry, session_id: &str, session_mode: &str) -> Envelope {
+    Envelope {
+        macp_version: if entry.macp_version.is_empty() {
+            macp_core::MACP_VERSION.into()
+        } else {
+            entry.macp_version.clone()
+        },
+        mode: if entry.mode.is_empty() {
+            session_mode.into()
+        } else {
+            entry.mode.clone()
+        },
+        message_type: entry.message_type.clone(),
+        message_id: entry.message_id.clone(),
+        session_id: session_id.into(),
+        sender: entry.sender.clone(),
+        // Use original envelope timestamp for replay determinism;
+        // fall back to received_at_ms for legacy log entries.
+        timestamp_unix_ms: if entry.timestamp_unix_ms != 0 {
+            entry.timestamp_unix_ms
+        } else {
+            entry.received_at_ms
+        },
+        payload: entry.raw_payload.clone(),
+    }
+}
+
+/// The library replay event a log entry records, or `None` for an entry with
+/// no state effect (a checkpoint, or an `Internal` type this binary does not
+/// know).
+fn replay_event(session: &Session, session_id: &str, entry: &LogEntry) -> Option<ReplayEvent> {
     match entry.entry_kind {
-        EntryKind::Incoming => {
-            let replay_env = Envelope {
-                macp_version: if entry.macp_version.is_empty() {
-                    macp_core::MACP_VERSION.into()
-                } else {
-                    entry.macp_version.clone()
-                },
-                mode: if entry.mode.is_empty() {
-                    session.mode.clone()
-                } else {
-                    entry.mode.clone()
-                },
-                message_type: entry.message_type.clone(),
-                message_id: entry.message_id.clone(),
-                session_id: session_id.into(),
-                sender: entry.sender.clone(),
-                // Use original envelope timestamp for replay determinism;
-                // fall back to received_at_ms for legacy log entries.
-                timestamp_unix_ms: if entry.timestamp_unix_ms != 0 {
-                    entry.timestamp_unix_ms
-                } else {
-                    entry.received_at_ms
-                },
-                payload: entry.raw_payload.clone(),
-            };
-
-            if session.state != SessionState::Open {
-                if !replay_env.message_id.is_empty() {
-                    session.seen_message_ids.insert(replay_env.message_id);
-                }
-                return Ok(());
-            }
-
-            mode.authorize_sender(session, &replay_env)?;
-            // The acceptance clock replays as the recorded `received_at_ms`
-            // (the same value the live path passed), never wall-clock.
-            let ctx = macp_core::mode::MessageContext::new(if entry.received_at_ms != 0 {
-                entry.received_at_ms
-            } else {
-                entry.timestamp_unix_ms
-            });
-            let response = mode.on_message_at(session, &replay_env, &ctx)?;
-            session.apply_mode_response(response);
-            if !replay_env.message_id.is_empty() {
-                session.seen_message_ids.insert(replay_env.message_id);
-            }
-        }
+        // A participant message and the handoff synthetic accept are both
+        // `Incoming`; the log cannot tell them apart, so replay credits no
+        // participant activity for either (`ReplayOptions` below) and
+        // dispatches both at the recorded acceptance clock, never wall-clock.
+        EntryKind::Incoming => Some(ReplayEvent::Message {
+            envelope: recorded_envelope(entry, session_id, &session.mode),
+            accepted_at_ms: recorded_at(entry),
+        }),
         // Every arm here replays a runtime-authored entry that, per
         // RFC-MACP-0006 §3.2:117/:122, consumed no accepted ordinal and was
         // never delivered on a subscribe stream when it was written
         // (`src/runtime.rs`'s `make_internal_entry`) — replay does not change
         // that, it only rebuilds session state from the recorded stamp.
         EntryKind::Internal => match entry.message_type.as_str() {
-            "TtlExpired" => {
-                session.state = SessionState::Expired;
-            }
+            "TtlExpired" => Some(ReplayEvent::Expired),
             // RFC-MACP-0001 §7.3: cancellation replays to the terminal CANCELLED
             // state (distinct from EXPIRED).
-            "SessionCancel" => {
-                let _ = session.cancel();
-            }
+            "SessionCancel" => Some(ReplayEvent::Cancelled),
             // RFC-MACP-0001 §7.5 / RFC-MACP-0003 §2: suspend/resume are on the
             // replayed timeline; banking uses the recorded entry timestamp so a
             // suspended-then-resumed session replays to the identical deadline.
-            "SessionSuspend" => {
-                let at = if entry.received_at_ms != 0 {
-                    entry.received_at_ms
-                } else {
-                    entry.timestamp_unix_ms
-                };
-                let _ = session.suspend(at);
-            }
-            "SessionResume" => {
-                let at = if entry.received_at_ms != 0 {
-                    entry.received_at_ms
-                } else {
-                    entry.timestamp_unix_ms
-                };
-                let _ = session.resume(at);
-            }
+            "SessionSuspend" => Some(ReplayEvent::Suspended {
+                at_ms: recorded_at(entry),
+            }),
+            "SessionResume" => Some(ReplayEvent::Resumed {
+                at_ms: recorded_at(entry),
+            }),
             // An `Internal` entry this binary does not recognise (e.g. a log
             // written by a newer runtime version). Warn, not error: this is
             // runtime bookkeeping the *runtime itself* produced and owns the
@@ -187,13 +170,32 @@ fn replay_entry(
                     received_at_ms = entry.received_at_ms,
                     "replay: unrecognized internal log entry type; skipping"
                 );
+                None
             }
         },
-        EntryKind::Checkpoint => {
-            // Skip intermediate checkpoints when replaying from an earlier one
-        }
+        // Skip intermediate checkpoints when replaying from an earlier one.
+        EntryKind::Checkpoint => None,
     }
-    Ok(())
+}
+
+/// The server log records participant messages and runtime-originated ones
+/// alike as `Incoming`, so it credits no participant activity on replay.
+fn log_replay_options() -> ReplayOptions {
+    ReplayOptions::default().with_credit_participant_activity(false)
+}
+
+/// Replay a single log entry onto a session — a thin mapping onto
+/// [`macp_modes::replay::apply_event`].
+fn replay_entry(
+    session: &mut Session,
+    session_id: &str,
+    entry: &LogEntry,
+    mode: &dyn Mode,
+) -> Result<(), MacpError> {
+    match replay_event(session, session_id, entry) {
+        Some(event) => apply_event(session, event, mode, &log_replay_options()),
+        None => Ok(()),
+    }
 }
 
 /// Warn-only replay/snapshot divergence check (D7, promoted from
@@ -206,7 +208,8 @@ fn replay_entry(
 ///
 /// Compared: `state`, dedup count, `participants`, the bound versions
 /// (mode/configuration/policy, counted as one), `mode_state` (byte equality),
-/// `accumulated_suspended_ms`, `suspended_at_ms`, and `suspension_intervals`.
+/// `accumulated_suspended_ms`, `suspended_at_ms`, `ttl_expiry`, and
+/// `suspension_intervals`.
 ///
 /// Deliberately **warn-only**: making it fatal would turn a benign snapshot
 /// lag (a crash between the log append and the snapshot write) into a startup
@@ -282,6 +285,18 @@ pub fn validate_replay_consistency(
             "replay/snapshot suspended_at_ms mismatch"
         );
     }
+    // The TTL deadline (RFC-MACP-0003 §2), already suspension-adjusted by
+    // `Session::resume`. Decides when the session expires, so a divergence is
+    // a determinism bug even while `state` still agrees.
+    if replayed.ttl_expiry != snapshot.ttl_expiry {
+        mismatches += 1;
+        tracing::warn!(
+            session_id,
+            replayed_ttl_expiry = replayed.ttl_expiry,
+            snapshot_ttl_expiry = snapshot.ttl_expiry,
+            "replay/snapshot ttl_expiry mismatch"
+        );
+    }
     // Completed suspend/resume pairs (Phase 11b). These feed the
     // implicit-accept deadline walk (RFC-MACP-0010 §5.1(3)), so a snapshot
     // that disagrees with the log about *when* a session was paused is the
@@ -298,119 +313,69 @@ pub fn validate_replay_consistency(
     mismatches
 }
 
-/// Full replay from the SessionStart entry.
+/// Full replay from the SessionStart entry: the entry's recorded bindings
+/// become a [`RecordedStart`], and [`macp_modes::replay`] does the rest.
 fn replay_from_start(
     session_id: &str,
     log_entries: &[LogEntry],
     registry: &ModeRegistry,
     policy_registry: Option<&PolicyRegistry>,
 ) -> Result<Session, MacpError> {
-    // 1. Find the SessionStart entry
     let start_entry = log_entries
         .iter()
         .find(|e| e.entry_kind == EntryKind::Incoming && e.message_type == "SessionStart")
         .ok_or(MacpError::InvalidPayload)?;
 
-    // Determine mode: prefer entry-level field, fall back to empty for legacy
-    let mode_name = if start_entry.mode.is_empty() {
-        // Legacy v2 entry — cannot determine mode from log entry alone;
-        // caller should skip or use directory heuristic
+    // Legacy v2 entries recorded no mode — it cannot be determined from the
+    // log entry alone; the caller skips or uses the directory heuristic.
+    if start_entry.mode.is_empty() {
         return Err(MacpError::InvalidPayload);
-    } else {
-        &start_entry.mode
-    };
+    }
+    let mode_name = start_entry.mode.as_str();
+    let mode = registry
+        .get_mode(mode_name)
+        .ok_or(MacpError::UnknownMode)?
+        .instantiate()?;
 
-    let mode = registry.get_mode(mode_name).ok_or(MacpError::UnknownMode)?;
-
-    // 2. Parse SessionStartPayload
-    let require_complete_start = registry.requires_strict_session_start(mode_name);
-    let start_payload = if start_entry.raw_payload.is_empty() && !require_complete_start {
-        crate::pb::SessionStartPayload::default()
+    // The policy definition is re-resolved from the registry here (the log
+    // records only the requested `policy_version`; checkpoints carry the bound
+    // definition). An empty request resolves to `policy.default`, exactly as
+    // the acceptance path in `runtime.rs` did (RFC-MACP-0012 §6.1) — the
+    // session then binds that id, never an empty one.
+    let requested = parse_session_start_payload(&start_entry.raw_payload)
+        .map(|p| p.policy_version)
+        .unwrap_or_default();
+    let effective = if requested.is_empty() {
+        crate::policy::defaults::DEFAULT_POLICY_ID
     } else {
-        parse_session_start_payload(&start_entry.raw_payload)?
+        requested.as_str()
     };
+    let policy = policy_registry.and_then(|pr| pr.resolve(effective).ok());
+
+    let start = RecordedStart::new(
+        recorded_envelope(start_entry, session_id, mode_name),
+        // The acceptance clock recorded on the entry — never `Utc::now()`.
+        start_entry.received_at_ms,
+    )
+    // Replay under the semantics revision the session was accepted with
+    // (legacy entries record 0 via serde default).
+    .with_semantics_rev(start_entry.semantics_rev)
+    // Suspension cap recorded at acceptance; legacy entries (None) load as
+    // 0 = default-cap semantics, matching how they were accepted.
+    .with_max_suspend_ms(start_entry.bound_max_suspend_ms.unwrap_or(0))
+    // The binding recorded at acceptance (extension modes whose payload
+    // omitted mode_version). Never re-derived from the live registry —
+    // dynamic registrations may have changed or be absent after restart.
+    .with_bound_mode_version(start_entry.bound_mode_version.clone())
+    .with_policy(policy)
     // Same split as the acceptance path in `runtime.rs`: the registry decides
-    // whether the canonical contract applies, the validator decides which
-    // roster rule applies within it.
-    if require_complete_start {
-        validate_canonical_session_start_payload_for_mode(mode_name, &start_payload)?;
-    }
+    // whether the canonical contract applies.
+    .with_strict(registry.requires_strict_session_start(mode_name));
 
-    let ttl_ms = if !require_complete_start && start_payload.ttl_ms == 0 {
-        // Legacy experimental modes may have 0 ttl_ms
-        60_000i64
-    } else {
-        extract_ttl_ms(&start_payload)?
-    };
-
-    // 3. Construct base session — use original received_at_ms, never Utc::now()
-    let started_at_unix_ms = start_entry.received_at_ms;
-    let ttl_expiry = started_at_unix_ms.saturating_add(ttl_ms);
-
-    let env = Envelope {
-        macp_version: if start_entry.macp_version.is_empty() {
-            macp_core::MACP_VERSION.into()
-        } else {
-            start_entry.macp_version.clone()
-        },
-        mode: mode_name.to_string(),
-        message_type: "SessionStart".into(),
-        message_id: start_entry.message_id.clone(),
-        session_id: session_id.into(),
-        sender: start_entry.sender.clone(),
-        timestamp_unix_ms: if start_entry.timestamp_unix_ms != 0 {
-            start_entry.timestamp_unix_ms
-        } else {
-            start_entry.received_at_ms
-        },
-        payload: start_entry.raw_payload.clone(),
-    };
-
-    let mut session = Session::builder(session_id, mode_name, start_entry.sender.clone())
-        // Replay under the semantics revision the session was accepted with
-        // (legacy entries record 0 via serde default).
-        .semantics_rev(start_entry.semantics_rev)
-        // Suspension cap recorded at acceptance; legacy entries (None) load
-        // as 0 = default-cap semantics, matching how they were accepted.
-        .max_suspend_ms(start_entry.bound_max_suspend_ms.unwrap_or(0))
-        .ttl_expiry(ttl_expiry)
-        .ttl_ms(ttl_ms)
-        .started_at_unix_ms(started_at_unix_ms)
-        .participants(start_payload.participants.clone())
-        .intent(start_payload.intent.clone())
-        // Use the binding recorded at acceptance time when present (extension
-        // modes whose SessionStart payload omitted mode_version). Never re-derive
-        // from the live registry — dynamic registrations may have changed or be
-        // absent after restart. Legacy entries (None) keep the payload's value,
-        // preserving their original (possibly empty) binding semantics.
-        .mode_version(
-            start_entry
-                .bound_mode_version
-                .clone()
-                .unwrap_or_else(|| start_payload.mode_version.clone()),
-        )
-        .configuration_version(start_payload.configuration_version.clone())
-        .policy_version(start_payload.policy_version.clone())
-        .context_id(start_payload.context_id.clone())
-        .extensions(start_payload.extensions.clone())
-        .roots(start_payload.roots.clone())
-        .policy_definition(if !start_payload.policy_version.is_empty() {
-            policy_registry.and_then(|pr| pr.resolve(&start_payload.policy_version).ok())
-        } else {
-            None
-        })
-        .build();
-
-    // 4. Call mode.on_session_start(), apply response
-    let response = mode.on_session_start(&session, &env)?;
-    session.seen_message_ids.insert(env.message_id.clone());
-    session.apply_mode_response(response);
-
-    // 5. Replay subsequent entries
+    let mut session = replay_start(&start, mode.as_ref())?;
     for entry in log_entries.iter().skip(1) {
-        replay_entry(&mut session, session_id, entry, &mode)?;
+        replay_entry(&mut session, session_id, entry, mode.as_ref())?;
     }
-
     Ok(session)
 }
 
@@ -421,6 +386,7 @@ mod tests {
     use crate::decision_pb::VotePayload;
     use crate::log_store::EntryKind;
     use crate::pb::{CommitmentPayload, SessionResumePayload, SessionStartPayload};
+    use crate::session::SessionState;
     use prost::Message;
 
     fn make_registry() -> ModeRegistry {
@@ -1146,6 +1112,13 @@ mod tests {
         e.suspended_at_ms = Some(1_000);
         e.suspension_intervals = vec![(1_000, 6_000)];
         assert_eq!(validate_replay_consistency("s1", &a, &e), 6);
+
+        // The TTL deadline: a replay that re-based it on the acceptance clock
+        // instead of the SessionStart timestamp (RFC-MACP-0003 §2) diverged
+        // silently before this comparison existed.
+        let mut f = a.clone();
+        f.ttl_expiry = a.ttl_expiry.saturating_sub(5_000);
+        assert_eq!(validate_replay_consistency("s1", &a, &f), 1);
     }
 
     // ---------------------------------------------------------------------

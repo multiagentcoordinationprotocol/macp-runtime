@@ -28,6 +28,19 @@ pub const MAX_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 /// (RFC-MACP-0003 §2) — see [`Session::effective_max_suspend_ms`].
 pub const MAX_SUSPEND_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
+/// The suspension cap a new session binds: `SessionStart.max_suspend_ms`
+/// when positive, else [`MAX_SUSPEND_MS`]. Record the result on the session
+/// (and in durable history) rather than re-resolving at replay, so a later
+/// default change never moves an existing session's cap. Negative payload
+/// values are refused earlier by SessionStart validation.
+pub fn resolve_max_suspend_ms(payload_value: i64) -> i64 {
+    if payload_value > 0 {
+        payload_value
+    } else {
+        MAX_SUSPEND_MS
+    }
+}
+
 /// Cap on the number of completed suspend/resume *cycles* a session may
 /// record in [`Session::suspension_intervals`]. Enforced in
 /// [`Session::resume`] at **every** revision, but with revision-dependent
@@ -1033,6 +1046,13 @@ mod tests {
             s.suspend(2).unwrap_err(),
             MacpError::SessionNotOpen
         ));
+    }
+
+    #[test]
+    fn resolve_max_suspend_ms_binds_payload_or_default() {
+        assert_eq!(resolve_max_suspend_ms(1234), 1234);
+        assert_eq!(resolve_max_suspend_ms(0), MAX_SUSPEND_MS);
+        assert_eq!(resolve_max_suspend_ms(-1), MAX_SUSPEND_MS);
     }
 
     #[test]
