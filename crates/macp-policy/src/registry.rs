@@ -166,7 +166,7 @@ impl PolicyRegistry {
     /// - The policy_id is in the reserved `policy.std.` namespace and the
     ///   descriptor is not the canonical RFC-MACP-0012 §5.2 definition
     /// - A policy with this id already exists
-    /// - The schema_version is 0
+    /// - The schema_version is 0, or not in [`crate::SUPPORTED_SCHEMA_VERSIONS`]
     pub fn register(&self, definition: PolicyDefinition) -> Result<(), String> {
         Self::validate_definition(&definition)?;
 
@@ -352,6 +352,13 @@ impl PolicyRegistry {
         }
         if definition.schema_version == 0 {
             return Err("INVALID_POLICY_DEFINITION: schema_version must be > 0".into());
+        }
+        if !crate::SUPPORTED_SCHEMA_VERSIONS.contains(&definition.schema_version) {
+            return Err(format!(
+                "INVALID_POLICY_DEFINITION: schema_version {} is not supported (supported: {:?})",
+                definition.schema_version,
+                crate::SUPPORTED_SCHEMA_VERSIONS
+            ));
         }
         if !definition.rules.is_object() {
             return Err("INVALID_POLICY_DEFINITION: rules must be a JSON object".into());
@@ -858,6 +865,44 @@ mod tests {
         policy.schema_version = 0;
         let err = registry.register(policy).unwrap_err();
         assert!(err.contains("schema_version"));
+    }
+
+    /// Admission and evaluation agree on the supported set: a version the
+    /// evaluator would deny at every commitment is refused at registration,
+    /// not accepted and left to fail on the first `Commitment`.
+    #[test]
+    fn register_unsupported_schema_version_fails() {
+        for version in [4, 99, u32::MAX] {
+            let mut policy = test_policy("policy.bad.schema");
+            policy.schema_version = version;
+            let err = refuse(policy);
+            assert!(
+                err.contains(&format!("schema_version {version} is not supported")),
+                "{version}: {err}"
+            );
+        }
+        for &version in crate::SUPPORTED_SCHEMA_VERSIONS {
+            let mut policy = test_policy("policy.ok.schema");
+            policy.schema_version = version;
+            accept(policy);
+        }
+    }
+
+    #[test]
+    fn policies_dir_rejects_an_unsupported_schema_version() {
+        let scratch = temp_dir("dir-schema-version");
+        let mut future = test_policy("policy.ops.future");
+        future.schema_version = 4;
+        write_policy(scratch.path(), "future.json", &future);
+
+        let registry = PolicyRegistry::new();
+        let err = registry.load_from_dir(scratch.path()).unwrap_err();
+        assert!(err.contains("future.json"), "error: {err}");
+        assert!(
+            err.contains("schema_version 4 is not supported"),
+            "error: {err}"
+        );
+        assert!(registry.get("policy.ops.future").is_none());
     }
 
     #[test]

@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 // keep the fail-open legacy arm forever so stored sessions replay identically
 // (§8), which is why the semantics are selected by the declared version on the
 // *stored descriptor* and never by the runtime's release.
-const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3];
+pub use crate::SUPPORTED_SCHEMA_VERSIONS;
 
 fn check_schema_version(policy: &PolicyDefinition) -> Option<PolicyDecision> {
     if !SUPPORTED_SCHEMA_VERSIONS.contains(&policy.schema_version) {

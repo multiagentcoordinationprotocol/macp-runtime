@@ -7,6 +7,15 @@
 //! [`macp_core::PolicyEvaluator`]. A consumer that wants different governance
 //! can implement `macp_core::PolicyEvaluator` itself and inject it instead.
 
+/// Every `PolicyDefinition.schema_version` this engine can evaluate (RFC-MACP-0012
+/// §8). The registry refuses any other value at admission and the evaluator
+/// denies it at commitment time, so the two can never disagree. Version 3 is
+/// the first *semantic* bump (the empty-tally rule, see `evaluator.rs`);
+/// versions 1 and 2 stay supported forever so stored sessions replay
+/// identically. Embedders building their own admission path should check
+/// membership here rather than hard-coding the list.
+pub const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3];
+
 pub mod defaults;
 pub mod evaluator;
 pub mod registry;
