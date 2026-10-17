@@ -1,0 +1,8 @@
+{
+  "name": "cmt_hash_008_noncanonical_claim",
+  "description": "the wire of cmt_hash_007_mismatch with 001's hash in uppercase hex; a claimed hash not in canonical form is mismatch, never normalized",
+  "label": "macp-commitment-hash/1",
+  "wire_hex": "0a02633112116465636973696f6e2e617070726f7665641a047365616d220e7365616c6564206279207365616d2a156d6163702e6d6f64652e6465636973696f6e2e76313205312e302e303a05312e302e304001",
+  "claimed_hash": "sha256:9F58E9D114D11860D48AA2BCB8CDA458B9618B1CC8560595A802B68C4AF85D41",
+  "expected_outcome": "mismatch"
+}

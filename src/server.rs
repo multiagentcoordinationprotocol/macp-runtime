@@ -986,6 +986,8 @@ impl MacpRuntimeService for MacpServer {
                     register_policy: !self.policies_read_only,
                     list_policies: true,
                     list_changed: true,
+                    // Advisory (policy.proto): admission stays authoritative.
+                    rule_extensions: self.runtime.policy_registry().rule_extension_names(),
                 }),
                 experimental: Some(crate::pb::ExperimentalCapabilities {
                     features: HashMap::from([
@@ -1402,6 +1404,13 @@ impl MacpRuntimeService for MacpServer {
             .authenticate_metadata(request.metadata())
             .await
             .map_err(Self::status_from_error)?;
+        // RFC-MACP-0004 §4.1 / RFC-MACP-0006 §3.4: `true` only when the
+        // sender was authenticated per RFC-MACP-0004 §3. Every Signal on the
+        // bus entered through this server's security layer, which derived its
+        // `sender` from the credential, so the layer decides for all of them;
+        // dev mode takes the bearer value as the sender (self-assertion) and
+        // reports `false`.
+        let sender_authenticated = self.security.authenticates_senders();
         let mut rx = self.runtime.subscribe_signals();
         let stream = async_stream::try_stream! {
             loop {
@@ -1409,6 +1418,7 @@ impl MacpRuntimeService for MacpServer {
                     Ok(envelope) => {
                         yield WatchSignalsResponse {
                             envelope: Some(envelope),
+                            sender_authenticated,
                         };
                     }
                     // Surface lag instead of silently ending the stream: a
@@ -2493,6 +2503,89 @@ mod tests {
             "Bearer agent://orchestrator".parse().unwrap(),
         );
         req
+    }
+
+    /// RFC-MACP-0012 §4 / `policy.proto` field 4: Initialize advertises the
+    /// vendor-extension keys the bound policy registry admits, sorted, and
+    /// none when the registry has none.
+    #[tokio::test]
+    async fn initialize_advertises_the_registrys_rule_extensions() {
+        struct AnyValue;
+        impl macp_core::policy::RuleExtension for AnyValue {
+            fn validate(&self, _: &serde_json::Value) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let advertised = |server: MacpServer| async move {
+            server
+                .initialize(Request::new(InitializeRequest {
+                    supported_protocol_versions: vec!["1.0".into()],
+                    ..Default::default()
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+                .capabilities
+                .unwrap()
+                .policy_registry
+                .unwrap()
+                .rule_extensions
+        };
+
+        let (server, _) = make_server();
+        assert!(advertised(server).await.is_empty());
+
+        let ext = || Arc::new(AnyValue) as Arc<dyn macp_core::policy::RuleExtension>;
+        let policies = crate::policy::registry::PolicyRegistry::new()
+            .with_rule_extensions([
+                ("x-org.zeta".to_string(), ext()),
+                ("x-com.alpha".to_string(), ext()),
+            ])
+            .unwrap();
+        let runtime = Arc::new(Runtime::with_registries(
+            Arc::new(crate::storage::MemoryBackend),
+            Arc::new(SessionRegistry::new()),
+            Arc::new(LogStore::new()),
+            Arc::new(crate::mode_registry::ModeRegistry::build_default(Arc::new(
+                macp_policy::DefaultPolicyEvaluator,
+            ))),
+            Arc::new(policies),
+        ));
+        let server = MacpServer::new(runtime, SecurityLayer::dev_mode());
+        assert_eq!(advertised(server).await, ["x-com.alpha", "x-org.zeta"]);
+    }
+
+    /// RFC-MACP-0004 §4.1 / RFC-MACP-0006 §3.4: dev-mode auth takes the
+    /// bearer value as the sender, which is self-assertion, not
+    /// authentication — so every Signal it forwards is marked
+    /// `sender_authenticated = false`. (The `true` side needs configured
+    /// auth; `tier1_jwt` pins it through the real binary.)
+    #[tokio::test]
+    async fn dev_mode_signals_are_marked_unauthenticated() {
+        let (server, _) = make_server();
+        let mut stream = server
+            .watch_signals(authed(WatchSignalsRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        let signal = Envelope {
+            macp_version: "1.0".into(),
+            message_type: "Signal".into(),
+            message_id: "sig-1".into(),
+            payload: crate::pb::SignalPayload {
+                signal_type: "progress".into(),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            ..Default::default()
+        };
+        assert!(do_send(&server, "agent://worker", signal).await.ok);
+        let delivered = tokio_stream::StreamExt::next(&mut stream)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivered.envelope.unwrap().message_id, "sig-1");
+        assert!(!delivered.sender_authenticated);
     }
 
     #[tokio::test]

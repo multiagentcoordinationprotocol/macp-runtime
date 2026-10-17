@@ -2,10 +2,22 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://multiagentcoordinationprotocol.io/schemas/cmt-hash-vector.schema.json",
   "title": "MACP canonical commitment hash test vector",
-  "description": "A reference vector for RFC-MACP-0013 Section 4 (canonical commitment hash algorithm). Pins the projected payload, the JCS-canonicalized bytes, the domain-separated preimage, and the resulting hash so a diverging implementation can identify at which step it diverged. This is a different shape from schemas/conformance/schema.json (session transcripts) and is validated separately.",
+  "description": "A reference vector for RFC-MACP-0013. A COMPUTE vector (Section 4, canonical commitment hash algorithm) pins the projected payload, the JCS-canonicalized bytes, the domain-separated preimage, and the resulting hash so a diverging implementation can identify at which step it diverged; verifying its own hash against the payload's wire encoding is *match*. A VERIFY vector (Section 6) pins a payload's Protobuf wire encoding, a claimed hash, and the one outcome a conforming verifier MUST return. This is a different shape from schemas/conformance/schema.json (session transcripts) and is validated separately.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["name", "description", "label", "payload", "jcs_utf8_hex", "preimage_utf8_hex", "hash"],
+  "required": ["name", "description", "label"],
+  "oneOf": [
+    {
+      "title": "compute vector",
+      "required": ["payload", "jcs_utf8_hex", "preimage_utf8_hex", "hash"],
+      "not": { "anyOf": [{ "required": ["wire_hex"] }, { "required": ["claimed_hash"] }, { "required": ["expected_outcome"] }] }
+    },
+    {
+      "title": "verify vector",
+      "required": ["wire_hex", "claimed_hash", "expected_outcome"],
+      "not": { "anyOf": [{ "required": ["payload"] }, { "required": ["jcs_utf8_hex"] }, { "required": ["preimage_utf8_hex"] }, { "required": ["hash"] }, { "required": ["must_differ_from"] }] }
+    }
+  ],
   "properties": {
     "name": {
       "type": "string",
@@ -75,6 +87,20 @@
       "type": "string",
       "description": "Name of another vector whose 'hash' this vector's 'hash' MUST NOT equal. Machine-checked by scripts/check-cmt-hash-vectors.py.",
       "pattern": "^cmt_hash_[0-9]{3}_[a-z_]+$"
+    },
+    "wire_hex": {
+      "type": "string",
+      "description": "Verify vectors only: lowercase hex of the CommitmentPayload's Protobuf wire encoding, exactly as received, so unknown fields stay observable. May be empty: a zero-length encoding is the all-default payload (RFC-MACP-0013 Section 6).",
+      "pattern": "^([0-9a-f]{2})*$"
+    },
+    "claimed_hash": {
+      "type": "string",
+      "description": "Verify vectors only: the hash a counterparty claims for the payload. Deliberately unconstrained: a claim not in canonical form is a valid input whose outcome is mismatch (RFC-MACP-0013 Section 6)."
+    },
+    "expected_outcome": {
+      "type": "string",
+      "description": "Verify vectors only: the one outcome a conforming verifier MUST return (RFC-MACP-0013 Section 6). cannot_verify is reserved for the payload encoding, never the claim.",
+      "enum": ["match", "mismatch", "cannot_verify"]
     }
   }
 }

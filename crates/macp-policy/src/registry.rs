@@ -204,9 +204,9 @@ impl PolicyRegistry {
         Ok(self)
     }
 
-    /// The vendor-extension keys this registry admits, sorted — the value a
-    /// runtime advertises in `PolicyRegistryCapability.rule_extensions` once
-    /// that proto field exists (proposal S1 §9).
+    /// The vendor-extension keys this registry admits, sorted — the value the
+    /// runtime advertises in `PolicyRegistryCapability.rule_extensions`
+    /// (`policy.proto` field 4, RFC-MACP-0012 §4).
     pub fn rule_extension_names(&self) -> Vec<String> {
         self.rule_extensions.keys().cloned().collect()
     }
@@ -2701,6 +2701,14 @@ mod tests {
     /// `invalid-*-rules/*.json` and `invalid-policy-descriptors/*.json` is
     /// refused. This is the closest thing to a JSON-Schema run the runtime
     /// has, and it is what proves the hand-written mirrors actually fire.
+    ///
+    /// Since spec `59ae57d` every valid fixture carries the vendor-extension
+    /// key `x-com.example.gov`. The schema leaves its value opaque, but
+    /// admission (RFC-MACP-0012 §4) refuses an extension the runtime does not
+    /// implement, so the valid fixtures register against a registry that
+    /// implements it ([`with_gov_extension`]) and are refused by one that
+    /// does not. The invalid fixtures are refused by the implementing
+    /// registry, so no refusal here is merely "extension not implemented".
     #[test]
     fn canonical_schema_fixtures_register_or_are_refused() {
         let Some(dir) = canonical_schema_dir() else {
@@ -2723,10 +2731,19 @@ mod tests {
         let mut checked = 0;
         for mode in ["decision", "proposal", "task", "handoff", "quorum"] {
             let rules = read(&tests.join(format!("valid-policy-rules/{mode}.json")));
-            let policy = policy_for(&format!("macp.mode.{mode}.v1"), rules);
-            PolicyRegistry::new()
+            let policy = policy_for(&format!("macp.mode.{mode}.v1"), rules.clone());
+            with_gov_extension()
                 .register(policy)
                 .unwrap_or_else(|e| panic!("valid-policy-rules/{mode}.json refused: {e}"));
+            if rules.get("x-com.example.gov").is_some() {
+                let err = PolicyRegistry::new()
+                    .register(policy_for(&format!("macp.mode.{mode}.v1"), rules))
+                    .expect_err("an unimplemented vendor extension is admitted");
+                assert!(
+                    err.contains("implements no vendor extension 'x-com.example.gov'"),
+                    "valid-policy-rules/{mode}.json: {err}"
+                );
+            }
             checked += 1;
             let sub = if mode == "decision" {
                 "invalid-policy-rules".to_string()
@@ -2735,7 +2752,7 @@ mod tests {
             };
             for path in json_files(&sub) {
                 let policy = policy_for(&format!("macp.mode.{mode}.v1"), read(&path));
-                let err = PolicyRegistry::new()
+                let err = with_gov_extension()
                     .register(policy)
                     .err()
                     .unwrap_or_else(|| panic!("{} was admitted", path.display()));

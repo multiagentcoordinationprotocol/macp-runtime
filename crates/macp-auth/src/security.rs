@@ -506,6 +506,14 @@ impl SecurityLayer {
         self.auth_chain.is_some()
     }
 
+    /// Whether every identity this layer yields was authenticated per
+    /// RFC-MACP-0004 §3 — false only on the dev-mode path, which takes the
+    /// bearer value as the sender. This is what `WatchSignalsResponse.
+    /// sender_authenticated` reports (RFC-MACP-0004 §4.1).
+    pub fn authenticates_senders(&self) -> bool {
+        self.auth_chain.is_some() || !self.identities.is_empty()
+    }
+
     pub async fn enforce_rate_limit(
         &self,
         sender: &str,
@@ -599,6 +607,15 @@ mod tests {
         meta.insert("x-macp-agent-id", "agent://dev-bot".parse().unwrap());
         let err = layer.authenticate_metadata(&meta).await.unwrap_err();
         assert!(matches!(err, MacpError::Unauthenticated));
+    }
+
+    /// RFC-MACP-0004 §3/§4.1: dev mode takes the bearer value as the sender
+    /// (self-assertion), so it authenticates no one; configured tokens do.
+    #[test]
+    fn only_configured_auth_authenticates_senders() {
+        assert!(!SecurityLayer::dev_mode().authenticates_senders());
+        let json = r#"[{"token":"tok-abc","sender":"agent://alice"}]"#;
+        assert!(layer_with_tokens(json).authenticates_senders());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Source
 
-The 34 `.json` fixtures in this directory, plus the 6 under `cmt-hash/`, were
+The 38 `.json` files in this directory, plus the 11 under `cmt-hash/` (10 vectors -- 001–005 compute, 006–010 verify -- and `vector-schema.json`), were
 copied, byte-identical, point-in-time, from:
 
 ```
@@ -8,7 +8,7 @@ multiagentcoordinationprotocol/schemas/conformance/
 multiagentcoordinationprotocol/schemas/conformance/cmt-hash/
 ```
 
-in the spec repo, commit `49518fbe4317c3d9c06414fd676e15f80a729523`, on
+in the spec repo, commit `59ae57d1b0019e55f9b03654df03536995cfa227`, on
 2026-10-16. That commit and date record the provenance of this import; this
 must stay equal to `SPEC_REV` in `.github/workflows/ci.yml`.
 

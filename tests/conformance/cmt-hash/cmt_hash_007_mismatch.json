@@ -1,0 +1,8 @@
+{
+  "name": "cmt_hash_007_mismatch",
+  "description": "exactly the wire of cmt_hash_001_minimal; the claimed hash differs from 001's hash in one hex digit",
+  "label": "macp-commitment-hash/1",
+  "wire_hex": "0a02633112116465636973696f6e2e617070726f7665641a047365616d220e7365616c6564206279207365616d2a156d6163702e6d6f64652e6465636973696f6e2e76313205312e302e303a05312e302e304001",
+  "claimed_hash": "sha256:9f59e9d114d11860d48aa2bcb8cda458b9618b1cc8560595a802b68c4af85d41",
+  "expected_outcome": "mismatch"
+}

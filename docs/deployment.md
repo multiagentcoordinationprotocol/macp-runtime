@@ -297,7 +297,7 @@ Two consequences worth knowing:
 | `MACP_STRICT_RECOVERY` | off | Set to `1` to fail on any recovery error |
 | `MACP_POLICIES_DIR` | -- | Directory of governance policy JSON files preloaded at startup; a file that fails validation aborts startup, and the wire registry becomes read-only |
 | `MACP_POLICIES_DRY_RUN` | off | Set to `1` to validate `MACP_POLICIES_DIR` and exit `0`/`1` without starting the server |
-| `MACP_POLICY_SCHEMAS_DIR` | -- | **Development and CI only; the server never reads it.** Path to the spec repository's `schemas/json/policy` directory, used by the `enum_lists_match_the_canonical_schemas` parity test -- see the warning below |
+| `MACP_POLICY_SCHEMAS_DIR` | -- | **Development and CI only; the server never reads it.** Path to the spec repository's `schemas/json/policy` directory, used by the `enum_lists_match_the_canonical_schemas`, `closed_key_sets_match_the_canonical_schemas` and `canonical_schema_fixtures_register_or_are_refused` parity tests (all three run in the `conformance-oracle` CI job) -- see the warning below |
 | `RUST_LOG` | `info` | Log level filter |
 
 `MACP_POLICY_SCHEMAS_DIR` is listed here because it is otherwise documented nowhere, and a contributor changing a registration mirror needs it. It is read only by `macp-policy`'s parity unit test, which asserts the hand-written value-domain mirrors in `crates/macp-policy/src/registry.rs` still match the canonical schemas. Two warnings:

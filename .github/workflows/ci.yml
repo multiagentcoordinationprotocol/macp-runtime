@@ -36,7 +36,7 @@ env:
   # of truth -- and files one tracked issue when upstream moves ahead of it in a
   # way that touches the mirrored trees. Pin without that watcher and the gate
   # quietly rots; that pairing is the whole design.
-  SPEC_REV: "49518fbe4317c3d9c06414fd676e15f80a729523"
+  SPEC_REV: "59ae57d1b0019e55f9b03654df03536995cfa227"
 
 jobs:
   actionlint:
@@ -683,21 +683,32 @@ jobs:
       # not `#[ignore]`d. Here the env var is set, so a missing directory
       # panics instead of skipping.
       #
-      # The name is pinned with `--exact` and the run is asserted to have
+      # Three tests read the canonical schemas: the enum/bound mirrors, the
+      # closed key sets (RFC-MACP-0012 §4), and the spec's own
+      # schemas/json/tests/{valid,invalid}-*-rules fixtures driven through
+      # registration. All three skip without the spec checkout, so before
+      # this step ran the last two they had never executed in CI.
+      #
+      # Each name is pinned with `--exact` and each run is asserted to have
       # executed exactly one test: libtest exits 0 when a filter matches
-      # nothing, so a rename would otherwise silently retire this gate.
+      # nothing, so a rename would otherwise silently retire the gate.
       - name: Policy validators match the canonical schemas
         env:
           MACP_POLICY_SCHEMAS_DIR: ${{ github.workspace }}/spec-repo/schemas/json/policy
-          TEST_NAME: registry::tests::enum_lists_match_the_canonical_schemas
         run: |
           set -o pipefail
-          log="${RUNNER_TEMP:-/tmp}/policy-parity.log"
-          cargo test -p macp-policy --lib -- --exact "$TEST_NAME" | tee "$log"
-          grep -q '^test result: ok\. 1 passed' "$log" || {
-            echo "::error::'$TEST_NAME' matched no test — was it renamed or moved?"
-            exit 1
-          }
+          for TEST_NAME in \
+            registry::tests::enum_lists_match_the_canonical_schemas \
+            registry::tests::closed_key_sets_match_the_canonical_schemas \
+            registry::tests::canonical_schema_fixtures_register_or_are_refused
+          do
+            log="${RUNNER_TEMP:-/tmp}/policy-parity-${TEST_NAME##*::}.log"
+            cargo test -p macp-policy --lib -- --exact "$TEST_NAME" | tee "$log"
+            grep -q '^test result: ok\. 1 passed' "$log" || {
+              echo "::error::'$TEST_NAME' matched no test — was it renamed or moved?"
+              exit 1
+            }
+          done
 
       # `macp_core::error::ERROR_CODE_REGISTRY` mirrors the spec's
       # registries/error-codes.md (HTTP column, and the S13 gRPC column once

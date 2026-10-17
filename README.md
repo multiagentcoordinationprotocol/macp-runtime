@@ -88,7 +88,7 @@ and the individual mode RFCs.
 
 - `StreamSession` binds one gRPC stream to one session and emits accepted envelopes in order
   - Passive subscribe (RFC-MACP-0006-A1): a `subscribe_session_id` + `after_sequence` frame replays accepted history and then delivers live envelopes; allowed for declared participants, the initiator, or observer identities
-- `WatchSignals` broadcasts ambient Signal envelopes to all subscribers in real time; Signals never enter session history
+- `WatchSignals` broadcasts ambient Signal envelopes to all subscribers in real time; Signals never enter session history. Each response's `sender_authenticated` is `true` only under configured auth (JWT/static bearer) -- dev-mode Signals are marked `false`
 
 ### Session lifecycle observability
 
