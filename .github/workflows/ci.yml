@@ -699,6 +699,22 @@ jobs:
             exit 1
           }
 
+      # `macp_core::error::ERROR_CODE_REGISTRY` mirrors the spec's
+      # registries/error-codes.md (HTTP column, and the S13 gRPC column once
+      # SPEC_REV carries it). Same exact-name/one-test guard as above.
+      - name: Error-code registry matches the canonical table
+        env:
+          MACP_ERROR_REGISTRY_PATH: ${{ github.workspace }}/spec-repo/registries/error-codes.md
+          TEST_NAME: error::tests::registry_matches_the_spec_table
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP:-/tmp}/error-registry-parity.log"
+          cargo test -p macp-core --lib -- --exact "$TEST_NAME" | tee "$log"
+          grep -q '^test result: ok\. 1 passed' "$log" || {
+            echo "::error::'$TEST_NAME' matched no test — was it renamed or moved?"
+            exit 1
+          }
+
   # Build-only Docker gate: proves the published image still builds without
   # pushing anything. The push happens in docker.yml on main/tags. Added after
   # the A-E merge broke the main image build while its (non-required) check

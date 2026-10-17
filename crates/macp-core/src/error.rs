@@ -339,50 +339,52 @@ mod tests {
         );
     }
 
-    /// The HTTP column must equal the spec's `registries/error-codes.md`
-    /// table. Reads the spec checkout named by `MACP_ERROR_REGISTRY_PATH`
-    /// (CI: the `SPEC_REV` export); skipped when unset. The gRPC column is
-    /// pinned once the spec ships it (S13) — then this test reads it too.
+    /// The registry table must equal the spec's `registries/error-codes.md`,
+    /// row for row: the HTTP column always, and the gRPC column (S13, spec
+    /// #189) whenever the checked-out spec has it. Columns are located by
+    /// header, so the test survives column reordering. Reads the file named by
+    /// `MACP_ERROR_REGISTRY_PATH` (CI: the `SPEC_REV` checkout); skipped when
+    /// unset, and a set-but-missing path panics by design.
     #[test]
-    fn http_column_matches_the_spec_registry() {
+    fn registry_matches_the_spec_table() {
         let Ok(path) = std::env::var("MACP_ERROR_REGISTRY_PATH") else {
             return;
         };
         let text = std::fs::read_to_string(&path).expect("MACP_ERROR_REGISTRY_PATH is readable");
+        let split = |line: &str| -> Vec<String> {
+            line.trim()
+                .trim_matches('|')
+                .split('|')
+                .map(|c| c.trim().trim_matches('`').to_string())
+                .collect()
+        };
+        let mut lines = text.lines().filter(|l| l.trim_start().starts_with('|'));
+        let header = split(lines.next().expect("a registry table"));
+        let col = |name: &str| header.iter().position(|h| h.eq_ignore_ascii_case(name));
+        let code_col = col("Code").expect("Code column");
+        let http_col = col("HTTP Status").expect("HTTP Status column");
+        let grpc_col = col("gRPC Status");
         let mut seen = 0;
-        for line in text.lines() {
-            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
-            if cells.len() < 4
-                || cells[1].is_empty()
-                || !cells[1].chars().all(|c| c.is_ascii_uppercase() || c == '_')
-            {
-                continue;
-            }
-            let Ok(http) = cells[3].parse::<u16>() else {
+        for line in lines {
+            let cells = split(line);
+            let Some(code) = cells.get(code_col) else {
                 continue;
             };
-            let row = registry_entry(cells[1]).unwrap_or_else(|| panic!("{} missing", cells[1]));
-            assert_eq!(row.http, http, "{}", cells[1]);
-            if let Some(grpc) = cells.iter().find(|c| {
-                c.chars().all(|ch| ch.is_ascii_uppercase() || ch == '_') && registry_grpc_name(c)
-            }) {
-                assert_eq!(row.grpc.grpc_name(), *grpc, "{}", cells[1]);
+            if code.is_empty() || code.starts_with('-') {
+                continue;
+            }
+            let row = registry_entry(code)
+                .unwrap_or_else(|| panic!("{code} missing from ERROR_CODE_REGISTRY"));
+            assert_eq!(row.http.to_string(), cells[http_col], "{code} HTTP");
+            if let Some(g) = grpc_col {
+                assert_eq!(row.grpc.grpc_name(), cells[g], "{code} gRPC");
             }
             seen += 1;
         }
-        assert_eq!(seen, ERROR_CODE_REGISTRY.len(), "every row compared");
-    }
-
-    fn registry_grpc_name(cell: &str) -> bool {
-        [
-            "INVALID_ARGUMENT",
-            "NOT_FOUND",
-            "ALREADY_EXISTS",
-            "PERMISSION_DENIED",
-            "RESOURCE_EXHAUSTED",
-            "FAILED_PRECONDITION",
-            "INTERNAL",
-        ]
-        .contains(&cell)
+        assert_eq!(
+            seen,
+            ERROR_CODE_REGISTRY.len(),
+            "every registry row compared"
+        );
     }
 }
