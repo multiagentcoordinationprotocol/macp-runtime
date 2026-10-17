@@ -2475,7 +2475,7 @@ mod tests {
         );
         e.message_id = reserved_id("h1");
         assert!(matches!(
-            crate::step::validate_message(&session, &e, &mode).unwrap_err(),
+            crate::step::validate_message(&session, &e, &mode, 0).unwrap_err(),
             MacpError::Forbidden
         ));
 
@@ -2483,7 +2483,7 @@ mod tests {
         let mut authorized = e.clone();
         authorized.sender = "target".into();
         assert!(matches!(
-            crate::step::validate_message(&session, &authorized, &mode).unwrap_err(),
+            crate::step::validate_message(&session, &authorized, &mode, 0).unwrap_err(),
             MacpError::InvalidEnvelope
         ));
     }

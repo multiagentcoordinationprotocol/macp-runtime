@@ -204,6 +204,14 @@ impl Session {
     /// Start building a `Session`. The three arguments are the fields with no
     /// meaningful default; everything else starts from documented defaults
     /// (see [`SessionBuilder`]) and is set with the builder's methods.
+    ///
+    /// Defaults worth knowing: `semantics_rev` is [`CURRENT_SEMANTICS_REV`]
+    /// and `ttl_expiry` is unbounded (`i64::MAX`). The builder performs **no**
+    /// SessionStart validation. An embedder accepting a client `SessionStart`
+    /// should use `macp_modes::step::accept_session_start`, which enforces the
+    /// session-id format, the canonical payload, TTL and the policy binding
+    /// exactly as the server kernel does; the builder is for replay, tests and
+    /// sessions the embedder has already validated.
     pub fn builder(
         session_id: impl Into<String>,
         mode: impl Into<String>,
@@ -332,6 +340,34 @@ impl Session {
             return Err(MacpError::SessionNotOpen);
         }
         self.state = SessionState::Cancelled;
+        self.suspended_at_ms = None;
+        Ok(())
+    }
+
+    /// Whether this session's deadline has passed as of `now_ms` and it must
+    /// be expired before anything else is processed: an `Open` session past
+    /// `ttl_expiry` (strict `>`, so a message exactly at the deadline is still
+    /// in time), or a `Suspended` session past its suspension cap
+    /// ([`Self::suspend_cap_exceeded`], RFC-MACP-0001 §7.5). Terminal sessions
+    /// never report `true`. The single predicate behind both the library
+    /// `step` and the server kernel, so they cannot disagree on expiry.
+    pub fn deadline_passed(&self, now_ms: i64) -> bool {
+        match self.state {
+            SessionState::Open => now_ms > self.ttl_expiry,
+            SessionState::Suspended => self.suspend_cap_exceeded(now_ms),
+            _ => false,
+        }
+    }
+
+    /// Move an `Open` or `Suspended` session to the terminal `Expired` state,
+    /// clearing any in-flight suspension. `Err(SessionNotOpen)` if already
+    /// terminal. Pure: a durable caller records its own expiry entry (the
+    /// server's internal `TtlExpired` log entry) at the time it observed.
+    pub fn expire(&mut self) -> Result<(), MacpError> {
+        if self.state.is_terminal() {
+            return Err(MacpError::SessionNotOpen);
+        }
+        self.state = SessionState::Expired;
         self.suspended_at_ms = None;
         Ok(())
     }

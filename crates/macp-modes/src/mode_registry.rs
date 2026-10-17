@@ -652,6 +652,14 @@ impl<'a> ModeRef<'a> {
             .ok_or(macp_core::error::MacpError::UnknownMode)
     }
 
+    /// A fresh instance of the mode, for the `crate::step` functions, which
+    /// take `&dyn Mode`. The kernel resolves the instance once per message, so
+    /// a concurrent `UnregisterExtMode` cannot split one message's checks
+    /// across two different modes.
+    pub fn instantiate(&self) -> Result<Box<dyn Mode>, macp_core::error::MacpError> {
+        Ok(self.factory()?.create())
+    }
+
     pub fn on_session_start(
         &self,
         session: &macp_core::session::Session,

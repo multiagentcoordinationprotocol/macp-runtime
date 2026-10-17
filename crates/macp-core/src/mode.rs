@@ -9,7 +9,7 @@
 /// `#[non_exhaustive]`: downstream wildcard arms must treat unknown responses
 /// as no-ops or rejections, never as resolutions.
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModeResponse {
     /// No state change needed.
     NoOp,

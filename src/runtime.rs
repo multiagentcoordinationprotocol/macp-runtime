@@ -11,7 +11,6 @@ use crate::policy::registry::PolicyRegistry;
 use crate::policy::PolicyDefinition;
 use crate::registry::SessionRegistry;
 use crate::session::{
-    extract_ttl_ms, parse_session_start_payload, validate_canonical_session_start_payload_for_mode,
     validate_session_id_for_acceptance, Session, SessionState, MAX_SUSPENSION_CYCLES,
 };
 use crate::storage::StorageBackend;
@@ -396,10 +395,10 @@ impl Runtime {
     ) -> Result<bool, MacpError> {
         let now = Utc::now().timestamp_millis();
         // An Open session past its deadline, or a Suspended session that has
-        // exceeded the MAX_SUSPEND_MS cap (RFC-MACP-0001 §7.5), expires.
-        let expires = (session.state == SessionState::Open && now > session.ttl_expiry)
-            || (session.state == SessionState::Suspended && session.suspend_cap_exceeded(now));
-        if expires {
+        // exceeded the MAX_SUSPEND_MS cap (RFC-MACP-0001 §7.5), expires. The
+        // predicate is the one `macp_modes::step` uses, so the library and the
+        // server cannot disagree on expiry.
+        if session.deadline_passed(now) {
             let entry =
                 Self::make_internal_entry("TtlExpired", b"", session_id, &session.mode, now);
             self.storage
@@ -407,8 +406,7 @@ impl Runtime {
                 .await
                 .map_err(|_| MacpError::StorageFailed)?;
             self.log_store.append(session_id, entry).await;
-            session.state = SessionState::Expired;
-            session.suspended_at_ms = None;
+            session.expire()?;
             self.metrics.record_session_expired(&session.mode);
             tracing::info!(session_id, "session expired via TTL");
             let _ = self
@@ -438,6 +436,12 @@ impl Runtime {
         env: &Envelope,
         max_open_sessions: Option<usize>,
     ) -> Result<ProcessResult, MacpError> {
+        // The checks themselves live in `macp_modes::step` — the library
+        // SessionStart acceptance path — so an embedder and this kernel run the
+        // identical sequence. Only the registry lookups (mode, descriptor
+        // version, strictness, policy) and the existing-session check are
+        // interposed here, in the order they always ran: mode lookup before
+        // payload validation, the duplicate check before policy resolution.
         if env.mode.trim().is_empty() {
             return Err(MacpError::InvalidEnvelope);
         }
@@ -446,9 +450,9 @@ impl Runtime {
         let mode = self
             .mode_registry
             .get_mode(mode_name)
-            .ok_or(MacpError::UnknownMode)?;
+            .ok_or(MacpError::UnknownMode)?
+            .instantiate()?;
 
-        let start_payload = parse_session_start_payload(&env.payload)?;
         // `requires_strict_session_start` stays the source of *whether* the
         // canonical contract applies: it reads the registry's per-entry
         // `strict_session_start` flag, which `promote_mode` sets for modes the
@@ -456,42 +460,33 @@ impl Runtime {
         // decides only *which* roster rule applies within that contract, and
         // defaults to the strict one for any mode it does not recognise — so a
         // promoted mode keeps full canonical validation.
-        let require_complete_start = self.mode_registry.requires_strict_session_start(mode_name);
-        if require_complete_start {
-            validate_canonical_session_start_payload_for_mode(mode_name, &start_payload)?;
+        //
+        // The descriptor version: a payload naming another `mode_version` is
+        // refused, and one omitting it (only possible for non-strict extension
+        // modes) is bound to the descriptor's, so the Commitment version check
+        // is never vacuous. The bound value is recorded on the SessionStart log
+        // entry so replay uses the recorded binding, never the live registry.
+        let mut opts = macp_modes::step::StartOptions::default()
+            .with_strict(self.mode_registry.requires_strict_session_start(mode_name));
+        if let Some(descriptor_version) = self.mode_registry.get_mode_version(mode_name) {
+            opts = opts.with_descriptor_mode_version(descriptor_version);
         }
-
-        // Validate mode_version matches the registered descriptor's version.
-        // When the payload omits mode_version (only possible for non-strict
-        // extension modes), bind the descriptor's version instead of leaving the
-        // session bound to "" — an empty binding makes the Commitment version
-        // check vacuous (any commitment with mode_version "" would match).
-        // The bound value is recorded on the SessionStart log entry so replay
-        // uses the recorded binding, never the live registry.
-        let descriptor_version = self.mode_registry.get_mode_version(mode_name);
-        if let Some(descriptor_version) = &descriptor_version {
-            if !start_payload.mode_version.is_empty()
-                && &start_payload.mode_version != descriptor_version
-            {
-                tracing::warn!(
-                    mode = mode_name,
-                    payload_version = %start_payload.mode_version,
-                    descriptor_version = %descriptor_version,
-                    "mode_version mismatch"
-                );
-                return Err(MacpError::InvalidEnvelope);
-            }
-        }
-        let bound_mode_version: Option<String> = if start_payload.mode_version.is_empty() {
-            descriptor_version
-        } else {
-            None
-        };
-        let effective_mode_version = bound_mode_version
-            .clone()
-            .unwrap_or_else(|| start_payload.mode_version.clone());
-
-        let ttl_ms = extract_ttl_ms(&start_payload)?;
+        // RFC-MACP-0003 §2: the TTL deadline is computed from the SessionStart
+        // envelope's timestamp_unix_ms, not wall-clock time, falling back to
+        // this acceptance clock when the envelope carries none. The resolved
+        // suspension cap is bound and recorded likewise (RFC-MACP-0001 §7.5).
+        let accepted_at = Utc::now().timestamp_millis();
+        let validated = macp_modes::step::validate_session_start(env, accepted_at, &opts)
+            .inspect_err(|err| {
+                if matches!(err, MacpError::InvalidEnvelope) {
+                    tracing::debug!(
+                        mode = mode_name,
+                        "SessionStart refused: invalid envelope or mode_version mismatch"
+                    );
+                }
+            })?;
+        let bound_mode_version = validated.bound_mode_version.clone();
+        let bound_max_suspend_ms = validated.max_suspend_ms;
 
         // Existing-session path: duplicate SessionStart handling. Take the
         // shared handle under a brief map read, then check dedup under the
@@ -508,71 +503,27 @@ impl Runtime {
             return Err(MacpError::SessionAlreadyExists);
         }
 
-        // Resolve the governance policy for this session.
         // RFC-MACP-0012 §6.1: policy_version is resolved at SessionStart; empty
-        // resolves to "policy.default". The resolved PolicyDescriptor is stored
-        // immutably on the session for deterministic replay (RFC-MACP-0003 §3).
-        let effective_policy_version = if start_payload.policy_version.is_empty() {
+        // resolves to "policy.default". The resolved definition is stored
+        // immutably on the session for deterministic replay (RFC-MACP-0003 §3);
+        // `accept` refuses a definition bound to another mode.
+        let effective_policy_version = if validated.requested_policy_version().is_empty() {
             crate::policy::defaults::DEFAULT_POLICY_ID.to_string()
         } else {
-            start_payload.policy_version.clone()
+            validated.requested_policy_version().to_string()
         };
-        let policy_definition = match self.policy_registry.resolve(&effective_policy_version) {
-            Ok(policy) => {
-                // RFC 6.1: reject if policy mode doesn't match session mode
-                if policy.mode != "*" && policy.mode != mode_name {
-                    return Err(MacpError::InvalidPolicyDefinition);
-                }
-                Some(policy)
-            }
-            Err(_) => {
-                return Err(MacpError::UnknownPolicyVersion);
-            }
-        };
+        let policy_definition = self
+            .policy_registry
+            .resolve(&effective_policy_version)
+            .map_err(|_| MacpError::UnknownPolicyVersion)?;
 
-        let accepted_at = Utc::now().timestamp_millis();
-        // RFC-MACP-0003 §2: TTL deadline is computed from the SessionStart
-        // envelope's timestamp_unix_ms, not wall-clock time. This ensures
-        // deterministic replay. Fall back to accepted_at if envelope has no timestamp.
-        let ttl_base = if env.timestamp_unix_ms > 0 {
-            env.timestamp_unix_ms
-        } else {
-            accepted_at
-        };
-        let ttl_expiry = ttl_base.saturating_add(ttl_ms);
-        // Resolve the suspension cap (RFC-MACP-0001 §7.5): the payload's
-        // positive value, else the runtime default. The RESOLVED value is
-        // bound on the session and recorded on the SessionStart log entry so
-        // replay uses it — never live configuration (RFC-MACP-0003 §2).
-        let bound_max_suspend_ms = if start_payload.max_suspend_ms > 0 {
-            start_payload.max_suspend_ms
-        } else {
-            macp_core::session::MAX_SUSPEND_MS
-        };
-        let session = Session::builder(env.session_id.clone(), mode_name, env.sender.clone())
-            .ttl_expiry(ttl_expiry)
-            .ttl_ms(ttl_ms)
-            .max_suspend_ms(bound_max_suspend_ms)
-            .started_at_unix_ms(accepted_at)
-            .participants(start_payload.participants.clone())
-            .intent(start_payload.intent.clone())
-            .mode_version(effective_mode_version)
-            .configuration_version(start_payload.configuration_version.clone())
-            .policy_version(effective_policy_version)
-            .context_id(start_payload.context_id.clone())
-            .extensions(start_payload.extensions.clone())
-            .roots(start_payload.roots.clone())
-            .policy_definition(policy_definition)
-            .build();
-
-        let response = mode.on_session_start(&session, env)?;
-        // The client boundary, on the start path too: the reserved
-        // `message_id` namespace is squattable through `SessionStart`, whose
-        // id enters `seen_message_ids` below. Runs after `on_session_start`
-        // (so existing roster rejections keep their error) and well before the
-        // commit-point append, and before the registry reservation — so a
-        // rejection needs no rollback and leaves no session behind.
-        mode.validate_client_envelope(&session, env)?;
+        // Builds the session at CURRENT_SEMANTICS_REV, runs `on_session_start`
+        // and the client boundary (the reserved `message_id` namespace is
+        // squattable through `SessionStart` too), applies the initial mode
+        // state and consumes the start's dedup slot — all before the registry
+        // reservation, so a rejection needs no rollback. Nothing is visible to
+        // another task until the commit-point append below succeeds.
+        let session = validated.accept(env, mode.as_ref(), Some(policy_definition))?;
         let semantics_rev = session.semantics_rev;
 
         // Reserve the session id atomically (dedup + max_open TOCTOU safety),
@@ -661,11 +612,6 @@ impl Runtime {
         self.log_store.create_session_log(&env.session_id).await;
         self.log_store.append(&env.session_id, incoming_entry).await;
 
-        session_guard
-            .seen_message_ids
-            .insert(env.message_id.clone());
-        session_guard.apply_mode_response(response);
-
         let result_state = session_guard.state.clone();
         // 3. Session snapshot — best-effort AFTER the durable append. The log
         // entry above is the COMMIT POINT: once it is durable, the session
@@ -743,7 +689,7 @@ impl Runtime {
     /// clock from `received_at_ms`, so any other value forks the live session
     /// from what the log rebuilds.
     ///
-    /// # No `step::commit`
+    /// # `step::commit_synthetic`, not `step::commit`
     ///
     /// The commit here is `seen_message_ids` + `apply_mode_response` only.
     /// `step::commit` would also call `record_participant_activity`, which
@@ -811,45 +757,37 @@ impl Runtime {
         session: &mut Session,
         now_ms: i64,
     ) -> Result<bool, MacpError> {
-        if session.state != SessionState::Open {
-            return Ok(false);
-        }
-        let Some(mode) = self.mode_registry.get_mode(&session.mode) else {
+        // A mode that vanished from the registry has nothing due.
+        let Some(mode) = self
+            .mode_registry
+            .get_mode(&session.mode)
+            .and_then(|m| m.instantiate().ok())
+        else {
             return Ok(false);
         };
-        let Some(syn) = mode.due_synthetic_envelope(session, now_ms) else {
+        // `next_synthetic` is the shared, pure half (`macp_modes::step`): the
+        // non-`Open` filter, the mode's `due_synthetic_envelope`, the dedup
+        // backstop, `authorize_sender` (mirroring replay, which authorizes every
+        // `Incoming` entry), and dispatch at the envelope's own timestamp. A
+        // step-only embedder runs the identical sequence through
+        // `step::advance`, so the two cannot drift.
+        let Some(syn) = macp_modes::step::next_synthetic(session, mode.as_ref(), now_ms)? else {
             return Ok(false);
         };
-        // Idempotence backstop. The mode's own contract already returns `None`
-        // once the envelope has been applied; this makes a mode that forgets
-        // append a duplicate entry impossible rather than merely unlikely.
-        if session.seen_message_ids.contains(&syn.message_id) {
-            return Ok(false);
-        }
-        // Mirrors replay, which authorizes every `Incoming` entry. The target
-        // is a declared participant by offer validation, so this always passes
-        // for handoff — but the seam is general.
-        mode.authorize_sender(session, &syn)?;
-        let response = mode.on_message_at(
-            session,
-            &syn,
-            &macp_core::mode::MessageContext::new(syn.timestamp_unix_ms),
-        )?;
 
         // COMMIT POINT: nothing above has mutated the session, so a failed
         // append rejects the *triggering* message with `StorageFailed` before
         // it consumed a dedup slot. RFC-MACP-0010 §5.1(2) forbids evaluating
         // that message without the accept in history, and this runtime never
         // acknowledges what it could not persist.
-        let entry = Self::make_incoming_entry(&syn, syn.timestamp_unix_ms);
+        let entry = Self::make_incoming_entry(&syn.envelope, syn.envelope.timestamp_unix_ms);
         self.storage
             .append_log_entry(session_id, &entry)
             .await
             .map_err(|_| MacpError::StorageFailed)?;
         self.log_store.append(session_id, entry).await;
 
-        session.seen_message_ids.insert(syn.message_id.clone());
-        session.apply_mode_response(response);
+        let syn = macp_modes::step::commit_synthetic(session, syn);
         self.metrics.record_message_accepted(&session.mode);
 
         tracing::info!(
@@ -923,8 +861,9 @@ impl Runtime {
                 // Durable expiry via the existing path: it appends the
                 // `TtlExpired` log entry, updates metrics/lifecycle, and marks
                 // the session Expired. `check_preconditions` and
-                // `maybe_expire_session` share the same strict `>`, OPEN-guarded
-                // rule, so this always expires.
+                // `maybe_expire_session` share one predicate,
+                // `Session::deadline_passed` (TTL for Open, the suspension cap
+                // for Suspended), so this always expires.
                 let expired = self.maybe_expire_session(&env.session_id, session).await?;
                 debug_assert!(expired, "check_preconditions reported Expired");
                 self.save_session_to_storage(session).await;
@@ -936,20 +875,18 @@ impl Runtime {
         let mode = self
             .mode_registry
             .get_mode(&session.mode)
-            .ok_or(MacpError::UnknownMode)?;
-        mode.authorize_sender(session, env)?;
-        // The client boundary (RFC-MACP-0010 §5.1(3)): shapes that are legal
-        // as recorded history but illegal as client submissions. Called here
-        // and NEVER on replay — replay re-reads entries that already passed
-        // this check when they were first accepted, and a runtime-synthesized
-        // envelope is not a client submission either. Placed after
-        // `authorize_sender` so the pre-existing Forbidden-before-InvalidPayload
-        // ordering is unchanged. This call is not optional plumbing: the
-        // runtime deliberately bypasses `macp_modes::step::validate_message`
-        // (which also calls the hook) so it can interpose the durable append
-        // between validation and commit, so without this line the runtime
-        // would have no client boundary at all.
-        mode.validate_client_envelope(session, env)?;
+            .ok_or(MacpError::UnknownMode)?
+            .instantiate()?;
+        // Sender authorization, then the client boundary (RFC-MACP-0010
+        // §5.1(3)): shapes that are legal as recorded history but illegal as
+        // client submissions. `step::admit` runs both, in that order, so the
+        // Forbidden-before-InvalidPayload ordering is unchanged. NEVER on
+        // replay — replay re-reads entries that already passed this check when
+        // they were first accepted, and a runtime-synthesized envelope is not a
+        // client submission either. The runtime drives the phases rather than
+        // `step::step` so it can interpose the durable append between
+        // validation and commit.
+        macp_modes::step::admit(session, env, mode.as_ref())?;
         // One acceptance clock for both the mode call and the log entry, so
         // replay (which re-reads received_at_ms) observes the identical time.
         let accepted_at_ms = Utc::now().timestamp_millis();
@@ -962,11 +899,7 @@ impl Runtime {
         // envelope can never provoke an append.
         self.synthesize_due_accept(&env.session_id, session, accepted_at_ms)
             .await?;
-        let response = mode.on_message_at(
-            session,
-            env,
-            &macp_core::mode::MessageContext::new(accepted_at_ms),
-        )?;
+        let response = macp_modes::step::dispatch(session, env, mode.as_ref(), accepted_at_ms)?;
 
         // 1. COMMIT POINT: write log entry to disk
         let incoming_entry = Self::make_incoming_entry(env, accepted_at_ms);
