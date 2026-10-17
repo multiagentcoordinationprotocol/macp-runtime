@@ -894,8 +894,12 @@ async fn initialize_rejects_unsupported_protocol_version() {
     let status = result.unwrap_err();
     assert_eq!(
         status.code(),
-        tonic::Code::FailedPrecondition,
-        "Expected FAILED_PRECONDITION for version mismatch"
+        tonic::Code::InvalidArgument,
+        "Expected INVALID_ARGUMENT for version mismatch (registry, S13)"
+    );
+    assert_eq!(
+        status.metadata().get("macp-error-code").unwrap(),
+        "UNSUPPORTED_PROTOCOL_VERSION"
     );
 }
 

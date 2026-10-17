@@ -440,6 +440,20 @@ async fn policy_enforcement_blocks_commitment_in_decision_mode() {
         "error code should be POLICY_DENIED, got: {:?}",
         ack.error
     );
+    // RFC-MACP-0012 §6.2 through the real boundary: structured denials with a
+    // stable code beside the legacy `reasons` strings.
+    let details: serde_json::Value =
+        serde_json::from_slice(&ack.error.as_ref().unwrap().details).expect("details are JSON");
+    let denials = details["denials"].as_array().expect("structured denials");
+    assert!(
+        denials.iter().any(|d| d["code"] == "threshold_not_met"),
+        "a unanimous shortfall is `threshold_not_met`: {details}"
+    );
+    assert_eq!(
+        details["reasons"].as_array().map(Vec::len),
+        Some(denials.len()),
+        "legacy `reasons` mirrors `denials`: {details}"
+    );
 }
 
 #[tokio::test]

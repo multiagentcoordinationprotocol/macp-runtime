@@ -236,9 +236,10 @@ impl Mode for TaskMode {
                     });
                     if !allow {
                         return Err(MacpError::PolicyDenied {
-                            reasons: vec![
-                                "reassignment after rejection not allowed by policy".into()
-                            ],
+                            reasons: vec![macp_core::policy::DenyReason::new(
+                                macp_core::policy::DenyCode::REASSIGNMENT_NOT_ALLOWED,
+                                "reassignment after rejection not allowed by policy",
+                            )],
                         });
                     }
                 }
@@ -272,9 +273,10 @@ impl Mode for TaskMode {
                         });
                         if !allow {
                             return Err(MacpError::PolicyDenied {
-                                reasons: vec![
-                                    "active assignee cannot reject without allow_reassignment_on_reject policy".into(),
-                                ],
+                                reasons: vec![macp_core::policy::DenyReason::new(
+                                    macp_core::policy::DenyCode::REASSIGNMENT_NOT_ALLOWED,
+                                    "active assignee cannot reject without allow_reassignment_on_reject policy",
+                                )],
                             });
                         }
                         // Policy permits: clear assignee, return to pre-assignment state

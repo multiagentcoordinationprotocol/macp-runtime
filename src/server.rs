@@ -212,13 +212,45 @@ impl MacpServer {
     }
 
     /// Serialize structured error details as JSON bytes for the `details` field.
-    /// Currently only `PolicyDenied` carries additional detail (its reasons list).
+    /// Currently only `PolicyDenied` carries additional detail:
+    ///
+    /// ```json
+    /// {"reasons": ["<message>", ...],
+    ///  "denials": [{"code": "veto", "message": "<message>", "participants": ["agent://a"]}, ...]}
+    /// ```
+    ///
+    /// `denials` is the structured form (RFC-MACP-0012 §6.2): a stable code per
+    /// reason, with participant identifiers carried beside the message, never
+    /// inside it. `reasons` keeps the pre-0.9 array-of-strings shape (now the
+    /// identifier-free messages) so an existing client keeps parsing.
     fn error_details_bytes(e: &MacpError) -> Vec<u8> {
         match e {
-            MacpError::PolicyDenied { reasons } => {
-                serde_json::to_vec(&serde_json::json!({ "reasons": reasons })).unwrap_or_default()
-            }
+            MacpError::PolicyDenied { reasons } => serde_json::to_vec(&serde_json::json!({
+                "reasons": reasons.iter().map(|r| r.message.as_str()).collect::<Vec<_>>(),
+                "denials": reasons,
+            }))
+            .unwrap_or_default(),
             _ => vec![],
+        }
+    }
+
+    /// A rejected stream frame as an inline `MACPError` (RFC-MACP-0001): the
+    /// registry code, the same structured details a unary `Ack` carries.
+    fn stream_inline_error(
+        err: &MacpError,
+        session_id: Option<&String>,
+        message_id: &str,
+    ) -> StreamSessionResponse {
+        StreamSessionResponse {
+            response: Some(crate::pb::stream_session_response::Response::Error(
+                PbMacpError {
+                    code: err.error_code().into(),
+                    message: err.to_string(),
+                    session_id: session_id.cloned().unwrap_or_default(),
+                    message_id: message_id.to_string(),
+                    details: Self::error_details_bytes(err),
+                },
+            )),
         }
     }
 
@@ -352,15 +384,15 @@ impl MacpServer {
         req: StreamSessionRequest,
         bound_session_id: &mut Option<String>,
         session_events: &mut Option<tokio::sync::broadcast::Receiver<Envelope>>,
-    ) -> Result<Vec<Envelope>, Status> {
+    ) -> Result<Vec<Envelope>, StreamFailure> {
         // RFC-MACP-0006-A1: Handle subscribe-only frame.
         // When subscribe_session_id is set and envelope is absent, subscribe to
         // the session's broadcast channel and replay accepted history.
         if !req.subscribe_session_id.is_empty() {
             if req.envelope.is_some() {
-                return Err(Status::invalid_argument(
+                return Err(StreamFailure::Terminal(Status::invalid_argument(
                     "StreamSessionRequest must not contain both envelope and subscribe_session_id",
-                ));
+                )));
             }
             return self
                 .process_subscribe_frame(
@@ -374,66 +406,71 @@ impl MacpServer {
         }
 
         let envelope = req.envelope.ok_or_else(|| {
-            Status::invalid_argument(
+            StreamFailure::Terminal(Status::invalid_argument(
                 "StreamSessionRequest must contain an envelope or subscribe_session_id",
-            )
+            ))
         })?;
+        let message_id = envelope.message_id.clone();
+        let rejected = |err: MacpError| StreamFailure::Rejected {
+            err,
+            message_id: message_id.clone(),
+        };
 
-        self.validate_envelope_shape(&envelope)
-            .map_err(Self::status_from_error)?;
+        self.validate_envelope_shape(&envelope).map_err(rejected)?;
         if envelope.session_id.trim().is_empty() {
-            return Err(Status::invalid_argument(
+            return Err(StreamFailure::Terminal(Status::invalid_argument(
                 "StreamSession requires a non-empty session_id",
-            ));
+            )));
         }
         if envelope.mode.trim().is_empty() {
-            return Err(Status::invalid_argument(
+            return Err(StreamFailure::Terminal(Status::invalid_argument(
                 "StreamSession requires a non-empty mode",
-            ));
+            )));
         }
         if let Some(bound) = bound_session_id.as_ref() {
             if bound != &envelope.session_id {
-                return Err(Status::invalid_argument(
+                return Err(StreamFailure::Terminal(Status::invalid_argument(
                     "StreamSession may only carry envelopes for one session_id",
-                ));
+                )));
             }
         }
 
-        let envelope = Self::apply_authenticated_sender(identity, envelope)
-            .map_err(Self::status_from_error)?;
+        let envelope = Self::apply_authenticated_sender(identity, envelope).map_err(rejected)?;
         let is_session_start = envelope.message_type == "SessionStart";
 
         if !is_session_start {
             if let Some(session) = self.runtime.get_session_checked(&envelope.session_id).await {
                 if envelope.mode != session.mode {
-                    return Err(Status::invalid_argument(
+                    return Err(StreamFailure::Terminal(Status::invalid_argument(
                         "INVALID_ENVELOPE: envelope mode does not match the bound session mode",
-                    ));
+                    )));
                 }
                 if session.state != SessionState::Open {
-                    return Err(Status::invalid_argument("SESSION_NOT_OPEN"));
+                    return Err(StreamFailure::Terminal(Status::invalid_argument(
+                        "SESSION_NOT_OPEN",
+                    )));
                 }
             } else if envelope.message_type == "Signal" {
-                return Err(Status::not_found(format!(
+                return Err(StreamFailure::Terminal(Status::not_found(format!(
                     "Session '{}' not found",
                     envelope.session_id
-                )));
+                ))));
             }
         }
 
         self.security
             .authorize_mode(identity, &envelope.mode, is_session_start)
-            .map_err(Self::status_from_error)?;
+            .map_err(rejected)?;
         // External ingress policy engine (E3): the stream path must be gated
         // identically to unary Send — without this, a sender denied by an
         // installed engine could simply switch transports.
         self.enforce_ingress_policy(identity, &envelope)
             .await
-            .map_err(Self::status_from_error)?;
+            .map_err(rejected)?;
         self.security
             .enforce_rate_limit(&identity.sender, is_session_start)
             .await
-            .map_err(Self::status_from_error)?;
+            .map_err(rejected)?;
 
         if session_events.is_none() {
             *bound_session_id = Some(envelope.session_id.clone());
@@ -448,7 +485,7 @@ impl MacpServer {
         self.runtime
             .process(&envelope, max_open)
             .await
-            .map_err(Self::status_from_error)?;
+            .map_err(rejected)?;
         Ok(vec![])
     }
 
@@ -462,13 +499,13 @@ impl MacpServer {
         after_sequence: u64,
         bound_session_id: &mut Option<String>,
         session_events: &mut Option<tokio::sync::broadcast::Receiver<Envelope>>,
-    ) -> Result<Vec<Envelope>, Status> {
+    ) -> Result<Vec<Envelope>, StreamFailure> {
         // Validate: only one session per stream
         if let Some(bound) = bound_session_id.as_ref() {
             if bound != session_id {
-                return Err(Status::invalid_argument(
+                return Err(StreamFailure::Terminal(Status::invalid_argument(
                     "StreamSession may only carry envelopes for one session_id",
-                ));
+                )));
             }
         }
 
@@ -477,22 +514,35 @@ impl MacpServer {
             .runtime
             .get_session_checked(session_id)
             .await
-            .ok_or_else(|| Status::not_found(format!("Session '{}' not found", session_id)))?;
+            .ok_or_else(|| {
+                StreamFailure::Terminal(Status::not_found(format!(
+                    "Session '{}' not found",
+                    session_id
+                )))
+            })?;
 
         // Authorize: caller must be a declared participant, initiator, or observer
         let allowed = identity.is_observer
             || session.initiator_sender == identity.sender
             || session.participants.iter().any(|p| p == &identity.sender);
         if !allowed {
-            return Err(Status::permission_denied(
-                "FORBIDDEN: caller is not a declared participant or observer for this session",
-            ));
+            // Per-frame refusal, not a transport failure: inline, stream stays
+            // open (the subscriber may still send envelopes it is entitled to).
+            return Err(StreamFailure::Inline {
+                code: MacpError::Forbidden.error_code(),
+                message: "caller is not a declared participant or observer for this session".into(),
+            });
         }
         // External ingress policy engine (E3): stream-based history replay is
         // a read and must be gated like GetSession (fail closed).
         if let Some(engine) = &self.policy_engine {
             let decision = engine.evaluate_session_access(identity, &session).await;
-            crate::policy_engine::require_allow(decision, "session access")?;
+            crate::policy_engine::require_allow(decision, "session access").map_err(|status| {
+                StreamFailure::Inline {
+                    code: MacpError::Forbidden.error_code(),
+                    message: status.message().to_string(),
+                }
+            })?;
         }
 
         // Subscribe to live broadcast (if not already subscribed)
@@ -514,10 +564,15 @@ impl MacpServer {
             .get_session_envelopes_after(session_id, after_sequence)
             .await
             .map_err(|base| {
-                Status::failed_precondition(format!(
-                    "session history before ordinal {base} was compacted; \
-                     resume with after_sequence >= {base} or re-read state via GetSession"
-                ))
+                // The requested `after_sequence` cannot be served; the
+                // subscriber re-subscribes with a later one on the same stream.
+                StreamFailure::Inline {
+                    code: MacpError::InvalidEnvelope.error_code(),
+                    message: format!(
+                        "session history before ordinal {base} was compacted; \
+                         resume with after_sequence >= {base} or re-read state via GetSession"
+                    ),
+                }
             })?;
 
         Ok(replay)
@@ -608,18 +663,19 @@ impl MacpServer {
                                         };
                                     }
                                 }
-                                Err(status) if Self::is_stream_terminal_error(&status) => {
+                                Err(StreamFailure::Terminal(status)) => {
                                     Err(status)?;
                                 }
-                                Err(status) => {
-                                    // RFC-MACP-0001: application-level validation errors
-                                    // are sent as inline MACPError; stream remains open.
+                                Err(StreamFailure::Rejected { err, .. }) if Self::is_stream_terminal_error(&err) => {
+                                    Err(Self::status_from_error(err))?;
+                                }
+                                Err(StreamFailure::Inline { code, message }) => {
                                     yield StreamSessionResponse {
                                         response: Some(
                                             crate::pb::stream_session_response::Response::Error(
                                                 PbMacpError {
-                                                    code: status.message().to_string(),
-                                                    message: status.message().to_string(),
+                                                    code: code.into(),
+                                                    message,
                                                     session_id: bound_session_id.clone().unwrap_or_default(),
                                                     message_id: String::new(),
                                                     details: vec![],
@@ -627,6 +683,11 @@ impl MacpServer {
                                             ),
                                         ),
                                     };
+                                }
+                                Err(StreamFailure::Rejected { err, message_id }) => {
+                                    // RFC-MACP-0001: application-level validation errors
+                                    // are sent as inline MACPError; stream remains open.
+                                    yield Self::stream_inline_error(&err, bound_session_id.as_ref(), &message_id);
                                 }
                             }
                             while let Some(envelope) = Self::try_next_stream_event(&mut session_events)? {
@@ -702,16 +763,19 @@ impl MacpServer {
                                         };
                                     }
                                 }
-                                Err(status) if Self::is_stream_terminal_error(&status) => {
+                                Err(StreamFailure::Terminal(status)) => {
                                     Err(status)?;
                                 }
-                                Err(status) => {
+                                Err(StreamFailure::Rejected { err, .. }) if Self::is_stream_terminal_error(&err) => {
+                                    Err(Self::status_from_error(err))?;
+                                }
+                                Err(StreamFailure::Inline { code, message }) => {
                                     yield StreamSessionResponse {
                                         response: Some(
                                             crate::pb::stream_session_response::Response::Error(
                                                 PbMacpError {
-                                                    code: status.message().to_string(),
-                                                    message: status.message().to_string(),
+                                                    code: code.into(),
+                                                    message,
                                                     session_id: bound_session_id.clone().unwrap_or_default(),
                                                     message_id: String::new(),
                                                     details: vec![],
@@ -719,6 +783,11 @@ impl MacpServer {
                                             ),
                                         ),
                                     };
+                                }
+                                Err(StreamFailure::Rejected { err, message_id }) => {
+                                    // RFC-MACP-0001: application-level validation errors
+                                    // are sent as inline MACPError; stream remains open.
+                                    yield Self::stream_inline_error(&err, bound_session_id.as_ref(), &message_id);
                                 }
                             }
                             while let Some(envelope) = Self::try_next_stream_event(&mut session_events)? {
@@ -741,49 +810,94 @@ impl MacpServer {
         Box::pin(output)
     }
 
-    /// Returns true if the error should terminate a StreamSession stream.
-    /// Transport and binding errors terminate. Application-level validation
-    /// errors (from `runtime.process()`) are sent as inline MACPError per RFC-0001.
-    fn is_stream_terminal_error(status: &Status) -> bool {
+    /// Returns true if a rejected frame's error should terminate the
+    /// StreamSession stream rather than come back as an inline `MACPError`.
+    ///
+    /// Decided by the error, never by its gRPC status: S13 moved
+    /// `INVALID_ENVELOPE` to `INVALID_ARGUMENT` and `SESSION_NOT_FOUND` to
+    /// `NOT_FOUND`, and classifying by status would have turned every mode
+    /// validation failure into a dropped stream. The set is exactly the errors
+    /// that terminated before S13 — authentication, resource limits, storage
+    /// failure, and the SessionStart-binding failures — so stream behaviour is
+    /// unchanged; everything else (mode validation, policy denial, a closed
+    /// session) stays inline, per RFC-MACP-0001.
+    fn is_stream_terminal_error(err: &MacpError) -> bool {
         matches!(
-            status.code(),
-            tonic::Code::Unauthenticated
-                | tonic::Code::Internal
-                | tonic::Code::ResourceExhausted
-                | tonic::Code::InvalidArgument
-                | tonic::Code::NotFound
-                | tonic::Code::AlreadyExists
+            err,
+            MacpError::Unauthenticated
+                | MacpError::PayloadTooLarge
+                | MacpError::RateLimited
+                | MacpError::StorageFailed
+                | MacpError::InvalidSessionId
+                | MacpError::InvalidPolicyDefinition
+                | MacpError::SessionAlreadyExists
         )
     }
 
+    /// `MacpError` → gRPC status, per the error-codes registry's gRPC column
+    /// (S13; `macp_core::error::ERROR_CODE_REGISTRY` is the single table).
+    ///
+    /// Every status carries the registry code in `macp-error-code` metadata, so
+    /// a client can branch on the code without parsing the message. A
+    /// `PolicyDenied` also carries its structured reasons, JSON-encoded, in
+    /// `macp-error-details-bin` (the same bytes as `MACPError.details`).
     fn status_from_error(err: MacpError) -> Status {
-        match err {
-            MacpError::Unauthenticated => Status::unauthenticated(err.to_string()),
-            MacpError::Forbidden => Status::permission_denied(err.to_string()),
-            MacpError::PayloadTooLarge => Status::resource_exhausted(err.to_string()),
-            MacpError::RateLimited => Status::resource_exhausted(err.to_string()),
-            MacpError::StorageFailed => Status::internal(err.to_string()),
-            MacpError::InvalidSessionId => Status::invalid_argument(err.to_string()),
-            MacpError::InvalidPolicyDefinition => Status::invalid_argument(err.to_string()),
-            MacpError::SessionAlreadyExists => Status::already_exists(err.to_string()),
-            MacpError::PolicyDenied { ref reasons } => {
-                let details = Self::error_details_bytes(&err);
-                let msg = if reasons.is_empty() {
-                    "PolicyDenied".to_string()
-                } else {
-                    format!("PolicyDenied: {}", reasons.join("; "))
-                };
-                let mut status = Status::failed_precondition(msg);
-                if !details.is_empty() {
-                    // Attach JSON details as binary metadata so clients can parse structured reasons.
-                    let val = tonic::metadata::MetadataValue::from_bytes(&details);
-                    status
-                        .metadata_mut()
-                        .insert_bin("macp-error-details-bin", val);
-                }
-                status
+        let code = tonic::Code::from_i32(err.transport_status().grpc_code());
+        let msg = match &err {
+            MacpError::PolicyDenied { reasons } if !reasons.is_empty() => format!(
+                "PolicyDenied: {}",
+                macp_core::policy::deny::join_messages(reasons, "; ")
+            ),
+            _ => err.to_string(),
+        };
+        let mut status = Status::new(code, msg);
+        status.metadata_mut().insert(
+            "macp-error-code",
+            tonic::metadata::MetadataValue::from_static(err.error_code()),
+        );
+        let details = Self::error_details_bytes(&err);
+        if !details.is_empty() {
+            let val = tonic::metadata::MetadataValue::from_bytes(&details);
+            status
+                .metadata_mut()
+                .insert_bin("macp-error-details-bin", val);
+        }
+        status
+    }
+}
+
+/// Why a StreamSession frame failed: a transport/binding problem that ends the
+/// stream, or a protocol rejection of one envelope (inline unless
+/// [`MacpServer::is_stream_terminal_error`]).
+#[derive(Debug)]
+enum StreamFailure {
+    Terminal(Status),
+    Rejected {
+        err: MacpError,
+        message_id: String,
+    },
+    /// A per-frame refusal with no `MacpError` (a subscribe frame's read
+    /// gate, an unservable `after_sequence`): inline, stream stays open.
+    Inline {
+        code: &'static str,
+        message: String,
+    },
+}
+
+#[cfg(test)]
+impl StreamFailure {
+    /// The gRPC code this failure carries (a rejection: its registry status).
+    fn code(&self) -> tonic::Code {
+        match self {
+            StreamFailure::Terminal(status) => status.code(),
+            StreamFailure::Rejected { err, .. } => {
+                tonic::Code::from_i32(err.transport_status().grpc_code())
             }
-            _ => Status::failed_precondition(err.to_string()),
+            StreamFailure::Inline { code, .. } => tonic::Code::from_i32(
+                macp_core::error::registry_entry(code)
+                    .map(|e| e.grpc.grpc_code())
+                    .unwrap_or(13),
+            ),
         }
     }
 }
@@ -805,9 +919,17 @@ impl MacpRuntimeService for MacpServer {
             .iter()
             .any(|v| v == macp_core::MACP_VERSION)
         {
-            return Err(Status::failed_precondition(
+            // Registry: UNSUPPORTED_PROTOCOL_VERSION → INVALID_ARGUMENT (S13).
+            let mut status = Status::invalid_argument(
                 "UNSUPPORTED_PROTOCOL_VERSION: no mutually supported protocol version",
-            ));
+            );
+            status.metadata_mut().insert(
+                "macp-error-code",
+                tonic::metadata::MetadataValue::from_static(
+                    MacpError::InvalidMacpVersion.error_code(),
+                ),
+            );
+            return Err(status);
         }
 
         Ok(Response::new(InitializeResponse {
@@ -1780,6 +1902,111 @@ mod tests {
     use chrono::Utc;
     use prost::Message;
 
+    /// S13: the server's status for every error is the registry's gRPC
+    /// column, and every status names its registry code in metadata.
+    #[test]
+    fn status_from_error_follows_the_registry() {
+        let cases = [
+            (
+                MacpError::PolicyDenied { reasons: vec![] },
+                tonic::Code::PermissionDenied,
+            ),
+            (MacpError::Forbidden, tonic::Code::PermissionDenied),
+            (MacpError::UnknownSession, tonic::Code::NotFound),
+            (MacpError::UnknownPolicyVersion, tonic::Code::NotFound),
+            (MacpError::SessionNotOpen, tonic::Code::FailedPrecondition),
+            (MacpError::TtlExpired, tonic::Code::FailedPrecondition),
+            (MacpError::DuplicateMessage, tonic::Code::AlreadyExists),
+            (MacpError::InvalidEnvelope, tonic::Code::InvalidArgument),
+            (MacpError::InvalidPayload, tonic::Code::InvalidArgument),
+            (MacpError::UnknownMode, tonic::Code::InvalidArgument),
+            (MacpError::InvalidMacpVersion, tonic::Code::InvalidArgument),
+            (MacpError::RateLimited, tonic::Code::ResourceExhausted),
+            (MacpError::StorageFailed, tonic::Code::Internal),
+            (MacpError::Unauthenticated, tonic::Code::Unauthenticated),
+        ];
+        for (err, code) in cases {
+            let name = err.error_code();
+            let status = MacpServer::status_from_error(err);
+            assert_eq!(status.code(), code, "{name}");
+            assert_eq!(status.metadata().get("macp-error-code").unwrap(), name);
+        }
+    }
+
+    /// RFC-MACP-0012 §6.2: POLICY_DENIED details carry structured denials
+    /// (code + participants beside the message) and keep the legacy
+    /// `reasons` string array.
+    #[test]
+    fn policy_denied_details_are_structured() {
+        use macp_core::policy::{DenyCode, DenyReason};
+        let err = MacpError::PolicyDenied {
+            reasons: vec![
+                DenyReason::new(DenyCode::VETO, "blocked by 1 blocking objection(s)")
+                    .with_participants(["agent://b", "agent://a"]),
+            ],
+        };
+        let details: serde_json::Value =
+            serde_json::from_slice(&MacpServer::error_details_bytes(&err)).unwrap();
+        assert_eq!(
+            details,
+            serde_json::json!({
+                "reasons": ["blocked by 1 blocking objection(s)"],
+                "denials": [{
+                    "code": "veto",
+                    "message": "blocked by 1 blocking objection(s)",
+                    "participants": ["agent://a", "agent://b"],
+                }],
+            })
+        );
+        let status = MacpServer::status_from_error(err);
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        let bin = status.metadata().get_bin("macp-error-details-bin").unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bin.to_bytes().unwrap()).unwrap(),
+            details
+        );
+    }
+
+    /// Stream classification is by error, not gRPC status: S13 moved
+    /// INVALID_ENVELOPE/SESSION_NOT_FOUND onto codes that used to mean
+    /// "terminate", and a mode validation failure must still stay inline.
+    #[test]
+    fn stream_rejections_stay_inline_under_the_registry_mapping() {
+        for err in [
+            MacpError::InvalidEnvelope,
+            MacpError::InvalidPayload,
+            MacpError::UnknownSession,
+            MacpError::DuplicateMessage,
+            MacpError::Forbidden,
+            MacpError::SessionNotOpen,
+            MacpError::PolicyDenied { reasons: vec![] },
+        ] {
+            assert!(!MacpServer::is_stream_terminal_error(&err), "{err:?}");
+        }
+        for err in [
+            MacpError::Unauthenticated,
+            MacpError::RateLimited,
+            MacpError::PayloadTooLarge,
+            MacpError::StorageFailed,
+        ] {
+            assert!(MacpServer::is_stream_terminal_error(&err), "{err:?}");
+        }
+        let inline = MacpServer::stream_inline_error(
+            &MacpError::PolicyDenied {
+                reasons: vec!["no votes cast".into()],
+            },
+            Some(&"sid".to_string()),
+            "m1",
+        );
+        let Some(crate::pb::stream_session_response::Response::Error(e)) = inline.response else {
+            panic!("expected an inline error");
+        };
+        // The registry code, not the status message (pre-0.9 bug).
+        assert_eq!(e.code, "POLICY_DENIED");
+        assert_eq!(e.message_id, "m1");
+        assert!(!e.details.is_empty());
+    }
+
     fn new_sid() -> String {
         uuid::Uuid::new_v4().as_hyphenated().to_string()
     }
@@ -2356,7 +2583,11 @@ mod tests {
             }))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            err.metadata().get("macp-error-code").unwrap(),
+            "UNSUPPORTED_PROTOCOL_VERSION"
+        );
     }
 
     // Regression test for issue #198: the served `instructions` string once
@@ -2959,10 +3190,20 @@ mod tests {
             .process_stream_request(&embargoed, req, &mut bound, &mut events)
             .await
             .expect_err("stream envelope from embargoed sender must be denied");
-        // PolicyDenied maps to FailedPrecondition on the transport (same
-        // error the unary path expresses as a POLICY_DENIED ack).
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition, "{err:?}");
-        assert!(err.message().contains("PolicyDenied"), "{err:?}");
+        // A per-envelope rejection (inline MACPError on the stream, same
+        // POLICY_DENIED the unary path acks) — not a stream-ending status.
+        // Its registry status is PERMISSION_DENIED (S13).
+        assert!(
+            matches!(
+                &err,
+                StreamFailure::Rejected {
+                    err: MacpError::PolicyDenied { .. },
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}");
 
         // 2. Passive-subscribe frame (history read) from the embargoed
         //    sender: denied even though membership would allow it.

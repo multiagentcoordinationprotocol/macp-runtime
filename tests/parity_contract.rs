@@ -339,7 +339,7 @@ fn error_codes_permanent_set_matches_runtime() {
         MacpError::InvalidSessionId,
         MacpError::UnknownPolicyVersion,
         MacpError::PolicyDenied {
-            reasons: vec!["parity_contract probe".to_string()],
+            reasons: vec!["parity_contract probe".into()],
         },
         MacpError::InvalidPolicyDefinition,
     ];

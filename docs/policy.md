@@ -256,26 +256,35 @@ A breach of this rule is a **sender-authorization failure**, not a governance-ru
 
 | Error code | When it occurs | gRPC status |
 |-----------|----------------|-------------|
-| `UNKNOWN_POLICY_VERSION` | The `policy_version` in SessionStart is not found in the registry | FailedPrecondition |
-| `POLICY_DENIED` | A commitment is rejected because governance rules are not satisfied | FailedPrecondition |
+| `UNKNOWN_POLICY_VERSION` | The `policy_version` in SessionStart is not found in the registry | NotFound |
+| `POLICY_DENIED` | A commitment is rejected because governance rules are not satisfied | PermissionDenied |
 | `FORBIDDEN` | A `commitment.authority` / `designated_roles` breach -- the sender is authenticated but not the authorized commitment authority (RFC-MACP-0002 §6.1, RFC-MACP-0012 §10) | PermissionDenied |
 | `INVALID_POLICY_DEFINITION` | A policy fails one of the [registration checks](#what-registration-checks), or claims a reserved `policy.std.` identifier | InvalidArgument |
 
-Two caveats on that status column, both visible in `Self::status_from_error` (`src/server.rs`):
+The status column is the error-codes registry's gRPC column (proposal S13), held once in `macp_core::error::ERROR_CODE_REGISTRY` and applied by `Self::status_from_error` (`src/server.rs`); every status also carries the registry code in `macp-error-code` metadata. Before 0.9.0 both policy codes surfaced as `FailedPrecondition`. Two caveats:
 
 - On the `Send` path these codes travel **in the `Ack`** -- the RPC itself succeeds, and the rejection surfaces as `ack.ok = false` with `ack.error.code` set to the string above. The gRPC status only applies where an error escapes as a `Status`. `POLICY_DENIED` additionally attaches its structured reasons as `macp-error-details-bin` metadata.
 - `RegisterPolicy`/`UnregisterPolicy` report failures in band too (`ok: false` plus an `error` string, since `RegisterPolicyResponse` has no code field), so reserved-namespace rejections carry the literal `INVALID_POLICY_DEFINITION` at the head of that string.
 
-When a commitment is denied, the error includes structured reasons explaining which rules were not met. They arrive in the order the checks run -- for Decision Mode: evaluation confidence, objection veto, vote quorum, then the voting result -- not in order of severity:
+When a commitment is denied, the error details (`ack.error.details`, an inline stream `MACPError.details`, or `macp-error-details-bin`) carry structured reasons explaining which rules were not met (RFC-MACP-0012 §6.2). They arrive in the order the checks run -- for Decision Mode: evaluation confidence, objection veto, vote quorum, then the voting result -- not in order of severity:
 
 ```json
 {
   "reasons": [
     "no qualifying evaluation meets minimum confidence threshold: 0.70",
-    "vote quorum not met: 1 voters of 3 participants (quorum: 60 percentage)"
+    "blocked by 1 blocking objection(s) (veto threshold: 1)"
+  ],
+  "denials": [
+    { "code": "confidence_below_minimum",
+      "message": "no qualifying evaluation meets minimum confidence threshold: 0.70" },
+    { "code": "veto",
+      "message": "blocked by 1 blocking objection(s) (veto threshold: 1)",
+      "participants": ["agent://compliance"] }
   ]
 }
 ```
+
+`denials` is the structured form: `code` is stable (`macp_core::policy::DenyCode` -- `veto`, `veto_hold`, `quorum_not_met`, `threshold_not_met`, `confidence_below_minimum`, `evaluation_required`, `no_votes`, `decline_over_approval`, `decline_not_backed`, `criterion_not_met`, `output_required`, `reassignment_not_allowed`, `unsupported_schema_version`, `invalid_rules`, `unspecified`; the set is open, so treat an unknown code as `unspecified`), and the participants a reason concerns are listed in `participants`, never only inside `message`. `reasons` is the pre-0.9 array of strings, kept for existing clients; since 0.9.0 its messages no longer embed participant ids (a veto used to end `..., from: agent://a, agent://b`). A custom `PolicyEvaluator` returns `PolicyDecision::Deny { reasons: Vec<DenyReason> }`; `DenyReason::from("text")` builds an `unspecified` reason.
 
 ## Default policy
 

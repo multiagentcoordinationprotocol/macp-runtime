@@ -12,9 +12,11 @@
 //! equality, and the [`RuleExtension`] trait an embedder implements to admit a
 //! vendor extension.
 
+pub mod deny;
 pub mod keys;
 pub mod rules;
 
+pub use deny::{DenyCode, DenyReason};
 pub use keys::RuleExtension;
 
 use crate::decision::DecisionState;
@@ -31,11 +33,15 @@ pub struct PolicyDefinition {
 
 /// `#[non_exhaustive]`: consumers MUST treat any non-`Allow` decision as a
 /// denial (fail closed). Never `if let Deny` — that fails open on new variants.
+///
+/// `Allow` reasons are informational log text. `Deny` reasons are structured
+/// ([`DenyReason`], RFC-MACP-0012 §6.2) because they reach the submitter as
+/// `POLICY_DENIED` detail; a `String` converts with `.into()`.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub enum PolicyDecision {
     Allow { reasons: Vec<String> },
-    Deny { reasons: Vec<String> },
+    Deny { reasons: Vec<DenyReason> },
 }
 
 #[non_exhaustive]
