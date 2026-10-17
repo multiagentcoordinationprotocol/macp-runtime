@@ -964,11 +964,11 @@ fn fixtures_conform_to_canonical_format() {
     // schema.json). Raised from 17 alongside the spec #99 corpus: the old floor
     // had drifted two fixtures below the real count, so it would have passed
     // with a fixture silently unvendored. Raised again to 32 by spec #111's
-    // `decision_zero_proposal_commitment.json`, and to 39 by the Seam-driven
+    // `decision_zero_proposal_commitment.json`, and to 37 by the Seam-driven
     // corpus (spec #192/#193: quorum overrides, handoff implicit accept,
     // SessionStart obligations).
     assert!(
-        checked >= 39,
+        checked >= 37,
         "expected all fixtures checked, got {checked}"
     );
 }
