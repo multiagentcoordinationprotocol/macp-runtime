@@ -200,8 +200,8 @@ pub const ERROR_CODE_REGISTRY: &[RegistryEntry] = &[
         TransportStatus::InvalidArgument,
         400,
     ),
-    // Control-plane rows proposed to the spec registry (PENDING_SPEC_ROWS);
-    // each keeps the gRPC status those RPCs returned before it had a code.
+    // Control-plane rows (spec #195, provisional); each keeps the gRPC
+    // status those RPCs returned before they had a code.
     entry(
         "REGISTRY_READ_ONLY",
         TransportStatus::FailedPrecondition,
@@ -213,18 +213,6 @@ pub const ERROR_CODE_REGISTRY: &[RegistryEntry] = &[
     // Deprecated alias for FORBIDDEN; never emitted, kept so a lookup of a
     // peer's legacy code still resolves.
     entry("UNAUTHORIZED", TransportStatus::PermissionDenied, 403),
-];
-
-/// Rows this runtime emits that the spec's `registries/error-codes.md` does
-/// not list yet (proposed upstream for the control-plane RPCs). The parity
-/// test lets these be absent from the spec table and fails once one appears
-/// there, so landing the spec row forces its removal from this list.
-#[doc(hidden)]
-pub const PENDING_SPEC_ROWS: &[&str] = &[
-    "REGISTRY_READ_ONLY",
-    "INVALID_REQUEST",
-    "STREAM_LAGGED",
-    "AGENT_NOT_FOUND",
 ];
 
 /// Look up a registry code (e.g. one received from a peer).
@@ -418,10 +406,6 @@ mod tests {
             if code.is_empty() || code.starts_with('-') {
                 continue;
             }
-            assert!(
-                !PENDING_SPEC_ROWS.contains(&code.as_str()),
-                "{code} is in the spec table now: drop it from PENDING_SPEC_ROWS"
-            );
             let row = registry_entry(code)
                 .unwrap_or_else(|| panic!("{code} missing from ERROR_CODE_REGISTRY"));
             assert_eq!(row.http.to_string(), cells[http_col], "{code} HTTP");
@@ -431,7 +415,7 @@ mod tests {
             seen += 1;
         }
         assert_eq!(
-            seen + PENDING_SPEC_ROWS.len(),
+            seen,
             ERROR_CODE_REGISTRY.len(),
             "every registry row compared"
         );

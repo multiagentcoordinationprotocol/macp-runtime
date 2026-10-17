@@ -350,7 +350,7 @@ runtime/
 Set `MACP_ALLOW_INSECURE=1` for local development, or provide `MACP_TLS_CERT_PATH` and `MACP_TLS_KEY_PATH` for production.
 
 **`InvalidSessionId` error**
-Session IDs must be UUID v4/v7 in hyphenated lowercase form (36 chars) or base64url tokens (22+ chars). Short or human-readable IDs like `"s1"` or `"my-session"` are rejected.
+Session IDs must be UUID v4/v7 in hyphenated lowercase form (36 chars) or base64url tokens (22–128 chars; 128 bytes is the RFC-MACP-0004 §11.2 portability floor and this runtime's cap). Short or human-readable IDs like `"s1"` or `"my-session"` are rejected.
 
 **`InvalidPayload` on `SessionStart`**
 For standards-track modes and built-in extensions (including `ext.multi_round.v1`), `SessionStartPayload` must include non-empty `participants`, `mode_version`, `configuration_version`, and a positive `ttl_ms`. Empty payloads are rejected.

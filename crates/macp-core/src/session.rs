@@ -730,15 +730,24 @@ pub fn validate_strict_session_start_payload(
     validate_canonical_session_start_payload_for_mode(mode, payload)
 }
 
+/// This runtime's `session_id` length cap, in bytes of the UTF-8 encoding
+/// (RFC-MACP-0004 §11.2). Set at the spec's floor: every id the spec calls
+/// portable is accepted, and no id this runtime admits is refused by another
+/// conformant runtime. It bounds per-session state (registry keys, log
+/// paths, every Envelope on the session). Applied at `SessionStart` only, so
+/// a persisted session with a longer legacy id still replays.
+pub const MAX_SESSION_ID_BYTES: usize = 128;
+
 /// Validate that a session ID meets the acceptance policy.
 ///
-/// Accepts:
+/// Accepts, up to [`MAX_SESSION_ID_BYTES`]:
 /// - UUID v4/v7 in hyphenated lowercase canonical form (36 chars)
 /// - base64url tokens of 22+ chars (`[A-Za-z0-9_-]`)
 ///
-/// Rejects everything else (empty, short human-readable, uppercase UUID, etc.).
+/// Rejects everything else (empty, short human-readable, uppercase UUID,
+/// over-long, etc.).
 pub fn validate_session_id_for_acceptance(session_id: &str) -> Result<(), MacpError> {
-    if session_id.is_empty() {
+    if session_id.is_empty() || session_id.len() > MAX_SESSION_ID_BYTES {
         return Err(MacpError::InvalidSessionId);
     }
 
@@ -1240,6 +1249,19 @@ mod tests {
         bytes[8] = (bytes[8] & 0x3F) | 0x80;
         let v1_id = uuid::Uuid::from_bytes(bytes).as_hyphenated().to_string();
         assert!(validate_session_id_for_acceptance(&v1_id).is_err());
+    }
+
+    /// RFC-MACP-0004 §11.2: ids up to 128 bytes MUST be accepted, longer
+    /// ones over the cap MUST be refused with INVALID_SESSION_ID.
+    #[test]
+    fn session_id_length_cap_is_the_spec_floor() {
+        let at_cap = "a".repeat(MAX_SESSION_ID_BYTES);
+        validate_session_id_for_acceptance(&at_cap).unwrap();
+        let over = "a".repeat(MAX_SESSION_ID_BYTES + 1);
+        assert!(matches!(
+            validate_session_id_for_acceptance(&over),
+            Err(MacpError::InvalidSessionId)
+        ));
     }
 
     #[test]

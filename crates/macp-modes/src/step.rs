@@ -310,8 +310,10 @@ pub fn step(
 
 /// A deployment-specific session-id rule, replacing
 /// [`validate_session_id_for_acceptance`] (UUID v4/v7 or a 22+ character
-/// base64url token). Use it only to be *stricter*: RFC-MACP-0001's id format
-/// is the floor every peer assumes.
+/// base64url token, at most [`MAX_SESSION_ID_BYTES`](macp_core::session::MAX_SESSION_ID_BYTES)).
+/// Use it only to be *stricter*: RFC-MACP-0001's id format is the floor every
+/// peer assumes, and a length cap MUST NOT fall below 128 bytes
+/// (RFC-MACP-0004 §11.2).
 pub type SessionIdValidator = Arc<dyn Fn(&str) -> Result<(), MacpError> + Send + Sync>;
 
 /// Knobs for [`accept_session_start`]. Construct with `StartOptions::default()`

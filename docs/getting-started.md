@@ -110,7 +110,7 @@ Send a `SessionStart` envelope to create a Decision Mode session with two partic
 
 The `sender` field is left empty because the runtime overrides it with the authenticated identity. The empty `policy_version` resolves to the built-in `policy.default`, which imposes no governance constraints beyond the mode's own rules.
 
-Session IDs must be either UUID v4/v7 in hyphenated lowercase form or base64url tokens of at least 22 characters. Short or human-readable IDs like `"my-session"` are rejected.
+Session IDs must be either UUID v4/v7 in hyphenated lowercase form or base64url tokens of 22 to 128 characters. Short or human-readable IDs like `"my-session"` are rejected.
 
 ### Step 3: Exchange messages
 
@@ -257,7 +257,7 @@ cargo run --bin fuzz_client         # Error path testing
 | `UNAUTHENTICATED` | No valid credential provided | In dev mode send `Authorization: Bearer <sender>`; in prod send a configured static bearer or a valid JWT |
 | `INVALID_ENVELOPE` | Missing required SessionStart fields | Ensure `participants`, `mode_version`, `configuration_version`, and `ttl_ms > 0` are all present |
 | `SESSION_NOT_OPEN` | Session already resolved or expired | Use `GetSession` to check state; start a new session |
-| `INVALID_SESSION_ID` | Session ID format not accepted | Use UUID v4/v7 or base64url (22+ characters) |
+| `INVALID_SESSION_ID` | Session ID format not accepted | Use UUID v4/v7 or base64url (22–128 characters) |
 | `FORBIDDEN` | Sender not authorized for this message | Check the mode's authority rules; ensure the sender is in the participants list |
 | `RATE_LIMITED` | Too many requests per minute | Wait for the rate window to expire, or increase the limit via environment variables |
 

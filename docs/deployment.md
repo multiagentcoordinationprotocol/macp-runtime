@@ -50,7 +50,11 @@ the following, and each refusal is `INVALID_ENVELOPE`:
 
 ### 3. Every gRPC `Status` names its registry code
 
-Control-plane RPCs that used to return a bare status (unknown session, read-only policy registry, bad `ListSessions` paging, stream lag, unknown manifest agent) now carry `macp-error-code` metadata like `Send` does. The gRPC status code itself did not change for any of them, so a client that branches on the status keeps working. Four codes are new and proposed to the spec registry: `REGISTRY_READ_ONLY`, `INVALID_REQUEST`, `STREAM_LAGGED` and `AGENT_NOT_FOUND`. See the "Control-plane codes" table in [the SDK guide](sdk-guide.md). Alerting that groups on `macp-error-code` sees these codes where it used to see none.
+Control-plane RPCs that used to return a bare status (unknown session, read-only policy registry, bad `ListSessions` paging, stream lag, unknown manifest agent) now carry `macp-error-code` metadata like `Send` does. The gRPC status code itself did not change for any of them, so a client that branches on the status keeps working. Four codes are new, provisional in the spec registry (spec #195): `REGISTRY_READ_ONLY`, `INVALID_REQUEST`, `STREAM_LAGGED` and `AGENT_NOT_FOUND`. See the "Control-plane codes" table in [the SDK guide](sdk-guide.md). Alerting that groups on `macp-error-code` sees these codes where it used to see none.
+
+### 4. `session_id` is capped at 128 bytes
+
+`SessionStart` now refuses a `session_id` longer than 128 bytes with `INVALID_SESSION_ID`. That is the RFC-MACP-0004 §11.2 floor (spec #194): every conformant runtime must accept ids up to 128 bytes, so ids within the cap are portable. A persisted session with a longer id still replays, because the cap applies only at admission. UUIDs (36 chars) are unaffected.
 
 ## Upgrading into registration-time policy validation
 

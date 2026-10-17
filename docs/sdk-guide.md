@@ -61,7 +61,7 @@ The runtime overrides `envelope.sender` with the authenticated identity. If the 
 
 **Message IDs** must be unique per sender. UUID v4 is a good default. The runtime deduplicates on `message_id`, so sending the same ID twice returns a duplicate acknowledgement without reprocessing. In a `macp.mode.handoff.v1` session at `semantics_rev >= 2`, a client `message_id` must not begin with the literal `implicit-accept:` -- that namespace is reserved for the runtime's own synthetic accept and is rejected with `INVALID_ENVELOPE` whatever the message type. See [Runtime API § Send](API.md#send) for the full rule and RFC-MACP-0010 §5.1(3) for the normative source.
 
-**Session IDs** must be UUID v4/v7 (hyphenated lowercase, 36 characters) or base64url tokens (22+ characters). UUID v4 is the simplest choice.
+**Session IDs** must be UUID v4/v7 (hyphenated lowercase, 36 characters) or base64url tokens (22–128 characters; ids over 128 bytes are refused with `INVALID_SESSION_ID`, per RFC-MACP-0004 §11.2). UUID v4 is the simplest choice.
 
 **Payloads** are protobuf-encoded bytes. Import the mode-specific `.proto` files, serialize the payload struct, and set `envelope.payload` to the resulting bytes.
 
@@ -118,7 +118,7 @@ Application-level errors (validation failures, authorization denials, policy den
 
 **gRPC status (0.9.0, S13).** Where a MACP error escapes as a gRPC `Status`, its code is the error-codes registry's gRPC column -- `POLICY_DENIED`/`FORBIDDEN` → `PERMISSION_DENIED`, `SESSION_NOT_FOUND`/`UNKNOWN_POLICY_VERSION` → `NOT_FOUND`, `INVALID_ENVELOPE`/`MODE_NOT_SUPPORTED`/`UNSUPPORTED_PROTOCOL_VERSION`/`INVALID_SESSION_ID`/`INVALID_POLICY_DEFINITION` → `INVALID_ARGUMENT`, `DUPLICATE_MESSAGE`/`SESSION_ALREADY_EXISTS` → `ALREADY_EXISTS`, `SESSION_NOT_OPEN` → `FAILED_PRECONDITION`, `PAYLOAD_TOO_LARGE`/`RATE_LIMITED` → `RESOURCE_EXHAUSTED`, `INTERNAL_ERROR` → `INTERNAL` -- and the registry code is in the `macp-error-code` metadata key. Branch on that key, not on the status: several codes share one status. Before 0.9.0 most codes surfaced as `FAILED_PRECONDITION`, including `Initialize`'s version mismatch.
 
-**Control-plane codes (0.9.0).** The same metadata is now on *every* `Status` the runtime returns, not only those built from a kernel error: `GetSession`/`CancelSession`/`SuspendSession`/`ResumeSession` on an unknown session → `SESSION_NOT_FOUND`, a non-member or non-initiator → `FORBIDDEN`, `GetPolicy` on an unknown id → `UNKNOWN_POLICY_VERSION`, and stream subscribe/binding errors → `INVALID_ENVELOPE`/`SESSION_NOT_FOUND`. Four codes are new, proposed to the spec registry alongside 0.9.0; their gRPC status is unchanged from what clients saw before, so only the metadata is new:
+**Control-plane codes (0.9.0).** The same metadata is now on *every* `Status` the runtime returns, not only those built from a kernel error: `GetSession`/`CancelSession`/`SuspendSession`/`ResumeSession` on an unknown session → `SESSION_NOT_FOUND`, a non-member or non-initiator → `FORBIDDEN`, `GetPolicy` on an unknown id → `UNKNOWN_POLICY_VERSION`, and stream subscribe/binding errors → `INVALID_ENVELOPE`/`SESSION_NOT_FOUND`. Four codes are new, `provisional` in the spec registry (spec #195); their gRPC status is unchanged from what clients saw before, so only the metadata is new:
 
 | Code | gRPC | HTTP | Raised by |
 |------|------|------|-----------|
