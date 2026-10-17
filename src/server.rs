@@ -306,12 +306,18 @@ impl MacpServer {
             .runtime
             .get_session_checked(session_id)
             .await
-            .ok_or_else(|| Status::not_found(format!("Session '{}' not found", session_id)))?;
+            .ok_or_else(|| {
+                Self::coded_status(
+                    MacpError::UnknownSession,
+                    format!("Session '{}' not found", session_id),
+                )
+            })?;
         let allowed = identity.is_observer
             || session.initiator_sender == identity.sender
             || session.participants.iter().any(|p| p == &identity.sender);
         if !allowed {
-            return Err(Status::permission_denied(
+            return Err(Self::coded_status(
+                MacpError::Forbidden,
                 "FORBIDDEN: session access denied",
             ));
         }
@@ -367,9 +373,10 @@ impl MacpServer {
                     skipped,
                     "StreamSession receiver fell behind; terminating stream"
                 );
-                Err(Status::resource_exhausted(format!(
-                    "StreamSession receiver fell behind by {skipped} envelopes"
-                )))
+                Err(Self::coded_status(
+                    MacpError::StreamLagged,
+                    format!("StreamSession receiver fell behind by {skipped} envelopes"),
+                ))
             }
         }
     }
@@ -390,7 +397,8 @@ impl MacpServer {
         // the session's broadcast channel and replay accepted history.
         if !req.subscribe_session_id.is_empty() {
             if req.envelope.is_some() {
-                return Err(StreamFailure::Terminal(Status::invalid_argument(
+                return Err(StreamFailure::Terminal(Self::coded_status(
+                    MacpError::InvalidEnvelope,
                     "StreamSessionRequest must not contain both envelope and subscribe_session_id",
                 )));
             }
@@ -406,7 +414,8 @@ impl MacpServer {
         }
 
         let envelope = req.envelope.ok_or_else(|| {
-            StreamFailure::Terminal(Status::invalid_argument(
+            StreamFailure::Terminal(Self::coded_status(
+                MacpError::InvalidEnvelope,
                 "StreamSessionRequest must contain an envelope or subscribe_session_id",
             ))
         })?;
@@ -418,18 +427,21 @@ impl MacpServer {
 
         self.validate_envelope_shape(&envelope).map_err(rejected)?;
         if envelope.session_id.trim().is_empty() {
-            return Err(StreamFailure::Terminal(Status::invalid_argument(
+            return Err(StreamFailure::Terminal(Self::coded_status(
+                MacpError::InvalidEnvelope,
                 "StreamSession requires a non-empty session_id",
             )));
         }
         if envelope.mode.trim().is_empty() {
-            return Err(StreamFailure::Terminal(Status::invalid_argument(
+            return Err(StreamFailure::Terminal(Self::coded_status(
+                MacpError::InvalidEnvelope,
                 "StreamSession requires a non-empty mode",
             )));
         }
         if let Some(bound) = bound_session_id.as_ref() {
             if bound != &envelope.session_id {
-                return Err(StreamFailure::Terminal(Status::invalid_argument(
+                return Err(StreamFailure::Terminal(Self::coded_status(
+                    MacpError::InvalidEnvelope,
                     "StreamSession may only carry envelopes for one session_id",
                 )));
             }
@@ -441,20 +453,22 @@ impl MacpServer {
         if !is_session_start {
             if let Some(session) = self.runtime.get_session_checked(&envelope.session_id).await {
                 if envelope.mode != session.mode {
-                    return Err(StreamFailure::Terminal(Status::invalid_argument(
+                    return Err(StreamFailure::Terminal(Self::coded_status(
+                        MacpError::InvalidEnvelope,
                         "INVALID_ENVELOPE: envelope mode does not match the bound session mode",
                     )));
                 }
                 if session.state != SessionState::Open {
-                    return Err(StreamFailure::Terminal(Status::invalid_argument(
+                    return Err(StreamFailure::Terminal(Self::coded_status(
+                        MacpError::InvalidEnvelope,
                         "SESSION_NOT_OPEN",
                     )));
                 }
             } else if envelope.message_type == "Signal" {
-                return Err(StreamFailure::Terminal(Status::not_found(format!(
-                    "Session '{}' not found",
-                    envelope.session_id
-                ))));
+                return Err(StreamFailure::Terminal(Self::coded_status(
+                    MacpError::UnknownSession,
+                    format!("Session '{}' not found", envelope.session_id),
+                )));
             }
         }
 
@@ -503,7 +517,8 @@ impl MacpServer {
         // Validate: only one session per stream
         if let Some(bound) = bound_session_id.as_ref() {
             if bound != session_id {
-                return Err(StreamFailure::Terminal(Status::invalid_argument(
+                return Err(StreamFailure::Terminal(Self::coded_status(
+                    MacpError::InvalidEnvelope,
                     "StreamSession may only carry envelopes for one session_id",
                 )));
             }
@@ -515,10 +530,10 @@ impl MacpServer {
             .get_session_checked(session_id)
             .await
             .ok_or_else(|| {
-                StreamFailure::Terminal(Status::not_found(format!(
-                    "Session '{}' not found",
-                    session_id
-                )))
+                StreamFailure::Terminal(Self::coded_status(
+                    MacpError::UnknownSession,
+                    format!("Session '{}' not found", session_id),
+                ))
             })?;
 
         // Authorize: caller must be a declared participant, initiator, or observer
@@ -731,7 +746,7 @@ impl MacpServer {
                             session_events = None;
                         }
                         StreamAction::Lagged(skipped) => {
-                            Err(Status::resource_exhausted(format!(
+                            Err(Self::coded_status(MacpError::StreamLagged, format!(
                                 "StreamSession receiver fell behind by {skipped} envelopes"
                             )))?;
                         }
@@ -842,7 +857,6 @@ impl MacpServer {
     /// `PolicyDenied` also carries its structured reasons, JSON-encoded, in
     /// `macp-error-details-bin` (the same bytes as `MACPError.details`).
     fn status_from_error(err: MacpError) -> Status {
-        let code = tonic::Code::from_i32(err.transport_status().grpc_code());
         let msg = match &err {
             MacpError::PolicyDenied { reasons } if !reasons.is_empty() => format!(
                 "PolicyDenied: {}",
@@ -850,7 +864,16 @@ impl MacpServer {
             ),
             _ => err.to_string(),
         };
-        let mut status = Status::new(code, msg);
+        Self::coded_status(err, msg)
+    }
+
+    /// [`Self::status_from_error`] with a caller-chosen human-readable
+    /// message: the gRPC code and `macp-error-code` still come from the
+    /// registry, so a control-plane RPC (GetSession, CancelSession, the policy
+    /// registry, the watch streams) is as machine-branchable as `Send`.
+    fn coded_status(err: MacpError, msg: impl Into<String>) -> Status {
+        let code = tonic::Code::from_i32(err.transport_status().grpc_code());
+        let mut status = Status::new(code, msg.into());
         status.metadata_mut().insert(
             "macp-error-code",
             tonic::metadata::MetadataValue::from_static(err.error_code()),
@@ -910,7 +933,8 @@ impl MacpRuntimeService for MacpServer {
     ) -> Result<Response<InitializeResponse>, Status> {
         let req = request.into_inner();
         if req.supported_protocol_versions.is_empty() {
-            return Err(Status::invalid_argument(
+            return Err(Self::coded_status(
+                MacpError::InvalidRequest,
                 "INVALID_REQUEST: supported_protocol_versions must not be empty",
             ));
         }
@@ -920,16 +944,10 @@ impl MacpRuntimeService for MacpServer {
             .any(|v| v == macp_core::MACP_VERSION)
         {
             // Registry: UNSUPPORTED_PROTOCOL_VERSION → INVALID_ARGUMENT (S13).
-            let mut status = Status::invalid_argument(
+            return Err(Self::coded_status(
+                MacpError::InvalidMacpVersion,
                 "UNSUPPORTED_PROTOCOL_VERSION: no mutually supported protocol version",
-            );
-            status.metadata_mut().insert(
-                "macp-error-code",
-                tonic::metadata::MetadataValue::from_static(
-                    MacpError::InvalidMacpVersion.error_code(),
-                ),
-            );
-            return Err(status);
+            ));
         }
 
         Ok(Response::new(InitializeResponse {
@@ -981,11 +999,12 @@ impl MacpRuntimeService for MacpServer {
     }
 
     async fn send(&self, request: Request<SendRequest>) -> Result<Response<SendResponse>, Status> {
-        let env = request
-            .get_ref()
-            .envelope
-            .clone()
-            .ok_or_else(|| Status::invalid_argument("SendRequest must contain an envelope"))?;
+        let env = request.get_ref().envelope.clone().ok_or_else(|| {
+            Self::coded_status(
+                MacpError::InvalidEnvelope,
+                "SendRequest must contain an envelope",
+            )
+        })?;
 
         let result = async {
             self.validate_envelope_shape(&env)?;
@@ -1037,7 +1056,12 @@ impl MacpRuntimeService for MacpServer {
             .runtime
             .get_session_checked(&session_id)
             .await
-            .ok_or_else(|| Status::not_found(format!("Session '{}' not found", session_id)))?;
+            .ok_or_else(|| {
+                Self::coded_status(
+                    MacpError::UnknownSession,
+                    format!("Session '{}' not found", session_id),
+                )
+            })?;
 
         Ok(Response::new(GetSessionResponse {
             metadata: Some(Self::session_to_metadata(&session)),
@@ -1058,13 +1082,19 @@ impl MacpRuntimeService for MacpServer {
             .runtime
             .get_session_checked(&session_id)
             .await
-            .ok_or_else(|| Status::not_found(format!("Session '{}' not found", session_id)))?;
+            .ok_or_else(|| {
+                Self::coded_status(
+                    MacpError::UnknownSession,
+                    format!("Session '{}' not found", session_id),
+                )
+            })?;
         // RFC-MACP-0001: "Only the initiator and policy-delegated roles may cancel."
         // CancelSession is a Core control-plane message — mode authorization does not apply.
         if identity.sender != session.initiator_sender
             && crate::mode::util::check_commitment_authority(&session, &identity.sender).is_err()
         {
-            return Err(Status::permission_denied(
+            return Err(Self::coded_status(
+                MacpError::Forbidden,
                 "FORBIDDEN: only the session initiator or policy-delegated roles can cancel",
             ));
         }
@@ -1120,13 +1150,19 @@ impl MacpRuntimeService for MacpServer {
             .runtime
             .get_session_checked(&session_id)
             .await
-            .ok_or_else(|| Status::not_found(format!("Session '{}' not found", session_id)))?;
+            .ok_or_else(|| {
+                Self::coded_status(
+                    MacpError::UnknownSession,
+                    format!("Session '{}' not found", session_id),
+                )
+            })?;
         // RFC-MACP-0001 §7.5: same authority model as CancelSession — initiator
         // or policy-delegated roles only; mode authorization does not apply.
         if identity.sender != session.initiator_sender
             && crate::mode::util::check_commitment_authority(&session, &identity.sender).is_err()
         {
-            return Err(Status::permission_denied(
+            return Err(Self::coded_status(
+                MacpError::Forbidden,
                 "FORBIDDEN: only the session initiator or policy-delegated roles can suspend",
             ));
         }
@@ -1182,11 +1218,17 @@ impl MacpRuntimeService for MacpServer {
             .runtime
             .get_session_checked(&session_id)
             .await
-            .ok_or_else(|| Status::not_found(format!("Session '{}' not found", session_id)))?;
+            .ok_or_else(|| {
+                Self::coded_status(
+                    MacpError::UnknownSession,
+                    format!("Session '{}' not found", session_id),
+                )
+            })?;
         if identity.sender != session.initiator_sender
             && crate::mode::util::check_commitment_authority(&session, &identity.sender).is_err()
         {
-            return Err(Status::permission_denied(
+            return Err(Self::coded_status(
+                MacpError::Forbidden,
                 "FORBIDDEN: only the session initiator or policy-delegated roles can resume",
             ));
         }
@@ -1234,10 +1276,10 @@ impl MacpRuntimeService for MacpServer {
     ) -> Result<Response<GetManifestResponse>, Status> {
         let req = request.into_inner();
         if !req.agent_id.is_empty() && req.agent_id != "macp-runtime" {
-            return Err(Status::not_found(format!(
-                "Agent '{}' not found",
-                req.agent_id
-            )));
+            return Err(Self::coded_status(
+                MacpError::AgentNotFound,
+                format!("Agent '{}' not found", req.agent_id),
+            ));
         }
 
         Ok(Response::new(GetManifestResponse {
@@ -1373,7 +1415,7 @@ impl MacpRuntimeService for MacpServer {
                     // slow consumer must be able to distinguish "no traffic"
                     // from "events dropped" (mirrors StreamSession).
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        Err(Status::resource_exhausted(format!(
+                        Err(Self::coded_status(MacpError::StreamLagged, format!(
                             "WatchSignals receiver fell behind by {skipped} signals"
                         )))?;
                     }
@@ -1407,7 +1449,8 @@ impl MacpRuntimeService for MacpServer {
         // response is complete only when `next_page_token` is empty — a page
         // may be short while more results remain.
         if req.page_size < 0 {
-            return Err(Status::invalid_argument(
+            return Err(Self::coded_status(
+                MacpError::InvalidRequest,
                 "INVALID_ARGUMENT: page_size must not be negative",
             ));
         }
@@ -1436,7 +1479,8 @@ impl MacpRuntimeService for MacpServer {
             // `crate::pagination` — the token is attacker-chosen bytes).
             Some(
                 crate::pagination::decode_page_token(&req.page_token).map_err(|_| {
-                    Status::invalid_argument(
+                    Self::coded_status(
+                        MacpError::InvalidRequest,
                         "INVALID_ARGUMENT: page_token is not a valid continuation token",
                     )
                 })?,
@@ -1543,7 +1587,7 @@ impl MacpRuntimeService for MacpServer {
                     &mut pending,
                     crate::watch_sync::PENDING_EVENT_LIMIT,
                 ) {
-                    Err(Status::resource_exhausted(drain_err.message()))?;
+                    Err(Self::coded_status(MacpError::StreamLagged, drain_err.message()))?;
                     break;
                 }
                 // One session, emitted and dropped before the next is asked
@@ -1566,7 +1610,7 @@ impl MacpRuntimeService for MacpServer {
                     None => match rx.recv().await {
                         Ok(event) => event,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            Err(Status::resource_exhausted(format!(
+                            Err(Self::coded_status(MacpError::StreamLagged, format!(
                                 "WatchSessions receiver fell behind by {skipped} events"
                             )))?;
                             break;
@@ -1643,7 +1687,7 @@ impl MacpRuntimeService for MacpServer {
         let req = request.into_inner();
         let descriptor = req
             .mode_descriptor
-            .ok_or_else(|| Status::invalid_argument("descriptor required"))?;
+            .ok_or_else(|| Self::coded_status(MacpError::InvalidRequest, "descriptor required"))?;
         match self.runtime.register_extension(descriptor) {
             Ok(()) => Ok(Response::new(RegisterExtModeResponse {
                 ok: true,
@@ -1720,7 +1764,8 @@ impl MacpRuntimeService for MacpServer {
         request: Request<RegisterPolicyRequest>,
     ) -> Result<Response<RegisterPolicyResponse>, Status> {
         if self.policies_read_only {
-            return Err(Status::failed_precondition(
+            return Err(Self::coded_status(
+                MacpError::RegistryReadOnly,
                 "policy registry is read-only: policies are file-loaded via MACP_POLICIES_DIR",
             ));
         }
@@ -1735,7 +1780,7 @@ impl MacpRuntimeService for MacpServer {
         let req = request.into_inner();
         let descriptor = req
             .policy_descriptor
-            .ok_or_else(|| Status::invalid_argument("descriptor required"))?;
+            .ok_or_else(|| Self::coded_status(MacpError::InvalidRequest, "descriptor required"))?;
         let definition = Self::policy_descriptor_to_definition(&descriptor);
         match self.runtime.register_policy(definition) {
             Ok(()) => Ok(Response::new(RegisterPolicyResponse {
@@ -1754,7 +1799,8 @@ impl MacpRuntimeService for MacpServer {
         request: Request<UnregisterPolicyRequest>,
     ) -> Result<Response<UnregisterPolicyResponse>, Status> {
         if self.policies_read_only {
-            return Err(Status::failed_precondition(
+            return Err(Self::coded_status(
+                MacpError::RegistryReadOnly,
                 "policy registry is read-only: policies are file-loaded via MACP_POLICIES_DIR",
             ));
         }
@@ -1789,10 +1835,12 @@ impl MacpRuntimeService for MacpServer {
             .await
             .map_err(Self::status_from_error)?;
         let req = request.into_inner();
-        let policy = self
-            .runtime
-            .get_policy(&req.policy_id)
-            .ok_or_else(|| Status::not_found(format!("Policy '{}' not found", req.policy_id)))?;
+        let policy = self.runtime.get_policy(&req.policy_id).ok_or_else(|| {
+            Self::coded_status(
+                MacpError::UnknownPolicyVersion,
+                format!("Policy '{}' not found", req.policy_id),
+            )
+        })?;
         Ok(Response::new(GetPolicyResponse {
             policy_descriptor: Some(Self::policy_definition_to_descriptor(&policy)),
         }))
@@ -1924,6 +1972,10 @@ mod tests {
             (MacpError::RateLimited, tonic::Code::ResourceExhausted),
             (MacpError::StorageFailed, tonic::Code::Internal),
             (MacpError::Unauthenticated, tonic::Code::Unauthenticated),
+            (MacpError::RegistryReadOnly, tonic::Code::FailedPrecondition),
+            (MacpError::InvalidRequest, tonic::Code::InvalidArgument),
+            (MacpError::StreamLagged, tonic::Code::ResourceExhausted),
+            (MacpError::AgentNotFound, tonic::Code::NotFound),
         ];
         for (err, code) in cases {
             let name = err.error_code();
@@ -2415,7 +2467,123 @@ mod tests {
             format!("Bearer {}", "agent://fraud").parse().unwrap(),
         );
         let err = server.cancel_session(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert_coded(&err, "FORBIDDEN", tonic::Code::PermissionDenied);
+    }
+
+    /// Every control-plane rejection names its registry code in
+    /// `macp-error-code`, exactly like `Send` (SDK report: these used to be
+    /// bare statuses a client could only branch on by message text).
+    fn assert_coded(status: &Status, code: &str, grpc: tonic::Code) {
+        assert_eq!(status.code(), grpc, "{code}: {status:?}");
+        assert_eq!(
+            status
+                .metadata()
+                .get("macp-error-code")
+                .unwrap_or_else(|| panic!("{code}: no macp-error-code on {status:?}")),
+            code
+        );
+        let row = macp_core::error::registry_entry(code).expect("registry row");
+        assert_eq!(status.code() as i32, row.grpc.grpc_code(), "{code}");
+    }
+
+    fn authed<T>(msg: T) -> Request<T> {
+        let mut req = Request::new(msg);
+        req.metadata_mut().insert(
+            "authorization",
+            "Bearer agent://orchestrator".parse().unwrap(),
+        );
+        req
+    }
+
+    #[tokio::test]
+    async fn control_plane_rejections_carry_registry_codes() {
+        let (server, _) = make_server();
+
+        let err = server
+            .get_session(authed(GetSessionRequest {
+                session_id: "nonexistent".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_coded(&err, "SESSION_NOT_FOUND", tonic::Code::NotFound);
+
+        let err = server
+            .list_sessions(authed(crate::pb::ListSessionsRequest {
+                page_size: -1,
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_coded(&err, "INVALID_REQUEST", tonic::Code::InvalidArgument);
+
+        let err = server
+            .list_sessions(authed(crate::pb::ListSessionsRequest {
+                page_token: "!!not-a-token!!".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_coded(&err, "INVALID_REQUEST", tonic::Code::InvalidArgument);
+
+        let err = server
+            .get_manifest(authed(crate::pb::GetManifestRequest {
+                agent_id: "someone-else".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_coded(&err, "AGENT_NOT_FOUND", tonic::Code::NotFound);
+
+        let err = server
+            .get_policy(authed(crate::pb::GetPolicyRequest {
+                policy_id: "policy.nope".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_coded(&err, "UNKNOWN_POLICY_VERSION", tonic::Code::NotFound);
+
+        let err = server
+            .register_policy(authed(crate::pb::RegisterPolicyRequest {
+                policy_descriptor: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_coded(&err, "INVALID_REQUEST", tonic::Code::InvalidArgument);
+
+        let err = server
+            .initialize(Request::new(InitializeRequest::default()))
+            .await
+            .unwrap_err();
+        assert_coded(&err, "INVALID_REQUEST", tonic::Code::InvalidArgument);
+
+        let err = server
+            .initialize(Request::new(InitializeRequest {
+                supported_protocol_versions: vec!["9.9".into()],
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_coded(
+            &err,
+            "UNSUPPORTED_PROTOCOL_VERSION",
+            tonic::Code::InvalidArgument,
+        );
+
+        let (server, _) = make_server();
+        let server = server.with_read_only_policies();
+        let err = server
+            .register_policy(authed(crate::pb::RegisterPolicyRequest {
+                policy_descriptor: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_coded(&err, "REGISTRY_READ_ONLY", tonic::Code::FailedPrecondition);
+        let err = server
+            .unregister_policy(authed(crate::pb::UnregisterPolicyRequest {
+                policy_id: "policy.default".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_coded(&err, "REGISTRY_READ_ONLY", tonic::Code::FailedPrecondition);
     }
 
     #[tokio::test]
@@ -2432,7 +2600,7 @@ mod tests {
                 .unwrap(),
         );
         let err = server.cancel_session(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_coded(&err, "SESSION_NOT_FOUND", tonic::Code::NotFound);
     }
 
     #[tokio::test]

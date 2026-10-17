@@ -48,6 +48,10 @@ the following, and each refusal is `INVALID_ENVELOPE`:
     no one is left who can take it. The initiator may then send a negative
     `Commitment` without a terminal report.
 
+### 3. Every gRPC `Status` names its registry code
+
+Control-plane RPCs that used to return a bare status (unknown session, read-only policy registry, bad `ListSessions` paging, stream lag, unknown manifest agent) now carry `macp-error-code` metadata like `Send` does. The gRPC status code itself did not change for any of them, so a client that branches on the status keeps working. Four codes are new and proposed to the spec registry: `REGISTRY_READ_ONLY`, `INVALID_REQUEST`, `STREAM_LAGGED` and `AGENT_NOT_FOUND`. See the "Control-plane codes" table in [the SDK guide](sdk-guide.md). Alerting that groups on `macp-error-code` sees these codes where it used to see none.
+
 ## Upgrading into registration-time policy validation
 
 This release tightens what the governance policy registry accepts, what the Quorum mode will bind, how the Decision evaluator reads a `weighted` round, when a decline may be finalized over a passing vote, and how a `percentage` Quorum threshold is computed. Ten changes are operationally visible -- seven tightenings, one relaxation (item 7, which cannot affect an existing deployment) and two corrections that *lower* a bar (items 9 and 10) -- and **item 6 is the only one that can change how an already-stored session replays** -- read it first if you have any persisted Decision session at all. Item 6 carries two independent predicates and **only one of them involves `weighted`**: the other reaches any Decision policy that sets `commitment.allow_decline_over_approval: true`, `majority` policies included. Read this section before upgrading any deployment that sets `MACP_POLICIES_DIR`, or that has persisted sessions bound to a policy with a Quorum `threshold`, a `weighted` `voting.algorithm`, or `commitment.allow_decline_over_approval: true`. `CHANGELOG.md` is generated from commit subjects and does not carry this detail.

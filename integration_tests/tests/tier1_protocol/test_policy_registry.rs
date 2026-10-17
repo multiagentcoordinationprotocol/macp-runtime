@@ -1030,7 +1030,8 @@ async fn std_supermajority_matches_the_rfc_outcome_table() {
     // §5.2 determinism note: 2/3, 4/6, 20/30 and 67/100 clear the binary64
     // two-thirds bar; 66/100 does not.
     for (approve, total) in [(2usize, 3usize), (4, 6), (20, 30), (67, 100)] {
-        let ack = commit_under_std_policy(STD_SUPERMAJORITY, approve, total - approve, 0, false).await;
+        let ack =
+            commit_under_std_policy(STD_SUPERMAJORITY, approve, total - approve, 0, false).await;
         assert!(
             ack.ok,
             "{approve} of {total} should approve: {:?}",

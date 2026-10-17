@@ -206,12 +206,10 @@ async fn watch_sessions_initial_sync_emits_every_session_once_on_a_private_runti
         std::env::var("MACP_TEST_BINARY").unwrap_or_else(|_| "../target/debug/macp-runtime".into());
     // 60 starts from one sender blows through the 60/minute default, which
     // would surface as a bogus lifecycle failure. Pin it above the fixture.
-    let manager = ServerManager::start_with_env(
-        &binary,
-        &[("MACP_SESSION_START_LIMIT_PER_MINUTE", "1000")],
-    )
-    .await
-    .expect("private runtime must start");
+    let manager =
+        ServerManager::start_with_env(&binary, &[("MACP_SESSION_START_LIMIT_PER_MINUTE", "1000")])
+            .await
+            .expect("private runtime must start");
     let mut client = MacpRuntimeServiceClient::connect(manager.endpoint.clone())
         .await
         .expect("connect to the private runtime");

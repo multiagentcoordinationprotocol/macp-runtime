@@ -260,6 +260,7 @@ A breach of this rule is a **sender-authorization failure**, not a governance-ru
 | `POLICY_DENIED` | A commitment is rejected because governance rules are not satisfied | PermissionDenied |
 | `FORBIDDEN` | A `commitment.authority` / `designated_roles` breach -- the sender is authenticated but not the authorized commitment authority (RFC-MACP-0002 §6.1, RFC-MACP-0012 §10) | PermissionDenied |
 | `INVALID_POLICY_DEFINITION` | A policy fails one of the [registration checks](#what-registration-checks), or claims a reserved `policy.std.` identifier | InvalidArgument |
+| `REGISTRY_READ_ONLY` | `RegisterPolicy`/`UnregisterPolicy` while the registry is file-loaded from `MACP_POLICIES_DIR` (0.9.0; proposed registry row) | FailedPrecondition |
 
 The status column is the error-codes registry's gRPC column (proposal S13), held once in `macp_core::error::ERROR_CODE_REGISTRY` and applied by `Self::status_from_error` (`src/server.rs`); every status also carries the registry code in `macp-error-code` metadata. Before 0.9.0 both policy codes surfaced as `FailedPrecondition`. Two caveats:
 

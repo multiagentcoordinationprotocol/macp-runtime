@@ -86,6 +86,30 @@
           },
           "expected_error_code": {
             "type": "string"
+          },
+          "accepted_at_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional acceptance clock for this step, in milliseconds on the session timeline: the runtime's recorded acceptance time of RFC-MACP-0001 Section 7.6 item 4, which the harness supplies to the runtime. It is distinct from the Envelope's timestamp_unix_ms (see 'envelope'). All-or-none: when any message carries it, every message MUST, and the values MUST be non-decreasing. The harness then accepts the fixture's own SessionStart at acceptance time 0 with Envelope timestamp_unix_ms 0. When no message carries it, the harness uses its own clock."
+          },
+          "envelope": {
+            "type": "object",
+            "description": "Optional overrides for Envelope fields the harness otherwise derives: session_id (default: the id the harness minted for the fixture's session), macp_version (default: '1.0'), mode (default: the fixture's mode) and timestamp_unix_ms (default: the harness clock, or 0 when accepted_at_ms is in use). A message whose message_type is SessionStart MUST set session_id, because it opens a session other than the fixture's own.",
+            "properties": {
+              "session_id": {
+                "type": "string"
+              },
+              "macp_version": {
+                "type": "string"
+              },
+              "mode": {
+                "type": "string"
+              },
+              "timestamp_unix_ms": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false
           }
         },
         "patternProperties": {
@@ -111,6 +135,41 @@
     },
     "expected_mode_state": {
       "type": "object"
+    },
+    "expected_history": {
+      "type": "array",
+      "description": "Optional exact assertion on the fixture session's accepted history after its SessionStart, in acceptance order and with no extra entries. It includes runtime-emitted envelopes that no message submitted, such as the synthetic HandoffAccept of RFC-MACP-0010 Section 5.1; mark those with synthetic: true. 'payload' is a subset match on the decoded payload.",
+      "items": {
+        "type": "object",
+        "required": [
+          "message_type",
+          "sender"
+        ],
+        "properties": {
+          "message_type": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sender": {
+            "type": "string",
+            "minLength": 1
+          },
+          "payload": {
+            "type": "object"
+          },
+          "synthetic": {
+            "type": "boolean",
+            "description": "true for a runtime-emitted envelope that no message in the transcript submitted."
+          }
+        },
+        "patternProperties": {
+          "^_": {
+            "type": "string",
+            "description": "Non-normative annotation (e.g. _comment). Harnesses MUST ignore keys starting with '_'."
+          }
+        },
+        "additionalProperties": false
+      }
     },
     "expect_resolution_present": {
       "type": "boolean"

@@ -118,6 +118,17 @@ Application-level errors (validation failures, authorization denials, policy den
 
 **gRPC status (0.9.0, S13).** Where a MACP error escapes as a gRPC `Status`, its code is the error-codes registry's gRPC column -- `POLICY_DENIED`/`FORBIDDEN` → `PERMISSION_DENIED`, `SESSION_NOT_FOUND`/`UNKNOWN_POLICY_VERSION` → `NOT_FOUND`, `INVALID_ENVELOPE`/`MODE_NOT_SUPPORTED`/`UNSUPPORTED_PROTOCOL_VERSION`/`INVALID_SESSION_ID`/`INVALID_POLICY_DEFINITION` → `INVALID_ARGUMENT`, `DUPLICATE_MESSAGE`/`SESSION_ALREADY_EXISTS` → `ALREADY_EXISTS`, `SESSION_NOT_OPEN` → `FAILED_PRECONDITION`, `PAYLOAD_TOO_LARGE`/`RATE_LIMITED` → `RESOURCE_EXHAUSTED`, `INTERNAL_ERROR` → `INTERNAL` -- and the registry code is in the `macp-error-code` metadata key. Branch on that key, not on the status: several codes share one status. Before 0.9.0 most codes surfaced as `FAILED_PRECONDITION`, including `Initialize`'s version mismatch.
 
+**Control-plane codes (0.9.0).** The same metadata is now on *every* `Status` the runtime returns, not only those built from a kernel error: `GetSession`/`CancelSession`/`SuspendSession`/`ResumeSession` on an unknown session → `SESSION_NOT_FOUND`, a non-member or non-initiator → `FORBIDDEN`, `GetPolicy` on an unknown id → `UNKNOWN_POLICY_VERSION`, and stream subscribe/binding errors → `INVALID_ENVELOPE`/`SESSION_NOT_FOUND`. Four codes are new, proposed to the spec registry alongside 0.9.0; their gRPC status is unchanged from what clients saw before, so only the metadata is new:
+
+| Code | gRPC | HTTP | Raised by |
+|------|------|------|-----------|
+| `REGISTRY_READ_ONLY` | `FAILED_PRECONDITION` | 409 | `RegisterPolicy`/`UnregisterPolicy` when policies are file-loaded (`MACP_POLICIES_DIR`) |
+| `INVALID_REQUEST` | `INVALID_ARGUMENT` | 400 | `ListSessions` negative `page_size` or bad `page_token`; a missing descriptor; `Initialize` with no versions |
+| `STREAM_LAGGED` | `RESOURCE_EXHAUSTED` | 503 | `StreamSession` and the `Watch*` streams when a subscriber falls behind -- resubscribe (see [Handling stream lag](#handling-stream-lag)) |
+| `AGENT_NOT_FOUND` | `NOT_FOUND` | 404 | `GetManifest` for an agent this runtime does not host |
+
+A client that does not recognise a code should fall back to the gRPC status.
+
 In a `macp.mode.handoff.v1` session, a stream can deliver a `HandoffAccept` that **no participant sent**: the runtime's synthetic implicit accept. It consumes an accepted ordinal and replays identically to any other accepted envelope, but its payload carries `implicit = true` and its `timestamp_unix_ms` is the computed deadline, not the time your SDK observed it. A client must never originate one. See [Handoff implicit accept](modes.md#implicit-accept-rfc-macp-0010-51).
 
 ### Handling stream lag
