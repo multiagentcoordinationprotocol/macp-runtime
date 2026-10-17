@@ -342,6 +342,10 @@ fn error_codes_permanent_set_matches_runtime() {
             reasons: vec!["parity_contract probe".into()],
         },
         MacpError::InvalidPolicyDefinition,
+        MacpError::RegistryReadOnly,
+        MacpError::InvalidRequest,
+        MacpError::StreamLagged,
+        MacpError::AgentNotFound,
     ];
     let produced: HashSet<&str> = variants.iter().map(|e| e.error_code()).collect();
 

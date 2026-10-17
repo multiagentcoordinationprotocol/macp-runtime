@@ -1,6 +1,6 @@
 {
   "$comment": "This file is NON-NORMATIVE: it projects values whose actual normative homes (where one exists) are named per-section via that section's `source` field. This manifest MUST NOT itself be cited as a normative source -- cite the named RFC/registry/proto file instead. See schemas/parity/README.md for full context, the applies_to/source semantics, and the versioning rules.",
-  "contract_version": "1.3.0",
+  "contract_version": "1.4.0",
   "sections": {
     "protocol": {
       "applies_to": [
@@ -64,7 +64,11 @@
         "INTERNAL_ERROR",
         "UNKNOWN_POLICY_VERSION",
         "POLICY_DENIED",
-        "INVALID_POLICY_DEFINITION"
+        "INVALID_POLICY_DEFINITION",
+        "REGISTRY_READ_ONLY",
+        "INVALID_REQUEST",
+        "STREAM_LAGGED",
+        "AGENT_NOT_FOUND"
       ],
       "deprecated": [
         "UNAUTHORIZED"

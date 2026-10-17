@@ -200,7 +200,7 @@ pub const ERROR_CODE_REGISTRY: &[RegistryEntry] = &[
         TransportStatus::InvalidArgument,
         400,
     ),
-    // Control-plane rows (spec #195, provisional); each keeps the gRPC
+    // Control-plane rows (spec #195; permanent since spec #196); each keeps the gRPC
     // status those RPCs returned before they had a code.
     entry(
         "REGISTRY_READ_ONLY",
