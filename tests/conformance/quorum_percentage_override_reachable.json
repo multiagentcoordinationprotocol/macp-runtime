@@ -1,0 +1,95 @@
+{
+  "_comment": "Companion to quorum_unreachable_override.json (seam-embedder-findings proposal S4). It shows that a large override is not on its own a licence for an immediate negative Commitment. percentage 100 over 3 declared participants resolves to an effective threshold of ceil(100 * 3 / 100) = 3 by RFC-MACP-0012 Section 4.2. That threshold is reachable until a ballot rules it out, so rule 4's termination arithmetic uses the effective count, as rule 6 requires.",
+  "description": "Quorum Mode: a percentage 100 override is reachable at first, so an early negative Commitment is rejected. One Reject makes it unreachable, and the negative Commitment is then accepted.",
+  "mode": "macp.mode.quorum.v1",
+  "initiator": "agent://coordinator",
+  "participants": [
+    "agent://alice",
+    "agent://bob",
+    "agent://carol"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.quorum.percentage-100",
+    "mode": "macp.mode.quorum.v1",
+    "schema_version": 3,
+    "description": "percentage threshold of 100 (effective 3 of 3 declared participants).",
+    "rules": {
+      "threshold": {
+        "type": "percentage",
+        "value": 100
+      }
+    }
+  },
+  "policy_version": "policy.quorum.percentage-100",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://coordinator",
+      "message_type": "ApprovalRequest",
+      "payload_type": "macp.modes.quorum.v1.ApprovalRequestPayload",
+      "payload": {
+        "request_id": "r1",
+        "action": "deploy",
+        "summary": "Deploy v2",
+        "details": [],
+        "required_approvals": 2
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Before any ballot, all 3 approvals remain possible and the effective threshold is 3, so neither termination clause of rule 4 holds. The Commitment MUST be rejected.",
+      "sender": "agent://coordinator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "quorum.rejected",
+        "authority_scope": "test",
+        "reason": "threshold unreachable",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.quorum.percentage-100",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "sender": "agent://alice",
+      "message_type": "Reject",
+      "payload_type": "macp.modes.quorum.v1.RejectPayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "not ready"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "After one Reject, at most 2 approvals remain possible, which is below the effective threshold of 3. Rule 4's second clause now holds, and the negative Commitment is accepted.",
+      "sender": "agent://coordinator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "action": "quorum.rejected",
+        "authority_scope": "test",
+        "reason": "threshold unreachable",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.quorum.percentage-100",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "quorum.rejected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": false
+  }
+}

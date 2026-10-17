@@ -3,7 +3,8 @@
   "initiator": "agent://owner",
   "participants": [
     "agent://owner",
-    "agent://target"
+    "agent://target",
+    "agent://target2"
   ],
   "mode_version": "1.0.0",
   "configuration_version": "cfg-1",
@@ -36,11 +37,49 @@
     },
     {
       "sender": "agent://target",
+      "message_type": "HandoffDecline",
+      "payload_type": "macp.modes.handoff.v1.HandoffDeclinePayload",
+      "payload": {
+        "handoff_id": "h1",
+        "declined_by": "agent://target",
+        "reason": "at capacity"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0010 Section 5 rule 3a: a new HandoffOffer MUST carry a target_participant that has not previously declined an offer in this Session. agent://target declined h1, so this offer -- new handoff_id, no offer outstanding, declared target, not the owner -- fails on rule 3a alone.",
+      "sender": "agent://owner",
+      "message_type": "HandoffOffer",
+      "payload_type": "macp.modes.handoff.v1.HandoffOfferPayload",
+      "payload": {
+        "handoff_id": "h2",
+        "target_participant": "agent://target",
+        "scope": "support",
+        "reason": "please reconsider"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0010 Section 5 rules 3a and 5: after a decline, an offer to a target that has not declined is valid.",
+      "sender": "agent://owner",
+      "message_type": "HandoffOffer",
+      "payload_type": "macp.modes.handoff.v1.HandoffOfferPayload",
+      "payload": {
+        "handoff_id": "h3",
+        "target_participant": "agent://target2",
+        "scope": "support",
+        "reason": "escalate"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://target2",
       "message_type": "HandoffAccept",
       "payload_type": "macp.modes.handoff.v1.HandoffAcceptPayload",
       "payload": {
-        "handoff_id": "h1",
-        "accepted_by": "agent://target",
+        "handoff_id": "h3",
+        "accepted_by": "agent://target2",
         "reason": "ready"
       },
       "expect": "accept"
@@ -50,7 +89,7 @@
       "message_type": "HandoffContext",
       "payload_type": "macp.modes.handoff.v1.HandoffContextPayload",
       "payload": {
-        "handoff_id": "h1",
+        "handoff_id": "h3",
         "content_type": "text/plain",
         "context": "late context"
       },
@@ -62,6 +101,9 @@
   "expected_mode_state": {
     "offers": {
       "h1": {
+        "disposition": "Declined"
+      },
+      "h3": {
         "disposition": "Accepted"
       }
     }

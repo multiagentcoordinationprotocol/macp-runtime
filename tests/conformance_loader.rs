@@ -193,6 +193,12 @@ fn encode_task_payload(msg: &ConformanceMessage) -> Vec<u8> {
             reason: p["reason"].as_str().unwrap_or_default().into(),
         }
         .encode_to_vec(),
+        "TaskReject" => macp_runtime::task_pb::TaskRejectPayload {
+            task_id: p["task_id"].as_str().unwrap_or_default().into(),
+            assignee: p["assignee"].as_str().unwrap_or_default().into(),
+            reason: p["reason"].as_str().unwrap_or_default().into(),
+        }
+        .encode_to_vec(),
         "TaskComplete" => macp_runtime::task_pb::TaskCompletePayload {
             task_id: p["task_id"].as_str().unwrap_or_default().into(),
             assignee: p["assignee"].as_str().unwrap_or_default().into(),
@@ -583,6 +589,14 @@ conformance_test!(
     "handoff_negative_outcome.json"
 );
 conformance_test!(conformance_quorum_reject_paths, "quorum_reject_paths.json");
+conformance_test!(
+    conformance_quorum_unreachable_override,
+    "quorum_unreachable_override.json"
+);
+conformance_test!(
+    conformance_quorum_percentage_override_reachable,
+    "quorum_percentage_override_reachable.json"
+);
 conformance_test!(
     conformance_quorum_negative_outcome,
     "quorum_negative_outcome.json"

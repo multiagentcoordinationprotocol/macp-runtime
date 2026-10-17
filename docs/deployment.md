@@ -22,6 +22,32 @@ A deliberate reversal of issue #145, made to follow RFC-MACP-0011 §5 rule 6 (Se
 
 Who it reaches: only sessions bound to a policy whose `n_of_m`/`count` value exceeds the session's participant count. Persisted sessions of that kind that 0.8 skipped at replay (item 3 of the next section) now **load again** -- and are immediately declinable. If such a session must not be declined without a vote, correct the policy before upgrading. An `Unsatisfiable` threshold (unrecognised `type`) is still refused at `ApprovalRequest`.
 
+### 2. Revision 4: three validation tightenings for new sessions
+
+Sessions started by 0.9.0 are bound to `semantics_rev` 4. A session started
+by an older release keeps its revision across the upgrade, so it replays
+and continues under the rules it was accepted under. Only new sessions see
+the following, and each refusal is `INVALID_ENVELOPE`:
+
+- **Decision (Seam S7, RFC-MACP-0007 §4).** `Vote.vote` and
+  `Evaluation.recommendation` must be UPPER_CASE, exactly as written
+  (`APPROVE`, not `approve`). `Objection.severity` must be lowercase and
+  non-empty; it no longer defaults to `medium`. **Clients that send
+  lowercase votes must change before they open new sessions.**
+- **Handoff (Seam S5, RFC-MACP-0010 §5 rule 3a).** After a target declines
+  an offer, the owner can't offer that target anything else in the same
+  Session. Offer to a different participant, or commit negatively.
+- **Task (Seam S6, RFC-MACP-0009 §5 rule 2a).** A `TaskReject` sent before
+  anyone is assigned declines the task for that participant only:
+  - That participant can never `TaskAccept` the task.
+  - Other participants can still accept it.
+    `assignment.allow_reassignment_on_reject` now applies only to a reject
+    from the *active assignee*. Before 0.9.0, a decline from anyone blocked
+    every later accept unless the policy allowed reassignment.
+  - If the task names a `requested_assignee` and that participant declines,
+    no one is left who can take it. The initiator may then send a negative
+    `Commitment` without a terminal report.
+
 ## Upgrading into registration-time policy validation
 
 This release tightens what the governance policy registry accepts, what the Quorum mode will bind, how the Decision evaluator reads a `weighted` round, when a decline may be finalized over a passing vote, and how a `percentage` Quorum threshold is computed. Ten changes are operationally visible -- seven tightenings, one relaxation (item 7, which cannot affect an existing deployment) and two corrections that *lower* a bar (items 9 and 10) -- and **item 6 is the only one that can change how an already-stored session replays** -- read it first if you have any persisted Decision session at all. Item 6 carries two independent predicates and **only one of them involves `weighted`**: the other reaches any Decision policy that sets `commitment.allow_decline_over_approval: true`, `majority` policies included. Read this section before upgrading any deployment that sets `MACP_POLICIES_DIR`, or that has persisted sessions bound to a policy with a Quorum `threshold`, a `weighted` `voting.algorithm`, or `commitment.allow_decline_over_approval: true`. `CHANGELOG.md` is generated from commit subjects and does not carry this detail.

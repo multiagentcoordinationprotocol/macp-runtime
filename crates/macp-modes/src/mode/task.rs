@@ -50,6 +50,13 @@ pub struct TaskRejectRecord {
     pub task_id: String,
     pub assignee: String,
     pub reason: String,
+    /// `true` when the rejecter was the active assignee (RFC-MACP-0009 §5
+    /// rule 3c, governed by `allow_reassignment_on_reject`); `false` for a
+    /// pre-assignment decline (rule 2a), which records that participant's
+    /// decline only. Recorded from `semantics_rev` 4; absent (so `false`) in
+    /// older snapshots, whose sessions never read it.
+    #[serde(default)]
+    pub while_assigned: bool,
 }
 
 /// A `TaskUpdate` as it stands in serialized `mode_state`.
@@ -112,6 +119,10 @@ pub struct TaskState {
     pub updates: Vec<TaskUpdateRecord>,
     pub terminal_report: Option<TaskTerminalReport>,
 }
+
+/// First `semantics_rev` at which RFC-MACP-0009 §5 rule 2a applies: a
+/// pre-assignment `TaskReject` is a personal decline (Seam finding S6, #185).
+pub const PERSONAL_DECLINE_REV: u32 = 4;
 
 pub struct TaskMode {
     evaluator: std::sync::Arc<dyn macp_core::policy::PolicyEvaluator>,
@@ -224,8 +235,22 @@ impl Mode for TaskMode {
                 if state.active_assignee.is_some() {
                     return Err(MacpError::InvalidPayload);
                 }
-                // RFC-MACP-0012: check allow_reassignment_on_reject if prior rejections exist
-                if !state.rejections.is_empty() {
+                let rule_2a = session.semantics_rev >= PERSONAL_DECLINE_REV;
+                // RFC-MACP-0009 §5 rule 2a: a participant that has declined
+                // MUST NOT later accept the task.
+                if rule_2a && state.rejections.iter().any(|r| r.assignee == env.sender) {
+                    return Err(MacpError::InvalidPayload);
+                }
+                // RFC-MACP-0012 `allow_reassignment_on_reject` governs only a
+                // reject by an active assignee (rule 3c). Before rule 2a
+                // (rev <= 3) any prior rejection gated every later accept --
+                // kept so those histories replay unchanged.
+                let reassigning = if rule_2a {
+                    state.rejections.iter().any(|r| r.while_assigned)
+                } else {
+                    !state.rejections.is_empty()
+                };
+                if reassigning {
                     let allow = session.policy_definition.as_ref().is_some_and(|p| {
                         serde_json::from_value::<macp_core::policy::rules::TaskPolicyRules>(
                             p.rules.clone(),
@@ -297,13 +322,15 @@ impl Mode for TaskMode {
                     return Err(MacpError::InvalidPayload);
                 }
                 // If active assignee is rejecting with policy permission, clear assignment
-                if state.active_assignee.as_deref() == Some(env.sender.as_str()) {
+                let while_assigned = state.active_assignee.as_deref() == Some(env.sender.as_str());
+                if while_assigned {
                     state.active_assignee = None;
                 }
                 state.rejections.push(TaskRejectRecord {
                     task_id: payload.task_id,
                     assignee: env.sender.clone(),
                     reason: payload.reason,
+                    while_assigned,
                 });
                 Ok(ModeResponse::PersistState(Self::encode_state(&state)))
             }
@@ -372,7 +399,20 @@ impl Mode for TaskMode {
             }
             "Commitment" => {
                 let commitment = validate_commitment_payload_for_session(session, &env.payload)?;
-                if state.terminal_report.is_none() {
+                // RFC-MACP-0009 §5 rule 2a: a named assignee's pre-assignment
+                // decline leaves no eligible assignee, so the session becomes
+                // eligible for a negative Commitment without a terminal report.
+                let no_eligible_assignee = session.semantics_rev >= PERSONAL_DECLINE_REV
+                    && state.active_assignee.is_none()
+                    && state.task.as_ref().is_some_and(|t| {
+                        !t.requested_assignee.is_empty()
+                            && state
+                                .rejections
+                                .iter()
+                                .any(|r| r.assignee == t.requested_assignee && !r.while_assigned)
+                    });
+                let declinable = no_eligible_assignee && !commitment.outcome_positive;
+                if state.terminal_report.is_none() && !declinable {
                     return Err(MacpError::InvalidPayload);
                 }
                 // Governance policy gate (shared): fail closed, only
@@ -1509,6 +1549,213 @@ mod tests {
             .on_message(
                 &session,
                 &env("worker", "TaskReject", make_task_reject("t1", "worker")),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), "PolicyDenied");
+    }
+
+    // --- RFC-MACP-0009 §5 rule 2a (Seam finding S6, #185), semantics_rev >= 4 ---
+
+    fn pool_session(rev: u32, rules: Option<serde_json::Value>) -> (TaskMode, Session) {
+        let mode = TaskMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = Session::builder("s1", "macp.mode.task.v1", "planner")
+            .ttl_ms(60_000)
+            .participants(vec!["planner".into(), "w1".into(), "w2".into()])
+            .mode_version("1.0.0")
+            .configuration_version("config")
+            .policy_version("policy")
+            .build();
+        session.semantics_rev = rev;
+        session.policy_definition = rules.map(|rules| macp_core::policy::PolicyDefinition {
+            policy_id: "policy".into(),
+            mode: "macp.mode.task.v1".into(),
+            description: "test".into(),
+            rules,
+            schema_version: 1,
+        });
+        let result = mode
+            .on_session_start(&session, &env("planner", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+        (mode, session)
+    }
+
+    fn step_ok(mode: &TaskMode, session: &mut Session, e: Envelope) {
+        let r = mode
+            .on_message(session, &e)
+            .unwrap_or_else(|err| panic!("{} from {} refused: {err}", e.message_type, e.sender));
+        apply(session, r);
+    }
+
+    #[test]
+    fn s6_a_broadcast_decline_is_personal() {
+        let (mode, mut session) = pool_session(macp_core::session::CURRENT_SEMANTICS_REV, None);
+        step_ok(
+            &mode,
+            &mut session,
+            env("planner", "TaskRequest", make_task_request("t1", "")),
+        );
+        step_ok(
+            &mode,
+            &mut session,
+            env("w1", "TaskReject", make_task_reject("t1", "w1")),
+        );
+        // The decliner can never accept (rule 2a)...
+        let err = mode
+            .on_message(
+                &session,
+                &env("w1", "TaskAccept", make_task_accept("t1", "w1")),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), "InvalidPayload");
+        // ...but its decline vetoes nobody else, whatever
+        // allow_reassignment_on_reject says (here: no policy, so false).
+        step_ok(
+            &mode,
+            &mut session,
+            env("w2", "TaskAccept", make_task_accept("t1", "w2")),
+        );
+        let err = mode
+            .on_message(
+                &session,
+                &env("w1", "TaskAccept", make_task_accept("t1", "w1")),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), "InvalidPayload");
+    }
+
+    #[test]
+    fn s6_a_decliner_stays_barred_even_when_reassignment_is_allowed() {
+        let (mode, mut session) = pool_session(
+            macp_core::session::CURRENT_SEMANTICS_REV,
+            Some(serde_json::json!({ "assignment": { "allow_reassignment_on_reject": true } })),
+        );
+        step_ok(
+            &mode,
+            &mut session,
+            env("planner", "TaskRequest", make_task_request("t1", "")),
+        );
+        step_ok(
+            &mode,
+            &mut session,
+            env("w1", "TaskReject", make_task_reject("t1", "w1")),
+        );
+        let err = mode
+            .on_message(
+                &session,
+                &env("w1", "TaskAccept", make_task_accept("t1", "w1")),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), "InvalidPayload");
+    }
+
+    #[test]
+    fn s6_reassignment_after_an_assigned_reject_is_still_policy_governed() {
+        // Rule 3c is untouched: a reject *by the active assignee* is what
+        // allow_reassignment_on_reject governs.
+        let (mode, mut session) = pool_session(
+            macp_core::session::CURRENT_SEMANTICS_REV,
+            Some(serde_json::json!({ "assignment": { "allow_reassignment_on_reject": true } })),
+        );
+        step_ok(
+            &mode,
+            &mut session,
+            env("planner", "TaskRequest", make_task_request("t1", "")),
+        );
+        step_ok(
+            &mode,
+            &mut session,
+            env("w1", "TaskAccept", make_task_accept("t1", "w1")),
+        );
+        step_ok(
+            &mode,
+            &mut session,
+            env("w1", "TaskReject", make_task_reject("t1", "w1")),
+        );
+        step_ok(
+            &mode,
+            &mut session,
+            env("w2", "TaskAccept", make_task_accept("t1", "w2")),
+        );
+    }
+
+    #[test]
+    fn s6_a_named_assignee_decline_makes_a_negative_commitment_eligible() {
+        let (mode, mut session) = pool_session(macp_core::session::CURRENT_SEMANTICS_REV, None);
+        step_ok(
+            &mode,
+            &mut session,
+            env("planner", "TaskRequest", make_task_request("t1", "w1")),
+        );
+        step_ok(
+            &mode,
+            &mut session,
+            env("w1", "TaskReject", make_task_reject("t1", "w1")),
+        );
+        let negative = CommitmentPayload {
+            commitment_id: "c1".into(),
+            action: "task.declined".into(),
+            authority_scope: "ops".into(),
+            reason: "no eligible assignee".into(),
+            mode_version: "1.0.0".into(),
+            policy_version: "policy".into(),
+            configuration_version: "config".into(),
+            outcome_positive: false,
+            supersedes: None,
+        }
+        .encode_to_vec();
+        // The positive outcome still needs a terminal report.
+        assert!(mode
+            .on_message(
+                &session,
+                &env("planner", "Commitment", commitment_payload())
+            )
+            .is_err());
+        let r = mode
+            .on_message(&session, &env("planner", "Commitment", negative))
+            .unwrap();
+        assert!(matches!(r, ModeResponse::PersistAndResolve { .. }));
+    }
+
+    #[test]
+    fn s6_legacy_sessions_keep_the_pool_wide_reassignment_rule() {
+        // Rev <= 3 histories were accepted under the old reading, under which
+        // any rejection gated every later TaskAccept on the policy.
+        let (mode, mut session) = pool_session(
+            3,
+            Some(serde_json::json!({ "assignment": { "allow_reassignment_on_reject": true } })),
+        );
+        step_ok(
+            &mode,
+            &mut session,
+            env("planner", "TaskRequest", make_task_request("t1", "")),
+        );
+        step_ok(
+            &mode,
+            &mut session,
+            env("w1", "TaskReject", make_task_reject("t1", "w1")),
+        );
+        // Old rule: the decliner may accept when reassignment is allowed.
+        step_ok(
+            &mode,
+            &mut session,
+            env("w1", "TaskAccept", make_task_accept("t1", "w1")),
+        );
+        let (mode, mut session) = pool_session(3, None);
+        step_ok(
+            &mode,
+            &mut session,
+            env("planner", "TaskRequest", make_task_request("t1", "")),
+        );
+        step_ok(
+            &mode,
+            &mut session,
+            env("w1", "TaskReject", make_task_reject("t1", "w1")),
+        );
+        let err = mode
+            .on_message(
+                &session,
+                &env("w2", "TaskAccept", make_task_accept("t1", "w2")),
             )
             .unwrap_err();
         assert_eq!(err.to_string(), "PolicyDenied");
