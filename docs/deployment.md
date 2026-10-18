@@ -50,7 +50,7 @@ the following, and each refusal is `INVALID_ENVELOPE`:
 
 ### 3. Every gRPC `Status` names its registry code
 
-Control-plane RPCs that used to return a bare status (unknown session, read-only policy registry, bad `ListSessions` paging, stream lag, unknown manifest agent) now carry `macp-error-code` metadata like `Send` does. The gRPC status code itself did not change for any of them, so a client that branches on the status keeps working. Four codes are new, provisional in the spec registry (spec #195): `REGISTRY_READ_ONLY`, `INVALID_REQUEST`, `STREAM_LAGGED` and `AGENT_NOT_FOUND`. See the "Control-plane codes" table in [the SDK guide](sdk-guide.md). Alerting that groups on `macp-error-code` sees these codes where it used to see none.
+Control-plane RPCs that used to return a bare status (unknown session, read-only policy registry, bad `ListSessions` paging, stream lag, unknown manifest agent) now carry `macp-error-code` metadata like `Send` does. The gRPC status code itself did not change for any of them, so a client that branches on the status keeps working. Four codes are new, added to the spec registry in spec #195 and permanent since spec #196: `REGISTRY_READ_ONLY`, `INVALID_REQUEST`, `STREAM_LAGGED` and `AGENT_NOT_FOUND`. See the "Control-plane codes" table in [the SDK guide](sdk-guide.md). Alerting that groups on `macp-error-code` sees these codes where it used to see none.
 
 ### 4. `session_id` is capped at 128 bytes
 
