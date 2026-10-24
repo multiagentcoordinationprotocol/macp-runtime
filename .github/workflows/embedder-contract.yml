@@ -1,0 +1,97 @@
+name: Embedder contract
+
+# PR-time enforcement of docs/stability.md for the four embeddable crates
+# (macp-core, macp-modes, macp-policy, macp-pb). Logic lives in
+# scripts/embedder_contract.py; this file only provisions it.
+#
+# A separate workflow from ci.yml for one reason: the semver gate reads the
+# `semver-breaking` label, so it must re-run on `labeled`/`unlabeled`, and
+# adding those event types to ci.yml would re-run the whole CI matrix on every
+# label change.
+#
+# release-plz.toml's `semver_check = true` is a different thing: it runs
+# cargo-semver-checks while computing the release PR, and uses a break only to
+# choose the bump (minor, pre-1.0). It never fails a feature PR, and it runs
+# after the break is already on main. This gate fails the PR that introduces it.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep in sync with ci.yml / rust-toolchain.toml. cargo-semver-checks reads
+  # rustdoc JSON, whose format moves with the toolchain, so bumping the
+  # toolchain can require bumping CARGO_SEMVER_CHECKS_VERSION too.
+  RUST_TOOLCHAIN: "1.96.1"
+  CARGO_SEMVER_CHECKS_VERSION: "0.50.0"
+  PROTOC_VERSION: "31.x"
+
+jobs:
+  semver:
+    name: Semver (embeddable crates)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # The gate diffs MIGRATING.md against, and may build, the PR's base
+          # commit.
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: semver
+
+      # macp-pb's build.rs runs prost-build, for the current tree and for the
+      # baseline crate downloaded from crates.io alike.
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ github.token }}
+
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-semver-checks@${{ env.CARGO_SEMVER_CHECKS_VERSION }}
+
+      - name: Check for unannounced breaking changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SEMVER_BREAKING_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'semver-breaking') }}
+        run: python3 scripts/embedder_contract.py semver-gate
+
+  release-migrating:
+    name: MIGRATING.md on breaking release
+    runs-on: ubuntu-latest
+    # release-plz names its release PR branches `release-plz-<timestamp>`.
+    # Skipped (which counts as passing) on every other PR.
+    if: startsWith(github.head_ref, 'release-plz-')
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Require a MIGRATING.md entry for a breaking bump
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/embedder_contract.py release-migrating

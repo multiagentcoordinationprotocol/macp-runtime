@@ -44,7 +44,14 @@ MACP_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test -p macp-storage --features
 - **Every behavior change lands with a test.** Changes affecting message
   acceptance or replay need a regression test, and — if they change semantics
   of persisted histories — a legacy-log fixture proving old logs still replay
-  under their original semantics (see `Session::semantics_rev`).
+  under their original semantics (see `Session::semantics_rev`). A new
+  revision also gets a row in `docs/semantics-revisions.md` (a test enforces
+  it) and a line in `MIGRATING.md`.
+- **Breaking changes to an embeddable crate** (`macp-core`, `macp-modes`,
+  `macp-policy`, `macp-pb`) need the `semver-breaking` PR label and a
+  `MIGRATING.md` entry under the next minor version. The `Embedder contract`
+  workflow enforces both for API breaks; behaviour breaks are on the author.
+  See `docs/stability.md`.
 - **Never weaken these invariants**: rejected messages don't consume dedup
   slots, and the only history a rejected message can cause is a
   **runtime-originated entry that was already due independently of it**;

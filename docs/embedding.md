@@ -7,6 +7,9 @@ acceptance obligations of §7.6 bind it. §7.6 also requires a library to
 document every obligation it leaves to its caller, and this page is that
 documentation for `macp-modes` 0.9.0.
 
+What these crates promise across releases is in [Stability](stability.md), and
+what changed in each breaking release is in [MIGRATING.md](../MIGRATING.md).
+
 The server kernel (`src/runtime.rs`) calls the same functions described here,
 so an embedder that follows this page and the server cannot drift apart.
 Every rule below is pinned by `crates/macp-modes/tests/` (`step_implicit_accept.rs`,
@@ -58,6 +61,9 @@ yours:
 - **Expiry bookkeeping.** When a deadline passes, `step` sets the session to
   `Expired` and returns `TtlExpired`. Record that expiry yourself (the server
   writes an internal `TtlExpired` entry) so replay reproduces it.
+- **Revision check on replay.** Refuse a recorded session whose
+  `semantics_rev` is newer than `CURRENT_SEMANTICS_REV`; see
+  [Semantics revisions](semantics-revisions.md).
 - **Rate and size limits, signals and lifecycle RPCs.** These are deployment
   policy. Signals (the ambient plane) never touch a `Session`.
 
@@ -199,12 +205,10 @@ upgrade never changes what an old history rebuilds to.
 - A legacy record that carries no revision replays as `0`.
 - Set a lower revision only to replay a history recorded under it.
 
-| Rev | Gates |
-|-----|-------|
-| 1 | Handoff's implicit-accept clock is the acceptance clock, not the envelope's |
-| 2 | Handoff's synthetic implicit accept; the `MAX_SUSPENSION_CYCLES` force-expire on resume (every mode) |
-| 3 | The `multi_round` `Contribute` canonical tie-break |
-| 4 | Three validation tightenings (0.9.0; `deployment.md`'s "Revision 4"). Decision wire enums are strict: `Vote.vote` and `Evaluation.recommendation` are UPPER_CASE, `Objection.severity` is lowercase, and an empty severity is refused. Handoff cannot re-offer to a target that declined. A Task `TaskReject` before assignment is a personal decline |
+[Semantics revisions](semantics-revisions.md) has the table of revisions and
+the replay compatibility guarantee. One rule there is yours to enforce: refuse
+a record whose `semantics_rev` is greater than `CURRENT_SEMANTICS_REV`, because
+`replay` does not check it.
 
 ## Session identifiers
 
