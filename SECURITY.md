@@ -2,14 +2,33 @@
 
 ## Reporting a vulnerability
 
-Please report suspected vulnerabilities privately via GitHub Security
-Advisories ("Report a vulnerability" on the repository's Security tab).
-Do not open public issues for security reports. You should receive an
-acknowledgement within 72 hours.
+Please report security problems privately through GitHub: open the
+repository's **Security** tab and choose **Report a vulnerability**. Don't open
+a public issue for them. You should receive an acknowledgement within 72 hours.
+
+Relevant reports include:
+
+- a way to inject into, read, or change a session you are not authorized for;
+- a way to make an accepted history, or a replay of it, differ from what the
+  runtime acknowledged;
+- an authentication or authorization bypass, including a forged
+  `Envelope.sender`;
+- a denial of service that gets past the configured rate, size, or
+  open-session limits;
+- the same classes of problem in the embeddable crates (`macp-core`,
+  `macp-modes`, `macp-policy`, `macp-pb`) when they are used as libraries
+  ([docs/embedding.md](docs/embedding.md)).
+
+A flaw in the protocol itself, one that a conformant implementation would
+share, belongs to the
+[specification repository](https://github.com/multiagentcoordinationprotocol/multiagentcoordinationprotocol/security).
+If you are unsure which applies, report it here.
 
 ## Supported versions
 
-Only the latest released minor version receives security fixes.
+Only the latest released minor version receives security fixes. Fixes ship as
+a patch release of the crates and a new `ghcr.io/multiagentcoordinationprotocol/macp-runtime`
+image tag.
 
 ## Security model (summary)
 
@@ -28,6 +47,5 @@ Only the latest released minor version receives security fixes.
 - **Resource protection**: per-sender rate limits, payload size limits,
   max-open-session limits.
 
-See `docs/deployment.md` for hardening guidance (including backend
-durability characteristics) and `plans/IMPROVEMENT_PLAN.md` for the audited
-security backlog.
+See [docs/deployment.md](docs/deployment.md) for hardening guidance, including
+backend durability characteristics.

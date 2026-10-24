@@ -200,6 +200,18 @@ Token JSON may be either a raw list or an object with a `tokens` array. Example:
 
 ## Quick start
 
+### From the published image
+
+```bash
+docker run -p 50051:50051 -e MACP_ALLOW_INSECURE=1 -e MACP_MEMORY_ONLY=1 \
+  ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.9.0
+```
+
+This is a local development runtime: plaintext gRPC, dev-mode auth, state in
+memory. [Getting Started](docs/getting-started.md) runs a first Decision Mode
+session against it, and [Deployment](docs/deployment.md#container-deployment) covers a
+production container.
+
 ### Production-style startup with TLS
 
 ```bash
@@ -221,7 +233,8 @@ sender identity as a bearer token (e.g. `Authorization: Bearer agent://alice`).
 
 ### Running the example clients
 
-The example clients in `src/bin` assume the local development startup shown above.
+The example clients in `src/bin` connect to a local development runtime on
+`127.0.0.1:50051`, started either way above.
 
 ```bash
 cargo run --bin client

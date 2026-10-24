@@ -28,6 +28,10 @@ RUN apt-get update && \
 RUN useradd --create-home --shell /bin/bash macp
 USER macp
 WORKDIR /home/macp
+# Created as `macp` so a named volume mounted here inherits that ownership;
+# otherwise Docker creates the mount point as root and startup fails with
+# "Permission denied".
+RUN mkdir -p /home/macp/.macp-data
 
 COPY --from=builder /app/target/release/macp-runtime /usr/local/bin/macp-runtime
 

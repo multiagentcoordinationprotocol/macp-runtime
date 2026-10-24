@@ -39,7 +39,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "m1",
         &session_id,
         "coordinator",
-        canonical_start_payload("select the deployment plan", &["alice", "bob"], 60_000),
+        canonical_start_payload(
+            "select the deployment plan",
+            &["coordinator", "alice", "bob"],
+            60_000,
+        ),
     );
     let ack = send_as(&mut client, "coordinator", start).await?;
     print_ack("session_start", &ack);
@@ -88,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let vote = VotePayload {
         proposal_id: "p1".into(),
-        vote: "yes".into(),
+        vote: "APPROVE".into(),
         reason: "approved for release".into(),
     };
     let ack = send_as(
