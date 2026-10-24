@@ -6,6 +6,17 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.9.0...macp-runtime-v0.9.1) - 2026-10-24
+
+### Fixed
+
+- *(deps)* bump webpki crates for RUSTSEC-2026-0381/0382/0383 ([#237](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/237))
+
+### Other
+
+- *(embedding)* PR-time semver gate, MIGRATING.md, stability and semantics-revision docs ([#236](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/236))
+- *(spec)* pin SPEC_REV to 60262b8 (spec #196); parity contract 1.4.0 ([#232](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/232))
+
 ## [0.9.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.8...macp-runtime-v0.9.0) - 2026-10-17
 
 ### Added
