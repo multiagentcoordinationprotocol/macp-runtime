@@ -404,16 +404,40 @@ configured authentication and TLS unless you explicitly opt in for local
 development:
 
 ```bash
-# Production: configure auth + TLS. Pin an immutable :X.Y.Z tag (see below) --
-# substitute the version you're deploying.
+# Production: configure auth + TLS, persist session logs on a volume, and pin
+# an immutable release tag (see "Published image tags" below).
 docker run -p 50051:50051 \
   -e MACP_AUTH_TOKENS_FILE=/etc/macp/tokens.json \
   -e MACP_TLS_CERT_PATH=/etc/macp/tls.crt -e MACP_TLS_KEY_PATH=/etc/macp/tls.key \
-  -v ./secrets:/etc/macp ghcr.io/multiagentcoordinationprotocol/macp-runtime:X.Y.Z
+  -v ./secrets:/etc/macp -v macp-data:/home/macp/.macp-data \
+  ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.9.0
 
-# Local development ONLY: any bearer token becomes a fully-privileged identity
-docker run -p 50051:50051 -e MACP_ALLOW_INSECURE=1 ghcr.io/multiagentcoordinationprotocol/macp-runtime:X.Y.Z
+# Local development ONLY: any bearer token becomes a fully-privileged identity,
+# and all state is lost when the container stops.
+docker run -p 50051:50051 -e MACP_ALLOW_INSECURE=1 -e MACP_MEMORY_ONLY=1 \
+  ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.9.0
 ```
+
+`0.9.0` is the newest release when this was written; check the
+[releases](https://github.com/multiagentcoordinationprotocol/macp-runtime/releases)
+for a newer one. The image sets `MACP_DATA_DIR=/home/macp/.macp-data` and runs
+as the non-root user `macp`. Without `MACP_MEMORY_ONLY=1` or a volume there, the
+development command still starts, but writes its logs into the container's
+writable layer.
+
+Images up to and including `0.9.0` do not create the data directory, so Docker
+creates a new named volume's mount point as root and the runtime exits with
+`Permission denied`. With those images, hand the volume to `macp` once before
+the first start:
+
+```bash
+docker run --rm --user root --entrypoint chown \
+  -v macp-data:/home/macp/.macp-data \
+  ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.9.0 macp:macp /home/macp/.macp-data
+```
+
+Later images create the directory as `macp`, and a new volume inherits that
+ownership.
 
 When deploying in containers:
 
@@ -432,8 +456,8 @@ digest with each other but never with a branch build's:
 
 | Tag | Mutability | Meaning |
 |-----|------------|---------|
-| `:X.Y.Z` (e.g. `0.8.1`) | Immutable | Exactly one release. Pin this for production. |
-| `:X.Y` (e.g. `0.8`) | Moves within the minor | Always the newest `X.Y.Z` patch published so far. |
+| `:X.Y.Z` (e.g. `0.9.0`) | Immutable | Exactly one release. Pin this for production. |
+| `:X.Y` (e.g. `0.9`) | Moves within the minor | Always the newest `X.Y.Z` patch published so far. |
 | `:latest` | Moves on every push to `main` | The tip of `main` — **not** the newest release. Do not use `latest` in production; it is not a release channel. |
 | `:main` | Moves on every push to `main` | Synonymous with `:latest` today (both are branch-build tags on the one `push: branches: [main]` trigger) — documented separately since nothing in `docker.yml` guarantees they stay synonymous if a second branch trigger is ever added. |
 | `:<sha>` (e.g. `:bb45705`) | Immutable | One image per commit pushed to `main` (branch builds only — a release build never gets a SHA tag; see below). |

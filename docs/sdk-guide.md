@@ -167,7 +167,9 @@ Unknown fields in protobuf messages are silently ignored, so SDKs built for prot
 ### Against a local runtime
 
 ```bash
-MACP_ALLOW_INSECURE=1 cargo run
+docker run -p 50051:50051 -e MACP_ALLOW_INSECURE=1 -e MACP_MEMORY_ONLY=1 \
+  ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.9.0
+# or, from a checkout: MACP_ALLOW_INSECURE=1 MACP_MEMORY_ONLY=1 cargo run
 # SDK connects to localhost:50051 sending Authorization: Bearer <sender-id>
 ```
 
