@@ -1,6 +1,6 @@
 # Source
 
-The 38 `.json` files in this directory, plus the 11 under `cmt-hash/` (10 vectors -- 001–005 compute, 006–010 verify -- and `vector-schema.json`), were
+The 41 `.json` files in this directory, plus the 11 under `cmt-hash/` (10 vectors -- 001–005 compute, 006–010 verify -- and `vector-schema.json`), were
 copied, byte-identical, point-in-time, from:
 
 ```
@@ -8,8 +8,8 @@ multiagentcoordinationprotocol/schemas/conformance/
 multiagentcoordinationprotocol/schemas/conformance/cmt-hash/
 ```
 
-in the spec repo, commit `60262b8f9ac487784f82a28bb85614cbe2e9f30b`, on
-2026-10-17. That commit and date record the provenance of this import; this
+in the spec repo, commit `ed7ff23fef63b9f79e9d976cdac73df743b83fc3`, on
+2026-10-24. That commit and date record the provenance of this import; this
 must stay equal to `SPEC_REV` in `.github/workflows/ci.yml`.
 
 **Gated by `check_dir` in `.github/workflows/ci.yml`'s `conformance-oracle`

@@ -14,7 +14,7 @@ fn vendored() -> PathBuf {
 async fn in_process_target_passes_every_vendored_fixture() {
     let set = FixtureSet::from_dir(vendored()).expect("load vendored fixtures");
     assert!(
-        set.fixtures.len() >= 37,
+        set.fixtures.len() >= 40,
         "only {} fixtures",
         set.fixtures.len()
     );

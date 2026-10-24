@@ -1,0 +1,137 @@
+{
+  "_comment": "Exercises the policy pack examples/policies/compliance-vote.json; the inline policy is byte-for-byte that descriptor (asserted by scripts/validate-json.sh). See docs/policy-packs.md.",
+  "description": "Decision Mode policy pack 'compliance vote': approvals from other agents are non-decisive, and the Commitment is denied until the compliance agent votes APPROVE.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://planner",
+  "participants": [
+    "agent://planner",
+    "agent://analyst",
+    "agent://compliance"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.packs.compliance-vote",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Compliance vote: the compliance agent is the only weighted voter, so no positive Commitment is allowed until it has voted APPROVE. Other participants still vote and their ballots are recorded, but they are non-decisive. Select this policy at SessionStart for sessions that touch personal data; detecting PII is not expressible inside a policy. Replace agent://compliance with the compliance agent's sender identity.",
+    "rules": {
+      "voting": {
+        "algorithm": "weighted",
+        "threshold": 1,
+        "weights": {
+          "agent://compliance": 1
+        }
+      }
+    }
+  },
+  "policy_version": "policy.packs.compliance-vote",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://planner",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "export-customer-records",
+        "rationale": "share customer contact records with the support vendor",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://planner",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "needed for the support rollout"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://analyst",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "vendor contract is in place"
+      },
+      "expect": "accept",
+      "_comment": "Neither the planner nor the analyst is in the weights map, so both ballots have weight 0: accepted and recorded, but non-decisive (RFC-MACP-0012 Section 4.1, weighted electorate)."
+    },
+    {
+      "sender": "agent://planner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c0",
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "two agents approved",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.packs.compliance-vote",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED",
+      "_comment": "Two approvals, but the compliance agent has not voted, so the decisive tally is empty. Under schema_version 3 the weighted algorithm fails on an empty tally (RFC-MACP-0012 Section 4.1)."
+    },
+    {
+      "sender": "agent://compliance",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "data processing agreement covers this export"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://planner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "compliance approved",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.packs.compliance-vote",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "accept",
+      "_comment": "The compliance agent is the whole weighted electorate: approve share 1/1 meets threshold 1."
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  },
+  "expected_mode_state": {
+    "phase": "Committed",
+    "votes": {
+      "p1": {
+        "agent://planner": {
+          "vote": "APPROVE"
+        },
+        "agent://analyst": {
+          "vote": "APPROVE"
+        },
+        "agent://compliance": {
+          "vote": "APPROVE"
+        }
+      }
+    }
+  }
+}
