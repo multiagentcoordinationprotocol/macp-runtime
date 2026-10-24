@@ -1,695 +1,195 @@
-use chrono::Utc;
-use macp_runtime::log_store::LogStore;
-use macp_runtime::macp_core::{Clock, ManualClock};
-use macp_runtime::pb::{CommitmentPayload, Envelope, SessionStartPayload};
+//! The conformance fixtures, run through the `macp-conform` library against
+//! two targets per fixture:
+//!
+//! - [`RuntimeTarget`]: this crate's full `Runtime` kernel (in-memory storage,
+//!   the server's own `process` path, its `LogStore` history and its
+//!   `replay_session`) — the Server profile minus the network;
+//! - [`InProcessTarget`]: `macp-conform`'s Embedded target over
+//!   `macp_modes::step` and `macp_modes::replay` alone.
+//!
+//! Each fixture must pass on both, with the same outcome — so the library the
+//! `macp-conform` CLI ships is held to exactly the verdicts this runtime's own
+//! suite has always enforced, and the two acceptance paths cannot drift.
+
+use async_trait::async_trait;
+use macp_conform::fixture::NamedFixture;
+use macp_conform::runner::run_fixture;
+use macp_conform::{
+    state_name, Capabilities, ConformanceTarget, HistoryEntry, InProcessTarget, Observation,
+    Outcome, Profile, Submission, TargetError,
+};
+use macp_runtime::log_store::{EntryKind, LogStore};
+use macp_runtime::macp_core::{ManualClock, PolicyDefinition};
+use macp_runtime::pb::Envelope;
 use macp_runtime::registry::SessionRegistry;
 use macp_runtime::replay::replay_session;
 use macp_runtime::runtime::Runtime;
-use macp_runtime::session::{Session, SessionState};
 use macp_runtime::storage::MemoryBackend;
-use prost::Message;
-use serde::Deserialize;
-use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::Arc;
 
-#[derive(Deserialize)]
-struct ConformanceFixture {
-    mode: String,
-    initiator: String,
-    participants: Vec<String>,
-    mode_version: String,
-    configuration_version: String,
-    policy_version: String,
-    /// Optional inline governance policy bound to the session. When present it
-    /// is registered before `SessionStart` so a non-default `policy_version`
-    /// resolves (RFC-MACP-0012). Deserializes straight into `PolicyDefinition`.
-    #[serde(default)]
-    policy: Option<Value>,
-    ttl_ms: i64,
-    messages: Vec<ConformanceMessage>,
-    expected_final_state: String,
-    #[serde(default)]
-    expected_mode_state: Option<Value>,
-    #[serde(default)]
-    expected_resolution: Option<Value>,
-    #[serde(default)]
-    expect_resolution_present: Option<bool>,
-    #[serde(default = "default_true")]
-    verify_replay_equivalence: bool,
-    /// Exact assertion on the fixture session's accepted history after its
-    /// `SessionStart`, synthetic entries included (README `expected_history`).
-    #[serde(default)]
-    expected_history: Option<Vec<ExpectedHistoryEntry>>,
-}
-
-#[derive(Deserialize)]
-struct ExpectedHistoryEntry {
-    message_type: String,
-    sender: String,
-    #[serde(default)]
-    payload: Option<Value>,
-    #[serde(default)]
-    synthetic: bool,
-}
-
-/// Per-step Envelope overrides (README `messages[].envelope`).
-#[derive(Default, Deserialize)]
-struct EnvelopeOverride {
-    session_id: Option<String>,
-    macp_version: Option<String>,
-    mode: Option<String>,
-    timestamp_unix_ms: Option<i64>,
-}
-
-#[derive(Deserialize)]
-struct ConformanceMessage {
-    sender: String,
-    message_type: String,
-    payload_type: String,
-    payload: Value,
-    expect: String,
-    #[serde(default)]
-    expected_error_code: Option<String>,
-    /// The runtime's acceptance clock for this step (RFC-MACP-0001 §7.6
-    /// item 4), distinct from the Envelope timestamp. All-or-none.
-    #[serde(default)]
-    accepted_at_ms: Option<i64>,
-    #[serde(default)]
-    envelope: Option<EnvelopeOverride>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn new_sid() -> String {
-    uuid::Uuid::new_v4().as_hyphenated().to_string()
+/// The reference runtime as a conformance target. A fresh `Runtime` per
+/// fixture; a clocked fixture runs it on a `ManualClock`.
+struct RuntimeTarget {
+    rt: Runtime,
+    clock: Option<Arc<ManualClock>>,
 }
 
 fn make_runtime(clock: Option<Arc<ManualClock>>) -> Runtime {
     let storage: Arc<dyn macp_runtime::storage::StorageBackend> = Arc::new(MemoryBackend);
-    let registry = Arc::new(SessionRegistry::new());
-    let log_store = Arc::new(LogStore::new());
-    let rt = Runtime::new(storage, registry, log_store);
+    let rt = Runtime::new(
+        storage,
+        Arc::new(SessionRegistry::new()),
+        Arc::new(LogStore::new()),
+    );
     match clock {
         Some(clock) => rt.with_clock(clock),
         None => rt,
     }
 }
 
-fn encode_payload(fixture: &ConformanceFixture, msg: &ConformanceMessage) -> Vec<u8> {
-    match msg.payload_type.as_str() {
-        // Canonical fully-qualified protobuf message names (conformance-pack
-        // format): mode payloads are macp.modes.<mode>.v1.<Type>Payload and
-        // the shared terminal is macp.v1.CommitmentPayload.
-        "macp.v1.SessionStartPayload" => {
-            let p = &msg.payload;
-            SessionStartPayload {
-                intent: p["intent"].as_str().unwrap_or_default().into(),
-                participants: p["participants"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                mode_version: p["mode_version"].as_str().unwrap_or_default().into(),
-                configuration_version: p["configuration_version"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .into(),
-                policy_version: p["policy_version"].as_str().unwrap_or_default().into(),
-                ttl_ms: p["ttl_ms"].as_i64().unwrap_or_default(),
-                context_id: String::new(),
-                extensions: std::collections::HashMap::new(),
-                roots: vec![],
-                max_suspend_ms: 0,
-            }
-            .encode_to_vec()
+impl RuntimeTarget {
+    fn new() -> Self {
+        Self {
+            rt: make_runtime(None),
+            clock: None,
         }
-        "macp.v1.CommitmentPayload" => {
-            let p = &msg.payload;
-            CommitmentPayload {
-                commitment_id: p["commitment_id"].as_str().unwrap_or_default().into(),
-                action: p["action"].as_str().unwrap_or_default().into(),
-                authority_scope: p["authority_scope"].as_str().unwrap_or_default().into(),
-                reason: p["reason"].as_str().unwrap_or_default().into(),
-                mode_version: p["mode_version"].as_str().unwrap_or_default().into(),
-                policy_version: p["policy_version"].as_str().unwrap_or_default().into(),
-                configuration_version: p["configuration_version"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .into(),
-                outcome_positive: p["outcome_positive"].as_bool().unwrap_or(true),
-                supersedes: None,
-            }
-            .encode_to_vec()
-        }
-        t if t.starts_with("macp.modes.decision.v1.") => encode_decision_payload(msg),
-        t if t.starts_with("macp.modes.proposal.v1.") => encode_proposal_payload(msg),
-        t if t.starts_with("macp.modes.task.v1.") => encode_task_payload(msg),
-        t if t.starts_with("macp.modes.handoff.v1.") => encode_handoff_payload(msg),
-        t if t.starts_with("macp.modes.quorum.v1.") => encode_quorum_payload(msg),
-        t if t.starts_with("macp.modes.multi_round.v1.") => encode_multi_round_payload(msg),
-        _ => panic!(
-            "Unknown payload_type: {} in fixture for mode {}",
-            msg.payload_type, fixture.mode
-        ),
     }
 }
 
-fn encode_decision_payload(msg: &ConformanceMessage) -> Vec<u8> {
-    let p = &msg.payload;
-    match msg.message_type.as_str() {
-        "Proposal" => macp_runtime::decision_pb::ProposalPayload {
-            proposal_id: p["proposal_id"].as_str().unwrap_or_default().into(),
-            option: p["option"].as_str().unwrap_or_default().into(),
-            rationale: p["rationale"].as_str().unwrap_or_default().into(),
-            supporting_data: vec![],
-        }
-        .encode_to_vec(),
-        "Evaluation" => macp_runtime::decision_pb::EvaluationPayload {
-            proposal_id: p["proposal_id"].as_str().unwrap_or_default().into(),
-            recommendation: p["recommendation"].as_str().unwrap_or_default().into(),
-            confidence: p["confidence"].as_f64().unwrap_or_default(),
-            reason: p["reason"].as_str().unwrap_or_default().into(),
-        }
-        .encode_to_vec(),
-        "Objection" => macp_runtime::decision_pb::ObjectionPayload {
-            proposal_id: p["proposal_id"].as_str().unwrap_or_default().into(),
-            reason: p["reason"].as_str().unwrap_or_default().into(),
-            severity: p["severity"].as_str().unwrap_or_default().into(),
-        }
-        .encode_to_vec(),
-        "Vote" => macp_runtime::decision_pb::VotePayload {
-            proposal_id: p["proposal_id"].as_str().unwrap_or_default().into(),
-            vote: p["vote"].as_str().unwrap_or_default().into(),
-            reason: p["reason"].as_str().unwrap_or_default().into(),
-        }
-        .encode_to_vec(),
-        _ => panic!("Unhandled decision message: {}", msg.message_type),
+#[async_trait]
+impl ConformanceTarget for RuntimeTarget {
+    fn profile(&self) -> Profile {
+        Profile::Embedded
     }
-}
 
-fn encode_proposal_payload(msg: &ConformanceMessage) -> Vec<u8> {
-    let p = &msg.payload;
-    match msg.message_type.as_str() {
-        "Proposal" => macp_runtime::proposal_pb::ProposalPayload {
-            proposal_id: p["proposal_id"].as_str().unwrap_or_default().into(),
-            title: p["title"].as_str().unwrap_or_default().into(),
-            summary: p["summary"].as_str().unwrap_or_default().into(),
-            details: vec![],
-            tags: vec![],
-        }
-        .encode_to_vec(),
-        "CounterProposal" => macp_runtime::proposal_pb::CounterProposalPayload {
-            proposal_id: p["proposal_id"].as_str().unwrap_or_default().into(),
-            supersedes_proposal_id: p["supersedes_proposal_id"]
-                .as_str()
-                .unwrap_or_default()
-                .into(),
-            title: p["title"].as_str().unwrap_or_default().into(),
-            summary: p["summary"].as_str().unwrap_or_default().into(),
-            details: vec![],
-        }
-        .encode_to_vec(),
-        "Accept" => macp_runtime::proposal_pb::AcceptPayload {
-            proposal_id: p["proposal_id"].as_str().unwrap_or_default().into(),
-            reason: p["reason"].as_str().unwrap_or_default().into(),
-        }
-        .encode_to_vec(),
-        "Reject" => macp_runtime::proposal_pb::RejectPayload {
-            proposal_id: p["proposal_id"].as_str().unwrap_or_default().into(),
-            reason: p["reason"].as_str().unwrap_or_default().into(),
-            terminal: p["terminal"].as_bool().unwrap_or(false),
-        }
-        .encode_to_vec(),
-        "Withdraw" => macp_runtime::proposal_pb::WithdrawPayload {
-            proposal_id: p["proposal_id"].as_str().unwrap_or_default().into(),
-            reason: p["reason"].as_str().unwrap_or_default().into(),
-        }
-        .encode_to_vec(),
-        _ => panic!("Unhandled proposal message: {}", msg.message_type),
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::default()
+            .with_clock_control(true)
+            .with_replay(true)
     }
-}
 
-fn encode_task_payload(msg: &ConformanceMessage) -> Vec<u8> {
-    let p = &msg.payload;
-    match msg.message_type.as_str() {
-        "TaskRequest" => macp_runtime::task_pb::TaskRequestPayload {
-            task_id: p["task_id"].as_str().unwrap_or_default().into(),
-            title: p["title"].as_str().unwrap_or_default().into(),
-            instructions: p["instructions"].as_str().unwrap_or_default().into(),
-            requested_assignee: p["requested_assignee"].as_str().unwrap_or_default().into(),
-            input: vec![],
-            deadline_unix_ms: p["deadline_unix_ms"].as_i64().unwrap_or(0),
-        }
-        .encode_to_vec(),
-        "TaskAccept" => macp_runtime::task_pb::TaskAcceptPayload {
-            task_id: p["task_id"].as_str().unwrap_or_default().into(),
-            assignee: p["assignee"].as_str().unwrap_or_default().into(),
-            reason: p["reason"].as_str().unwrap_or_default().into(),
-        }
-        .encode_to_vec(),
-        "TaskReject" => macp_runtime::task_pb::TaskRejectPayload {
-            task_id: p["task_id"].as_str().unwrap_or_default().into(),
-            assignee: p["assignee"].as_str().unwrap_or_default().into(),
-            reason: p["reason"].as_str().unwrap_or_default().into(),
-        }
-        .encode_to_vec(),
-        "TaskComplete" => macp_runtime::task_pb::TaskCompletePayload {
-            task_id: p["task_id"].as_str().unwrap_or_default().into(),
-            assignee: p["assignee"].as_str().unwrap_or_default().into(),
-            output: vec![],
-            summary: p["summary"].as_str().unwrap_or_default().into(),
-        }
-        .encode_to_vec(),
-        "TaskFail" => macp_runtime::task_pb::TaskFailPayload {
-            task_id: p["task_id"].as_str().unwrap_or_default().into(),
-            assignee: p["assignee"].as_str().unwrap_or_default().into(),
-            error_code: p["error_code"].as_str().unwrap_or_default().into(),
-            reason: p["reason"].as_str().unwrap_or_default().into(),
-            retryable: p["retryable"].as_bool().unwrap_or(false),
-        }
-        .encode_to_vec(),
-        "TaskUpdate" => macp_runtime::task_pb::TaskUpdatePayload {
-            task_id: p["task_id"].as_str().unwrap_or_default().into(),
-            status: p["status"].as_str().unwrap_or_default().into(),
-            progress: p["progress"].as_f64().unwrap_or_default(),
-            message: p["message"].as_str().unwrap_or_default().into(),
-            partial_output: vec![],
-        }
-        .encode_to_vec(),
-        _ => panic!("Unhandled task message: {}", msg.message_type),
+    fn describe(&self) -> String {
+        "macp-runtime kernel (in-memory)".into()
     }
-}
 
-fn encode_handoff_payload(msg: &ConformanceMessage) -> Vec<u8> {
-    let p = &msg.payload;
-    match msg.message_type.as_str() {
-        "HandoffOffer" => macp_runtime::handoff_pb::HandoffOfferPayload {
-            handoff_id: p["handoff_id"].as_str().unwrap_or_default().into(),
-            target_participant: p["target_participant"].as_str().unwrap_or_default().into(),
-            scope: p["scope"].as_str().unwrap_or_default().into(),
-            reason: p["reason"].as_str().unwrap_or_default().into(),
-        }
-        .encode_to_vec(),
-        "HandoffAccept" => macp_runtime::handoff_pb::HandoffAcceptPayload {
-            handoff_id: p["handoff_id"].as_str().unwrap_or_default().into(),
-            accepted_by: p["accepted_by"].as_str().unwrap_or_default().into(),
-            reason: p["reason"].as_str().unwrap_or_default().into(),
-            implicit: p["implicit"].as_bool().unwrap_or(false),
-        }
-        .encode_to_vec(),
-        "HandoffDecline" => macp_runtime::handoff_pb::HandoffDeclinePayload {
-            handoff_id: p["handoff_id"].as_str().unwrap_or_default().into(),
-            declined_by: p["declined_by"].as_str().unwrap_or_default().into(),
-            reason: p["reason"].as_str().unwrap_or_default().into(),
-        }
-        .encode_to_vec(),
-        "HandoffContext" => macp_runtime::handoff_pb::HandoffContextPayload {
-            handoff_id: p["handoff_id"].as_str().unwrap_or_default().into(),
-            content_type: p["content_type"].as_str().unwrap_or_default().into(),
-            context: p["context"]
-                .as_str()
-                .map(|s| s.as_bytes().to_vec())
-                .unwrap_or_default(),
-        }
-        .encode_to_vec(),
-        _ => panic!("Unhandled handoff message: {}", msg.message_type),
+    async fn begin_fixture(&mut self, clock_start: Option<i64>) -> Result<(), TargetError> {
+        self.clock = clock_start.map(|at| Arc::new(ManualClock::new(at)));
+        self.rt = make_runtime(self.clock.clone());
+        Ok(())
     }
-}
 
-fn encode_quorum_payload(msg: &ConformanceMessage) -> Vec<u8> {
-    let p = &msg.payload;
-    match msg.message_type.as_str() {
-        "ApprovalRequest" => macp_runtime::quorum_pb::ApprovalRequestPayload {
-            request_id: p["request_id"].as_str().unwrap_or_default().into(),
-            action: p["action"].as_str().unwrap_or_default().into(),
-            summary: p["summary"].as_str().unwrap_or_default().into(),
-            details: vec![],
-            required_approvals: p["required_approvals"].as_u64().unwrap_or(0) as u32,
-        }
-        .encode_to_vec(),
-        "Approve" => macp_runtime::quorum_pb::ApprovePayload {
-            request_id: p["request_id"].as_str().unwrap_or_default().into(),
-            reason: p["reason"].as_str().unwrap_or_default().into(),
-        }
-        .encode_to_vec(),
-        "Reject" => macp_runtime::quorum_pb::RejectPayload {
-            request_id: p["request_id"].as_str().unwrap_or_default().into(),
-            reason: p["reason"].as_str().unwrap_or_default().into(),
-        }
-        .encode_to_vec(),
-        "Abstain" => macp_runtime::quorum_pb::AbstainPayload {
-            request_id: p["request_id"].as_str().unwrap_or_default().into(),
-            reason: p["reason"].as_str().unwrap_or_default().into(),
-        }
-        .encode_to_vec(),
-        _ => panic!("Unhandled quorum message: {}", msg.message_type),
+    async fn register_policy(&mut self, definition: PolicyDefinition) -> Result<(), TargetError> {
+        self.rt.register_policy(definition).map_err(TargetError)
     }
-}
 
-fn encode_multi_round_payload(msg: &ConformanceMessage) -> Vec<u8> {
-    let p = &msg.payload;
-    match msg.message_type.as_str() {
-        "Contribute" => macp_runtime::multi_round_pb::ContributePayload {
-            value: p["value"].as_str().unwrap_or_default().into(),
-        }
-        .encode_to_vec(),
-        _ => panic!("Unhandled multi_round message: {}", msg.message_type),
+    async fn set_clock(&mut self, now_ms: i64) -> Result<(), TargetError> {
+        let clock = self
+            .clock
+            .as_ref()
+            .ok_or_else(|| TargetError("set_clock on an unclocked fixture".into()))?;
+        clock.set(now_ms);
+        Ok(())
     }
-}
 
-fn expected_state(name: &str) -> SessionState {
-    match name {
-        "Open" => SessionState::Open,
-        "Resolved" => SessionState::Resolved,
-        "Expired" => SessionState::Expired,
-        "Suspended" => SessionState::Suspended,
-        "Cancelled" => SessionState::Cancelled,
-        other => panic!("Unknown expected_final_state: {other}"),
-    }
-}
-
-fn resolution_to_json(resolution: &[u8]) -> Option<Value> {
-    CommitmentPayload::decode(resolution)
-        .ok()
-        .map(|commitment| {
-            json!({
-                "commitment_id": commitment.commitment_id,
-                "action": commitment.action,
-                "authority_scope": commitment.authority_scope,
-                "reason": commitment.reason,
-                "mode_version": commitment.mode_version,
-                "policy_version": commitment.policy_version,
-                "configuration_version": commitment.configuration_version,
-                "outcome_positive": commitment.outcome_positive,
-            })
+    async fn submit(&mut self, envelope: Envelope) -> Result<Submission, TargetError> {
+        Ok(match self.rt.process(&envelope, None).await {
+            Ok(r) => Submission::Accepted {
+                duplicate: r.duplicate,
+            },
+            Err(e) => Submission::Rejected {
+                code: e.error_code().to_string(),
+            },
         })
-}
-
-/// Decodes an accepted-history payload for `expected_history`'s subset match.
-/// Covers the shared terminal and every Handoff message (the only mode whose
-/// fixtures assert history today); anything else fails loudly rather than
-/// matching vacuously.
-fn history_payload_to_json(message_type: &str, raw: &[u8]) -> Value {
-    use macp_runtime::handoff_pb as h;
-    match message_type {
-        "Commitment" => resolution_to_json(raw).expect("Commitment payload decodes"),
-        "HandoffOffer" => {
-            let p = h::HandoffOfferPayload::decode(raw).unwrap();
-            json!({"handoff_id": p.handoff_id, "target_participant": p.target_participant,
-                   "scope": p.scope, "reason": p.reason})
-        }
-        "HandoffAccept" => {
-            let p = h::HandoffAcceptPayload::decode(raw).unwrap();
-            json!({"handoff_id": p.handoff_id, "accepted_by": p.accepted_by,
-                   "reason": p.reason, "implicit": p.implicit})
-        }
-        "HandoffDecline" => {
-            let p = h::HandoffDeclinePayload::decode(raw).unwrap();
-            json!({"handoff_id": p.handoff_id, "declined_by": p.declined_by, "reason": p.reason})
-        }
-        "HandoffContext" => {
-            let p = h::HandoffContextPayload::decode(raw).unwrap();
-            json!({"handoff_id": p.handoff_id, "content_type": p.content_type,
-                   "context": String::from_utf8_lossy(&p.context)})
-        }
-        other => panic!("expected_history payload decoding not implemented for {other}"),
     }
-}
 
-fn mode_state_to_json(session: &Session) -> Option<Value> {
-    if session.mode_state.is_empty() {
-        return None;
+    async fn observe(&mut self, sid: &str, _initiator: &str) -> Result<Observation, TargetError> {
+        let session = self
+            .rt
+            .get_session_checked(sid)
+            .await
+            .ok_or_else(|| TargetError(format!("no session {sid}")))?;
+        let log = self.rt.log_store.get_log(sid).await.unwrap_or_default();
+        let history = log
+            .iter()
+            .filter(|e| e.entry_kind == EntryKind::Incoming)
+            .map(|e| {
+                HistoryEntry::new(
+                    e.message_type.clone(),
+                    e.sender.clone(),
+                    e.message_id.clone(),
+                    e.raw_payload.clone(),
+                )
+            })
+            .collect();
+        let mode_state = if session.mode_state.is_empty() {
+            None
+        } else {
+            serde_json::from_slice(&session.mode_state).ok()
+        };
+        Ok(Observation::new(state_name(&session.state))
+            .with_resolution(session.resolution.clone())
+            .with_mode_state(mode_state)
+            .with_history(history))
     }
-    serde_json::from_slice(&session.mode_state).ok()
-}
 
-fn assert_json_contains(actual: &Value, expected: &Value) {
-    match (actual, expected) {
-        (Value::Object(actual_map), Value::Object(expected_map)) => {
-            for (key, expected_value) in expected_map {
-                let actual_value = actual_map
-                    .get(key)
-                    .unwrap_or_else(|| panic!("missing key '{key}' in actual json {actual:?}"));
-                assert_json_contains(actual_value, expected_value);
-            }
+    async fn check_replay(&mut self, sid: &str) -> Result<Result<(), String>, TargetError> {
+        let live = self
+            .rt
+            .get_session_checked(sid)
+            .await
+            .ok_or_else(|| TargetError(format!("no session {sid}")))?;
+        let log = self.rt.log_store.get_log(sid).await.unwrap_or_default();
+        // Pass the runtime's policy registry so replay re-resolves any bound
+        // policy and re-evaluates commitments through it: policy-bound
+        // replay, not just log-trusting replay.
+        let replayed = match replay_session(
+            sid,
+            &log,
+            self.rt.mode_registry().as_ref(),
+            Some(self.rt.policy_registry().as_ref()),
+        ) {
+            Ok(s) => s,
+            Err(e) => return Ok(Err(format!("replay failed: {e}"))),
+        };
+        if replayed.state != live.state {
+            return Ok(Err(format!(
+                "state: replayed {:?}, live {:?}",
+                replayed.state, live.state
+            )));
         }
-        (Value::Array(actual_items), Value::Array(expected_items)) => {
-            assert!(
-                actual_items.len() >= expected_items.len(),
-                "actual array shorter than expected: {actual_items:?} vs {expected_items:?}"
-            );
-            for (idx, expected_item) in expected_items.iter().enumerate() {
-                assert_json_contains(&actual_items[idx], expected_item);
-            }
+        if replayed.resolution != live.resolution {
+            return Ok(Err("resolution differs".into()));
         }
-        _ => assert_eq!(actual, expected),
+        if replayed.mode_state != live.mode_state {
+            return Ok(Err("mode_state differs".into()));
+        }
+        if replayed.seen_message_ids != live.seen_message_ids {
+            return Ok(Err("dedup state (seen_message_ids) differs".into()));
+        }
+        Ok(Ok(()))
     }
-}
-
-async fn assert_replay_equivalence(rt: &Runtime, sid: &str, live_session: &Session) {
-    let log = rt
-        .log_store
-        .get_log(sid)
-        .await
-        .unwrap_or_else(|| panic!("missing log entries for {sid}"));
-    // Pass the runtime's policy registry so replay re-resolves any bound policy
-    // and re-evaluates commitments through it, exercising policy-bound replay
-    // (not just log-trusting replay). For a policy-bound decline the votes are in
-    // the log ahead of the Commitment, so re-evaluation is deterministic.
-    let replayed = replay_session(
-        sid,
-        &log,
-        rt.mode_registry().as_ref(),
-        Some(rt.policy_registry().as_ref()),
-    )
-    .unwrap_or_else(|e| panic!("replay failed for {sid}: {e}"));
-    assert_eq!(replayed.state, live_session.state, "replay state mismatch");
-    assert_eq!(
-        replayed.resolution, live_session.resolution,
-        "replay resolution mismatch"
-    );
-    assert_eq!(
-        replayed.mode_state, live_session.mode_state,
-        "replay mode_state mismatch"
-    );
-    assert_eq!(
-        replayed.seen_message_ids, live_session.seen_message_ids,
-        "replay dedup state mismatch"
-    );
 }
 
 async fn run_conformance_fixture(path: &Path) {
-    let content = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("Failed to read fixture {}: {e}", path.display()));
-    let fixture: ConformanceFixture = serde_json::from_str(&content)
-        .unwrap_or_else(|e| panic!("Failed to parse fixture {}: {e}", path.display()));
-
-    // `accepted_at_ms` is all-or-none (README). When present the harness
-    // drives the runtime's acceptance clock and opens the fixture session at
-    // acceptance time 0 with Envelope timestamp 0; otherwise the runtime's own
-    // wall clock runs, as it always has.
-    let stepped = fixture
-        .messages
-        .iter()
-        .filter(|m| m.accepted_at_ms.is_some())
-        .count();
-    assert!(
-        stepped == 0 || stepped == fixture.messages.len(),
-        "accepted_at_ms is all-or-none in {}",
-        path.display()
-    );
-    let clock = (stepped > 0).then(|| Arc::new(ManualClock::new(0)));
-    let rt = make_runtime(clock.clone());
-    let sid = new_sid();
-
-    // Register a fixture's inline policy (if any) before SessionStart, so a
-    // non-empty policy_version resolves instead of failing UNKNOWN_POLICY_VERSION.
-    if let Some(policy) = &fixture.policy {
-        let def: macp_runtime::policy::PolicyDefinition = serde_json::from_value(policy.clone())
-            .unwrap_or_else(|e| panic!("bad inline policy in {}: {e}", path.display()));
-        rt.register_policy(def)
-            .unwrap_or_else(|e| panic!("register_policy failed in {}: {e}", path.display()));
-    }
-
-    let start_payload = SessionStartPayload {
-        intent: "conformance".into(),
-        participants: fixture.participants.clone(),
-        mode_version: fixture.mode_version.clone(),
-        configuration_version: fixture.configuration_version.clone(),
-        policy_version: fixture.policy_version.clone(),
-        ttl_ms: fixture.ttl_ms,
-        context_id: String::new(),
-        extensions: std::collections::HashMap::new(),
-        roots: vec![],
-        max_suspend_ms: 0,
-    }
-    .encode_to_vec();
-
-    rt.process(
-        &Envelope {
-            macp_version: "1.0".into(),
-            mode: fixture.mode.clone(),
-            message_type: "SessionStart".into(),
-            message_id: "m0".into(),
-            session_id: sid.clone(),
-            sender: fixture.initiator.clone(),
-            timestamp_unix_ms: if clock.is_some() {
-                0
-            } else {
-                Utc::now().timestamp_millis()
-            },
-            payload: start_payload,
-        },
-        None,
-    )
-    .await
-    .unwrap_or_else(|e| panic!("SessionStart failed for {}: {e}", path.display()));
-
-    for (i, msg) in fixture.messages.iter().enumerate() {
-        let payload = encode_payload(&fixture, msg);
-        if let (Some(clock), Some(at)) = (&clock, msg.accepted_at_ms) {
-            assert!(
-                at >= clock.now_ms(),
-                "accepted_at_ms must be non-decreasing in {}",
-                path.display()
-            );
-            clock.set(at);
-        }
-        let no_override = EnvelopeOverride::default();
-        let ov = msg.envelope.as_ref().unwrap_or(&no_override);
-        let env = Envelope {
-            macp_version: ov.macp_version.clone().unwrap_or_else(|| "1.0".into()),
-            mode: ov.mode.clone().unwrap_or_else(|| fixture.mode.clone()),
-            message_type: msg.message_type.clone(),
-            message_id: format!("m{}", i + 1),
-            session_id: ov.session_id.clone().unwrap_or_else(|| sid.clone()),
-            sender: msg.sender.clone(),
-            timestamp_unix_ms: ov.timestamp_unix_ms.unwrap_or_else(|| {
-                if clock.is_some() {
-                    0
-                } else {
-                    Utc::now().timestamp_millis()
-                }
-            }),
-            payload,
-        };
-
-        let result = rt.process(&env, None).await;
-        match msg.expect.as_str() {
-            "accept" => {
-                result.unwrap_or_else(|e| {
-                    panic!(
-                        "Message {} ({}) expected accept but got error: {e} in {}",
-                        i + 1,
-                        msg.message_type,
-                        path.display()
-                    )
-                });
-            }
-            "reject" => {
-                assert!(
-                    result.is_err(),
-                    "Message {} ({}) expected reject but succeeded in {}",
-                    i + 1,
-                    msg.message_type,
-                    path.display()
-                );
-                if let Some(expected_error_code) = &msg.expected_error_code {
-                    let err = result.unwrap_err();
-                    assert_eq!(
-                        err.error_code(),
-                        expected_error_code,
-                        "reject error code mismatch at message {} ({}) in {}",
-                        i + 1,
-                        msg.message_type,
-                        path.display()
-                    );
-                }
-            }
-            other => panic!("Unknown expect value: {other}"),
-        }
-    }
-
-    let session = rt.get_session_checked(&sid).await.unwrap();
-    assert_eq!(
-        session.state,
-        expected_state(&fixture.expected_final_state),
-        "Final state mismatch for {}",
-        path.display()
-    );
-
-    if let Some(expect_resolution_present) = fixture.expect_resolution_present {
+    let fixture = NamedFixture::from_file(path).unwrap_or_else(|e| panic!("{e}"));
+    let on_runtime = run_fixture(&mut RuntimeTarget::new(), &fixture).await;
+    let in_process = run_fixture(&mut InProcessTarget::new(), &fixture).await;
+    for (who, r) in [("runtime", &on_runtime), ("in-process", &in_process)] {
         assert_eq!(
-            session.resolution.is_some(),
-            expect_resolution_present,
-            "resolution presence mismatch for {}",
-            path.display()
+            r.outcome,
+            Outcome::Pass,
+            "{} on the {who} target: {:?} {:?}",
+            path.display(),
+            r.reason,
+            r.failure
         );
-    }
-
-    if let Some(expected_resolution) = &fixture.expected_resolution {
-        let actual_resolution = session
-            .resolution
-            .as_ref()
-            .and_then(|resolution| resolution_to_json(resolution))
-            .unwrap_or_else(|| {
-                panic!("resolution missing or not decodable for {}", path.display())
-            });
-        assert_json_contains(&actual_resolution, expected_resolution);
-    }
-
-    if let Some(expected_mode_state) = &fixture.expected_mode_state {
-        let actual_mode_state = mode_state_to_json(&session)
-            .unwrap_or_else(|| panic!("mode state missing or not json for {}", path.display()));
-        assert_json_contains(&actual_mode_state, expected_mode_state);
-    }
-
-    if let Some(expected_history) = &fixture.expected_history {
-        let submitted: std::collections::HashSet<String> = (1..=fixture.messages.len())
-            .map(|i| format!("m{i}"))
-            .collect();
-        let log = rt.log_store.get_log(&sid).await.unwrap_or_default();
-        let accepted: Vec<_> = log
-            .iter()
-            .filter(|e| e.entry_kind == macp_runtime::log_store::EntryKind::Incoming)
-            .filter(|e| e.message_id != "m0")
-            .collect();
-        let shape: Vec<String> = accepted
-            .iter()
-            .map(|e| format!("{} from {}", e.message_type, e.sender))
-            .collect();
-        assert_eq!(
-            accepted.len(),
-            expected_history.len(),
-            "accepted history length mismatch in {}: {shape:?}",
-            path.display()
+        assert!(
+            r.unverified.is_empty(),
+            "{} on the {who} target left {:?} unverified",
+            path.display(),
+            r.unverified
         );
-        for (idx, (actual, expected)) in accepted.iter().zip(expected_history).enumerate() {
-            let ctx = format!("history entry {idx} in {}", path.display());
-            assert_eq!(actual.message_type, expected.message_type, "{ctx}");
-            assert_eq!(actual.sender, expected.sender, "{ctx}");
-            assert_eq!(
-                !submitted.contains(&actual.message_id),
-                expected.synthetic,
-                "synthetic flag mismatch at {ctx} (message_id {})",
-                actual.message_id
-            );
-            if let Some(expected_payload) = &expected.payload {
-                let actual_payload =
-                    history_payload_to_json(&actual.message_type, &actual.raw_payload);
-                assert_json_contains(&actual_payload, expected_payload);
-            }
-        }
-    }
-
-    if fixture.verify_replay_equivalence {
-        assert_replay_equivalence(&rt, &sid, &session).await;
     }
 }
 
