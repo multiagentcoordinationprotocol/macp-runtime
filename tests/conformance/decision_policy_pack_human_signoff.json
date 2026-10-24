@@ -1,0 +1,119 @@
+{
+  "_comment": "Exercises the policy pack examples/policies/human-signoff.json; the inline policy is byte-for-byte that descriptor (asserted by scripts/validate-json.sh). See docs/policy-packs.md.",
+  "description": "Decision Mode policy pack 'human sign-off': only the designated human approver may emit the Commitment; the initiator and an approving agent are FORBIDDEN.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://planner",
+  "participants": [
+    "agent://planner",
+    "agent://analyst",
+    "agent://human-approver"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.packs.human-signoff",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Human sign-off: agents propose, evaluate and vote, but only the designated human approver may emit the Commitment that binds the decision. Select this policy at SessionStart for the sessions that need a human; the selection rule itself (for example an amount above a limit) is not expressible inside a policy. Replace agent://human-approver with the approver's authenticated sender identity.",
+    "rules": {
+      "voting": {
+        "algorithm": "none"
+      },
+      "commitment": {
+        "authority": "designated_role",
+        "designated_roles": [
+          "agent://human-approver"
+        ]
+      }
+    }
+  },
+  "policy_version": "policy.packs.human-signoff",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://planner",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "pay-invoice-4471",
+        "rationale": "vendor invoice of 25,000 USD, above the deployment's sign-off limit",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://analyst",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "matches the purchase order"
+      },
+      "expect": "accept",
+      "_comment": "Agents still deliberate and vote. Under voting.algorithm 'none' the ballots are recorded but no voting constraint is enforced; the human's Commitment is what binds."
+    },
+    {
+      "sender": "agent://planner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c0",
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "initiator tries to seal its own proposal",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.packs.human-signoff",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN",
+      "_comment": "commitment.authority 'designated_role' replaces the initiator's default Commitment authority (RFC-MACP-0007 Section 2.1 authority matrix; RFC-MACP-0012 Section 4). The initiator is not in designated_roles, so it is an unauthorized sender."
+    },
+    {
+      "sender": "agent://analyst",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "an approving agent tries to seal the decision",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.packs.human-signoff",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN",
+      "_comment": "A declared participant that voted APPROVE is still not a designated committer."
+    },
+    {
+      "sender": "agent://human-approver",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "human approver signs off",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.packs.human-signoff",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "accept",
+      "_comment": "The designated human approver is the only sender whose Commitment is accepted."
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}

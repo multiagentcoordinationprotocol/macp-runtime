@@ -1,0 +1,117 @@
+{
+  "_comment": "Exercises the policy pack examples/policies/two-agent-rule.json; the inline policy is byte-for-byte that descriptor (asserted by scripts/validate-json.sh). See docs/policy-packs.md.",
+  "description": "Quorum Mode policy pack 'two-agent rule': a request asking for 1 approval still needs 2 distinct approvers, and one approver cannot count twice.",
+  "mode": "macp.mode.quorum.v1",
+  "initiator": "agent://coordinator",
+  "participants": [
+    "agent://alice",
+    "agent://bob",
+    "agent://carol"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.packs.two-agent-rule",
+    "mode": "macp.mode.quorum.v1",
+    "schema_version": 3,
+    "description": "Two-agent rule (four eyes): an approval request resolves positively only after two distinct declared participants have approved it. The threshold replaces the required_approvals value in the ApprovalRequest, so the requester cannot lower it, and each participant casts at most one ballot.",
+    "rules": {
+      "threshold": {
+        "type": "n_of_m",
+        "value": 2
+      }
+    }
+  },
+  "policy_version": "policy.packs.two-agent-rule",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://coordinator",
+      "message_type": "ApprovalRequest",
+      "payload_type": "macp.modes.quorum.v1.ApprovalRequestPayload",
+      "payload": {
+        "request_id": "r1",
+        "action": "rotate-prod-credentials",
+        "summary": "Rotate production database credentials",
+        "details": [],
+        "required_approvals": 1
+      },
+      "expect": "accept",
+      "_comment": "The request asks for only 1 approval. The policy's n_of_m threshold of 2 replaces it (RFC-MACP-0011 Section 5 rule 6), so the requester cannot weaken the rule."
+    },
+    {
+      "sender": "agent://alice",
+      "message_type": "Approve",
+      "payload_type": "macp.modes.quorum.v1.ApprovePayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "reviewed the change"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://coordinator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c0",
+        "action": "quorum.approved",
+        "authority_scope": "test",
+        "reason": "one approval",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.packs.two-agent-rule",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE",
+      "_comment": "One approval would satisfy the request's own required_approvals of 1, but the effective threshold is 2, so the session is not yet eligible for Commitment (RFC-MACP-0011 Section 5 rule 4)."
+    },
+    {
+      "sender": "agent://alice",
+      "message_type": "Approve",
+      "payload_type": "macp.modes.quorum.v1.ApprovePayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "approving again"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE",
+      "_comment": "The same agent cannot supply both approvals: each participant casts at most one ballot per request (RFC-MACP-0011 Section 5 rule 3)."
+    },
+    {
+      "sender": "agent://bob",
+      "message_type": "Approve",
+      "payload_type": "macp.modes.quorum.v1.ApprovePayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "second pair of eyes"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://coordinator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "quorum.approved",
+        "authority_scope": "test",
+        "reason": "two distinct approvals",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.packs.two-agent-rule",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "quorum.approved",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}

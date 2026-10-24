@@ -369,6 +369,23 @@ conformance_test!(
     "decision_zero_proposal_commitment.json"
 );
 
+// Spec W2.7 policy packs (examples/policies/ in the spec repo, docs/policy-packs.md).
+// Each fixture inlines one ready-made PolicyDescriptor verbatim and exercises the
+// one rule it relies on: designated_role commitment authority, a weighted
+// electorate of one, and a quorum n_of_m override of required_approvals.
+conformance_test!(
+    conformance_decision_policy_pack_human_signoff,
+    "decision_policy_pack_human_signoff.json"
+);
+conformance_test!(
+    conformance_decision_policy_pack_compliance_vote,
+    "decision_policy_pack_compliance_vote.json"
+);
+conformance_test!(
+    conformance_quorum_policy_pack_two_agent_rule,
+    "quorum_policy_pack_two_agent_rule.json"
+);
+
 /// Guard: every vendored fixture must be registered with `conformance_test!`.
 ///
 /// Unlike both SDK harnesses, which discover fixtures dynamically, the
@@ -466,9 +483,10 @@ fn fixtures_conform_to_canonical_format() {
     // with a fixture silently unvendored. Raised again to 32 by spec #111's
     // `decision_zero_proposal_commitment.json`, and to 37 by the Seam-driven
     // corpus (spec #192/#193: quorum overrides, handoff implicit accept,
-    // SessionStart obligations).
+    // SessionStart obligations), and to 40 by the W2.7 policy-pack fixtures
+    // (spec #209).
     assert!(
-        checked >= 37,
+        checked >= 40,
         "expected all fixtures checked, got {checked}"
     );
 }
