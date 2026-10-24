@@ -30,6 +30,14 @@ action from consumers rather than just reading:
   a server start. See
   [Upgrading into registration-time policy validation](docs/deployment.md#upgrading-into-registration-time-policy-validation).
 
+## Using the crates as libraries
+
+`macp-core`, `macp-modes`, `macp-policy` and `macp-pb` can be embedded without
+the server: [Embedding](docs/embedding.md) shows how. What they promise across
+releases is in [Stability](docs/stability.md), replay compatibility across
+releases is in [Semantics revisions](docs/semantics-revisions.md), and what to
+change for each breaking release is in [`MIGRATING.md`](MIGRATING.md).
+
 ## Implemented modes
 
 Standards-track modes:
@@ -399,7 +407,12 @@ push to `main`, release-plz (`.github/workflows/release-plz.yml`, configured by
 `release-plz.toml`) opens or updates a **release PR** that bumps the shared
 workspace version and rewrites `CHANGELOG.md` from the
 conventional-commit history. It also runs `cargo semver-checks` while computing
-that PR, so an unintended API break blocks the release rather than shipping.
+that PR, and an API break makes it pick the breaking (minor, pre-1.0) bump.
+Breaks are caught earlier than that: the `Embedder contract` workflow fails a
+PR that breaks the public API of `macp-core`, `macp-modes`, `macp-policy` or
+`macp-pb` without the `semver-breaking` label and a
+[`MIGRATING.md`](MIGRATING.md) entry, and fails a release PR whose breaking
+bump has no such entry. See [Stability](docs/stability.md).
 Merging the PR creates the per-crate git tags and one GitHub Release, then calls
 two workflows directly: `publish.yml`, which runs `cargo publish --workspace`
 (cargo computes the seven-crate publish order itself and waits for index
