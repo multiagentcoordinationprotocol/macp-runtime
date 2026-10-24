@@ -1,0 +1,60 @@
+[package]
+name = "macp-conform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "MACP conformance runner: drives the spec's conformance fixtures and commitment-hash vectors against an implementation (in-process or over gRPC) and reports the conformance level it reaches."
+readme = "README.md"
+keywords = ["macp", "conformance", "multi-agent", "protocol", "testing"]
+categories = ["development-tools::testing"]
+include = ["src/**", "schema/**", "build.rs", "Cargo.toml", "README.md"]
+
+[features]
+default = []
+# The gRPC target (`GrpcTarget`) and the `macp-conform` CLI. Off by default so
+# the library's in-process path carries no transport: a plain dependency on
+# this crate pulls no tonic. (tokio still arrives through macp-modes and
+# macp-policy, which use `tokio::sync::broadcast`.)
+grpc = [
+    "dep:tonic",
+    "dep:tonic-prost",
+    "dep:tokio",
+    "dep:tokio-stream",
+    "dep:macp-proto",
+    "dep:tonic-prost-build",
+]
+
+[dependencies]
+macp-core = { workspace = true }
+macp-modes = { workspace = true }
+macp-policy = { workspace = true }
+macp-pb = { workspace = true }
+prost = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
+# grpc feature only.
+tonic = { workspace = true, optional = true, features = ["tls-webpki-roots"] }
+tonic-prost = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }
+# Provides DEP_MACP_PROTO_PROTO_DIR to build.rs for the client stubs.
+macp-proto = { workspace = true, optional = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[[bin]]
+name = "macp-conform"
+path = "src/bin/macp-conform.rs"
+required-features = ["grpc"]

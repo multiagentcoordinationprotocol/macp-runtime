@@ -11,6 +11,11 @@ says what those crates promise across releases and how CI holds them to it.
 they are the server's internals. They follow Cargo's version rules, and nothing
 more is promised for them.
 
+`macp-conform`, the conformance runner, is published in the same lockstep
+group. It is a tool, not an embeddable crate: it is not in the semver job's
+crate list, and its API follows Cargo's version rules only. Its JSON report
+is versioned separately, by the report's own `report_format` field.
+
 ## The public API
 
 The public API of an embeddable crate is:

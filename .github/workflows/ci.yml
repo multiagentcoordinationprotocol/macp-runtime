@@ -158,6 +158,11 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # macp-conform's gRPC target and CLI sit behind its `grpc` feature,
+      # which the workspace run above does not enable.
+      - name: Run clippy (macp-conform, grpc feature)
+        run: cargo clippy -p macp-conform --features grpc --all-targets -- -D warnings
+
   docs:
     name: Rustdoc
     runs-on: ubuntu-latest
@@ -292,6 +297,17 @@ jobs:
           echo "$deps"
           if echo "$deps" | sed 's/ ([^)]*)//' | grep -qiE "tonic|macp-policy|macp-storage|macp-auth|macp-runtime|reqwest|rocksdb|redis"; then
             echo "::error::macp-modes pulled a forbidden dependency"; exit 1
+          fi
+
+      # The conformance library's in-process path must carry no transport.
+      # Only tonic is checked: tokio already arrives through macp-modes and
+      # macp-policy (tokio::sync::broadcast), so "no tokio" cannot hold here.
+      - name: macp-conform without grpc has no transport
+        run: |
+          deps=$(cargo tree -p macp-conform --edges normal)
+          echo "$deps"
+          if echo "$deps" | sed 's/ ([^)]*)//' | grep -qiE "tonic|macp-storage|macp-auth|macp-runtime|reqwest|rocksdb|redis"; then
+            echo "::error::macp-conform (default features) pulled a forbidden dependency"; exit 1
           fi
 
       - name: auth deps stay out of the vocabulary crates
@@ -726,6 +742,79 @@ jobs:
             exit 1
           }
 
+  # The macp-conform CLI against the published server image, over gRPC: the
+  # Server-profile path end to end, with the canonical fixtures at SPEC_REV.
+  # A server exposes no clock or commitment-hash API, so the clocked fixture
+  # and the cmt-hash vectors are reported as skipped and Core/Standard come
+  # out `incomplete`; the run fails only on a fixture that fails or errors.
+  conform-cli:
+    name: macp-conform CLI (GHCR image, gRPC)
+    runs-on: ubuntu-latest
+    env:
+      MACP_CONFORM_IMAGE: ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.9.0
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Checkout spec repo (canonical fixtures)
+        uses: actions/checkout@v7
+        with:
+          repository: multiagentcoordinationprotocol/multiagentcoordinationprotocol
+          ref: ${{ env.SPEC_REV }}
+          path: spec-repo
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: main
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ github.token }}
+
+      - name: Build macp-conform
+        run: cargo build -p macp-conform --features grpc --bin macp-conform
+
+      - name: Start the runtime image
+        run: |
+          docker run -d --name macp -p 50051:50051 \
+            -e MACP_ALLOW_INSECURE=1 -e MACP_MEMORY_ONLY=1 \
+            "$MACP_CONFORM_IMAGE"
+          for _ in $(seq 1 60); do
+            if (exec 3<>/dev/tcp/127.0.0.1/50051) 2>/dev/null; then exit 0; fi
+            sleep 1
+          done
+          docker logs macp
+          echo "::error::runtime image did not open port 50051"; exit 1
+
+      - name: Run macp-conform over gRPC
+        run: |
+          ./target/debug/macp-conform \
+            --target grpc://127.0.0.1:50051 \
+            --fixtures spec-repo/schemas/conformance \
+            --level standard --multi-round \
+            --report macp-conform-report.json
+
+      - name: Runtime logs
+        if: failure()
+        run: docker logs macp
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macp-conform-report
+          path: macp-conform-report.json
+          if-no-files-found: warn
+
   # Build-only Docker gate: proves the published image still builds without
   # pushing anything. The push happens in docker.yml on main/tags. Added after
   # the A-E merge broke the main image build while its (non-required) check
@@ -752,7 +841,7 @@ jobs:
   ci-pass:
     name: All Checks Passed
     runs-on: ubuntu-latest
-    needs: [check, fmt, clippy, docs, test, build, deps-isolation, audit, features, integration, docker-build, conformance-oracle]
+    needs: [check, fmt, clippy, docs, test, build, deps-isolation, audit, features, integration, docker-build, conformance-oracle, conform-cli]
 
     steps:
       - name: Summary
@@ -769,3 +858,4 @@ jobs:
           echo "  - feature-gated code (rocksdb, redis, otel)"
           echo "  - tier-1 + tier-2 integration suites"
           echo "  - docker image build"
+          echo "  - macp-conform CLI against the published image"

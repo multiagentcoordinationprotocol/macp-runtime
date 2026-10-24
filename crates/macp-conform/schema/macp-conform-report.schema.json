@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/multiagentcoordinationprotocol/macp-runtime/crates/macp-conform/schema/macp-conform-report.schema.json",
+  "title": "macp-conform run report",
+  "description": "The machine-readable report macp-conform writes (report_format 1). Fields may be added without bumping report_format; consumers MUST ignore unknown fields.",
+  "type": "object",
+  "required": ["report_format", "runner", "target", "fixtures_source", "requested", "levels", "multi_round", "totals", "fixtures"],
+  "properties": {
+    "report_format": { "const": 1 },
+    "runner": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" }
+      }
+    },
+    "target": {
+      "type": "object",
+      "required": ["description", "profile", "capabilities"],
+      "properties": {
+        "description": { "type": "string" },
+        "profile": { "enum": ["server", "embedded"] },
+        "semantics_rev": { "type": "integer", "minimum": 0 },
+        "capabilities": {
+          "type": "object",
+          "required": ["clock_control", "replay", "commitment_hash"],
+          "properties": {
+            "clock_control": { "type": "boolean" },
+            "replay": { "type": "boolean" },
+            "commitment_hash": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "fixtures_source": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "path"],
+          "properties": {
+            "kind": { "const": "directory" },
+            "path": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "path", "version", "spec_commit", "sha256", "checksum_verified"],
+          "properties": {
+            "kind": { "const": "bundle" },
+            "path": { "type": "string" },
+            "version": { "type": "string" },
+            "spec_commit": { "type": "string" },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "checksum_verified": { "type": "boolean" }
+          }
+        }
+      ]
+    },
+    "requested": {
+      "type": "object",
+      "required": ["level", "multi_round", "strict"],
+      "properties": {
+        "level": { "$ref": "#/$defs/level" },
+        "multi_round": { "type": "boolean" },
+        "strict": { "type": "boolean" }
+      }
+    },
+    "levels": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "$ref": "#/$defs/group_summary" }
+    },
+    "multi_round": { "$ref": "#/$defs/group_summary" },
+    "achieved_level": { "$ref": "#/$defs/level" },
+    "claim": { "type": "string" },
+    "totals": {
+      "type": "object",
+      "required": ["passed", "failed", "skipped", "errors", "unverified"],
+      "properties": {
+        "passed": { "$ref": "#/$defs/count" },
+        "failed": { "$ref": "#/$defs/count" },
+        "skipped": { "$ref": "#/$defs/count" },
+        "errors": { "$ref": "#/$defs/count" },
+        "unverified": { "$ref": "#/$defs/count" }
+      }
+    },
+    "fixtures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "kind", "group", "outcome"],
+        "properties": {
+          "name": { "type": "string" },
+          "kind": { "enum": ["session", "cmt_hash"] },
+          "group": { "$ref": "#/$defs/group" },
+          "outcome": { "enum": ["pass", "fail", "skipped", "error"] },
+          "reason": { "type": "string" },
+          "failure": {
+            "type": "object",
+            "required": ["step", "assertion", "message"],
+            "properties": {
+              "step": { "type": ["integer", "null"], "minimum": 0 },
+              "assertion": { "type": "string" },
+              "message": { "type": "string" }
+            }
+          },
+          "unverified": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "level": { "enum": ["core", "decision", "standard"] },
+    "group": { "enum": ["core", "decision", "standard", "multi_round", "unclassified"] },
+    "group_summary": {
+      "type": "object",
+      "required": ["group", "status", "passed", "failed", "skipped", "errors", "unverified"],
+      "properties": {
+        "group": { "$ref": "#/$defs/group" },
+        "status": { "enum": ["pass", "fail", "incomplete", "not_run"] },
+        "passed": { "$ref": "#/$defs/count" },
+        "failed": { "$ref": "#/$defs/count" },
+        "skipped": { "$ref": "#/$defs/count" },
+        "errors": { "$ref": "#/$defs/count" },
+        "unverified": { "$ref": "#/$defs/count" }
+      }
+    }
+  }
+}
