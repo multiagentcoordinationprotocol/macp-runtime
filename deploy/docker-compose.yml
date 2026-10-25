@@ -92,7 +92,7 @@ services:
     restart: unless-stopped
 
   control-plane:
-    image: ${MACP_CONTROL_PLANE_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-control-plane:0.6.0}
+    image: ${MACP_CONTROL_PLANE_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-control-plane:0.6.1}
     environment:
       NODE_ENV: production
       PORT: "3001"
@@ -117,9 +117,9 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      # Match the body: /healthz (and /readyz) answer 200 even with "ok":false.
-      # /healthz covers the process and Postgres.
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/healthz | grep -q '\"ok\":true'"]
+      # /readyz answers 503 until Postgres, the runtime and the stream consumer
+      # are all up, and busybox wget exits non-zero on it.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3001/readyz"]
       interval: 5s
       timeout: 5s
       retries: 30
