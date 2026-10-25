@@ -200,6 +200,17 @@ Token JSON may be either a raw list or an object with a `tokens` array. Example:
 
 ## Quick start
 
+### The whole stack, one command
+
+```bash
+cd deploy && docker compose up
+```
+
+This runs the runtime, control plane, console and playground with local-dev
+credentials and deterministic agents (no tokens or LLM keys). Open
+<http://localhost:3000> and launch the showcase run. See
+[`deploy/README.md`](deploy/README.md).
+
 ### From the published image
 
 ```bash

@@ -1,0 +1,53 @@
+name: Self-host stack
+
+# The one-command self-host in deploy/ (W3.7). It runs only when deploy/
+# changes: the stack is pinned to published images, so runtime code changes
+# cannot move it.
+on:
+  pull_request:
+    paths:
+      - "deploy/**"
+      - ".github/workflows/self-host.yml"
+  push:
+    branches: [ main ]
+    paths:
+      - "deploy/**"
+      - ".github/workflows/self-host.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  pins:
+    name: Images pinned to release tags
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Check pins
+        run: deploy/scripts/check-pins.sh
+
+  acceptance:
+    name: docker compose up → run → Verified
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # No registry login on purpose: every image must pull anonymously.
+      - name: Pull images
+        working-directory: deploy
+        run: |
+          start=$(date +%s)
+          docker compose pull --quiet
+          echo "pull took $(( $(date +%s) - start ))s"
+
+      - name: Up, launch a deterministic Decision run, wait for Verified, tear down
+        run: deploy/scripts/acceptance.sh
