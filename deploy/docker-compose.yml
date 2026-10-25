@@ -28,7 +28,7 @@ services:
   # ephemeral key at boot; the runtime re-reads the JWKS (TTL below) after a
   # restart. Not published to the host.
   auth-service:
-    image: ${MACP_AUTH_SERVICE_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-auth-service:sha-8190141}
+    image: ${MACP_AUTH_SERVICE_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-auth-service:1.0.0}
     environment:
       PORT: "3200"
       MACP_AUTH_ISSUER: macp-auth-service
