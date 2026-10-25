@@ -1,0 +1,106 @@
+name: macp CLI binaries
+
+# Builds the `macp` binary (crates/macp-cli) for four targets and attaches
+# `macp-<version>-<target>.tar.gz` plus `SHA256SUMS` to the release's GitHub
+# Release (tag `macp-runtime-v<version>`, the one release-plz creates).
+#
+# The live path is `workflow_call` from release-plz.yml, sibling to publish
+# and docker, for the reason publish.yml's header gives: GitHub starts no
+# workflow run from a tag pushed with the default GITHUB_TOKEN.
+# `workflow_dispatch` re-runs it for an existing release.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Released workspace version, e.g. 0.10.0 (no leading v)"
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Released workspace version, e.g. 0.10.0 (no leading v)"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  # Keep in sync with ci.yml / rust-toolchain.toml.
+  RUST_TOOLCHAIN: "1.96.1"
+  TAG: macp-runtime-v${{ inputs.version }}
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin, os: macos-15 }
+          - { target: x86_64-apple-darwin, os: macos-15 }
+    steps:
+      - name: Refuse an empty version
+        if: ${{ inputs.version == '' }}
+        run: |
+          echo "::error::version input is empty"; exit 1
+
+      - name: Checkout the release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          version: "31.x"
+          repo-token: ${{ github.token }}
+
+      - name: Build
+        run: cargo build --locked --release -p macp-cli --bin macp --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="macp-${{ inputs.version }}-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/macp" crates/macp-cli/README.md LICENSE* "$name"/
+          tar -czf "$name.tar.gz" "$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macp-${{ matrix.target }}
+          path: macp-${{ inputs.version }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  attach:
+    name: attach to the GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: macp-*
+          merge-multiple: true
+
+      - name: Upload tarballs and SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha256sum macp-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$TAG" macp-*.tar.gz SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"

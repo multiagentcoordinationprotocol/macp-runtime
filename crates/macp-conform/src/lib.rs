@@ -39,6 +39,8 @@ pub mod runner;
 pub mod target;
 
 #[cfg(feature = "grpc")]
+pub mod cli;
+#[cfg(feature = "grpc")]
 mod grpc;
 
 pub use fixture::{FixtureSet, FixtureSource, LoadError};

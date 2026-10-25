@@ -152,6 +152,18 @@ jobs:
     with:
       version: ${{ fromJSON(needs.release-plz.outputs.releases)[0].version }}
 
+  # The `macp` CLI's release tarballs + SHA256SUMS, attached to the GitHub
+  # Release. Same gate and same version guard as `docker`.
+  cli-binaries:
+    name: macp CLI binaries
+    needs: [release-plz, docker-version-guard]
+    if: ${{ needs.release-plz.outputs.releases_created == 'true' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/cli-binaries.yml
+    with:
+      version: ${{ fromJSON(needs.release-plz.outputs.releases)[0].version }}
+
   # `integration_tests/` is a separate cargo workspace (root Cargo.toml:
   # `exclude = ["integration_tests"]`). It depends on the runtime by path only,
   # but its Cargo.lock still records the resolved versions of all seven macp-*

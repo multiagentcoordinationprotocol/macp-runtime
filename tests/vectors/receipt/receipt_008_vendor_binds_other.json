@@ -1,0 +1,48 @@
+{
+  "name": "receipt_008_vendor_binds_other",
+  "description": "a vendor attestation with binds=other is informative only and never establishes authenticity",
+  "receipt": {
+    "receipt_format": "macp-receipt/1",
+    "session_id": "0192f1a4-7c3e-7b2a-9f10-5d2c8e4b6a01",
+    "mode": "macp.mode.decision.v1",
+    "commitment": {
+      "commitment_id": "c2",
+      "action": "decision.approved",
+      "authority_scope": "seam",
+      "reason": "sealed by seam",
+      "mode_version": "macp.mode.decision.v1",
+      "policy_version": "1.0.0",
+      "configuration_version": "1.0.0",
+      "outcome_positive": true,
+      "supersedes": {
+        "session_id": "prior-sess",
+        "commitment_hash": "sha256:9f58e9d114d11860d48aa2bcb8cda458b9618b1cc8560595a802b68c4af85d41"
+      }
+    },
+    "commitment_hash": "sha256:7cc490432ad6b25e9c19fc7c3a84f1e33abe497fca1fd5266ff0275db3650f9d",
+    "semantics_rev": {
+      "implementation": "macp-runtime",
+      "rev": 4
+    },
+    "issuer": "runtime:example",
+    "issued_at": "2026-10-24T12:00:00Z",
+    "attestations": [
+      {
+        "type": "vendor",
+        "format": "org.example.trust-token",
+        "binds": "other",
+        "value": "opaque"
+      }
+    ]
+  },
+  "trusted_keys": {
+    "example-1": "TDVzkxaSf6_Oxu7mmn5TbCkF80s8Ulh33qKQsi0gnZM"
+  },
+  "expected": {
+    "integrity": "match",
+    "attestations": [
+      "unsupported"
+    ],
+    "verdict": "integrity_only"
+  }
+}

@@ -1,0 +1,13 @@
+//! The `macp` command line, as a library: each command's logic lives here so
+//! it can be tested without spawning the binary.
+//!
+//! - [`receipt`]: RFC-MACP-0013 Appendix A.4 decision-receipt verification
+//!   (`macp verify`), with [`jcs`] for the receipt body.
+//! - [`stack`]: the self-host stack from the repo's `deploy/`, embedded at
+//!   build time (`macp up`, `macp down`, `macp status`).
+//!
+//! `macp conform` is `macp_conform::cli`, unchanged.
+
+pub mod jcs;
+pub mod receipt;
+pub mod stack;

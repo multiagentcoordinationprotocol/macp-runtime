@@ -1,0 +1,45 @@
+{
+  "name": "receipt_012_wire_disagrees",
+  "description": "commitment_wire_b64 decodes to a different Commitment than `commitment`: mismatch",
+  "receipt": {
+    "receipt_format": "macp-receipt/1",
+    "session_id": "0192f1a4-7c3e-7b2a-9f10-5d2c8e4b6a01",
+    "mode": "macp.mode.decision.v1",
+    "commitment": {
+      "commitment_id": "c2",
+      "action": "decision.approved",
+      "authority_scope": "seam",
+      "reason": "sealed by seam",
+      "mode_version": "macp.mode.decision.v1",
+      "policy_version": "1.0.0",
+      "configuration_version": "1.0.0",
+      "outcome_positive": true,
+      "supersedes": {
+        "session_id": "prior-sess",
+        "commitment_hash": "sha256:9f58e9d114d11860d48aa2bcb8cda458b9618b1cc8560595a802b68c4af85d41"
+      }
+    },
+    "commitment_hash": "sha256:7cc490432ad6b25e9c19fc7c3a84f1e33abe497fca1fd5266ff0275db3650f9d",
+    "semantics_rev": {
+      "implementation": "macp-runtime",
+      "rev": 4
+    },
+    "issuer": "runtime:example",
+    "issued_at": "2026-10-24T12:00:00Z",
+    "commitment_wire_b64": "CgJjMhIRZGVjaXNpb24uYXBwcm92ZWQaBHNlYW0iEmEgZGlmZmVyZW50IHJlYXNvbioVbWFjcC5tb2RlLmRlY2lzaW9uLnYxMgUxLjAuMDoFMS4wLjBAAUpVCgpwcmlvci1zZXNzEkdzaGEyNTY6OWY1OGU5ZDExNGQxMTg2MGQ0OGFhMmJjYjhjZGE0NThiOTYxOGIxY2M4NTYwNTk1YTgwMmI2OGM0YWY4NWQ0MQ==",
+    "attestations": [
+      {
+        "type": "jws",
+        "jws": "eyJhbGciOiJFZERTQSIsImtpZCI6ImV4YW1wbGUtMSJ9..WX0xK_4XNs5AJV9x_VfSHoZnG7LxwuqWxsoPwNYfNPQ9gz103kqDB4xeZih6bVIWz1AnD87pgbqDHz3i1PUFDQ"
+      }
+    ]
+  },
+  "trusted_keys": {
+    "example-1": "TDVzkxaSf6_Oxu7mmn5TbCkF80s8Ulh33qKQsi0gnZM"
+  },
+  "expected": {
+    "integrity": "mismatch",
+    "attestations": [],
+    "verdict": "unverified"
+  }
+}

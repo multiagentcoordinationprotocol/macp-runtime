@@ -27,6 +27,15 @@ Additive only: nothing an embedder calls changes.
   unchanged, so what a record rebuilds to is unchanged. See
   [docs/embedding.md](docs/embedding.md#what-if-replay).
 
+### `macp-cli` (new crate) / `macp_conform::cli`
+
+- New crate `macp-cli`, binary `macp`: `up`/`down`/`status` for the self-host
+  stack, `verify` for decision receipts (RFC-MACP-0013 Appendix A.4), and
+  `conform`. See [crates/macp-cli/README.md](crates/macp-cli/README.md).
+- New: `macp_conform::cli::main(prog, args) -> ExitCode` (feature `grpc`), the
+  `macp-conform` binary's entry point as a library function. The
+  `macp-conform` binary itself is unchanged.
+
 ## 0.9.0 — library acceptance, step and replay
 
 0.9.0 makes the libraries a complete runtime: `SessionStart` acceptance and

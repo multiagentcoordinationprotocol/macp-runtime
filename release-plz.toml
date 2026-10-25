@@ -64,6 +64,9 @@ version_group = "macp"
 name = "macp-conform"
 version_group = "macp"
 [[package]]
+name = "macp-cli"
+version_group = "macp"
+[[package]]
 name = "macp-runtime"
 version_group = "macp"
 # The one GitHub Release per version rides the umbrella crate's tag

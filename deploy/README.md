@@ -19,6 +19,19 @@ value the agents sealed.
 You need Docker with Compose v2 (Docker Desktop, or Engine 24+). The images are
 public on GHCR; the first `up` downloads several hundred MB.
 
+Without a clone, the `macp` CLI runs the same stack. It embeds this
+directory's `docker-compose.yml` and `.env.example`:
+
+```bash
+cargo install macp-cli   # or a release tarball
+macp up                  # waits until healthy, then prints the URLs
+macp down
+```
+
+See [crates/macp-cli](../crates/macp-cli/README.md). When you edit
+`docker-compose.yml` or `.env.example` here, copy the change into
+`crates/macp-cli/deploy/`. A test fails until the copies match.
+
 ## What runs
 
 ```mermaid

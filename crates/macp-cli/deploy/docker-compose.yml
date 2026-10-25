@@ -1,0 +1,185 @@
+# One-command self-host for the MACP stack.
+#
+#   git clone https://github.com/multiagentcoordinationprotocol/macp-runtime
+#   cd macp-runtime/deploy && docker compose up
+#
+# then open http://localhost:3000. See README.md in this directory.
+#
+# Every image is public on GHCR and pinned by tag (`scripts/check-pins.sh`
+# refuses `latest` and anything that is not semver). No GITHUB_TOKEN, no LLM
+# key: the playground runs agents deterministically unless PLAYGROUND_ALLOW_LLM
+# is set, which this file never does.
+#
+# Credentials are local-dev defaults, overridable from a `.env` next to this
+# file (copy `.env.example`). Every port binds to 127.0.0.1: auth-service mints
+# a token for any sender it is asked for, so this stack must not be reachable
+# from other machines as configured.
+
+name: macp
+
+x-node-health: &node-health
+  interval: 5s
+  timeout: 5s
+  retries: 30
+  start_period: 10s
+
+services:
+  # Signs the agents' JWTs. No MACP_AUTH_SIGNING_KEY_JSON, so it generates an
+  # ephemeral key at boot; the runtime re-reads the JWKS (TTL below) after a
+  # restart. Not published to the host.
+  auth-service:
+    image: ${MACP_AUTH_SERVICE_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-auth-service:1.0.0}
+    environment:
+      PORT: "3200"
+      MACP_AUTH_ISSUER: macp-auth-service
+      MACP_AUTH_AUDIENCE: macp-runtime
+      MACP_AUTH_DEFAULT_TTL_SECONDS: "3600"
+      MACP_AUTH_MAX_TTL_SECONDS: "7200"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3200/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  runtime:
+    image: ${MACP_RUNTIME_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.9.0}
+    environment:
+      MACP_BIND_ADDR: 0.0.0.0:50051
+      # Plaintext gRPC inside the compose network. Required: the image does not
+      # bake it, and the runtime refuses to start without TLS otherwise.
+      MACP_ALLOW_INSECURE: "1"
+      MACP_DATA_DIR: /home/macp/.macp-data
+      MACP_METRICS_ADDR: 0.0.0.0:9464
+      # Agents authenticate with auth-service JWTs...
+      MACP_AUTH_ISSUER: macp-auth-service
+      MACP_AUTH_AUDIENCE: macp-runtime
+      MACP_AUTH_JWKS_URL: http://auth-service:3200/.well-known/jwks.json
+      MACP_AUTH_JWKS_TTL_SECS: "60"
+      # ...and the control plane with a static observer token. It has to be an
+      # observer to read sessions it did not start; the runtime's no-auth dev
+      # fallback grants no observer rights, so this token is not optional.
+      MACP_AUTH_TOKENS_JSON: >-
+        {"tokens":[{"token":"${MACP_CP_RUNTIME_TOKEN:-macp-dev-cp-observer}","sender":"macp-control-plane","can_start_sessions":false,"is_observer":true,"can_manage_mode_registry":false}]}
+    volumes:
+      - runtime-data:/home/macp/.macp-data
+    ports:
+      - "127.0.0.1:${MACP_RUNTIME_PORT:-50051}:50051"
+    depends_on:
+      auth-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/50051"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16.10-alpine
+    environment:
+      POSTGRES_USER: macp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-macp}
+      POSTGRES_DB: macp
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U macp -d macp"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  control-plane:
+    image: ${MACP_CONTROL_PLANE_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-control-plane:0.6.1}
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      HOST: 0.0.0.0
+      DATABASE_URL: postgres://macp:${POSTGRES_PASSWORD:-macp}@postgres:5432/macp
+      RUNTIME_KIND: rust
+      RUNTIME_ADDRESS: runtime:50051
+      RUNTIME_TLS: "false"
+      RUNTIME_ALLOW_INSECURE: "true"
+      # Static bearer, no MACP_AUTH_SERVICE_URL: the control plane uses JWT mode
+      # only when that is set. It runs its migrations at boot, before serving.
+      RUNTIME_BEARER_TOKEN: ${MACP_CP_RUNTIME_TOKEN:-macp-dev-cp-observer}
+      AUTH_API_KEYS: ${MACP_CP_API_KEY:-macp-dev-key}
+      CORS_ORIGIN: http://localhost:${MACP_CONSOLE_PORT:-3000}
+      STREAM_HUB_STRATEGY: memory
+      SESSION_DISCOVERY_ENABLED: "true"
+      LOG_LEVEL: info
+    ports:
+      - "127.0.0.1:${MACP_CP_PORT:-3001}:3001"
+    depends_on:
+      # Only Postgres: the control plane reconnects to the runtime on its own.
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # /readyz answers 503 until Postgres, the runtime and the stream consumer
+      # are all up, and busybox wget exits non-zero on it.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3001/readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  # The playground is what spawns the agents: the console launches a run with
+  # POST /examples/run, and the control plane only observes. Deterministic
+  # unless PLAYGROUND_ALLOW_LLM is set. Do not set AUTH_API_KEYS here: the
+  # image's HEALTHCHECK sends no key.
+  playground:
+    image: ${MACP_PLAYGROUND_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-playground:0.2.1}
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOST: 0.0.0.0
+      MACP_RUNTIME_ADDRESS: runtime:50051
+      MACP_RUNTIME_TLS: "false"
+      MACP_RUNTIME_ALLOW_INSECURE: "true"
+      MACP_AUTH_SERVICE_URL: http://auth-service:3200
+      MACP_AUTH_TOKEN_TTL_SECONDS: "3600"
+      MACP_CONTROL_PLANE_URL: http://control-plane:3001
+      MACP_CONTROL_PLANE_API_KEY: ${MACP_CP_API_KEY:-macp-dev-key}
+      REGISTER_POLICIES_ON_LAUNCH: "true"
+      CORS_ORIGIN: http://localhost:${MACP_CONSOLE_PORT:-3000}
+      LOG_LEVEL: info
+    ports:
+      - "127.0.0.1:${MACP_PLAYGROUND_PORT:-3100}:3000"
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      runtime:
+        condition: service_healthy
+      control-plane:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      <<: *node-health
+    restart: unless-stopped
+
+  console:
+    image: ${MACP_UI_CONSOLE_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-ui-console:0.2.0}
+    environment:
+      # Read server-side on every request; the browser only talks to the console.
+      # Demo mode is off in the image itself (baked in at build time).
+      MACP_CONTROL_PLANE_BASE_URL: http://control-plane:3001
+      MACP_CONTROL_PLANE_API_KEY: ${MACP_CP_API_KEY:-macp-dev-key}
+      MACP_PLAYGROUND_BASE_URL: http://playground:3000
+    ports:
+      - "127.0.0.1:${MACP_CONSOLE_PORT:-3000}:3000"
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      playground:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      <<: *node-health
+    restart: unless-stopped
+
+volumes:
+  runtime-data:
+  postgres-data:
