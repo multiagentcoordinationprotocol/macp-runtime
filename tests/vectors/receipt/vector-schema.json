@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multiagentcoordinationprotocol.io/schemas/receipt-vector.schema.json",
+  "title": "MACP decision-receipt test vector",
+  "description": "A reference vector for RFC-MACP-0013 Appendix A. It pins a receipt, the keys the verifier trusts, and the Appendix A.4 outcomes a conforming verifier returns. `receipt` is deliberately not held to macp-decision-receipt.schema.json here, because some vectors carry receipts a verifier must refuse; scripts/validate-json.sh validates every receipt whose receipt_format is macp-receipt/1 against that schema separately.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "description", "receipt", "trusted_keys", "expected"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Vector identifier; MUST match the file's basename (without .json).",
+      "pattern": "^receipt_[0-9]{3}_[a-z0-9_]+$"
+    },
+    "description": { "type": "string", "minLength": 1 },
+    "receipt": { "type": "object" },
+    "trusted_keys": {
+      "type": "object",
+      "description": "kid -> Ed25519 public key as a JWK `x` (base64url, no padding). A verifier trusts exactly these keys.",
+      "additionalProperties": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" }
+    },
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["integrity", "attestations", "verdict"],
+      "properties": {
+        "integrity": {
+          "description": "Appendix A.4 step 2. null only when the receipt is refused at step 1.",
+          "enum": ["match", "mismatch", "cannot_verify", null]
+        },
+        "attestations": {
+          "type": "array",
+          "description": "One outcome per entry of receipt.attestations, in order. Empty when integrity is not match: a mismatch ends verification.",
+          "items": { "enum": ["valid", "invalid", "unknown_key", "unsupported"] }
+        },
+        "verdict": {
+          "description": "attested: integrity match and at least one valid attestation. integrity_only: integrity match and none valid. unverified: integrity mismatch or cannot_verify. refused: unknown receipt_format.",
+          "enum": ["attested", "integrity_only", "unverified", "refused"]
+        }
+      }
+    }
+  }
+}

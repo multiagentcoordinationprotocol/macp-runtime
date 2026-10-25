@@ -647,6 +647,7 @@ jobs:
           }
           check_dir "tests/conformance" "spec-repo/schemas/conformance"
           check_dir "tests/conformance/cmt-hash" "spec-repo/schemas/conformance/cmt-hash"
+          check_dir "tests/vectors/receipt" "spec-repo/schemas/conformance/receipt"
           check_dir "tests/parity" "spec-repo/schemas/parity"
           exit $status
 
