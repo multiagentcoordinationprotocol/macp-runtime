@@ -7,6 +7,7 @@
 
 use crate::fixture::FixtureSource;
 use crate::level::{Group, Level};
+use crate::runner::NEEDS_HASH_API;
 use crate::target::{Capabilities, Profile};
 use serde::Serialize;
 
@@ -77,7 +78,8 @@ impl FixtureResult {
     }
 }
 
-/// `pass`: every fixture in the group passed. `fail`: at least one failed or
+/// `pass`: every fixture in the group passed, apart from skips that do not
+/// count against a level (`excused`). `fail`: at least one failed or
 /// errored. `incomplete`: none failed, but some were skipped. `not_run`:
 /// the group was not selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -98,6 +100,10 @@ pub struct GroupSummary {
     pub passed: usize,
     pub failed: usize,
     pub skipped: usize,
+    /// How many of `skipped` do not count against the level: clock-dependent
+    /// fixtures (`needs-clock-control`) on a Server target, per the spec's
+    /// Server-profile rule. Included in `skipped`.
+    pub excused: usize,
     pub errors: usize,
     /// Unverified assertions across the group's passing fixtures.
     pub unverified: usize,
@@ -130,6 +136,8 @@ pub struct Totals {
     pub passed: usize,
     pub failed: usize,
     pub skipped: usize,
+    /// Skips that do not count against a level (see [`GroupSummary::excused`]).
+    pub excused: usize,
     pub errors: usize,
     pub unverified: usize,
 }
@@ -146,14 +154,20 @@ pub struct Report {
     pub levels: Vec<GroupSummary>,
     pub multi_round: GroupSummary,
     /// The highest level whose own group and every group below it are
-    /// `pass` (with `strict`, `incomplete` never counts as `pass`; without
-    /// it, an `incomplete` group also blocks the level, since some of its
-    /// fixtures did not run). Absent when not even Core passed.
+    /// `pass`. An `incomplete` group blocks the level, with or without
+    /// `strict`, since some of its fixtures did not run; `excused` skips do
+    /// not make a group incomplete. Absent when not even Core passed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub achieved_level: Option<Level>,
-    /// The claim the run supports, e.g. `Standard modes, Server profile`.
+    /// The claim the run supports, e.g. `Standard modes, Server profile` or
+    /// `Standard modes, Server profile (hash vectors in-process)`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claim: Option<String>,
+    /// When the commitment-hash vectors ran against a different target from
+    /// the session fixtures ([`crate::runner::run_with_hash_target`]), that
+    /// target's description. Absent when `target` ran them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash_vectors_target: Option<String>,
     pub totals: Totals,
     pub fixtures: Vec<FixtureResult>,
 }
@@ -182,6 +196,9 @@ impl Report {
             "target: {} ({:?} profile)\n",
             self.target.description, self.target.profile
         ));
+        if let Some(h) = &self.hash_vectors_target {
+            out.push_str(&format!("hash vectors: {h}\n"));
+        }
         for r in &self.fixtures {
             let mark = match r.outcome {
                 Outcome::Pass => "PASS",
@@ -208,7 +225,7 @@ impl Report {
         }
         for g in self.levels.iter().chain(std::iter::once(&self.multi_round)) {
             out.push_str(&format!(
-                "{:<12} {:?}: {} passed, {} failed, {} skipped, {} errors, {} unverified\n",
+                "{:<12} {:?}: {} passed, {} failed, {} skipped ({} not counted), {} errors, {} unverified\n",
                 serde_json::to_value(g.group)
                     .ok()
                     .and_then(|v| v.as_str().map(String::from))
@@ -217,6 +234,7 @@ impl Report {
                 g.passed,
                 g.failed,
                 g.skipped,
+                g.excused,
                 g.errors,
                 g.unverified
             ));
@@ -224,6 +242,17 @@ impl Report {
         match &self.claim {
             Some(claim) => out.push_str(&format!("claim: {claim}\n")),
             None => out.push_str("claim: none (no level fully passed)\n"),
+        }
+        let hash_skipped = self
+            .fixtures
+            .iter()
+            .any(|r| r.reason.as_deref() == Some(NEEDS_HASH_API));
+        if hash_skipped && self.target.profile == Profile::Server {
+            out.push_str(
+                "note: a Server target has no commitment-hash RPC; Core counts the cmt-hash \
+                 vectors when they pass in-process against the same implementation and release \
+                 (--hash-vectors in-process)\n",
+            );
         }
         out
     }

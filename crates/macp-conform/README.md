@@ -24,6 +24,11 @@ cargo install macp-conform --features grpc
 # A running server. --fixtures takes a spec checkout's schemas/conformance:
 macp-conform --target grpc://127.0.0.1:50051 --fixtures ../spec/schemas/conformance --level standard
 
+# A macp-runtime server at this runner's release, with the commitment-hash
+# vectors run in-process (see "What a Server target cannot show"):
+macp-conform --target grpc://127.0.0.1:50051 --fixtures ../spec/schemas/conformance \
+  --multi-round --hash-vectors in-process
+
 # A release bundle, checked against its SHA256SUMS:
 macp-conform --target grpc://127.0.0.1:50051 \
   --bundle macp-conformance-1.2.0.tar.gz --sha256sums SHA256SUMS --multi-round
@@ -33,7 +38,8 @@ macp-conform --target in-process --fixtures ../spec/schemas/conformance --multi-
 ```
 
 The flags are `--level core|decision|standard` (default `standard`),
-`--multi-round`, `--strict` (an incomplete group fails the run), `--report
+`--multi-round`, `--strict` (an incomplete group fails the run),
+`--hash-vectors in-process` (gRPC targets only; see below), `--report
 PATH|-` (the JSON report), `--token SENDER=TOKEN` (repeatable; the default
 bearer token is the sender's name, which is what a server started with
 `MACP_ALLOW_INSECURE=1` accepts) and `--quiet`.
@@ -43,17 +49,41 @@ usage or harness error.
 
 ## What a Server target cannot show
 
-A gRPC server exposes no clock, mode state, replay or commitment-hash API. The
-runner reports what it could not check instead of guessing:
+A gRPC server exposes no clock, mode state, replay or commitment-hash API.
+The runner reports what it could not check instead of guessing, and applies
+the spec's two Server-profile rules (`docs/conformance.md`, Profiles):
 
-- clocked fixtures are `skipped` with reason `needs-clock-control`;
-- `cmt-hash` vectors are `skipped` with reason `needs-hash-api`;
+- **Clock-dependent fixtures** (TTL expiry, implicit accept) are `skipped`
+  with reason `needs-clock-control`, and **do not count against a level**.
+  The group summary counts them in both `skipped` and `excused`, and a group
+  whose only skips are excused is `pass`, with or without `--strict`. This
+  applies to Server targets only: an Embedded target is expected to drive
+  them with a controlled clock, so there a skip leaves the group
+  `incomplete`.
+- **Commitment-hash vectors** (`cmt_hash_001`-`010`, part of Core) are
+  `skipped` with reason `needs-hash-api`, which leaves Core, and so every
+  level, `incomplete`. A Server claim counts them when they pass in-process
+  against the same implementation and release. `--hash-vectors in-process`
+  does that: it runs the vectors through this crate's in-process target (the
+  reference kernel at the runner's own version) after checking, through
+  `Initialize`, that the server reports itself as `macp-runtime` at that same
+  version; otherwise the run stops with status 2. The report names the hash
+  target in `hash_vectors_target` and the claim ends in
+  `(hash vectors in-process)`.
 - `expected_mode_state` and `verify_replay_equivalence` show up in a passing
   fixture's `unverified` list.
 
-A group with skipped fixtures is `incomplete`, and an incomplete group never
-counts toward `achieved_level`. Over gRPC that means Core, and therefore every
-level, stays incomplete until servers expose a commitment-hash API.
+So against a `macp-runtime` server of the same release:
+
+```text
+standard     Pass: 15 passed, 0 failed, 1 skipped (1 not counted), 0 errors, 18 unverified
+claim: Standard modes + multi_round, Server profile (hash vectors in-process)
+```
+
+To test another server implementation the same way, drive its own in-process
+hash code with the library's `run_with_hash_target`, which runs the session
+fixtures against one target and the vectors against another. Whether the two
+are the same implementation and release is the caller's to vouch for.
 
 ## Library
 

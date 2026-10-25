@@ -742,11 +742,18 @@ jobs:
             exit 1
           }
 
-  # The macp-conform CLI against the published server image, over gRPC: the
-  # Server-profile path end to end, with the canonical fixtures at SPEC_REV.
-  # A server exposes no clock or commitment-hash API, so the clocked fixture
-  # and the cmt-hash vectors are reported as skipped and Core/Standard come
-  # out `incomplete`; the run fails only on a fixture that fails or errors.
+  # The macp-conform CLI over gRPC: the Server-profile path end to end, with
+  # the canonical fixtures at SPEC_REV. A server exposes no clock or
+  # commitment-hash API. Per the spec's Server-profile rules
+  # (docs/conformance.md, Profiles) the clocked fixture is skipped
+  # (`needs-clock-control`) without counting against a level, and the
+  # cmt-hash vectors count when they pass in-process against the same
+  # implementation and release.
+  #   1. The published image: the vectors are skipped (`needs-hash-api`), so
+  #      Core stays `incomplete`; fails only on a fixture that fails/errors.
+  #   2. A server built from this checkout, with `--hash-vectors in-process`
+  #      (same release by construction) and `--strict`: must claim
+  #      Standard modes + multi_round.
   conform-cli:
     name: macp-conform CLI (GHCR image, gRPC)
     runs-on: ubuntu-latest
@@ -780,8 +787,10 @@ jobs:
           version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ github.token }}
 
-      - name: Build macp-conform
-        run: cargo build -p macp-conform --features grpc --bin macp-conform
+      - name: Build macp-conform and the runtime
+        run: |
+          cargo build -p macp-conform --features grpc --bin macp-conform
+          cargo build --bin macp-runtime
 
       - name: Start the runtime image
         run: |
@@ -803,16 +812,38 @@ jobs:
             --level standard --multi-round \
             --report macp-conform-report.json
 
+      - name: Run macp-conform over gRPC, hash vectors in-process (this checkout)
+        run: |
+          MACP_ALLOW_INSECURE=1 MACP_MEMORY_ONLY=1 MACP_BIND_ADDR=127.0.0.1:50052 \
+            ./target/debug/macp-runtime > macp-local.log 2>&1 &
+          for _ in $(seq 1 60); do
+            if (exec 3<>/dev/tcp/127.0.0.1/50052) 2>/dev/null; then break; fi
+            sleep 1
+          done
+          ./target/debug/macp-conform \
+            --target grpc://127.0.0.1:50052 \
+            --fixtures spec-repo/schemas/conformance \
+            --level standard --multi-round --strict \
+            --hash-vectors in-process \
+            --report macp-conform-report-hash-in-process.json
+          claim=$(jq -r .claim macp-conform-report-hash-in-process.json)
+          echo "claim: $claim" >> "$GITHUB_STEP_SUMMARY"
+          test "$claim" = "Standard modes + multi_round, Server profile (hash vectors in-process)" || {
+            echo "::error::unexpected claim: $claim"; exit 1
+          }
+
       - name: Runtime logs
         if: failure()
-        run: docker logs macp
+        run: |
+          docker logs macp
+          cat macp-local.log || true
 
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: macp-conform-report
-          path: macp-conform-report.json
+          path: macp-conform-report*.json
           if-no-files-found: warn
 
   # Build-only Docker gate: proves the published image still builds without
