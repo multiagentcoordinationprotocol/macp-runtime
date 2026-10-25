@@ -270,6 +270,42 @@ let session = replay(&start, events, mode.as_ref(), &ReplayOptions::default())?;
   mode disagree, through corruption or a behaviour change without a
   `semantics_rev` gate.
 
+## What-if replay
+
+`macp_modes::what_if::replay_under_policy` (0.10.0) answers "had this policy
+governed that session, what would have happened?". Use it before rolling out a
+policy change. It takes the same record as `replay`, plus a candidate
+`PolicyDefinition`, and returns a `WhatIfReport`.
+
+```rust
+use macp_modes::what_if::replay_under_policy;
+
+let report = replay_under_policy(&start, events, mode.as_ref(), &ReplayOptions::default(), &candidate)?;
+if report.outcome_changed() {
+    // report.recorded / report.candidate: final state, resolution, the resolving Commitment
+    // report.first_divergence: SessionStart, or Event(i) — an index into `events`
+    // report.denials: every POLICY_DENIED the candidate raised, with its DenyReasons
+    // report.entries: each entry as both replays handled it
+}
+```
+
+- **Two replays, side by side.** The recorded replay is plain `replay`, and an
+  error from it is returned: the history is not one this mode produced. The
+  candidate replay records each refusal and skips that event, as a live runtime
+  would have rejected it. The event takes no dedup slot and changes no state.
+- **Rules only.** The candidate replaces `policy_definition`. The session keeps
+  the `policy_version` it was bound to, so recorded Commitments' version echo
+  still matches. Validate the candidate first (`macp_policy::PolicyRegistry`);
+  this crate does not.
+- **Pure.** No storage, clock or registry, and every event is dispatched at its
+  recorded time. The same inputs give the same report.
+- **Fixed history.** Agents that would have acted differently are not
+  simulated. A runtime-originated event the candidate would have produced on
+  its own (a Handoff implicit accept under a shorter timeout) is not
+  synthesized; only recorded ones are re-applied.
+- **For tools.** `WhatIfReport` is `serde::Serialize`. `candidate_session`, the
+  full rebuilt session, is left out of the JSON.
+
 ## Other public building blocks (I17)
 
 These were already public before 0.9.0. Use them instead of reimplementing

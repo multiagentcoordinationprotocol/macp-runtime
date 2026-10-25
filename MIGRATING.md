@@ -14,6 +14,19 @@ Every release that may break an embeddable crate has an entry here, under a
 introduces a breaking API change must add it, and a release PR with a breaking
 bump fails without it. Patch releases have no entry.
 
+## 0.10.0 — what-if replay
+
+Additive only: nothing an embedder calls changes.
+
+### `macp_modes::replay` / `macp_modes::what_if`
+
+- New: `macp_modes::what_if::replay_under_policy(start, events, mode, opts,
+  candidate) -> Result<WhatIfReport, MacpError>`. It replays a recorded session
+  under a candidate `PolicyDefinition` and reports the would-be outcome and its
+  difference from the record. `replay`, `replay_start` and `apply_event` are
+  unchanged, so what a record rebuilds to is unchanged. See
+  [docs/embedding.md](docs/embedding.md#what-if-replay).
+
 ## 0.9.0 — library acceptance, step and replay
 
 0.9.0 makes the libraries a complete runtime: `SessionStart` acceptance and
