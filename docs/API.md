@@ -384,7 +384,7 @@ The runtime applies a resolver chain in this order:
 
 1. **JWT bearer** (when `MACP_AUTH_ISSUER` is set): `Authorization: Bearer <jwt>`. The JWT's `sub` claim becomes the sender; `macp_scopes` carries capability flags (`allowed_modes`, `can_start_sessions`, `max_open_sessions`, `can_manage_mode_registry`, `is_observer`).
 2. **Static bearer** (when `MACP_AUTH_TOKENS_*` is set): `Authorization: Bearer <token>` or `x-macp-token: <token>` header. The opaque token is mapped to an `AuthIdentity` via the configured token file.
-3. **Dev-mode fallback** (when neither JWT nor static bearer is configured): any `Authorization: Bearer <value>` header authenticates the caller as sender `<value>` with all capabilities. Intended only for local development.
+3. **Dev-mode fallback** (when neither JWT nor static bearer is configured): any `Authorization: Bearer <value>` header authenticates the caller as sender `<value>` with full capabilities **except** `is_observer`: it can start sessions and manage the mode registry, but it cannot read a session it neither started nor joined. An observer such as a control plane therefore cannot watch other agents' sessions under dev mode; give it a static token with `"is_observer": true` instead (`crates/macp-auth/src/security.rs`, `dev_authenticate`). Intended only for local development.
 4. **Reject**: Returns `UNAUTHENTICATED`.
 
 See the [Getting Started guide](getting-started.md) for token configuration examples.

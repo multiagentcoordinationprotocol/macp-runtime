@@ -52,7 +52,7 @@ export MACP_ALLOW_INSECURE=1
 cargo run
 ```
 
-The server listens on `127.0.0.1:50051` and treats any `Authorization: Bearer <value>` header as authenticating the caller with sender identity `<value>`.
+The server listens on `127.0.0.1:50051` and treats any `Authorization: Bearer <value>` header as authenticating the caller with sender identity `<value>`. That identity can start sessions and manage the registry but is not an observer, so a monitoring client (such as a control plane) can read only sessions it started or joins. To watch other agents' sessions, configure a static token with `"is_observer": true` ([Production mode](#production-mode)). For a full local stack with this already wired up, see [`deploy/`](../deploy/README.md).
 
 ### Starting a production server
 
