@@ -131,7 +131,7 @@ services:
   # unless PLAYGROUND_ALLOW_LLM is set. Do not set AUTH_API_KEYS here: the
   # image's HEALTHCHECK sends no key.
   playground:
-    image: ${MACP_PLAYGROUND_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-playground:sha-a212f25}
+    image: ${MACP_PLAYGROUND_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-playground:0.2.0}
     environment:
       NODE_ENV: production
       PORT: "3000"
