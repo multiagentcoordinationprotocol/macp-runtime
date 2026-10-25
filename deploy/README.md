@@ -104,8 +104,9 @@ service, set its `MACP_*_IMAGE` variable (see `.env.example`).
 ## Acceptance test
 
 `scripts/acceptance.sh` is the test the `self-host` CI workflow runs. It brings
-the stack up from nothing, launches the showcase run through the playground,
-waits for the control plane to report `verified`, and tears everything down.
+the stack up from nothing and launches the showcase run through the console's
+proxy, the same path the Showcase button uses. It then waits for the control
+plane to report `verified`, and tears everything down.
 
 ```bash
 scripts/acceptance.sh              # needs docker compose, curl and jq

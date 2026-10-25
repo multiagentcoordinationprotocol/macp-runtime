@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 # Acceptance test for the self-host stack: bring it up from nothing, launch the
-# console's showcase run (a deterministic Decision) through the playground,
-# wait for the control plane to report it Verified, tear down.
+# console's showcase run (a deterministic Decision) through the console's own
+# proxy, wait for the control plane to report it Verified, tear down.
+#
+# Going through the console exercises its proxy and its wiring to the
+# playground and control plane. The proxy rate-limits launches (5 per 10
+# minutes per client), which one launch per run stays well under.
 #
 #   deploy/scripts/acceptance.sh            # leaves nothing behind
 #   KEEP_STACK=1 deploy/scripts/acceptance.sh
 #
-# Needs docker compose v2, curl and jq. Uses the .env defaults, so run it with
-# no .env in deploy/ (or one whose ports and MACP_CP_API_KEY match).
+# Needs docker compose v2, curl and jq. Reads the console port from
+# MACP_CONSOLE_PORT if set; the console holds the control-plane key itself.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-CP="http://127.0.0.1:${MACP_CP_PORT:-3001}"
-PLAYGROUND="http://127.0.0.1:${MACP_PLAYGROUND_PORT:-3100}"
 CONSOLE="http://127.0.0.1:${MACP_CONSOLE_PORT:-3000}"
-KEY="${MACP_CP_API_KEY:-macp-dev-key}"
+PLAYGROUND="$CONSOLE/api/proxy/macp-playground"
+CP="$CONSOLE/api/proxy/macp-control-plane"
 VERIFY_TIMEOUT_SECS="${VERIFY_TIMEOUT_SECS:-120}"
 
 teardown() {
@@ -53,7 +56,7 @@ echo "launched run $run_id (session $(jq -r .sessionId <<<"$launch"))"
 
 deadline=$(( $(date +%s) + VERIFY_TIMEOUT_SECS ))
 while :; do
-  verification=$(curl -fsS "$CP/runs/$run_id/verification" -H "authorization: Bearer $KEY")
+  verification=$(curl -fsS "$CP/runs/$run_id/verification")
   status=$(jq -r .status <<<"$verification")
   case "$status" in
     verified) break ;;
@@ -62,7 +65,7 @@ while :; do
   esac
   if [ "$(date +%s)" -ge "$deadline" ]; then
     echo "still pending after ${VERIFY_TIMEOUT_SECS}s" >&2
-    curl -fsS "$CP/runs/$run_id" -H "authorization: Bearer $KEY" | jq . >&2 || true
+    curl -fsS "$CP/runs/$run_id" | jq . >&2 || true
     exit 1
   fi
   sleep 1
