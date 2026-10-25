@@ -9,7 +9,8 @@
 //! `--strict`, when a level is incomplete), 2 when the run could not start.
 
 use macp_conform::{
-    run, ConformanceTarget, FixtureSet, GrpcTarget, InProcessTarget, Level, RunOptions,
+    run, run_with_hash_target, ConformanceTarget, FixtureSet, GrpcTarget, InProcessTarget, Level,
+    RunOptions,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -18,6 +19,7 @@ const USAGE: &str = "\
 usage: macp-conform --target <grpc://host:port | grpcs://host:port | in-process>
                     (--fixtures <dir> | --bundle <macp-conformance-X.tar.gz> [--sha256sums <file>])
                     [--level core|decision|standard] [--multi-round] [--strict]
+                    [--hash-vectors in-process]
                     [--report <path>] [--token <sender>=<token>]... [--quiet]
 
   --target       the implementation under test: a MACPRuntimeService endpoint
@@ -27,6 +29,12 @@ usage: macp-conform --target <grpc://host:port | grpcs://host:port | in-process>
   --level        run this level and every level below it (default: standard)
   --multi-round  also run the optional multi_round fixtures
   --strict       treat an incomplete level (skipped fixtures) as failure
+  --hash-vectors in-process
+                 with a gRPC target, run the cmt-hash vectors through this
+                 crate's in-process target instead (a server has no hash RPC).
+                 The server must report itself as macp-runtime at this
+                 runner's version: the spec counts the vectors only against
+                 the same implementation and release
   --report       write the JSON report here ('-' for stdout)
   --token        bearer token to use for a sender (default: the sender's name,
                  as a server in MACP_ALLOW_INSECURE=1 development mode expects)
@@ -40,6 +48,7 @@ struct Args {
     level: Level,
     multi_round: bool,
     strict: bool,
+    hashes_in_process: bool,
     report: Option<String>,
     tokens: Vec<(String, String)>,
     quiet: bool,
@@ -55,6 +64,7 @@ fn parse() -> Result<Args, String> {
         level: Level::Standard,
         multi_round: false,
         strict: false,
+        hashes_in_process: false,
         report: None,
         tokens: Vec::new(),
         quiet: false,
@@ -72,6 +82,10 @@ fn parse() -> Result<Args, String> {
             }
             "--multi-round" => a.multi_round = true,
             "--strict" => a.strict = true,
+            "--hash-vectors" => match value("--hash-vectors")?.as_str() {
+                "in-process" => a.hashes_in_process = true,
+                v => return Err(format!("--hash-vectors takes in-process, got {v:?}")),
+            },
             "--report" => a.report = Some(value("--report")?),
             "--token" => {
                 let v = value("--token")?;
@@ -95,10 +109,29 @@ fn parse() -> Result<Args, String> {
     if a.fixtures.is_some() == a.bundle.is_some() {
         return Err("give exactly one of --fixtures and --bundle".into());
     }
+    if a.hashes_in_process && a.target == "in-process" {
+        return Err("--hash-vectors in-process is for a gRPC target".into());
+    }
     if a.sha256sums.is_some() && a.bundle.is_none() {
         return Err("--sha256sums needs --bundle".into());
     }
     Ok(a)
+}
+
+/// The in-process target is the reference kernel at this runner's version,
+/// so its hash results stand in for the server's only when the server is
+/// that implementation at that release (spec `docs/conformance.md`).
+async fn same_release(t: &mut GrpcTarget) -> Result<(), String> {
+    let (name, version) = t.runtime_info().await.map_err(|e| e.to_string())?;
+    let want = env!("CARGO_PKG_VERSION");
+    if name == "macp-runtime" && version == want {
+        Ok(())
+    } else {
+        Err(format!(
+            "the server reports {name} {version}, but the in-process target is macp-runtime {want}; \
+             hash vectors count only against the same implementation and release"
+        ))
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -133,6 +166,12 @@ async fn main() -> ExitCode {
                 for (s, tok) in &args.tokens {
                     t = t.with_token(s.clone(), tok.clone());
                 }
+                if args.hashes_in_process {
+                    if let Err(e) = same_release(&mut t).await {
+                        eprintln!("macp-conform: --hash-vectors in-process: {e}");
+                        return ExitCode::from(2);
+                    }
+                }
                 Box::new(t)
             }
             Err(e) => {
@@ -145,7 +184,11 @@ async fn main() -> ExitCode {
         .with_level(args.level)
         .with_multi_round(args.multi_round)
         .with_strict(args.strict);
-    let report = run(target.as_mut(), &set, &opts).await;
+    let report = if args.hashes_in_process {
+        run_with_hash_target(target.as_mut(), &InProcessTarget::new(), &set, &opts).await
+    } else {
+        run(target.as_mut(), &set, &opts).await
+    };
     if !args.quiet {
         eprint!("{}", report.render_text());
     }

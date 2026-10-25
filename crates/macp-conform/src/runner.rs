@@ -24,7 +24,7 @@ use crate::report::{
     Failure, FixtureKind, FixtureResult, GroupStatus, GroupSummary, Outcome, Report, Requested,
     RunnerInfo, TargetInfo, Totals, REPORT_FORMAT,
 };
-use crate::target::{ConformanceTarget, Observable, Submission};
+use crate::target::{ConformanceTarget, Observable, Profile, Submission};
 use macp_core::PolicyDefinition;
 use macp_pb::pb::{CommitmentPayload, Envelope, SessionStartPayload};
 use prost::Message;
@@ -93,26 +93,68 @@ pub async fn run(
     set: &FixtureSet,
     opts: &RunOptions,
 ) -> Report {
+    run_inner(target, None, set, opts).await
+}
+
+/// Like [`run`], but drive the commitment-hash vectors through `hashes`
+/// instead of `target`.
+///
+/// This is the spec's Server-profile rule (`docs/conformance.md`, Profiles):
+/// `MACPRuntimeService` has no commitment-hash RPC, so a Server claim counts
+/// the `cmt-hash` vectors when they pass in-process against the same
+/// implementation and release. The caller vouches for "same implementation
+/// and release" (the CLI checks it with `Initialize` before calling this);
+/// the report names `hashes` in `hash_vectors_target` and the claim says
+/// `(hash vectors in-process)`.
+pub async fn run_with_hash_target(
+    target: &mut dyn ConformanceTarget,
+    hashes: &dyn ConformanceTarget,
+    set: &FixtureSet,
+    opts: &RunOptions,
+) -> Report {
+    run_inner(target, Some(hashes), set, opts).await
+}
+
+async fn run_inner(
+    target: &mut dyn ConformanceTarget,
+    hashes: Option<&dyn ConformanceTarget>,
+    set: &FixtureSet,
+    opts: &RunOptions,
+) -> Report {
     let mut results = Vec::new();
     for f in &set.fixtures {
         if opts.selects(group_of_fixture(&f.name)) {
             results.push(run_fixture(target, f).await);
         }
     }
-    let hashes: HashMap<String, String> = set
+    let pinned: HashMap<String, String> = set
         .vectors
         .iter()
         .filter_map(|v| Some((v.vector.name.clone(), v.vector.hash.clone()?)))
         .collect();
     for v in &set.vectors {
         if opts.selects(group_of_vector(&v.name)) {
-            results.push(run_vector(&*target, v, &hashes));
+            results.push(run_vector(hashes.unwrap_or(&*target), v, &pinned));
         }
     }
-    build_report(target, set, opts, results)
+    build_report(target, hashes, set, opts, results)
 }
 
-fn summarize(group: Group, selected: bool, results: &[FixtureResult]) -> GroupSummary {
+/// Does this skip not count against a level? Only a clock-dependent fixture
+/// on a Server target (spec `docs/conformance.md`, Profiles): an Embedded
+/// run is expected to drive it with a controlled clock.
+fn excused(profile: Profile, r: &FixtureResult) -> bool {
+    profile == Profile::Server
+        && r.outcome == Outcome::Skipped
+        && r.reason.as_deref() == Some(NEEDS_CLOCK_CONTROL)
+}
+
+fn summarize(
+    group: Group,
+    selected: bool,
+    profile: Profile,
+    results: &[FixtureResult],
+) -> GroupSummary {
     let mine: Vec<_> = results.iter().filter(|r| r.group == group).collect();
     let count = |o: Outcome| mine.iter().filter(|r| r.outcome == o).count();
     let (passed, failed, skipped, errors) = (
@@ -121,11 +163,12 @@ fn summarize(group: Group, selected: bool, results: &[FixtureResult]) -> GroupSu
         count(Outcome::Skipped),
         count(Outcome::Error),
     );
+    let excused = mine.iter().filter(|r| excused(profile, r)).count();
     let status = if !selected {
         GroupStatus::NotRun
     } else if failed + errors > 0 {
         GroupStatus::Fail
-    } else if skipped > 0 || passed == 0 {
+    } else if skipped > excused || passed == 0 {
         GroupStatus::Incomplete
     } else {
         GroupStatus::Pass
@@ -136,6 +179,7 @@ fn summarize(group: Group, selected: bool, results: &[FixtureResult]) -> GroupSu
         passed,
         failed,
         skipped,
+        excused,
         errors,
         unverified: mine
             .iter()
@@ -147,15 +191,20 @@ fn summarize(group: Group, selected: bool, results: &[FixtureResult]) -> GroupSu
 
 fn build_report(
     target: &dyn ConformanceTarget,
+    hashes: Option<&dyn ConformanceTarget>,
     set: &FixtureSet,
     opts: &RunOptions,
     results: Vec<FixtureResult>,
 ) -> Report {
+    let profile = target.profile();
     let levels: Vec<GroupSummary> = Level::ALL
         .iter()
-        .map(|&l| summarize(Group::Level(l), opts.selects(Group::Level(l)), &results))
+        .map(|&l| {
+            let g = Group::Level(l);
+            summarize(g, opts.selects(g), profile, &results)
+        })
         .collect();
-    let multi_round = summarize(Group::MultiRound, opts.multi_round, &results);
+    let multi_round = summarize(Group::MultiRound, opts.multi_round, profile, &results);
     let mut achieved_level = None;
     for (l, g) in Level::ALL.iter().zip(&levels) {
         if g.status == GroupStatus::Pass {
@@ -164,17 +213,19 @@ fn build_report(
             break;
         }
     }
-    let profile = target.profile();
     let claim = achieved_level.map(|l| {
         let mut c = l.claim_name().to_string();
         if multi_round.status == GroupStatus::Pass {
             c.push_str(" + multi_round");
         }
         let p = match profile {
-            crate::target::Profile::Server => "Server",
-            crate::target::Profile::Embedded => "Embedded",
+            Profile::Server => "Server",
+            Profile::Embedded => "Embedded",
         };
         c.push_str(&format!(", {p} profile"));
+        if hashes.is_some() {
+            c.push_str(" (hash vectors in-process)");
+        }
         if let Some(rev) = target.semantics_rev() {
             c.push_str(&format!(", semantics_rev {rev}"));
         }
@@ -188,7 +239,10 @@ fn build_report(
                 totals.unverified += r.unverified.len();
             }
             Outcome::Fail => totals.failed += 1,
-            Outcome::Skipped => totals.skipped += 1,
+            Outcome::Skipped => {
+                totals.skipped += 1;
+                totals.excused += usize::from(excused(profile, r));
+            }
             Outcome::Error => totals.errors += 1,
         }
     }
@@ -214,6 +268,7 @@ fn build_report(
         multi_round,
         achieved_level,
         claim,
+        hash_vectors_target: hashes.map(|h| h.describe()),
         totals,
         fixtures: results,
     }

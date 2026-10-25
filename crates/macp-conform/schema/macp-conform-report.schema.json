@@ -75,6 +75,10 @@
     "multi_round": { "$ref": "#/$defs/group_summary" },
     "achieved_level": { "$ref": "#/$defs/level" },
     "claim": { "type": "string" },
+    "hash_vectors_target": {
+      "type": "string",
+      "description": "Present when the cmt-hash vectors ran against a different target from the session fixtures: a Server target, whose wire has no commitment-hash RPC, with the vectors run in-process against the same implementation and release (spec docs/conformance.md, Profiles). The claim then ends with \"(hash vectors in-process)\"."
+    },
     "totals": {
       "type": "object",
       "required": ["passed", "failed", "skipped", "errors", "unverified"],
@@ -82,6 +86,7 @@
         "passed": { "$ref": "#/$defs/count" },
         "failed": { "$ref": "#/$defs/count" },
         "skipped": { "$ref": "#/$defs/count" },
+        "excused": { "$ref": "#/$defs/count" },
         "errors": { "$ref": "#/$defs/count" },
         "unverified": { "$ref": "#/$defs/count" }
       }
@@ -124,6 +129,10 @@
         "passed": { "$ref": "#/$defs/count" },
         "failed": { "$ref": "#/$defs/count" },
         "skipped": { "$ref": "#/$defs/count" },
+        "excused": {
+          "$ref": "#/$defs/count",
+          "description": "How many of skipped do not count against the level: clock-dependent fixtures (reason needs-clock-control) on a Server target. A group whose only skips are excused is pass."
+        },
         "errors": { "$ref": "#/$defs/count" },
         "unverified": { "$ref": "#/$defs/count" }
       }

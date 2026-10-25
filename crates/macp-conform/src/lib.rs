@@ -45,7 +45,7 @@ pub use fixture::{FixtureSet, FixtureSource, LoadError};
 pub use in_process::{state_name, InProcessTarget};
 pub use level::{Group, Level};
 pub use report::{Outcome, Report, REPORT_SCHEMA};
-pub use runner::{run, RunOptions};
+pub use runner::{run, run_with_hash_target, RunOptions};
 pub use target::{
     Capabilities, ConformanceTarget, HistoryEntry, Observable, Observation, Profile, Submission,
     TargetError,

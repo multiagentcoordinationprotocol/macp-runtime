@@ -12,7 +12,10 @@
 //! - there is no mode-state or replay RPC, so `expected_mode_state` and
 //!   `verify_replay_equivalence` are *unverified*;
 //! - there is no commitment-hash RPC, so the `cmt-hash` vectors are skipped
-//!   (`needs-hash-api`).
+//!   (`needs-hash-api`), unless they run in-process against the same
+//!   implementation and release (`crate::runner::run_with_hash_target`; the
+//!   CLI's `--hash-vectors in-process` checks the release with
+//!   [`GrpcTarget::runtime_info`]).
 //!
 //! State comes from `GetSession`; history from a passive `StreamSession`
 //! subscription (`subscribe_session_id`, `after_sequence = 0`), read until
@@ -26,8 +29,9 @@ use crate::target::{
 use async_trait::async_trait;
 use macp_core::PolicyDefinition;
 use macp_pb::pb::{
-    stream_session_response, Envelope, GetSessionRequest, PolicyDescriptor, RegisterPolicyRequest,
-    SendRequest, SessionState, StreamSessionRequest, UnregisterPolicyRequest,
+    stream_session_response, Envelope, GetSessionRequest, InitializeRequest, PolicyDescriptor,
+    RegisterPolicyRequest, SendRequest, SessionState, StreamSessionRequest,
+    UnregisterPolicyRequest,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -101,6 +105,26 @@ impl GrpcTarget {
     pub fn with_stream_idle(mut self, idle: Duration) -> Self {
         self.stream_idle = idle;
         self
+    }
+
+    /// The server's `Initialize` `runtime_info`: `(name, version)`, e.g.
+    /// `("macp-runtime", "0.9.0")`.
+    pub async fn runtime_info(&mut self) -> Result<(String, String), TargetError> {
+        let req = self.request(
+            ADMIN_SENDER,
+            InitializeRequest {
+                supported_protocol_versions: vec![macp_core::MACP_VERSION.into()],
+                ..Default::default()
+            },
+        )?;
+        let resp = self
+            .client
+            .initialize(req)
+            .await
+            .map_err(|s| TargetError(format!("Initialize failed: {}", s.message())))?
+            .into_inner();
+        let info = resp.runtime_info.unwrap_or_default();
+        Ok((info.name, info.version))
     }
 
     fn request<T>(&self, sender: &str, body: T) -> Result<tonic::Request<T>, TargetError> {
