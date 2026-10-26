@@ -26,14 +26,15 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --shell /bin/bash macp
-USER macp
 WORKDIR /home/macp
-# Created as `macp` so a named volume mounted here inherits that ownership;
-# otherwise Docker creates the mount point as root and startup fails with
-# "Permission denied".
-RUN mkdir -p /home/macp/.macp-data
+# Created as `macp` so a named volume mounted here inherits that ownership.
+RUN install -d -o macp -g macp /home/macp/.macp-data
 
 COPY --from=builder /app/target/release/macp-runtime /usr/local/bin/macp-runtime
+# The container starts as root only so the entrypoint can hand a root-owned
+# MACP_DATA_DIR (a platform volume or a bind mount) to `macp`; it then drops
+# to `macp` with setpriv, so the runtime never runs as root (#258).
+COPY docker/entrypoint.sh /usr/local/bin/macp-entrypoint
 
 ENV MACP_BIND_ADDR=0.0.0.0:50051
 # NOTE: no MACP_ALLOW_INSECURE here. The runtime refuses to start without
@@ -43,4 +44,4 @@ ENV MACP_DATA_DIR=/home/macp/.macp-data
 
 EXPOSE 50051
 
-ENTRYPOINT ["macp-runtime"]
+ENTRYPOINT ["macp-entrypoint"]
