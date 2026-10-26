@@ -16,6 +16,7 @@ attached to each [GitHub release](https://github.com/multiagentcoordinationproto
 | `macp status` | Lists its containers. |
 | `macp verify <receipt.json> [--key …]… [--require attested\|integrity] [--json]` | Verifies a decision receipt (RFC-MACP-0013 Appendix A.4). |
 | `macp session tail <id> [--after N] [--no-follow] [--json]` | Prints a session's accepted envelopes, then follows it until it ends. |
+| `macp replay (--data-dir <dir> <id> \| --file <log> \| --session <id>) [--policy <file>] [--json]` | Replays a recorded session: alone, as an integrity check, or under a candidate policy (what-if). |
 | `macp conform …` | Runs the spec's conformance fixtures against an implementation. It takes the same arguments as [`macp-conform`](../macp-conform/README.md). |
 
 ## Exit status
@@ -63,6 +64,54 @@ release knows:
   token, so `macp up` then `macp session tail` works as is. Any token that can
   read the session works: an observer, the initiator or a participant.
 - An unknown session, a refused token or a lost connection exits 2.
+
+## `macp replay`
+
+```sh
+macp replay --data-dir .macp-data 4c7542ed-6b5e-4290-bbd1-9ed372ed914c
+macp replay --file log.jsonl --policy unanimous.json
+macp replay --session $SID --token "$TOKEN" --policy unanimous.json --json
+```
+
+`replay` runs RFC-MACP-0012 §8.1 what-if replay. The history comes from one
+of three sources:
+
+- `--data-dir <dir> <id>`: a file-backend runtime's `MACP_DATA_DIR`. It reads
+  `sessions/<id>/log.jsonl`, and `session.json` when present.
+- `--file <log>`: a session log, as JSON lines of log entries or as a JSON
+  array of them.
+- `--session <id>`: a session on a running runtime, replayed there through the
+  `WhatIfReplay` RPC. `--target` and `--token` work as they do for `tail`.
+
+The local sources run `macp_runtime::runtime::what_if_over_log`, the same code
+the RPC runs, so all three produce the same report:
+
+```text
+recorded   policy.default           Resolved by Commitment m5 at #5
+candidate  policy.cli.unanimous     Open
+diverges   at #5 Commitment m5: recorded applied (Resolved), candidate refused POLICY_DENIED
+denied     #5 m5: threshold_not_met: unanimous vote failed: 1 approve, 0 reject out of 3 participants
+outcome    changed
+```
+
+- **Without `--policy`**, the session is replayed under its own recorded
+  policy. That checks that the history still replays and, with a stored
+  session, that it ends in the state the session did. It exits 0 when it
+  does and 1 when it does not. A policy that is not built in, such as one
+  registered at runtime, must be passed with `--policy` for the local
+  sources.
+- **With `--policy`** (a policy definition in the format `MACP_POLICIES_DIR`
+  uses), the command exits 0 when the candidate's outcome is the recorded one
+  and 1 when it changed. The outcome covers the final state, the resolution
+  and the entry that resolved it.
+- `#N` is the accepted ordinal, numbered as `tail` numbers it
+  (`history_index` + 1). `--json` prints the response with `details` parsed,
+  the resolution decoded, and an `outcome_changed` field added.
+- Exit 2 means nothing was replayed. The causes are an unknown session, an
+  unreadable file, a refused candidate, a refused token, an unreachable
+  runtime, or a history compacted when the session ended
+  (`HISTORY_UNAVAILABLE`). Run the runtime with `MACP_COMPACT_TERMINAL_LOGS=0`
+  to keep full logs.
 
 ## `macp verify`
 

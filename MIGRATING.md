@@ -51,13 +51,20 @@ Additive only: nothing an embedder calls changes.
 
 - New crate `macp-cli`, binary `macp`: `up`/`down`/`status` for the self-host
   stack, `verify` for decision receipts (RFC-MACP-0013 Appendix A.4), and
-  `conform`, and `session tail`, which follows a session's accepted envelopes.
+  `conform`, `session tail`, which follows a session's accepted envelopes,
+  and `replay`, which runs what-if replay over a data directory, a log file
+  or a running runtime.
   See [crates/macp-cli/README.md](crates/macp-cli/README.md).
 - New: `macp_conform::cli::main(prog, args) -> ExitCode` (feature `grpc`), the
   `macp-conform` binary's entry point as a library function. The
   `macp-conform` binary itself is unchanged.
 - New: `macp_conform::client` (feature `grpc`), the generated `macp.v1`
   client and its `connect(url)`, which `GrpcTarget` and `macp` share.
+- New in `macp-runtime`: `runtime::what_if_over_log(..)`, the what-if replay
+  of a log without a running runtime (`Runtime::what_if_replay` now calls
+  it), `runtime::recorded_policy(..)`, and `server::what_if::response(run)`,
+  which builds the `WhatIfReplayResponse`. `WhatIfRun` and `WhatIfError` are
+  public.
 
 ## 0.9.0 — library acceptance, step and replay
 

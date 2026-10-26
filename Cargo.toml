@@ -41,6 +41,7 @@ macp-storage = { version = "0.9.0", path = "crates/macp-storage" }
 macp-auth = { version = "0.9.0", path = "crates/macp-auth" }
 macp-modes = { version = "0.9.0", path = "crates/macp-modes" }
 macp-conform = { version = "0.9.0", path = "crates/macp-conform" }
+macp-runtime = { version = "0.9.0", path = "." }
 # External
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.14", features = ["transport", "tls-ring"] }

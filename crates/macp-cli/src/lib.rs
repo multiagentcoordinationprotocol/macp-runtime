@@ -5,6 +5,8 @@
 //!   (`macp verify`), with [`jcs`] for the receipt body.
 //! - [`stack`]: the self-host stack from the repo's `deploy/`, embedded at
 //!   build time (`macp up`, `macp down`, `macp status`).
+//! - [`replay`]: a recorded session replayed alone or under a candidate
+//!   policy, from a data directory, a log file or a runtime (`macp replay`).
 //! - [`tail`]: a session's accepted envelopes over a passive `StreamSession`
 //!   (`macp session tail`).
 //!
@@ -12,5 +14,6 @@
 
 pub mod jcs;
 pub mod receipt;
+pub mod replay;
 pub mod stack;
 pub mod tail;

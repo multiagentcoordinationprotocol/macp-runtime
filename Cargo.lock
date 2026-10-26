@@ -1313,6 +1313,7 @@ dependencies = [
  "macp-conform",
  "macp-core",
  "macp-pb",
+ "macp-runtime",
  "prost",
  "serde",
  "serde_json",

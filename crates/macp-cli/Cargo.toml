@@ -20,6 +20,7 @@ path = "src/main.rs"
 macp-core = { workspace = true }
 macp-pb = { workspace = true }
 macp-conform = { workspace = true, features = ["grpc"] }
+macp-runtime = { workspace = true }
 prost = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
