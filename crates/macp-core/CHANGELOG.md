@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-core-v0.9.0...macp-core-v0.10.0) - 2026-10-26
+
+### Added
+
+- *(server)* WhatIfReplay RPC (RFC-MACP-0012 §8.1) ([#248](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/248))
+
+### Other
+
+- *(spec)* pin SPEC_REV to 60262b8 (spec #196); parity contract 1.4.0 ([#232](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/232))
+
 ## [0.9.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-core-v0.8.8...macp-core-v0.9.0) - 2026-10-17
 
 ### Added

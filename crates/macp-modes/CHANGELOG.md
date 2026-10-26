@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-modes-v0.9.0...macp-modes-v0.10.0) - 2026-10-26
+
+### Added
+
+- *(modes)* what-if replay of a recorded session under a candidate policy (W4.1) ([#245](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/245))
+
 ## [0.9.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-modes-v0.8.8...macp-modes-v0.9.0) - 2026-10-17
 
 ### Added
