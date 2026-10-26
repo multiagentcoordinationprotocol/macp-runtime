@@ -297,6 +297,7 @@ development aids for exercising a local server, not a supported SDK.
 | `GetPolicy` | implemented |
 | `ListPolicies` | implemented |
 | `WatchPolicies` | implemented |
+| `WhatIfReplay` | implemented |
 
 ## Architecture
 

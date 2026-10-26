@@ -423,6 +423,27 @@ impl PolicyRegistry {
                 DEFAULT_POLICY_ID
             ));
         }
+        self.validate_content(definition, true)
+    }
+
+    /// Admit a what-if candidate (RFC-MACP-0012 §8.1 requirement 3): the
+    /// admission [`Self::register`] applies, without registering it. Only the
+    /// definition is checked; its `policy_id` "need not be unique or
+    /// registrable", so the id checks (empty, `policy.default`, the reserved
+    /// `policy.std.` namespace) are skipped. Errors lead with
+    /// `INVALID_POLICY_DEFINITION`, as [`Self::register`]'s do.
+    pub fn validate_candidate(&self, definition: &PolicyDefinition) -> Result<(), String> {
+        self.validate_content(definition, false)
+    }
+
+    /// Everything [`Self::validate_definition`] checks after the `policy_id`
+    /// itself; `reserved_namespace` also applies the `policy.std.` rule, in
+    /// its historical position.
+    fn validate_content(
+        &self,
+        definition: &PolicyDefinition,
+        reserved_namespace: bool,
+    ) -> Result<(), String> {
         if definition.schema_version == 0 {
             return Err("INVALID_POLICY_DEFINITION: schema_version must be > 0".into());
         }
@@ -439,7 +460,9 @@ impl PolicyRegistry {
         // Closed objects (RFC-MACP-0012 §4) before the typed parse, so a
         // misspelled key is reported by path rather than silently defaulted.
         self.validate_rule_keys(&definition.mode, &definition.rules)?;
-        Self::validate_reserved_namespace(definition)?;
+        if reserved_namespace {
+            Self::validate_reserved_namespace(definition)?;
+        }
         // Validate that rules deserialize into the mode-specific schema.
         Self::validate_rules_for_mode(&definition.mode, &definition.rules)?;
         // Validate conditional constraints (RFC-MACP-0012).
@@ -2776,5 +2799,35 @@ mod tests {
             "only {checked} fixtures found under {}",
             tests.display()
         );
+    }
+
+    #[test]
+    fn validate_candidate_admits_unregistrable_ids_but_not_bad_rules() {
+        let registry = PolicyRegistry::new();
+        // `register` refuses these ids; a what-if candidate's id is free.
+        for id in [
+            "",
+            DEFAULT_POLICY_ID,
+            "policy.std.majority",
+            "policy.std.mine",
+        ] {
+            registry.validate_candidate(&test_policy(id)).unwrap();
+        }
+        assert!(
+            registry.get("policy.std.mine").is_none(),
+            "never registered"
+        );
+
+        let mut bad_schema = test_policy("c");
+        bad_schema.schema_version = 99;
+        let mut bad_key = test_policy("c");
+        bad_key.rules = serde_json::json!({ "voting": { "algorithm": "majority", "nope": 1 } });
+        let mut bad_bound = test_policy("c");
+        bad_bound.rules =
+            serde_json::json!({ "voting": { "algorithm": "majority", "threshold": 0.0 } });
+        for bad in [bad_schema, bad_key, bad_bound] {
+            let err = registry.validate_candidate(&bad).unwrap_err();
+            assert!(err.starts_with("INVALID_POLICY_DEFINITION"), "{err}");
+        }
     }
 }

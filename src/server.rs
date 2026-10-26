@@ -17,9 +17,9 @@ use crate::pb::{
     UnregisterPolicyRequest, UnregisterPolicyResponse, WatchModeRegistryRequest,
     WatchModeRegistryResponse, WatchPoliciesRequest, WatchPoliciesResponse, WatchRootsRequest,
     WatchRootsResponse, WatchSessionsRequest, WatchSessionsResponse, WatchSignalsRequest,
-    WatchSignalsResponse,
+    WatchSignalsResponse, WhatIfReplayRequest, WhatIfReplayResponse,
 };
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, WhatIfError};
 use crate::security::{AuthIdentity, SecurityLayer};
 use crate::session::SessionState;
 use std::collections::HashMap;
@@ -889,6 +889,120 @@ impl MacpServer {
     }
 }
 
+/// `WhatIfRun` → `WhatIfReplayResponse`.
+///
+/// The wire reports accepted-history entries only: `history_index` is the
+/// 0-based accepted ordinal (`SessionStart` = 0, so the library's
+/// `Event(i)` is whatever index that event took), and runtime-internal
+/// events (suspend/resume/cancel/expiry), which take no ordinal, are omitted.
+/// `first_divergence` is recomputed over the entries reported.
+mod what_if {
+    use crate::pb::what_if_entry_outcome::Kind;
+    use crate::pb::{
+        WhatIfDenial, WhatIfEntry, WhatIfEntryOutcome, WhatIfOutcome, WhatIfReplayResponse,
+    };
+    use crate::runtime::WhatIfRun;
+    use macp_core::policy::DenyReason;
+    use macp_modes::what_if::{EntryOutcome, HistoryPoint, Outcome};
+
+    pub(super) fn response(run: WhatIfRun) -> WhatIfReplayResponse {
+        let WhatIfRun {
+            report,
+            history_index,
+        } = run;
+        let index = |at: HistoryPoint| -> Option<u64> {
+            match at {
+                HistoryPoint::SessionStart => Some(0),
+                HistoryPoint::Event(i) => history_index.get(i).copied().flatten(),
+                _ => None,
+            }
+        };
+        let mut first_divergence = None;
+        let mut entries = Vec::new();
+        for e in &report.entries {
+            let Some(i) = index(e.at) else { continue };
+            if first_divergence.is_none() && e.diverges() {
+                first_divergence = Some(i);
+            }
+            entries.push(WhatIfEntry {
+                history_index: i,
+                message_id: e.message_id.clone().unwrap_or_default(),
+                message_type: e.message_type.clone().unwrap_or_default(),
+                recorded: Some(entry_outcome(&e.recorded)),
+                candidate: Some(entry_outcome(&e.candidate)),
+            });
+        }
+        let denials = report
+            .denials
+            .iter()
+            .filter_map(|d| {
+                Some(WhatIfDenial {
+                    history_index: index(d.at)?,
+                    message_id: d.message_id.clone().unwrap_or_default(),
+                    details: details(&d.reasons),
+                })
+            })
+            .collect();
+        WhatIfReplayResponse {
+            candidate_policy_id: report.candidate_policy_id.clone(),
+            recorded_policy_id: report
+                .recorded_policy_id
+                .clone()
+                .unwrap_or_else(|| crate::policy::defaults::DEFAULT_POLICY_ID.to_string()),
+            recorded: Some(outcome(&report.recorded, &index)),
+            candidate: Some(outcome(&report.candidate, &index)),
+            first_divergence,
+            denials,
+            entries,
+        }
+    }
+
+    fn entry_outcome(o: &EntryOutcome) -> WhatIfEntryOutcome {
+        let mut out = WhatIfEntryOutcome::default();
+        match o {
+            EntryOutcome::Applied { state } => {
+                out.kind = Kind::Applied.into();
+                out.state = super::MacpServer::session_state_to_pb(state);
+            }
+            EntryOutcome::NotOpen => out.kind = Kind::NotOpen.into(),
+            EntryOutcome::Refused { code, reasons } => {
+                out.kind = Kind::Refused.into();
+                out.error_code = code.to_string();
+                out.details = details(reasons);
+            }
+            EntryOutcome::NoSession => out.kind = Kind::NoSession.into(),
+            _ => {}
+        }
+        out
+    }
+
+    fn outcome(o: &Outcome, index: &impl Fn(HistoryPoint) -> Option<u64>) -> WhatIfOutcome {
+        let by = o.resolved_by.as_ref();
+        WhatIfOutcome {
+            state: o
+                .state
+                .as_ref()
+                .map(super::MacpServer::session_state_to_pb)
+                .unwrap_or_default(),
+            resolution: o.resolution.clone().unwrap_or_default(),
+            resolved_by_history_index: by.and_then(|b| index(b.at)).unwrap_or_default(),
+            resolved_by_message_id: by.map(|b| b.message_id.clone()).unwrap_or_default(),
+            resolved_by_message_type: by.map(|b| b.message_type.clone()).unwrap_or_default(),
+        }
+    }
+
+    /// The bytes `MACPError.details` carries for `POLICY_DENIED` (see
+    /// `MacpServer::error_details_bytes`); empty when there are no reasons.
+    fn details(reasons: &[DenyReason]) -> Vec<u8> {
+        if reasons.is_empty() {
+            return Vec::new();
+        }
+        super::MacpServer::error_details_bytes(&crate::error::MacpError::PolicyDenied {
+            reasons: reasons.to_vec(),
+        })
+    }
+}
+
 /// Why a StreamSession frame failed: a transport/binding problem that ends the
 /// stream, or a protocol rejection of one envelope (inline unless
 /// [`MacpServer::is_stream_terminal_error`]).
@@ -983,6 +1097,7 @@ impl MacpRuntimeService for MacpServer {
                     list_changed: false,
                 }),
                 policy_registry: Some(PolicyRegistryCapability {
+                    what_if_replay: true,
                     register_policy: !self.policies_read_only,
                     list_policies: true,
                     list_changed: true,
@@ -1835,6 +1950,51 @@ impl MacpRuntimeService for MacpServer {
         }
     }
 
+    /// RFC-MACP-0012 §8.1: replay a session's accepted history under a
+    /// candidate policy, read-only. Authorized as `GetSession`; rate-limited
+    /// as an ordinary message.
+    async fn what_if_replay(
+        &self,
+        request: Request<WhatIfReplayRequest>,
+    ) -> Result<Response<WhatIfReplayResponse>, Status> {
+        let session_id = request.get_ref().session_id.clone();
+        let identity = self
+            .authenticate_session_access(&request, &session_id)
+            .await?;
+        self.security
+            .enforce_rate_limit(&identity.sender, false)
+            .await
+            .map_err(Self::status_from_error)?;
+        let descriptor = request
+            .into_inner()
+            .candidate
+            .ok_or_else(|| Self::coded_status(MacpError::InvalidRequest, "candidate required"))?;
+        let candidate = Self::policy_descriptor_to_definition(&descriptor);
+        match self.runtime.what_if_replay(&session_id, &candidate).await {
+            Ok(run) => Ok(Response::new(what_if::response(run))),
+            Err(WhatIfError::UnknownSession) => Err(Self::coded_status(
+                MacpError::UnknownSession,
+                format!("Session '{}' not found", session_id),
+            )),
+            Err(WhatIfError::InvalidCandidate(msg)) => {
+                Err(Self::coded_status(MacpError::InvalidPolicyDefinition, msg))
+            }
+            // The spec defines no error code for this (it assumes the full
+            // history is kept), so it carries no `macp-error-code`.
+            Err(WhatIfError::Compacted) => Err(Status::failed_precondition(format!(
+                "session '{session_id}' history was compacted when it ended and cannot be \
+                 replayed; run the runtime with MACP_COMPACT_TERMINAL_LOGS=0 to keep it"
+            ))),
+            Err(WhatIfError::Integrity(msg)) => {
+                tracing::error!(session_id, error = %msg, "what-if recorded replay diverged");
+                Err(Self::coded_status(
+                    MacpError::StorageFailed,
+                    format!("INTERNAL_ERROR: {msg}"),
+                ))
+            }
+        }
+    }
+
     async fn get_policy(
         &self,
         request: Request<GetPolicyRequest>,
@@ -1955,6 +2115,7 @@ impl MacpServer {
 mod tests {
     use super::*;
     use crate::log_store::LogStore;
+    use crate::pb::what_if_entry_outcome::Kind;
     use crate::pb::SessionStartPayload;
     use crate::registry::SessionRegistry;
     use chrono::Utc;
@@ -4141,5 +4302,323 @@ mod tests {
             );
         }
         assert_eq!(counts.len(), expected, "unexpected extra sessions emitted");
+    }
+
+    // ── WhatIfReplay (RFC-MACP-0012 §8.1) ───────────────────────────────
+
+    const BUYER: &str = "agent://buyer";
+    const SELLER: &str = "agent://seller";
+    const PROPOSAL: &str = "macp.mode.proposal.v1";
+
+    fn penv(message_type: &str, message_id: &str, sid: &str, payload: Vec<u8>) -> Envelope {
+        Envelope {
+            macp_version: "1.0".into(),
+            mode: PROPOSAL.into(),
+            message_type: message_type.into(),
+            message_id: message_id.into(),
+            session_id: sid.into(),
+            sender: String::new(),
+            timestamp_unix_ms: Utc::now().timestamp_millis(),
+            payload,
+        }
+    }
+
+    /// SessionStart(0) → Proposal(1) → Accept(2) → Accept(3) → Commitment(4),
+    /// resolved under `policy.default`; the buyer initiates and commits.
+    async fn resolved_proposal_session(server: &MacpServer) -> String {
+        resolved_proposal_session_paused(server, false).await
+    }
+
+    /// As [`resolved_proposal_session`]; `pause` suspends and resumes the
+    /// session before the Commitment, leaving two internal log entries.
+    async fn resolved_proposal_session_paused(server: &MacpServer, pause: bool) -> String {
+        let sid = new_sid();
+        let start = SessionStartPayload {
+            intent: "buy".into(),
+            participants: vec![BUYER.into(), SELLER.into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            ttl_ms: 60_000,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let proposal = crate::proposal_pb::ProposalPayload {
+            proposal_id: "p1".into(),
+            title: "offer".into(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let accept = crate::proposal_pb::AcceptPayload {
+            proposal_id: "p1".into(),
+            reason: String::new(),
+        }
+        .encode_to_vec();
+        let commitment = crate::pb::CommitmentPayload {
+            commitment_id: "c1".into(),
+            action: "proposal.accepted".into(),
+            authority_scope: "commercial".into(),
+            reason: "bound".into(),
+            mode_version: "1.0.0".into(),
+            policy_version: "policy.default".into(),
+            configuration_version: "cfg-1".into(),
+            outcome_positive: true,
+            supersedes: None,
+        }
+        .encode_to_vec();
+        for (sender, env) in [
+            (BUYER, penv("SessionStart", "m0", &sid, start)),
+            (SELLER, penv("Proposal", "m1", &sid, proposal)),
+            (SELLER, penv("Accept", "m2", &sid, accept.clone())),
+            (BUYER, penv("Accept", "m3", &sid, accept)),
+            (BUYER, penv("Commitment", "m4", &sid, commitment)),
+        ] {
+            if pause && env.message_type == "Commitment" {
+                server
+                    .runtime
+                    .suspend_session(&sid, "hold", BUYER)
+                    .await
+                    .unwrap();
+                server
+                    .runtime
+                    .resume_session(&sid, "go", BUYER)
+                    .await
+                    .unwrap();
+            }
+            let ack = do_send(server, sender, env).await;
+            assert!(ack.ok, "{:?}", ack.error);
+        }
+        sid
+    }
+
+    #[tokio::test]
+    async fn what_if_skips_internal_entries_in_history_index() {
+        let (server, runtime) = make_server();
+        let sid = resolved_proposal_session_paused(&server, true).await;
+        let internal = runtime
+            .log_store
+            .get_log(&sid)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|e| e.entry_kind == crate::log_store::EntryKind::Internal)
+            .count();
+        assert_eq!(internal, 2, "the suspend and the resume");
+        let resp = server
+            .what_if_replay(what_if_req(SELLER, &sid, Some(seller_only())))
+            .await
+            .unwrap()
+            .into_inner();
+        let idx: Vec<_> = resp.entries.iter().map(|e| e.history_index).collect();
+        assert_eq!(idx, vec![0, 1, 2, 3, 4]);
+        assert_eq!(resp.first_divergence, Some(4));
+        assert_eq!(resp.recorded.unwrap().resolved_by_history_index, 4);
+    }
+
+    fn what_if_req(
+        sender: &str,
+        sid: &str,
+        candidate: Option<PolicyDescriptor>,
+    ) -> Request<WhatIfReplayRequest> {
+        let mut req = Request::new(WhatIfReplayRequest {
+            session_id: sid.into(),
+            candidate,
+        });
+        req.metadata_mut()
+            .insert("authorization", format!("Bearer {sender}").parse().unwrap());
+        req
+    }
+
+    fn candidate(mode: &str, rules: serde_json::Value, schema_version: u32) -> PolicyDescriptor {
+        PolicyDescriptor {
+            policy_id: "what-if.candidate".into(),
+            mode: mode.into(),
+            description: "candidate".into(),
+            rules: rules.to_string(),
+            schema_version,
+            ..Default::default()
+        }
+    }
+
+    fn seller_only() -> PolicyDescriptor {
+        candidate(
+            PROPOSAL,
+            serde_json::json!({
+                "commitment": { "authority": "designated_role", "designated_roles": [SELLER] }
+            }),
+            1,
+        )
+    }
+
+    #[tokio::test]
+    async fn what_if_reports_where_a_candidate_diverges() {
+        let (server, runtime) = make_server();
+        let sid = resolved_proposal_session(&server).await;
+        let log_before = runtime.log_store.get_log(&sid).await.unwrap();
+        let session_before = runtime.get_session_checked(&sid).await.unwrap();
+
+        let resp = server
+            .what_if_replay(what_if_req(SELLER, &sid, Some(seller_only())))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.candidate_policy_id, "what-if.candidate");
+        assert_eq!(resp.recorded_policy_id, "policy.default");
+        let recorded = resp.recorded.unwrap();
+        assert_eq!(recorded.state, PbSessionState::Resolved as i32);
+        assert_eq!(recorded.resolved_by_history_index, 4);
+        assert_eq!(recorded.resolved_by_message_id, "m4");
+        assert!(!recorded.resolution.is_empty());
+        let cand = resp.candidate.unwrap();
+        assert_eq!(cand.state, PbSessionState::Open as i32);
+        assert!(cand.resolution.is_empty());
+
+        // history_index is the 0-based accepted ordinal, SessionStart = 0.
+        let idx: Vec<_> = resp.entries.iter().map(|e| e.history_index).collect();
+        assert_eq!(idx, vec![0, 1, 2, 3, 4]);
+        assert_eq!(resp.first_divergence, Some(4));
+        let last = resp.entries.last().unwrap();
+        assert_eq!(last.message_type, "Commitment");
+        assert_eq!(last.recorded.as_ref().unwrap().kind, Kind::Applied as i32);
+        let refused = last.candidate.as_ref().unwrap();
+        assert_eq!(refused.kind, Kind::Refused as i32);
+        assert!(!refused.error_code.is_empty());
+
+        // Read-only: no envelope, session and log untouched, never registered.
+        assert_eq!(
+            runtime.log_store.get_log(&sid).await.unwrap().len(),
+            log_before.len()
+        );
+        let session_after = runtime.get_session_checked(&sid).await.unwrap();
+        assert_eq!(session_after.state, session_before.state);
+        assert_eq!(
+            session_after.seen_message_ids.len(),
+            session_before.seen_message_ids.len()
+        );
+        assert!(runtime.get_policy("what-if.candidate").is_none());
+    }
+
+    #[tokio::test]
+    async fn what_if_under_an_equivalent_candidate_does_not_diverge() {
+        let (server, _) = make_server();
+        let sid = resolved_proposal_session(&server).await;
+        // `"*"` governs every mode; an id the registry would refuse to
+        // register is fine for a candidate.
+        let mut equivalent = candidate("*", serde_json::json!({}), 1);
+        equivalent.policy_id = "policy.default".into();
+        let resp = server
+            .what_if_replay(what_if_req(BUYER, &sid, Some(equivalent)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.first_divergence, None);
+        assert!(resp.denials.is_empty());
+        assert_eq!(resp.recorded, resp.candidate);
+    }
+
+    #[tokio::test]
+    async fn what_if_refuses_what_register_policy_would() {
+        let (server, _) = make_server();
+        let sid = resolved_proposal_session(&server).await;
+        for bad in [
+            candidate("macp.mode.decision.v1", serde_json::json!({}), 1),
+            candidate(PROPOSAL, serde_json::json!({}), 99),
+            candidate(PROPOSAL, serde_json::json!({ "no_such_rule": true }), 1),
+        ] {
+            let err = server
+                .what_if_replay(what_if_req(BUYER, &sid, Some(bad)))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.code(),
+                tonic::Code::InvalidArgument,
+                "{}",
+                err.message()
+            );
+            assert_eq!(
+                err.metadata().get("macp-error-code").unwrap(),
+                "INVALID_POLICY_DEFINITION"
+            );
+        }
+        let err = server
+            .what_if_replay(what_if_req(BUYER, &sid, None))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn what_if_is_authorized_as_get_session() {
+        let (server, _) = make_server();
+        let sid = resolved_proposal_session(&server).await;
+        let err = server
+            .what_if_replay(what_if_req("agent://outsider", &sid, Some(seller_only())))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        let err = server
+            .what_if_replay(what_if_req(BUYER, &new_sid(), Some(seller_only())))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn what_if_refuses_a_compacted_history() {
+        let (server, runtime) = make_server();
+        let sid = resolved_proposal_session(&server).await;
+        let mut checkpoint = runtime.log_store.get_log(&sid).await.unwrap()[0].clone();
+        checkpoint.entry_kind = crate::log_store::EntryKind::Checkpoint;
+        checkpoint.message_type = "Checkpoint".into();
+        checkpoint.compacted_incoming_ordinals = 5;
+        runtime
+            .log_store
+            .replace_session_log(&sid, vec![checkpoint])
+            .await;
+        let err = server
+            .what_if_replay(what_if_req(BUYER, &sid, Some(seller_only())))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn what_if_fails_when_the_recorded_half_does_not_reproduce() {
+        let (server, runtime) = make_server();
+        let sid = resolved_proposal_session(&server).await;
+        // Drop the Commitment: the recorded replay now ends Open, but the
+        // stored session is Resolved.
+        let mut log = runtime.log_store.get_log(&sid).await.unwrap();
+        log.retain(|e| e.message_type != "Commitment");
+        runtime.log_store.replace_session_log(&sid, log).await;
+        let err = server
+            .what_if_replay(what_if_req(BUYER, &sid, Some(seller_only())))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert_eq!(
+            err.metadata().get("macp-error-code").unwrap(),
+            "INTERNAL_ERROR"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_advertises_what_if_replay() {
+        let (server, _) = make_server();
+        let resp = server
+            .initialize(Request::new(InitializeRequest {
+                supported_protocol_versions: vec!["1.0".into()],
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            resp.capabilities
+                .unwrap()
+                .policy_registry
+                .unwrap()
+                .what_if_replay
+        );
     }
 }

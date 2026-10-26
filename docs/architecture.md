@@ -196,7 +196,7 @@ The runtime supports two forms of log compaction:
 
 - **Interval-based checkpoints**: After a configurable number of log entries (`MACP_CHECKPOINT_INTERVAL`), the runtime writes a checkpoint that captures the full session state. Replay can start from the checkpoint instead of replaying the entire log.
 
-- **Terminal compaction**: When a session reaches a terminal state (resolved, cancelled, or expired), the runtime compacts its log into a single checkpoint entry. If compaction fails, a forced checkpoint is written as a fallback.
+- **Terminal compaction**: When a session reaches a terminal state (resolved, cancelled, or expired), the runtime compacts its log into a single checkpoint entry. If compaction fails, a forced checkpoint is written as a fallback. `MACP_COMPACT_TERMINAL_LOGS=0` takes that fallback every time, which keeps the full history for `WhatIfReplay`.
 
 ## Concurrency model
 

@@ -38,7 +38,7 @@ The client sends its supported protocol versions in descending preference order.
 
 Returns `UNSUPPORTED_PROTOCOL_VERSION` if no mutual version exists.
 
-**Capabilities advertised**: `sessions.stream`, `sessions.list_sessions`, `sessions.watch_sessions`, `cancellation.cancel_session`, `progress.progress`, `manifest.get_manifest`, `mode_registry.list_modes`, `mode_registry.list_changed`, `roots.list_roots`, `roots.list_changed`, `policy_registry.register_policy`, `policy_registry.list_policies`, `policy_registry.list_changed`, and `policy_registry.rule_extensions` (the vendor-extension keys the policy registry admits, sorted; empty unless an embedder registered `RuleExtension`s -- advisory, admission is authoritative).
+**Capabilities advertised**: `sessions.stream`, `sessions.list_sessions`, `sessions.watch_sessions`, `cancellation.cancel_session`, `progress.progress`, `manifest.get_manifest`, `mode_registry.list_modes`, `mode_registry.list_changed`, `roots.list_roots`, `roots.list_changed`, `policy_registry.register_policy`, `policy_registry.list_policies`, `policy_registry.list_changed`, `policy_registry.what_if_replay`, and `policy_registry.rule_extensions` (the vendor-extension keys the policy registry admits, sorted; empty unless an embedder registered `RuleExtension`s -- advisory, admission is authoritative).
 
 ## Message Transport
 
@@ -341,6 +341,23 @@ rpc UnregisterPolicy(UnregisterPolicyRequest) returns (UnregisterPolicyResponse)
 rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse)
 rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse)
 ```
+
+### WhatIfReplay
+
+Replays a session's accepted history under a candidate policy and reports what would have happened (RFC-MACP-0012 §8.1). It is read-only: it emits no envelope, and leaves the session, its dedup state and the policy registry untouched.
+
+```protobuf
+rpc WhatIfReplay(WhatIfReplayRequest) returns (WhatIfReplayResponse)
+```
+
+- **Authorization** is the same as `GetSession`: an observer, the initiator, or a declared participant. Otherwise `SESSION_NOT_FOUND` or `FORBIDDEN`. The call counts against the sender's message rate limit.
+- **Candidate admission** is `RegisterPolicy`'s, except for the id. The candidate's `policy_id` need not be unique or registrable, and the candidate is never registered. Its `mode` must be the session's mode or `"*"`. A rejection is `INVALID_POLICY_DEFINITION` (gRPC `INVALID_ARGUMENT`).
+- **Two replays.** The recorded half runs under the definition the session bound at `SessionStart`. The candidate half runs under the candidate's rules and `schema_version`, and keeps the bound `policy_version`. If the recorded half does not reproduce the stored session state, the call fails with `INTERNAL_ERROR`.
+- **`history_index`** is the 0-based position in accepted history, with `SessionStart` at 0. Runtime-internal entries (suspend, resume, cancel, TTL expiry) take no index and are not reported in `entries`. `first_divergence` is the first reported entry the two replays handled differently.
+- **`details`**, on a `KIND_REFUSED` entry and on every `WhatIfDenial`, are the bytes `MACPError.details` carries for `POLICY_DENIED`: `{"reasons": [...], "denials": [...]}`. They are empty for other refusals.
+- **Compacted history.** By default a session's log is compacted to a single checkpoint when it ends, which leaves nothing to replay. A compacted session is refused with gRPC `FAILED_PRECONDITION`. The spec defines no MACP code for this, so the status carries no `macp-error-code`. Set `MACP_COMPACT_TERMINAL_LOGS=0` to keep ended sessions replayable (see [Deployment](deployment.md)).
+
+Advertised as `policy_registry.what_if_replay`.
 
 ## Streaming Watches
 

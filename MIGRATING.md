@@ -27,6 +27,18 @@ Additive only: nothing an embedder calls changes.
   unchanged, so what a record rebuilds to is unchanged. See
   [docs/embedding.md](docs/embedding.md#what-if-replay).
 
+### `macp_policy::PolicyRegistry::validate_candidate` / `WhatIfReplay`
+
+- New: `PolicyRegistry::validate_candidate(&PolicyDefinition) -> Result<(),
+  String>`. It applies `register`'s admission to a definition without
+  registering it, and skips the `policy_id` checks. Use it on a what-if
+  candidate before `replay_under_policy`.
+- New RPC `WhatIfReplay` (macp-proto 0.1.12), advertised as
+  `PolicyRegistryCapability.what_if_replay`. See
+  [docs/API.md](docs/API.md#whatifreplay).
+- New env `MACP_COMPACT_TERMINAL_LOGS` (default on). Set it to `0` to keep
+  ended sessions' history, which `WhatIfReplay` needs.
+
 ### `macp-cli` (new crate) / `macp_conform::cli`
 
 - New crate `macp-cli`, binary `macp`: `up`/`down`/`status` for the self-host

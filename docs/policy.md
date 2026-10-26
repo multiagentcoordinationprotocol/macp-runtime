@@ -13,6 +13,7 @@ Policies are managed through five gRPC RPCs. Any authenticated sender can perfor
 | `GetPolicy` | Retrieve a policy by its identifier |
 | `ListPolicies` | List all policies, optionally filtered by target mode |
 | `WatchPolicies` | Stream notifications when the registry changes |
+| `WhatIfReplay` | Replay a recorded session under a candidate policy, without registering it ([API](API.md#whatifreplay)) |
 
 The built-in `policy.default` is always present and cannot be registered or removed. The `policy.std.` namespace is reserved the same way -- see [Reserved `policy.std.` profiles](#reserved-policystd-profiles).
 
