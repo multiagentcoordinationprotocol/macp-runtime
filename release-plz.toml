@@ -72,3 +72,12 @@ version_group = "macp"
 # The one GitHub Release per version rides the umbrella crate's tag
 # (`macp-runtime-v{version}`).
 git_release_enable = true
+# No semver baseline for the umbrella crate: the published 0.9.0 no longer
+# builds. Its build.rs generates the `macp.v1` service trait from whatever
+# `macp-proto` 0.1.x resolves to, and macp-proto 0.1.12 added `WhatIfReplay`,
+# which 0.9.0's server does not implement (E0046). cargo-semver-checks builds the
+# baseline without our lockfile, so every release-plz run after #248 failed and
+# the release PR went stale. The library crates above keep the check, and so
+# does ci.yml's "Semver (embeddable crates)" job. Re-enable once the newest
+# published macp-runtime builds against the current macp-proto.
+semver_check = false
