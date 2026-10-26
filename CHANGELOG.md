@@ -6,6 +6,34 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.9.0...macp-runtime-v0.10.0) - 2026-10-26
+
+### Added
+
+- *(cli)* `macp replay` — what-if replay from a data dir, a log file or a runtime (W4.4) ([#250](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/250))
+- *(cli)* `macp session tail` (W4.4) ([#249](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/249))
+- *(server)* WhatIfReplay RPC (RFC-MACP-0012 §8.1) ([#248](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/248))
+- *(cli)* `macp` command line — verify, up/down/status, conform (W4.4) ([#246](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/246))
+- *(modes)* what-if replay of a recorded session under a candidate policy (W4.1) ([#245](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/245))
+- *(deploy)* one-command self-host stack with a Verified acceptance test (W3.7) ([#243](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/243))
+- *(conform)* count Server-profile hash vectors in-process and excuse clock skips ([#241](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/241))
+- *(conform)* macp-conform conformance runner crate, CLI and CI (E2) ([#239](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/239))
+
+### Fixed
+
+- *(deps)* zstd-sys 2.1.2 for RUSTSEC-2026-0410 ([#254](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/254))
+- *(release)* skip release-plz semver baseline for macp-runtime ([#252](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/252))
+- *(deps)* bump webpki crates for RUSTSEC-2026-0381/0382/0383 ([#237](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/237))
+
+### Other
+
+- *(deploy)* pin macp-control-plane 0.6.1; health-check /readyz by status ([#244](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/244))
+- *(parity)* re-vendor contract 1.4.1; bump SPEC_REV to 22976d8 ([#242](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/242))
+- *(conformance)* vendor the W2.7 policy-pack fixtures; bump SPEC_REV ([#240](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/240))
+- runnable first session, real image tags, SECURITY.md scope, CODEOWNERS ([#238](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/238))
+- *(embedding)* PR-time semver gate, MIGRATING.md, stability and semantics-revision docs ([#236](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/236))
+- *(spec)* pin SPEC_REV to 60262b8 (spec #196); parity contract 1.4.0 ([#232](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/232))
+
 ## [0.9.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.8.8...macp-runtime-v0.9.0) - 2026-10-17
 
 ### Added
