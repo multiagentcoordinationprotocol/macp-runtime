@@ -288,6 +288,7 @@ Two consequences worth knowing:
 | `MACP_REQUEST_TIMEOUT_SECS` | `30` | Per-request timeout (`src/main.rs:464`) |
 | `MACP_SHUTDOWN_DRAIN_SECS` | `10` | Graceful-shutdown drain deadline (`src/main.rs:524`) |
 | `MACP_CHECKPOINT_INTERVAL` | `0` (disabled) | Log entries between checkpoints |
+| `MACP_COMPACT_TERMINAL_LOGS` | on | `0` or `false` keeps an ended session's full log, so `WhatIfReplay` can replay it, instead of compacting it to one checkpoint |
 | `MACP_AUDIT_LEVEL` | `debug` | `info` logs every accepted message at `info` ("message accepted (audit)"); replaces the pre-0.9 `rules.audit` policy block |
 | `MACP_AUDIT_INFO_POLICIES` | — | Comma-separated `policy_id`s whose sessions are audited at `info` |
 | `MACP_AUDIT_INFO_MODES` | — | Comma-separated mode names whose sessions are audited at `info` |
@@ -390,7 +391,7 @@ The runtime provides operational visibility through several mechanisms:
 
 **Session eviction** -- Terminal sessions (resolved, expired, or cancelled) are evicted from memory once their age exceeds `MACP_SESSION_RETENTION_SECS` (default one hour), measured from session **start** rather than from when they became terminal. This is on by default and bounds memory usage. Their data remains on disk and can be replayed if needed. Deleting that durable data is a separate, opt-in step governed by `MACP_SESSION_DISK_RETENTION_SECS`, which defaults to `0` -- disk GC does not run at all unless you set it.
 
-**Log compaction** -- When a session reaches a terminal state, the runtime automatically compacts its log into a single checkpoint entry. This reduces storage footprint for completed sessions.
+**Log compaction** -- When a session reaches a terminal state, the runtime compacts its log into a single checkpoint entry by default. This shrinks storage for completed sessions, but it discards the history that `WhatIfReplay` and `StreamSession` replay from the start need. `MACP_COMPACT_TERMINAL_LOGS` is the runtime's history-retention control (RFC-MACP-0012 §8.1 item 8). Set it to `0` to keep the full log; the runtime then appends a checkpoint instead. The self-host stack in `deploy/` sets it. Only sessions that end after the change keep their history; a log already compacted cannot be restored, and `WhatIfReplay` refuses it with `HISTORY_UNAVAILABLE`. A kept log is never trimmed by the runtime; `MACP_SESSION_DISK_RETENTION_SECS` still deletes a terminal session's durable data at its age limit.
 
 **gRPC reflection** (dev/debug only) -- Build with the `reflection` Cargo feature (`cargo build --features reflection`) to enable the standard gRPC Server Reflection API, so tools like `grpcurl`/`grpcui` can call RPCs without a local `.proto`/`.protoset` file (e.g. `grpcurl -plaintext localhost:50051 list`). Off by default and never enabled in the published Docker image -- it exposes the full service/message schema to any client that can reach the port, so treat it the same as `MACP_ALLOW_INSECURE`: fine for a local instance or an ephemeral CI container, not for a production deployment. The runtime logs a warning at startup when it's active. Without this feature, point `grpcurl -proto`/`-protoset` at the published proto instead (`@multiagentcoordinationprotocol/proto` on npm, `macp-proto` on crates.io).
 

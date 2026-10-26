@@ -123,14 +123,14 @@ fn recorded_envelope(entry: &LogEntry, session_id: &str, session_mode: &str) -> 
 /// The library replay event a log entry records, or `None` for an entry with
 /// no state effect (a checkpoint, or an `Internal` type this binary does not
 /// know).
-fn replay_event(session: &Session, session_id: &str, entry: &LogEntry) -> Option<ReplayEvent> {
+fn replay_event(session_mode: &str, session_id: &str, entry: &LogEntry) -> Option<ReplayEvent> {
     match entry.entry_kind {
         // A participant message and the handoff synthetic accept are both
         // `Incoming`; the log cannot tell them apart, so replay credits no
         // participant activity for either (`ReplayOptions` below) and
         // dispatches both at the recorded acceptance clock, never wall-clock.
         EntryKind::Incoming => Some(ReplayEvent::Message {
-            envelope: recorded_envelope(entry, session_id, &session.mode),
+            envelope: recorded_envelope(entry, session_id, session_mode),
             accepted_at_ms: recorded_at(entry),
         }),
         // Every arm here replays a runtime-authored entry that, per
@@ -192,7 +192,7 @@ fn replay_entry(
     entry: &LogEntry,
     mode: &dyn Mode,
 ) -> Result<(), MacpError> {
-    match replay_event(session, session_id, entry) {
+    match replay_event(&session.mode, session_id, entry) {
         Some(event) => apply_event(session, event, mode, &log_replay_options()),
         None => Ok(()),
     }
@@ -321,21 +321,8 @@ fn replay_from_start(
     registry: &ModeRegistry,
     policy_registry: Option<&PolicyRegistry>,
 ) -> Result<Session, MacpError> {
-    let start_entry = log_entries
-        .iter()
-        .find(|e| e.entry_kind == EntryKind::Incoming && e.message_type == "SessionStart")
-        .ok_or(MacpError::InvalidPayload)?;
-
-    // Legacy v2 entries recorded no mode — it cannot be determined from the
-    // log entry alone; the caller skips or uses the directory heuristic.
-    if start_entry.mode.is_empty() {
-        return Err(MacpError::InvalidPayload);
-    }
-    let mode_name = start_entry.mode.as_str();
-    let mode = registry
-        .get_mode(mode_name)
-        .ok_or(MacpError::UnknownMode)?
-        .instantiate()?;
+    let (start_pos, start, mode) = recorded_start(session_id, log_entries, registry)?;
+    let start_entry = &log_entries[start_pos];
 
     // The policy definition is re-resolved from the registry here (the log
     // records only the requested `policy_version`; checkpoints carry the bound
@@ -351,6 +338,39 @@ fn replay_from_start(
         requested.as_str()
     };
     let policy = policy_registry.and_then(|pr| pr.resolve(effective).ok());
+    let start = start.with_policy(policy);
+
+    let mut session = replay_start(&start, mode.as_ref())?;
+    for entry in log_entries.iter().skip(1) {
+        replay_entry(&mut session, session_id, entry, mode.as_ref())?;
+    }
+    Ok(session)
+}
+
+/// The recorded `SessionStart` of a full log (its position, the replay start
+/// without a policy, and the instantiated mode), or an error when the log
+/// holds none.
+fn recorded_start(
+    session_id: &str,
+    log_entries: &[LogEntry],
+    registry: &ModeRegistry,
+) -> Result<(usize, RecordedStart, Box<dyn Mode>), MacpError> {
+    let start_pos = log_entries
+        .iter()
+        .position(|e| e.entry_kind == EntryKind::Incoming && e.message_type == "SessionStart")
+        .ok_or(MacpError::InvalidPayload)?;
+    let start_entry = &log_entries[start_pos];
+
+    // Legacy v2 entries recorded no mode — it cannot be determined from the
+    // log entry alone; the caller skips or uses the directory heuristic.
+    if start_entry.mode.is_empty() {
+        return Err(MacpError::InvalidPayload);
+    }
+    let mode_name = start_entry.mode.as_str();
+    let mode = registry
+        .get_mode(mode_name)
+        .ok_or(MacpError::UnknownMode)?
+        .instantiate()?;
 
     let start = RecordedStart::new(
         recorded_envelope(start_entry, session_id, mode_name),
@@ -367,16 +387,71 @@ fn replay_from_start(
     // omitted mode_version). Never re-derived from the live registry —
     // dynamic registrations may have changed or be absent after restart.
     .with_bound_mode_version(start_entry.bound_mode_version.clone())
-    .with_policy(policy)
     // Same split as the acceptance path in `runtime.rs`: the registry decides
     // whether the canonical contract applies.
     .with_strict(registry.requires_strict_session_start(mode_name));
+    Ok((start_pos, start, mode))
+}
 
-    let mut session = replay_start(&start, mode.as_ref())?;
-    for entry in log_entries.iter().skip(1) {
-        replay_entry(&mut session, session_id, entry, mode.as_ref())?;
+/// A session's full accepted history, as RFC-MACP-0012 §8.1 what-if replay
+/// needs it, or `None` when compaction has discarded it.
+pub(crate) struct RecordedHistory {
+    pub start: RecordedStart,
+    pub mode: Box<dyn Mode>,
+    /// The replay events after the `SessionStart`, in log order.
+    pub events: Vec<ReplayEvent>,
+    /// Per event, its 0-based accepted-history index (`SessionStart` = 0), or
+    /// `None` for a runtime-internal entry, which takes no accepted ordinal
+    /// (RFC-MACP-0006 §3.2).
+    pub history_index: Vec<Option<u64>>,
+}
+
+/// Split a session log into its [`RecordedHistory`]. `Ok(None)` when the log
+/// was compacted (its `SessionStart` is gone, or a checkpoint records
+/// discarded ordinals), so the history can no longer be replayed.
+pub(crate) fn recorded_history(
+    session_id: &str,
+    session_mode: &str,
+    log_entries: &[LogEntry],
+    registry: &ModeRegistry,
+) -> Result<Option<RecordedHistory>, MacpError> {
+    let compacted = log_entries
+        .iter()
+        .any(|e| e.entry_kind == EntryKind::Checkpoint && e.compacted_incoming_ordinals > 0);
+    let has_start = log_entries
+        .iter()
+        .any(|e| e.entry_kind == EntryKind::Incoming && e.message_type == "SessionStart");
+    if compacted || !has_start {
+        return Ok(None);
     }
-    Ok(session)
+    let (start_pos, start, mode) = recorded_start(session_id, log_entries, registry)?;
+    let mut events = Vec::new();
+    let mut history_index = Vec::new();
+    let mut next = 1u64;
+    for entry in &log_entries[start_pos + 1..] {
+        let Some(event) = replay_event(session_mode, session_id, entry) else {
+            continue;
+        };
+        if entry.entry_kind == EntryKind::Incoming {
+            history_index.push(Some(next));
+            next += 1;
+        } else {
+            history_index.push(None);
+        }
+        events.push(event);
+    }
+    Ok(Some(RecordedHistory {
+        start,
+        mode,
+        events,
+        history_index,
+    }))
+}
+
+/// The replay options the server log is replayed with (see
+/// [`log_replay_options`]).
+pub(crate) fn server_log_replay_options() -> ReplayOptions {
+    log_replay_options()
 }
 
 #[cfg(test)]

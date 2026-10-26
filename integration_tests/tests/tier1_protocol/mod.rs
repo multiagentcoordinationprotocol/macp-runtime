@@ -21,3 +21,4 @@ mod test_suspend_resume;
 mod test_tls;
 mod test_validation_gaps;
 mod test_watch_streams;
+mod test_what_if_replay;

@@ -295,8 +295,8 @@ if report.outcome_changed() {
   would have rejected it. The event takes no dedup slot and changes no state.
 - **Rules only.** The candidate replaces `policy_definition`. The session keeps
   the `policy_version` it was bound to, so recorded Commitments' version echo
-  still matches. Validate the candidate first (`macp_policy::PolicyRegistry`);
-  this crate does not.
+  still matches. Validate the candidate first
+  (`macp_policy::PolicyRegistry::validate_candidate`); this crate does not.
 - **Pure.** No storage, clock or registry, and every event is dispatched at its
   recorded time. The same inputs give the same report.
 - **Fixed history.** Agents that would have acted differently are not

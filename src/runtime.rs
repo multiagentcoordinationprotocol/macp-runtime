@@ -109,8 +109,35 @@ pub struct Runtime {
     extensions: Arc<ExtensionProviderRegistry>,
     metrics: Arc<RuntimeMetrics>,
     checkpoint_interval: usize,
+    /// `MACP_COMPACT_TERMINAL_LOGS` (default on): replace a terminal
+    /// session's log with one checkpoint. Off keeps the full history (a
+    /// checkpoint is appended instead), so `WhatIfReplay` can replay it.
+    compact_terminal_logs: bool,
     audit: AuditConfig,
     clock: Arc<dyn Clock>,
+}
+
+/// A `WhatIfReplay` result: the library report, plus each replay event's
+/// 0-based accepted-history index (`SessionStart` = 0; `None` for a
+/// runtime-internal entry, which takes no accepted ordinal).
+#[derive(Debug)]
+pub struct WhatIfRun {
+    pub report: macp_modes::what_if::WhatIfReport,
+    pub history_index: Vec<Option<u64>>,
+}
+
+/// Why [`Runtime::what_if_replay`] produced no report.
+#[derive(Debug)]
+pub enum WhatIfError {
+    /// No such session (or it was evicted from memory).
+    UnknownSession,
+    /// The candidate failed admission (`INVALID_POLICY_DEFINITION`).
+    InvalidCandidate(String),
+    /// The session's history was compacted away and cannot be replayed.
+    Compacted,
+    /// The recorded replay failed or did not reproduce the stored outcome
+    /// (`INTERNAL_ERROR`).
+    Integrity(String),
 }
 
 impl Runtime {
@@ -155,6 +182,10 @@ impl Runtime {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0); // 0 = disabled by default
+        let compact_terminal_logs = !matches!(
+            std::env::var("MACP_COMPACT_TERMINAL_LOGS").as_deref(),
+            Ok("0") | Ok("false")
+        );
         let (signal_tx, _) = tokio::sync::broadcast::channel(256);
         let (session_lifecycle_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
@@ -169,6 +200,7 @@ impl Runtime {
             extensions: Arc::new(ExtensionProviderRegistry::new()),
             metrics: Arc::new(RuntimeMetrics::new()),
             checkpoint_interval,
+            compact_terminal_logs,
             audit: AuditConfig::from_env(),
             clock: Arc::new(SystemClock),
         }
@@ -1031,6 +1063,80 @@ impl Runtime {
         Some(session.clone())
     }
 
+    /// RFC-MACP-0012 §8.1 what-if replay: replay the session's accepted
+    /// history under its bound policy and under `candidate`, and report the
+    /// difference. Read-only: no envelope is emitted, and the session, its
+    /// log, dedup state and the policy registry are untouched. The caller
+    /// authorizes the read (as for `GetSession`).
+    ///
+    /// The candidate passes `RegisterPolicy` admission (its id excepted) and
+    /// must govern the session's mode or `"*"`. The recorded half must
+    /// reproduce the stored session state, or the result is an integrity
+    /// failure.
+    pub async fn what_if_replay(
+        &self,
+        session_id: &str,
+        candidate: &PolicyDefinition,
+    ) -> Result<WhatIfRun, WhatIfError> {
+        let session = self
+            .get_session_checked(session_id)
+            .await
+            .ok_or(WhatIfError::UnknownSession)?;
+        self.policy_registry
+            .validate_candidate(candidate)
+            .map_err(WhatIfError::InvalidCandidate)?;
+        if candidate.mode != session.mode && candidate.mode != "*" {
+            return Err(WhatIfError::InvalidCandidate(format!(
+                "INVALID_POLICY_DEFINITION: candidate mode '{}' does not govern session mode '{}'",
+                candidate.mode, session.mode
+            )));
+        }
+
+        let log =
+            match self.log_store.get_log(session_id).await {
+                Some(log) => log,
+                None => self.storage.load_log(session_id).await.map_err(|e| {
+                    WhatIfError::Integrity(format!("cannot read the session log: {e}"))
+                })?,
+            };
+        let history =
+            crate::replay::recorded_history(session_id, &session.mode, &log, &self.mode_registry)
+                .map_err(|e| {
+                    WhatIfError::Integrity(format!("cannot rebuild the SessionStart: {e}"))
+                })?
+                .ok_or(WhatIfError::Compacted)?;
+
+        // The recorded half runs under the definition the session bound at
+        // acceptance, not whatever the registry holds under that id now.
+        let bound = session.policy_definition.clone().or_else(|| {
+            let id = if session.policy_version.is_empty() {
+                crate::policy::defaults::DEFAULT_POLICY_ID
+            } else {
+                session.policy_version.as_str()
+            };
+            self.policy_registry.resolve(id).ok()
+        });
+        let start = history.start.with_policy(bound);
+        let report = macp_modes::what_if::replay_under_policy(
+            &start,
+            history.events,
+            history.mode.as_ref(),
+            &crate::replay::server_log_replay_options(),
+            candidate,
+        )
+        .map_err(|e| WhatIfError::Integrity(format!("recorded replay failed: {e}")))?;
+        if report.recorded.state.as_ref() != Some(&session.state) {
+            return Err(WhatIfError::Integrity(format!(
+                "recorded replay ends {:?}, the stored session is {:?}",
+                report.recorded.state, session.state
+            )));
+        }
+        Ok(WhatIfRun {
+            report,
+            history_index: history.history_index,
+        })
+    }
+
     /// Cancel a session. The `cancelled_by` parameter MUST be the authenticated
     /// sender of the CancelSession RPC (RFC-MACP-0001 Section 7.3: CancelSession
     /// is a Core control-plane message; mode authorization does not apply).
@@ -1289,6 +1395,9 @@ impl Runtime {
     /// Best-effort log compaction for terminal sessions.
     /// Returns `true` if compaction succeeded, `false` if skipped or failed.
     async fn maybe_compact_log(&self, session_id: &str, session: &Session) -> bool {
+        if !self.compact_terminal_logs {
+            return false;
+        }
         // Ordinal accounting for the sequence contract: the checkpoint must
         // record every accepted ordinal it discards, including any base from
         // a prior compaction recorded in the current log.

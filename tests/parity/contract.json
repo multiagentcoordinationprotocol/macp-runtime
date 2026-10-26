@@ -68,7 +68,8 @@
         "REGISTRY_READ_ONLY",
         "INVALID_REQUEST",
         "STREAM_LAGGED",
-        "AGENT_NOT_FOUND"
+        "AGENT_NOT_FOUND",
+        "HISTORY_UNAVAILABLE"
       ],
       "deprecated": [
         "UNAUTHORIZED"

@@ -67,6 +67,10 @@ pub enum MacpError {
     /// `GetManifest` named an agent this runtime does not host.
     #[error("AgentNotFound")]
     AgentNotFound,
+    /// `WhatIfReplay` named a session whose full accepted history is no
+    /// longer held (e.g. compacted when it ended), RFC-MACP-0012 §8.1 item 8.
+    #[error("HistoryUnavailable")]
+    HistoryUnavailable,
 }
 
 impl MacpError {
@@ -97,6 +101,7 @@ impl MacpError {
             MacpError::InvalidRequest => "INVALID_REQUEST",
             MacpError::StreamLagged => "STREAM_LAGGED",
             MacpError::AgentNotFound => "AGENT_NOT_FOUND",
+            MacpError::HistoryUnavailable => "HISTORY_UNAVAILABLE",
         }
     }
 }
@@ -210,6 +215,11 @@ pub const ERROR_CODE_REGISTRY: &[RegistryEntry] = &[
     entry("INVALID_REQUEST", TransportStatus::InvalidArgument, 400),
     entry("STREAM_LAGGED", TransportStatus::ResourceExhausted, 503),
     entry("AGENT_NOT_FOUND", TransportStatus::NotFound, 404),
+    entry(
+        "HISTORY_UNAVAILABLE",
+        TransportStatus::FailedPrecondition,
+        409,
+    ),
     // Deprecated alias for FORBIDDEN; never emitted, kept so a lookup of a
     // peer's legacy code still resolves.
     entry("UNAUTHORIZED", TransportStatus::PermissionDenied, 403),
@@ -287,6 +297,7 @@ mod tests {
             (MacpError::InvalidRequest, "INVALID_REQUEST"),
             (MacpError::StreamLagged, "STREAM_LAGGED"),
             (MacpError::AgentNotFound, "AGENT_NOT_FOUND"),
+            (MacpError::HistoryUnavailable, "HISTORY_UNAVAILABLE"),
         ];
 
         for (error, expected_code) in cases {
