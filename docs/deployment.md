@@ -422,7 +422,7 @@ docker run -p 50051:50051 -e MACP_ALLOW_INSECURE=1 -e MACP_MEMORY_ONLY=1 \
 `0.10.0` is the newest release when this was written; check the
 [releases](https://github.com/multiagentcoordinationprotocol/macp-runtime/releases)
 for a newer one. The image sets `MACP_DATA_DIR=/home/macp/.macp-data` and runs
-as the non-root user `macp`. Without `MACP_MEMORY_ONLY=1` or a volume there, the
+the runtime as the non-root user `macp`. Without `MACP_MEMORY_ONLY=1` or a volume there, the
 development command still starts, but writes its logs into the container's
 writable layer.
 
@@ -439,6 +439,15 @@ docker run --rm --user root --entrypoint chown \
 
 Later images create the directory as `macp`, and a new volume inherits that
 ownership.
+
+From 0.10.1 the container starts as root only so its entrypoint can hand
+`MACP_DATA_DIR` to `macp` (recursively, when it is not already `macp`'s), and
+then drops to `macp` with `setpriv` before the runtime starts. That covers what
+a named volume's inherited ownership does not: bind mounts and platform volumes
+(Railway, for one) that arrive root-owned. Started as another user (`--user`,
+Kubernetes `runAsUser`), the entrypoint changes nothing and that user needs
+write access to the directory. A cluster that enforces `runAsNonRoot` must set
+`runAsUser` for that reason.
 
 When deploying in containers:
 
