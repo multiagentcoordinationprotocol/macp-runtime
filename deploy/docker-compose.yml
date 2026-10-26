@@ -96,7 +96,7 @@ services:
     restart: unless-stopped
 
   control-plane:
-    image: ${MACP_CONTROL_PLANE_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-control-plane:0.6.1}
+    image: ${MACP_CONTROL_PLANE_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-control-plane:0.7.0}
     environment:
       NODE_ENV: production
       PORT: "3001"
@@ -165,7 +165,7 @@ services:
     restart: unless-stopped
 
   console:
-    image: ${MACP_UI_CONSOLE_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-ui-console:0.2.0}
+    image: ${MACP_UI_CONSOLE_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-ui-console:0.2.1}
     environment:
       # Read server-side on every request; the browser only talks to the console.
       # Demo mode is off in the image itself (baked in at build time).
