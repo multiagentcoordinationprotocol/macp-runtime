@@ -43,7 +43,7 @@ services:
     restart: unless-stopped
 
   runtime:
-    image: ${MACP_RUNTIME_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.9.0}
+    image: ${MACP_RUNTIME_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.10.0}
     environment:
       MACP_BIND_ADDR: 0.0.0.0:50051
       # Plaintext gRPC inside the compose network. Required: the image does not

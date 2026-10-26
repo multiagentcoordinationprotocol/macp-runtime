@@ -93,7 +93,7 @@ pub async fn tail(
     let mut stream = client
         .stream_session(req)
         .await
-        .map_err(|s| format!("StreamSession: {}", s.message()))?
+        .map_err(|s| format!("StreamSession: {}", status_message(&s)))?
         .into_inner();
 
     let mut printed = 0u64;
@@ -115,7 +115,7 @@ pub async fn tail(
                 None => {}
             },
             Ok(Ok(None)) => return Err("the runtime closed the stream".into()),
-            Ok(Err(s)) => return Err(format!("StreamSession: {}", s.message())),
+            Ok(Err(s)) => return Err(format!("StreamSession: {}", status_message(&s))),
             Err(_quiet) => {
                 let state = session_state(client, &bearer, &opts.session_id).await?;
                 if !matches!(state.as_str(), "Open" | "Suspended") {
@@ -157,6 +157,9 @@ pub fn status_message(s: &tonic::Status) -> String {
         .and_then(|v| v.to_str().ok())
     {
         Some(code) if !s.message().starts_with(code) => format!("{code}: {}", s.message()),
+        // A status with no message (tonic's `UNIMPLEMENTED` for an RPC the
+        // runtime does not serve) still names its code.
+        _ if s.message().is_empty() => format!("gRPC {:?}: {}", s.code(), s.code().description()),
         _ => s.message().to_string(),
     }
 }
@@ -273,6 +276,13 @@ pub fn rfc3339_ms(unix_ms: i64) -> String {
 mod tests {
     use super::*;
     use prost::Message as _;
+
+    #[test]
+    fn status_message_names_the_code_when_there_is_no_message() {
+        let s = status_message(&tonic::Status::unimplemented(""));
+        assert!(s.starts_with("gRPC Unimplemented: "), "{s}");
+        assert_eq!(status_message(&tonic::Status::not_found("gone")), "gone");
+    }
 
     #[test]
     fn rfc3339_ms_formats_utc() {

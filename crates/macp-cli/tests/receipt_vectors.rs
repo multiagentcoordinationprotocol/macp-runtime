@@ -61,3 +61,22 @@ fn the_embedded_stack_is_the_repo_deploy_stack() {
         "crates/macp-cli/deploy/.env.example must be a copy of deploy/.env.example"
     );
 }
+
+#[test]
+fn the_written_stack_runs_this_releases_runtime() {
+    let pinned = format!("macp-runtime:{}}}", env!("CARGO_PKG_VERSION"));
+    let written = macp_cli::stack::compose_file();
+    assert_eq!(written.matches(&pinned).count(), 1, "{written}");
+    let differing: Vec<_> = written
+        .lines()
+        .zip(macp_cli::stack::COMPOSE_FILE.lines())
+        .filter(|(a, b)| a != b)
+        .collect();
+    assert!(differing.len() <= 1, "{differing:?}");
+    assert!(
+        differing
+            .iter()
+            .all(|(a, _)| a.contains("MACP_RUNTIME_IMAGE")),
+        "{differing:?}"
+    );
+}
