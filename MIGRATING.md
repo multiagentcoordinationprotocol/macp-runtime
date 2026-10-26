@@ -51,10 +51,13 @@ Additive only: nothing an embedder calls changes.
 
 - New crate `macp-cli`, binary `macp`: `up`/`down`/`status` for the self-host
   stack, `verify` for decision receipts (RFC-MACP-0013 Appendix A.4), and
-  `conform`. See [crates/macp-cli/README.md](crates/macp-cli/README.md).
+  `conform`, and `session tail`, which follows a session's accepted envelopes.
+  See [crates/macp-cli/README.md](crates/macp-cli/README.md).
 - New: `macp_conform::cli::main(prog, args) -> ExitCode` (feature `grpc`), the
   `macp-conform` binary's entry point as a library function. The
   `macp-conform` binary itself is unchanged.
+- New: `macp_conform::client` (feature `grpc`), the generated `macp.v1`
+  client and its `connect(url)`, which `GrpcTarget` and `macp` share.
 
 ## 0.9.0 — library acceptance, step and replay
 
