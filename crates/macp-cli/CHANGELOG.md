@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-cli-v0.10.0...macp-cli-v0.10.1) - 2026-10-26
+
+### Fixed
+
+- *(deploy)* pin control-plane 0.7.1 ([#260](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/260))
+- *(deploy)* pin control-plane 0.7.0 and ui-console 0.2.1 ([#257](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/257))
+- *(cli)* `macp up` runs this release's runtime; name empty gRPC errors ([#255](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/255))
+
 ## [0.10.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-cli-v0.9.0...macp-cli-v0.10.0) - 2026-10-26
 
 ### Added
