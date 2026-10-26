@@ -7,7 +7,11 @@
 //! with `docker compose`; a `.env` placed in that directory is read as usual.
 //! The copies under this crate's `deploy/` are byte-identical to the repo's
 //! (a test checks it): a published crate cannot reach outside its own
-//! directory.
+//! directory. The one change on the way out is the runtime image's default
+//! tag, which becomes this binary's own version: the runtime and `macp` are
+//! released together, and a pin in `deploy/` that lags a release would
+//! otherwise ship that release's `macp up` with the previous runtime (0.10.0
+//! did, and its `macp replay --session` met a runtime without WhatIfReplay).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,6 +20,27 @@ use std::process::Command;
 pub const COMPOSE_FILE: &str = include_str!("../deploy/docker-compose.yml");
 /// `deploy/.env.example`, as of this release.
 pub const ENV_EXAMPLE: &str = include_str!("../deploy/.env.example");
+/// The runtime image the compose file defaults to, before its tag.
+const RUNTIME_IMAGE: &str = "ghcr.io/multiagentcoordinationprotocol/macp-runtime:";
+
+/// [`COMPOSE_FILE`] with the runtime image's default tag set to this release.
+/// `MACP_RUNTIME_IMAGE` still overrides it.
+pub fn compose_file() -> String {
+    let Some(at) = COMPOSE_FILE
+        .find(RUNTIME_IMAGE)
+        .map(|i| i + RUNTIME_IMAGE.len())
+    else {
+        return COMPOSE_FILE.to_string();
+    };
+    let end = at + COMPOSE_FILE[at..].find('}').unwrap_or(0);
+    format!(
+        "{}{}{}",
+        &COMPOSE_FILE[..at],
+        env!("CARGO_PKG_VERSION"),
+        &COMPOSE_FILE[end..]
+    )
+}
+
 /// The compose project name, fixed so `down` and `status` find a stack that
 /// another `macp` release brought up.
 pub const PROJECT: &str = "macp";
@@ -58,7 +83,7 @@ pub fn materialize(dir: &Path) -> Result<PathBuf, StackError> {
     let io = |e: std::io::Error| StackError::Unavailable(format!("{}: {e}", dir.display()));
     std::fs::create_dir_all(dir).map_err(io)?;
     let compose = dir.join("docker-compose.yml");
-    std::fs::write(&compose, COMPOSE_FILE).map_err(io)?;
+    std::fs::write(&compose, compose_file()).map_err(io)?;
     std::fs::write(dir.join(".env.example"), ENV_EXAMPLE).map_err(io)?;
     Ok(compose)
 }

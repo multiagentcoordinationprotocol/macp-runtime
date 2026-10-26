@@ -246,6 +246,9 @@ async fn replay_remote(
         Err(s) if s.message().starts_with("INTERNAL_ERROR") => {
             Err(ReplayError::Integrity(s.message().to_string()))
         }
+        Err(s) if s.code() == tonic::Code::Unimplemented => Err(ReplayError::Unavailable(format!(
+            "{target} does not serve WhatIfReplay (macp-runtime 0.10.0 or later does)"
+        ))),
         Err(s) => Err(unavailable(s)),
     }
 }

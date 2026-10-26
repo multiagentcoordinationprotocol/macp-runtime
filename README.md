@@ -215,7 +215,7 @@ credentials and deterministic agents (no tokens or LLM keys). Open
 
 ```bash
 docker run -p 50051:50051 -e MACP_ALLOW_INSECURE=1 -e MACP_MEMORY_ONLY=1 \
-  ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.9.0
+  ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.10.0
 ```
 
 This is a local development runtime: plaintext gRPC, dev-mode auth, state in

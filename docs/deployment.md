@@ -411,15 +411,15 @@ docker run -p 50051:50051 \
   -e MACP_AUTH_TOKENS_FILE=/etc/macp/tokens.json \
   -e MACP_TLS_CERT_PATH=/etc/macp/tls.crt -e MACP_TLS_KEY_PATH=/etc/macp/tls.key \
   -v ./secrets:/etc/macp -v macp-data:/home/macp/.macp-data \
-  ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.9.0
+  ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.10.0
 
 # Local development ONLY: any bearer token becomes a fully-privileged identity,
 # and all state is lost when the container stops.
 docker run -p 50051:50051 -e MACP_ALLOW_INSECURE=1 -e MACP_MEMORY_ONLY=1 \
-  ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.9.0
+  ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.10.0
 ```
 
-`0.9.0` is the newest release when this was written; check the
+`0.10.0` is the newest release when this was written; check the
 [releases](https://github.com/multiagentcoordinationprotocol/macp-runtime/releases)
 for a newer one. The image sets `MACP_DATA_DIR=/home/macp/.macp-data` and runs
 as the non-root user `macp`. Without `MACP_MEMORY_ONLY=1` or a volume there, the
