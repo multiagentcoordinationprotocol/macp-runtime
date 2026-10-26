@@ -96,7 +96,7 @@ services:
     restart: unless-stopped
 
   control-plane:
-    image: ${MACP_CONTROL_PLANE_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-control-plane:0.7.0}
+    image: ${MACP_CONTROL_PLANE_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-control-plane:0.7.1}
     environment:
       NODE_ENV: production
       PORT: "3001"
