@@ -38,6 +38,14 @@ Additive only: nothing an embedder calls changes.
   [docs/API.md](docs/API.md#whatifreplay).
 - New env `MACP_COMPACT_TERMINAL_LOGS` (default on). Set it to `0` to keep
   ended sessions' history, which `WhatIfReplay` needs.
+- New `MacpError::HistoryUnavailable` (`HISTORY_UNAVAILABLE`, gRPC
+  `FAILED_PRECONDITION`, HTTP 409), in `ERROR_CODE_REGISTRY`. The enum is
+  `#[non_exhaustive]`, so a wildcard arm already covers it.
+
+### Fixtures and vectors
+
+- `SPEC_REV` moved to spec `8d20dc5`. `tests/parity/contract.json` lists
+  `HISTORY_UNAVAILABLE` as permanent. Re-vendor it if you check the contract.
 
 ### `macp-cli` (new crate) / `macp_conform::cli`
 

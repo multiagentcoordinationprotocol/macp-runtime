@@ -159,4 +159,10 @@ async fn what_if_refuses_a_compacted_session() {
         "{}",
         err.message()
     );
+    assert_eq!(
+        err.metadata()
+            .get("macp-error-code")
+            .and_then(|v| v.to_str().ok()),
+        Some("HISTORY_UNAVAILABLE")
+    );
 }

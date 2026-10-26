@@ -1981,10 +1981,13 @@ impl MacpRuntimeService for MacpServer {
             }
             // The spec defines no error code for this (it assumes the full
             // history is kept), so it carries no `macp-error-code`.
-            Err(WhatIfError::Compacted) => Err(Status::failed_precondition(format!(
-                "session '{session_id}' history was compacted when it ended and cannot be \
-                 replayed; run the runtime with MACP_COMPACT_TERMINAL_LOGS=0 to keep it"
-            ))),
+            Err(WhatIfError::Compacted) => Err(Self::coded_status(
+                MacpError::HistoryUnavailable,
+                format!(
+                    "session '{session_id}' history was compacted when it ended and cannot be \
+                     replayed; run the runtime with MACP_COMPACT_TERMINAL_LOGS=0 to keep it"
+                ),
+            )),
             Err(WhatIfError::Integrity(msg)) => {
                 tracing::error!(session_id, error = %msg, "what-if recorded replay diverged");
                 Err(Self::coded_status(
@@ -2147,6 +2150,10 @@ mod tests {
             (MacpError::InvalidRequest, tonic::Code::InvalidArgument),
             (MacpError::StreamLagged, tonic::Code::ResourceExhausted),
             (MacpError::AgentNotFound, tonic::Code::NotFound),
+            (
+                MacpError::HistoryUnavailable,
+                tonic::Code::FailedPrecondition,
+            ),
         ];
         for (err, code) in cases {
             let name = err.error_code();
@@ -4579,7 +4586,7 @@ mod tests {
             .what_if_replay(what_if_req(BUYER, &sid, Some(seller_only())))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert_coded(&err, "HISTORY_UNAVAILABLE", tonic::Code::FailedPrecondition);
     }
 
     #[tokio::test]
