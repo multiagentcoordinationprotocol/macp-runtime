@@ -126,7 +126,101 @@ pub struct WhatIfRun {
     pub history_index: Vec<Option<u64>>,
 }
 
-/// Why [`Runtime::what_if_replay`] produced no report.
+/// What-if replay (RFC-MACP-0012 §8.1) of one session's log, with no
+/// runtime: what [`Runtime::what_if_replay`] runs once it has the session and
+/// its log, and what `macp replay` runs over a data directory or a log file.
+///
+/// `stored` is the session as the runtime holds it. When given, the recorded
+/// half runs under its bound policy and must end in its state. Without it, the
+/// mode and policy come from the log's `SessionStart` (the policy resolved in
+/// `policy_registry`), and the recorded half only has to replay. Pass the
+/// recorded policy as `candidate` to check a log's integrity alone.
+pub fn what_if_over_log(
+    session_id: &str,
+    log: &[LogEntry],
+    stored: Option<&Session>,
+    mode_registry: &ModeRegistry,
+    policy_registry: &PolicyRegistry,
+    candidate: &PolicyDefinition,
+) -> Result<WhatIfRun, WhatIfError> {
+    policy_registry
+        .validate_candidate(candidate)
+        .map_err(WhatIfError::InvalidCandidate)?;
+    let start_entry = log
+        .iter()
+        .find(|e| e.entry_kind == EntryKind::Incoming && e.message_type == "SessionStart");
+    let mode = match (stored, start_entry) {
+        (Some(s), _) => s.mode.clone(),
+        (None, Some(e)) => e.mode.clone(),
+        (None, None) => return Err(WhatIfError::Compacted),
+    };
+    if candidate.mode != mode && candidate.mode != "*" {
+        return Err(WhatIfError::InvalidCandidate(format!(
+            "INVALID_POLICY_DEFINITION: candidate mode '{}' does not govern session mode '{mode}'",
+            candidate.mode
+        )));
+    }
+
+    let history = crate::replay::recorded_history(session_id, &mode, log, mode_registry)
+        .map_err(|e| WhatIfError::Integrity(format!("cannot rebuild the SessionStart: {e}")))?
+        .ok_or(WhatIfError::Compacted)?;
+
+    let start = history
+        .start
+        .with_policy(recorded_policy(log, stored, policy_registry));
+    let report = macp_modes::what_if::replay_under_policy(
+        &start,
+        history.events,
+        history.mode.as_ref(),
+        &crate::replay::server_log_replay_options(),
+        candidate,
+    )
+    .map_err(|e| WhatIfError::Integrity(format!("recorded replay failed: {e}")))?;
+    if let Some(s) = stored {
+        if report.recorded.state.as_ref() != Some(&s.state) {
+            return Err(WhatIfError::Integrity(format!(
+                "recorded replay ends {:?}, the stored session is {:?}",
+                report.recorded.state, s.state
+            )));
+        }
+    }
+    Ok(WhatIfRun {
+        report,
+        history_index: history.history_index,
+    })
+}
+
+/// The policy a session's recorded half replays under: the definition the
+/// session bound at acceptance, not whatever the registry holds under that id
+/// now. Without a stored session, the log's `SessionStart` names it (empty
+/// means `policy.default`) and `policy_registry` resolves it; `None` when it
+/// does not know it.
+pub fn recorded_policy(
+    log: &[LogEntry],
+    stored: Option<&Session>,
+    policy_registry: &PolicyRegistry,
+) -> Option<PolicyDefinition> {
+    if let Some(def) = stored.and_then(|s| s.policy_definition.clone()) {
+        return Some(def);
+    }
+    let id = match stored {
+        Some(s) => s.policy_version.clone(),
+        None => log
+            .iter()
+            .find(|e| e.entry_kind == EntryKind::Incoming && e.message_type == "SessionStart")
+            .and_then(|e| crate::session::parse_session_start_payload(&e.raw_payload).ok())
+            .map(|p| p.policy_version)
+            .unwrap_or_default(),
+    };
+    let id = if id.is_empty() {
+        crate::policy::defaults::DEFAULT_POLICY_ID
+    } else {
+        id.as_str()
+    };
+    policy_registry.resolve(id).ok()
+}
+
+/// Why [`what_if_over_log`] produced no report.
 #[derive(Debug)]
 pub enum WhatIfError {
     /// No such session (or it was evicted from memory).
@@ -1082,16 +1176,6 @@ impl Runtime {
             .get_session_checked(session_id)
             .await
             .ok_or(WhatIfError::UnknownSession)?;
-        self.policy_registry
-            .validate_candidate(candidate)
-            .map_err(WhatIfError::InvalidCandidate)?;
-        if candidate.mode != session.mode && candidate.mode != "*" {
-            return Err(WhatIfError::InvalidCandidate(format!(
-                "INVALID_POLICY_DEFINITION: candidate mode '{}' does not govern session mode '{}'",
-                candidate.mode, session.mode
-            )));
-        }
-
         let log =
             match self.log_store.get_log(session_id).await {
                 Some(log) => log,
@@ -1099,42 +1183,14 @@ impl Runtime {
                     WhatIfError::Integrity(format!("cannot read the session log: {e}"))
                 })?,
             };
-        let history =
-            crate::replay::recorded_history(session_id, &session.mode, &log, &self.mode_registry)
-                .map_err(|e| {
-                    WhatIfError::Integrity(format!("cannot rebuild the SessionStart: {e}"))
-                })?
-                .ok_or(WhatIfError::Compacted)?;
-
-        // The recorded half runs under the definition the session bound at
-        // acceptance, not whatever the registry holds under that id now.
-        let bound = session.policy_definition.clone().or_else(|| {
-            let id = if session.policy_version.is_empty() {
-                crate::policy::defaults::DEFAULT_POLICY_ID
-            } else {
-                session.policy_version.as_str()
-            };
-            self.policy_registry.resolve(id).ok()
-        });
-        let start = history.start.with_policy(bound);
-        let report = macp_modes::what_if::replay_under_policy(
-            &start,
-            history.events,
-            history.mode.as_ref(),
-            &crate::replay::server_log_replay_options(),
+        what_if_over_log(
+            session_id,
+            &log,
+            Some(&session),
+            &self.mode_registry,
+            &self.policy_registry,
             candidate,
         )
-        .map_err(|e| WhatIfError::Integrity(format!("recorded replay failed: {e}")))?;
-        if report.recorded.state.as_ref() != Some(&session.state) {
-            return Err(WhatIfError::Integrity(format!(
-                "recorded replay ends {:?}, the stored session is {:?}",
-                report.recorded.state, session.state
-            )));
-        }
-        Ok(WhatIfRun {
-            report,
-            history_index: history.history_index,
-        })
     }
 
     /// Cancel a session. The `cancelled_by` parameter MUST be the authenticated

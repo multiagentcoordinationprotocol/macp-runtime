@@ -896,7 +896,7 @@ impl MacpServer {
 /// `Event(i)` is whatever index that event took), and runtime-internal
 /// events (suspend/resume/cancel/expiry), which take no ordinal, are omitted.
 /// `first_divergence` is recomputed over the entries reported.
-mod what_if {
+pub mod what_if {
     use crate::pb::what_if_entry_outcome::Kind;
     use crate::pb::{
         WhatIfDenial, WhatIfEntry, WhatIfEntryOutcome, WhatIfOutcome, WhatIfReplayResponse,
@@ -905,7 +905,8 @@ mod what_if {
     use macp_core::policy::DenyReason;
     use macp_modes::what_if::{EntryOutcome, HistoryPoint, Outcome};
 
-    pub(super) fn response(run: WhatIfRun) -> WhatIfReplayResponse {
+    /// The `WhatIfReplayResponse` for a run, as the RPC returns it.
+    pub fn response(run: WhatIfRun) -> WhatIfReplayResponse {
         let WhatIfRun {
             report,
             history_index,
@@ -1979,8 +1980,7 @@ impl MacpRuntimeService for MacpServer {
             Err(WhatIfError::InvalidCandidate(msg)) => {
                 Err(Self::coded_status(MacpError::InvalidPolicyDefinition, msg))
             }
-            // The spec defines no error code for this (it assumes the full
-            // history is kept), so it carries no `macp-error-code`.
+            // RFC-MACP-0012 §8.1 item 8.
             Err(WhatIfError::Compacted) => Err(Self::coded_status(
                 MacpError::HistoryUnavailable,
                 format!(

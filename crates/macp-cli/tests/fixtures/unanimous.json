@@ -1,0 +1,1 @@
+{"policy_id":"policy.cli.unanimous","mode":"macp.mode.decision.v1","description":"all must vote","schema_version":1,"rules":{"voting":{"algorithm":"unanimous"}}}

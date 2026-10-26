@@ -9,6 +9,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use macp_cli::receipt::{self, TrustedKeys, Verdict};
+use macp_cli::replay::{self, ReplayError, Source};
 use macp_cli::stack::{self, StackError};
 use macp_cli::tail::{self, TailEnd, TailOptions};
 
@@ -59,6 +60,40 @@ enum Cmd {
     Session {
         #[command(subcommand)]
         command: SessionCmd,
+    },
+    /// Replay a recorded session, alone (an integrity check) or under a
+    /// candidate policy (what-if, RFC-MACP-0012 §8.1).
+    #[command(group(clap::ArgGroup::new("source").required(true).args(["data_dir", "file", "session"])))]
+    Replay {
+        /// A file-backend data directory (`MACP_DATA_DIR`); give the session id.
+        #[arg(long, value_name = "DIR", requires = "session_id")]
+        data_dir: Option<PathBuf>,
+        /// The session id in `--data-dir`.
+        #[arg(requires = "data_dir")]
+        session_id: Option<String>,
+        /// A session log: JSON lines of log entries, or a JSON array of them.
+        #[arg(long, value_name = "LOG")]
+        file: Option<PathBuf>,
+        /// A session on a running runtime, replayed there with `WhatIfReplay`.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+        /// The candidate policy definition (JSON, as in `MACP_POLICIES_DIR`).
+        #[arg(long, value_name = "FILE")]
+        policy: Option<PathBuf>,
+        /// With --session: the runtime's gRPC endpoint.
+        #[arg(long, env = "MACP_TARGET", default_value = "grpc://127.0.0.1:50051")]
+        target: String,
+        /// With --session: a bearer token that can read the session.
+        #[arg(
+            long,
+            env = "MACP_TOKEN",
+            default_value = "macp-dev-cp-observer",
+            hide_env_values = true
+        )]
+        token: String,
+        /// Print the report as JSON on stdout.
+        #[arg(long)]
+        json: bool,
     },
     /// Run the spec's conformance fixtures against an implementation. Takes
     /// macp-conform's arguments; `macp conform --help` lists them.
@@ -138,6 +173,28 @@ fn main() -> ExitCode {
             opts.follow = !no_follow;
             opts.json = json;
             session_tail(&target, &token, &opts)
+        }
+        Cmd::Replay {
+            data_dir,
+            session_id,
+            file,
+            session,
+            policy,
+            target,
+            token,
+            json,
+        } => {
+            let source = match (data_dir, session_id, file, session) {
+                (Some(dir), Some(session_id), _, _) => Source::DataDir { dir, session_id },
+                (_, _, Some(f), _) => Source::File(f),
+                (_, _, _, Some(session_id)) => Source::Session {
+                    target,
+                    token,
+                    session_id,
+                },
+                _ => unreachable!("clap requires one source"),
+            };
+            replay_cmd(&source, policy.as_deref(), json)
         }
         Cmd::Conform { args } => conform(args),
     }
@@ -283,6 +340,40 @@ fn session_tail(target: &str, token: &str, opts: &TailOptions) -> ExitCode {
             eprintln!("macp session tail: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+fn replay_cmd(source: &Source, policy: Option<&std::path::Path>, json: bool) -> ExitCode {
+    let report = |e: ReplayError| {
+        eprintln!("macp replay: {e}");
+        match e {
+            ReplayError::Integrity(_) => ExitCode::from(1),
+            ReplayError::Unavailable(_) => ExitCode::from(2),
+        }
+    };
+    let candidate = match policy.map(replay::read_policy).transpose() {
+        Ok(c) => c,
+        Err(e) => return report(e),
+    };
+    let Some(rt) = runtime("macp replay") else {
+        return ExitCode::from(2);
+    };
+    let resp = match rt.block_on(replay::run(source, candidate.as_ref())) {
+        Ok(r) => r,
+        Err(e) => return report(e),
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&replay::render_json(&resp)).unwrap()
+        );
+    } else {
+        print!("{}", replay::render_text(&resp, candidate.is_some()));
+    }
+    if candidate.is_some() && replay::outcome_changed(&resp) {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
