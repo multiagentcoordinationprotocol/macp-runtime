@@ -10,6 +10,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use macp_cli::receipt::{self, TrustedKeys, Verdict};
 use macp_cli::stack::{self, StackError};
+use macp_cli::tail::{self, TailEnd, TailOptions};
 
 #[derive(Parser)]
 #[command(name = "macp", version, about = "The MACP command line")]
@@ -54,12 +55,48 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Read a session on a running runtime.
+    Session {
+        #[command(subcommand)]
+        command: SessionCmd,
+    },
     /// Run the spec's conformance fixtures against an implementation. Takes
     /// macp-conform's arguments; `macp conform --help` lists them.
     #[command(disable_help_flag = true, disable_version_flag = true)]
     Conform {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCmd {
+    /// Print a session's accepted envelopes, then follow live traffic until
+    /// the session ends.
+    Tail {
+        /// The session id.
+        session_id: String,
+        /// The runtime's gRPC endpoint: grpc://, grpcs://, http:// or https://.
+        #[arg(long, env = "MACP_TARGET", default_value = "grpc://127.0.0.1:50051")]
+        target: String,
+        /// Bearer token: an observer, the initiator or a participant. The
+        /// default is the self-host stack's observer token.
+        #[arg(
+            long,
+            env = "MACP_TOKEN",
+            default_value = "macp-dev-cp-observer",
+            hide_env_values = true
+        )]
+        token: String,
+        /// Skip the first N accepted envelopes.
+        #[arg(long, value_name = "N", default_value_t = 0)]
+        after: u64,
+        /// Print the history and exit, even if the session is still open.
+        #[arg(long)]
+        no_follow: bool,
+        /// One JSON object per line, payload in base64.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -85,6 +122,23 @@ fn main() -> ExitCode {
             require,
             json,
         } => verify(&receipt, &keys, require, json),
+        Cmd::Session {
+            command:
+                SessionCmd::Tail {
+                    session_id,
+                    target,
+                    token,
+                    after,
+                    no_follow,
+                    json,
+                },
+        } => {
+            let mut opts = TailOptions::new(session_id);
+            opts.after = after;
+            opts.follow = !no_follow;
+            opts.json = json;
+            session_tail(&target, &token, &opts)
+        }
         Cmd::Conform { args } => conform(args),
     }
 }
@@ -212,16 +266,37 @@ fn add_key(key: &str, trusted: &mut TrustedKeys) -> Result<(), String> {
     }
 }
 
-fn conform(args: Vec<String>) -> ExitCode {
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("macp conform: {e}");
-            return ExitCode::from(2);
+fn session_tail(target: &str, token: &str, opts: &TailOptions) -> ExitCode {
+    let Some(rt) = runtime("macp session tail") else {
+        return ExitCode::from(2);
+    };
+    let mut out = std::io::stdout().lock();
+    match rt.block_on(tail::run(target, token, opts, &mut out)) {
+        Ok(TailEnd::Ended { state, printed } | TailEnd::Caught { state, printed }) => {
+            eprintln!(
+                "macp: session {} is {state} ({printed} shown)",
+                opts.session_id
+            );
+            ExitCode::SUCCESS
         }
+        Err(e) => {
+            eprintln!("macp session tail: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn conform(args: Vec<String>) -> ExitCode {
+    let Some(rt) = runtime("macp conform") else {
+        return ExitCode::from(2);
     };
     rt.block_on(macp_conform::cli::main("macp conform", args))
+}
+
+fn runtime(prog: &str) -> Option<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| eprintln!("{prog}: {e}"))
+        .ok()
 }

@@ -5,9 +5,12 @@
 //!   (`macp verify`), with [`jcs`] for the receipt body.
 //! - [`stack`]: the self-host stack from the repo's `deploy/`, embedded at
 //!   build time (`macp up`, `macp down`, `macp status`).
+//! - [`tail`]: a session's accepted envelopes over a passive `StreamSession`
+//!   (`macp session tail`).
 //!
 //! `macp conform` is `macp_conform::cli`, unchanged.
 
 pub mod jcs;
 pub mod receipt;
 pub mod stack;
+pub mod tail;
