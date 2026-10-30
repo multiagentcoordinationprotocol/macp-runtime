@@ -14,6 +14,16 @@ Before exposing the runtime to production traffic, ensure these four items are c
 
 4. **Bind address** -- Set `MACP_BIND_ADDR` to the desired listen address. The default `127.0.0.1:50051` only accepts local connections.
 
+## Upgrading to 0.11.0
+
+0.11.0 adds decision receipts (RFC-MACP-0013 §13). Nothing changes for a deployment that sets none of the receipt variables: it serves unsigned receipts with issuer `runtime:macp-runtime`, and no message, replay or recovery path behaves differently.
+
+1. **New RPCs.** `GetDecisionReceipt` and `GetReceiptKeys` are served, and `Initialize` advertises `decision_receipt`. A proxy or gateway that allow-lists `macp.v1` methods must let both through. `GetReceiptKeys` needs no credentials.
+2. **New startup aborts.** The runtime refuses to start on a malformed or unreadable receipt key, on both key forms set, on `MACP_RECEIPT_SIGNING_KID` without a key, on a bad `MACP_RECEIPT_PUBLIC_KEYS_PATH`, and on a signing key without `MACP_RUNTIME_ID`. Unset or empty variables are not an error.
+3. **To sign**, set a key, its `kid` and a stable `MACP_RUNTIME_ID`, as described in [Decision receipts](#decision-receipts). Choose `MACP_RUNTIME_ID` once: it is the `issuer` of every receipt and must not change across restarts.
+4. **Disclosure.** A receipt carries the whole resolving Commitment, including `reason`, and any reader of the session can fetch it and pass it on.
+5. **Storage.** The `file` backend writes `sessions/<id>/receipt.json` on the first fetch. On a file system without hard links, receipts live only in memory, and the runtime warns at startup when it signs there.
+
 ## Upgrading to 0.9.0
 
 ### 1. Quorum: an over-participant policy threshold is accepted and declinable at once
