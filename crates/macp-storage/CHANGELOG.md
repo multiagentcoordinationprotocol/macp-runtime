@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-storage-v0.10.1...macp-storage-v0.11.0) - 2026-10-30
+
+### Added
+
+- *(receipts)* issue and serve decision receipts (RFC-MACP-0013 §13) ([#264](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/264))
+
 ## [0.8.5](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-storage-v0.8.4...macp-storage-v0.8.5) - 2026-09-29
 
 ### Fixed
