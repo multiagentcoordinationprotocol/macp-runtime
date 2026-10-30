@@ -2,6 +2,7 @@ mod test_backends;
 mod test_cancel_session;
 mod test_concurrent_sessions;
 mod test_decision_mode;
+mod test_decision_receipts;
 mod test_error_paths;
 mod test_handoff_implicit_accept;
 mod test_initialize;

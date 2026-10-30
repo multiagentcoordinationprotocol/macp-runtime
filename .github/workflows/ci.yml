@@ -590,8 +590,9 @@ jobs:
       - name: Verify integration_tests/Cargo.lock is consistent with its manifest
         run: cargo metadata --locked --manifest-path integration_tests/Cargo.toml --format-version 1 > /dev/null
 
-      - name: Build runtime binary
-        run: cargo build
+      # The `macp` CLI too: test_decision_receipts runs `macp verify --keys-from`.
+      - name: Build runtime and CLI binaries
+        run: cargo build -p macp-runtime -p macp-cli --bins
 
       # Tier 2 (Rig ToolSet against the live server) is deterministic — no
       # LLM, no network beyond localhost — so it runs on every PR alongside

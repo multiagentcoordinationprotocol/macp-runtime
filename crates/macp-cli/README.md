@@ -14,7 +14,7 @@ attached to each [GitHub release](https://github.com/multiagentcoordinationproto
 | `macp up [--attach] [--env-file <f>]` | Runs the [self-host stack](../../deploy/README.md) pinned in this release. No clone needed. |
 | `macp down [--volumes]` | Stops it. `--volumes` also deletes every recorded run. |
 | `macp status` | Lists its containers. |
-| `macp verify <receipt.json> [--key …]… [--require attested\|integrity] [--json]` | Verifies a decision receipt (RFC-MACP-0013 Appendix A.4). |
+| `macp verify <receipt.json> [--key …]… [--keys-from <target>] [--require attested\|integrity] [--json]` | Verifies a decision receipt (RFC-MACP-0013 Appendix A.4). |
 | `macp session tail <id> [--after N] [--no-follow] [--json]` | Prints a session's accepted envelopes, then follows it until it ends. |
 | `macp replay (--data-dir <dir> <id> \| --file <log> \| --session <id>) [--policy <file>] [--json]` | Replays a recorded session: alone, as an integrity check, or under a candidate policy (what-if). |
 | `macp conform …` | Runs the spec's conformance fixtures against an implementation. It takes the same arguments as [`macp-conform`](../macp-conform/README.md). |
@@ -118,6 +118,7 @@ outcome    changed
 ```sh
 macp verify receipt.json --key example-1=TDVzkxaSf6_Oxu7mmn5TbCkF80s8Ulh33qKQsi0gnZM
 macp verify receipt.json --key issuer-jwks.json --json
+macp verify receipt.json --keys-from https://runtime.example:50051
 ```
 
 `macp verify` reports integrity, the outcome of each attestation, and an
@@ -129,6 +130,11 @@ overall verdict.
 - **Each attestation** is *valid*, *invalid*, *unknown_key* or *unsupported*.
   Only EdDSA `jws` attestations from a `--key` you trust can be *valid*.
   `--key` takes either a JWK/JWKS file or `<kid>=<x>`, and can be repeated.
+  `--keys-from <target>` also trusts every key a runtime publishes through
+  `GetReceiptKeys`; it merges with `--key`. Only use it against a runtime you
+  already trust, over TLS -- whoever answers the call chooses the keys.
+  `--token` (or `MACP_TOKEN`) is the bearer it sends. An unreachable runtime, or
+  one that publishes no Ed25519 key, exits 2.
 - **The verdict** is one of:
   - *attested*: integrity matches and at least one attestation is valid.
   - *integrity_only*: integrity matches but no attestation is valid.

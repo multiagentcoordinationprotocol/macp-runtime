@@ -29,6 +29,47 @@ bump fails without it. Patch releases have no entry.
   `FAILED_PRECONDITION`, HTTP 409), in `ERROR_CODE_REGISTRY`. The enum is
   `#[non_exhaustive]`, so a wildcard arm already covers it.
 
+### `macp_core::receipt` (new, `receipts` feature)
+
+- Receipt building, verification and keys moved out of `macp-cli` into
+  `macp_core::receipt`, behind the non-default `receipts` feature (it pulls in
+  `base64` and `ed25519-dalek`; without it `macp-core` gains no dependency).
+  `build(&ReceiptInputs, Option<&ReceiptSigner>)` is pure: same inputs and key,
+  same bytes. `ReceiptSigner` loads a PKCS#8 PEM or a private OKP JWK;
+  `KeySet` is the published JWKS and refuses private members and duplicate
+  `kid`s. Errors are `KeyError` and `BuildError`, both `#[non_exhaustive]`.
+- `Integrity`, `AttestationOutcome`, `Verdict` and `Verification` are now
+  `#[non_exhaustive]`. Match them with a wildcard arm, and read
+  `Verification` fields rather than building one.
+- `add_jwks` returns `Result<usize, KeyError>` instead of `Result<usize,
+  String>`. Use `.to_string()` (or `{}`) where a `String` was expected.
+
+### `macp-cli`
+
+- `macp_cli::receipt` and `macp_cli::jcs` are re-exports of
+  `macp_core::receipt` and `macp_core::receipt::jcs`, so 0.10 paths keep
+  resolving. The changes above apply through them. `macp verify` gains
+  `--keys-from <target>` and `--token`.
+
+### `macp_storage::StorageBackend`
+
+- Three provided methods, so an existing implementation still compiles:
+  `load_receipt` (default `Ok(None)`), `store_receipt_if_absent` (default
+  `Unsupported`) and `receipts_durable` (default `false`). On a backend left
+  at the defaults the runtime keeps receipts in memory only and warns at
+  startup when it signs. To persist them, implement both methods first writer
+  wins, never replace a stored receipt, and delete it in `delete_session`.
+  The outcome type `ReceiptWrite` is `#[non_exhaustive]`.
+
+### `macp-runtime` (as a library)
+
+- `Runtime::with_receipt_config(ReceiptConfig)` and
+  `Runtime::with_compact_terminal_logs(bool)` are builders; the default is
+  unsigned receipts with issuer `runtime:macp-runtime`. `decision_receipt`
+  and `session_for_read` are new. Session recovery from storage moved into
+  `macp_runtime::recovery::recover_sessions`, returning a `#[non_exhaustive]`
+  `RecoveryReport`.
+
 ### Fixtures and vectors
 
 - `SPEC_REV` moved to spec `6bb4426`. No vendored fixture changed.

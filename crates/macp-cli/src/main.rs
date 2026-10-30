@@ -49,6 +49,18 @@ enum Cmd {
         /// base64url public key. Repeatable.
         #[arg(long = "key", value_name = "FILE|KID=X")]
         keys: Vec<String>,
+        /// Also trust the keys a running runtime publishes (`GetReceiptKeys`),
+        /// e.g. grpc://127.0.0.1:50051. Only as trustworthy as the channel.
+        #[arg(long = "keys-from", value_name = "TARGET")]
+        keys_from: Option<String>,
+        /// With --keys-from: a bearer token for the runtime.
+        #[arg(
+            long,
+            env = "MACP_TOKEN",
+            default_value = "macp-dev-cp-observer",
+            hide_env_values = true
+        )]
+        token: String,
         /// The weakest verdict that exits 0.
         #[arg(long, value_enum, default_value_t = Require::Attested)]
         require: Require,
@@ -154,9 +166,11 @@ fn main() -> ExitCode {
         Cmd::Verify {
             receipt,
             keys,
+            keys_from,
+            token,
             require,
             json,
-        } => verify(&receipt, &keys, require, json),
+        } => verify(&receipt, &keys, keys_from.as_deref(), &token, require, json),
         Cmd::Session {
             command:
                 SessionCmd::Tail {
@@ -245,7 +259,14 @@ fn stack_cmd(args: &[&str]) -> ExitCode {
     }
 }
 
-fn verify(path: &str, keys: &[String], require: Require, json: bool) -> ExitCode {
+fn verify(
+    path: &str,
+    keys: &[String],
+    keys_from: Option<&str>,
+    token: &str,
+    require: Require,
+    json: bool,
+) -> ExitCode {
     let usage = |m: String| {
         eprintln!("macp verify: {m}");
         ExitCode::from(2)
@@ -266,6 +287,19 @@ fn verify(path: &str, keys: &[String], require: Require, json: bool) -> ExitCode
     for key in keys {
         if let Err(e) = add_key(key, &mut trusted) {
             return usage(format!("--key {key}: {e}"));
+        }
+    }
+    if let Some(target) = keys_from {
+        let Some(rt) = runtime("macp verify") else {
+            return ExitCode::from(2);
+        };
+        let added = rt
+            .block_on(fetch_receipt_keys(target, token))
+            .and_then(|doc| receipt::add_jwks(&doc, &mut trusted).map_err(|e| e.to_string()));
+        match added {
+            Ok(0) => return usage(format!("--keys-from {target}: no Ed25519 key published")),
+            Ok(_) => {}
+            Err(e) => return usage(format!("--keys-from {target}: {e}")),
         }
     }
 
@@ -305,6 +339,22 @@ fn verify(path: &str, keys: &[String], require: Require, json: bool) -> ExitCode
     } else {
         ExitCode::from(1)
     }
+}
+
+/// The JWKS `target` publishes through `GetReceiptKeys`.
+async fn fetch_receipt_keys(target: &str, token: &str) -> Result<serde_json::Value, String> {
+    let mut client = macp_conform::client::connect(target).await?;
+    let mut req = tonic::Request::new(macp_pb::pb::GetReceiptKeysRequest {});
+    let bearer = tonic::metadata::MetadataValue::try_from(format!("Bearer {token}"))
+        .map_err(|_| "the token is not a valid bearer value".to_string())?;
+    req.metadata_mut().insert("authorization", bearer);
+    let jwks = client
+        .get_receipt_keys(req)
+        .await
+        .map_err(|s| tail::status_message(&s))?
+        .into_inner()
+        .jwks_json;
+    serde_json::from_str(&jwks).map_err(|e| format!("the published key set is not JSON: {e}"))
 }
 
 fn add_key(key: &str, trusted: &mut TrustedKeys) -> Result<(), String> {

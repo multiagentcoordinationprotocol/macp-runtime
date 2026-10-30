@@ -474,81 +474,89 @@ fn startup_refuses_default_page_size_above_max() {
 /// echoes the key text.
 #[test]
 fn startup_refuses_bad_receipt_keys() {
+    use base64::Engine as _;
     let binary =
         std::env::var("MACP_TEST_BINARY").unwrap_or_else(|_| "../target/debug/macp-runtime".into());
     let dir = tempfile::tempdir().unwrap();
-    let not_json = dir.path().join("keys.json");
-    std::fs::write(&not_json, "not json").unwrap();
-    let not_json = not_json.to_str().unwrap();
+    let write = |name: &str, text: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        path.to_str().unwrap().to_string()
+    };
+    let not_json = write("keys.json", "not json");
     let secret = "SECRET-KEY-MATERIAL-do-not-echo";
     let fixtures = "../crates/macp-core/tests/fixtures";
     let pem = &format!("{fixtures}/test-receipt-key.pem");
     let private_keys = &format!("{fixtures}/invalid-receipt-keys/okp_private_d.json");
-    let doc: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(private_keys).unwrap()).unwrap();
-    let private_jwk = &doc["keys"][0];
-    let d = private_jwk["d"].as_str().unwrap().to_string();
-    let jwk = private_jwk.to_string();
-    let mut public_jwk = private_jwk.clone();
-    public_jwk.as_object_mut().unwrap().remove("d");
-    let retired_path = dir.path().join("retired.json");
-    std::fs::write(
-        &retired_path,
-        serde_json::json!({ "keys": [public_jwk] }).to_string(),
-    )
-    .unwrap();
-    let retired = retired_path.to_str().unwrap().to_string();
+    // A valid private JWK, kid "jwk-1".
+    let seed = [42u8; 32];
+    let d = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(seed);
+    let mut jwk = macp_runtime::macp_core::receipt::ReceiptSigner::from_seed(&seed, "jwk-1")
+        .unwrap()
+        .public_jwk();
+    let retired = write(
+        "retired.json",
+        &serde_json::json!({ "keys": [jwk.clone()] }).to_string(),
+    );
+    jwk["d"] = d.clone().into();
+    let jwk = jwk.to_string();
 
-    for (env, var) in [
+    for (env, var, reason) in [
         (
             vec![("MACP_RECEIPT_SIGNING_KEY", secret)],
             "MACP_RECEIPT_SIGNING_KEY",
+            "not a PKCS#8 PEM or a JWK",
         ),
         (
             vec![
                 ("MACP_RECEIPT_SIGNING_KEY", secret),
                 ("MACP_RECEIPT_SIGNING_KEY_PATH", "/nonexistent/key.pem"),
             ],
+            "MACP_RECEIPT_SIGNING_KEY",
             "both set",
         ),
         (
             vec![("MACP_RECEIPT_SIGNING_KEY_PATH", "/nonexistent/key.pem")],
             "MACP_RECEIPT_SIGNING_KEY_PATH",
+            "cannot read",
         ),
         (
             vec![("MACP_RECEIPT_SIGNING_KID", "k1")],
             "MACP_RECEIPT_SIGNING_KID",
+            "no signing key",
         ),
         (
-            vec![("MACP_RECEIPT_PUBLIC_KEYS_PATH", not_json)],
+            vec![("MACP_RECEIPT_PUBLIC_KEYS_PATH", not_json.as_str())],
             "MACP_RECEIPT_PUBLIC_KEYS_PATH",
+            "is not JSON",
         ),
-        // A PEM carries no kid.
         (
             vec![("MACP_RECEIPT_SIGNING_KEY_PATH", pem)],
             "MACP_RECEIPT_SIGNING_KEY_PATH",
+            "no kid",
         ),
-        // The JWK's own kid disagrees with the configured one.
         (
             vec![
                 ("MACP_RECEIPT_SIGNING_KEY", jwk.as_str()),
                 ("MACP_RECEIPT_SIGNING_KID", "other"),
             ],
             "MACP_RECEIPT_SIGNING_KEY",
+            "differs from the configured kid",
         ),
-        // Published keys must be public.
         (
             vec![("MACP_RECEIPT_PUBLIC_KEYS_PATH", private_keys)],
             "MACP_RECEIPT_PUBLIC_KEYS_PATH",
+            "private member",
         ),
         // A retired key reusing the active kid with another public key.
         (
             vec![
                 ("MACP_RECEIPT_SIGNING_KEY_PATH", pem),
-                ("MACP_RECEIPT_SIGNING_KID", "example-1"),
+                ("MACP_RECEIPT_SIGNING_KID", "jwk-1"),
                 ("MACP_RECEIPT_PUBLIC_KEYS_PATH", retired.as_str()),
             ],
             "MACP_RECEIPT_PUBLIC_KEYS_PATH",
+            "names more than one key",
         ),
     ] {
         let mut env = env;
@@ -556,8 +564,8 @@ fn startup_refuses_bad_receipt_keys() {
         let (stdout, stderr, status) = run_expecting_startup_abort(&binary, &env);
         assert!(!status.success(), "{env:?} must be fatal at startup");
         assert!(
-            stderr.contains("startup aborted") && stderr.contains(var),
-            "{env:?}: stderr must name {var}; stderr: {stderr}"
+            stderr.contains("startup aborted") && stderr.contains(var) && stderr.contains(reason),
+            "{env:?}: stderr must name {var} and say {reason:?}; stderr: {stderr}"
         );
         assert!(
             ![secret, d.as_str()]
