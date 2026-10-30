@@ -122,6 +122,7 @@ impl ConformanceTarget for RuntimeTarget {
                 )
             })
             .collect();
+        pin_resolution_and_receipt(&self.rt, &session, &log).await;
         let mode_state = if session.mode_state.is_empty() {
             None
         } else {
@@ -169,6 +170,51 @@ impl ConformanceTarget for RuntimeTarget {
         }
         Ok(Ok(()))
     }
+}
+
+/// Seam S-d: a resolved standards-track session's `resolution` is its
+/// accepted Commitment's payload bytes, verbatim, and its decision receipt
+/// (RFC-MACP-0013 §13) issues with integrity `match`. A resolved extension
+/// session gets no receipt.
+async fn pin_resolution_and_receipt(
+    rt: &Runtime,
+    session: &macp_runtime::session::Session,
+    log: &[macp_runtime::log_store::LogEntry],
+) {
+    use macp_runtime::macp_core::receipt::{verify, Integrity, TrustedKeys};
+    use macp_runtime::session::SessionState;
+    if session.state != SessionState::Resolved {
+        return;
+    }
+    let sid = session.session_id.as_str();
+    let receipt = rt.decision_receipt(sid).await;
+    if !macp_runtime::receipts::RECEIPT_MODES.contains(&session.mode.as_str()) {
+        assert!(
+            matches!(
+                receipt,
+                Err(macp_runtime::error::MacpError::ReceiptUnavailable)
+            ),
+            "{sid}: an extension-mode session must get no receipt"
+        );
+        return;
+    }
+    let commitment = log
+        .iter()
+        .rev()
+        .find(|e| e.entry_kind == EntryKind::Incoming && e.message_type == "Commitment")
+        .unwrap_or_else(|| panic!("{sid}: resolved without an accepted Commitment"));
+    assert_eq!(
+        session.resolution.as_deref(),
+        Some(&commitment.raw_payload[..]),
+        "{sid}: resolution must be the Commitment payload bytes, verbatim"
+    );
+    let receipt = receipt.unwrap_or_else(|e| panic!("{sid}: no receipt: {e}"));
+    let receipt: serde_json::Value = serde_json::from_slice(&receipt).unwrap();
+    assert_eq!(
+        verify(&receipt, &TrustedKeys::new()).integrity,
+        Some(Integrity::Match),
+        "{sid}: receipt integrity"
+    );
 }
 
 async fn run_conformance_fixture(path: &Path) {

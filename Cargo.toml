@@ -83,7 +83,7 @@ reflection = ["dep:tonic-reflection"]
 
 [dependencies]
 macp-pb = { workspace = true }
-macp-core = { workspace = true }
+macp-core = { workspace = true, features = ["receipts"] }
 macp-storage = { workspace = true }
 macp-policy = { workspace = true }
 macp-modes = { workspace = true }

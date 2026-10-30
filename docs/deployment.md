@@ -280,6 +280,11 @@ Two consequences worth knowing:
 | `MACP_MAX_PAYLOAD_BYTES` | `1048576` | Maximum envelope payload size in bytes |
 | `MACP_SESSION_START_LIMIT_PER_MINUTE` | `60` | Per-sender session creation rate limit |
 | `MACP_MESSAGE_LIMIT_PER_MINUTE` | `600` | Per-sender message rate limit |
+| `MACP_RECEIPT_SIGNING_KEY_PATH` | -- | File holding the Ed25519 decision-receipt signing key: a PKCS#8 PEM or a private OKP JWK. Unset: receipts are unsigned. See [Decision receipts](#decision-receipts) |
+| `MACP_RECEIPT_SIGNING_KEY` | -- | The same key inline, for platform secret stores. Setting both forms is a startup error |
+| `MACP_RECEIPT_SIGNING_KID` | -- | The signing key's `kid`. Required for a PEM; for a JWK it must match the JWK's own `kid` when both are set |
+| `MACP_RECEIPT_PUBLIC_KEYS_PATH` | -- | JWKS of retired public keys, still published by `GetReceiptKeys` so receipts signed before a rotation keep verifying |
+| `MACP_RUNTIME_ID` | `macp-runtime` | Receipt `issuer` is `runtime:<id>`. Set a distinct, stable value per deployment |
 | `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE` | `100` | `ListSessions` page size when the request sends `page_size = 0` |
 | `MACP_LIST_SESSIONS_MAX_PAGE_SIZE` | `1000` | Hard cap a requested `ListSessions` `page_size` is clamped to |
 | `MACP_METRICS_ADDR` | -- (off) | Prometheus text endpoint bind address, e.g. `127.0.0.1:9464` (`src/main.rs:584`) |
@@ -366,6 +371,54 @@ The runtime applies a pluggable resolver chain assembled at startup:
 
 If a credential matches a resolver but fails verification (expired JWT, unknown static token), the request is rejected with `UNAUTHENTICATED` -- the chain does **not** fall through to a later resolver.
 
+## Decision receipts
+
+`GetDecisionReceipt` returns a `macp-receipt/1` decision receipt for a resolved
+standards-track session (RFC-MACP-0013 §13): the resolving Commitment, its
+`commitment_hash`, the payload bytes verbatim, and -- when a signing key is
+configured -- a detached Ed25519 JWS over the body. `GetReceiptKeys` publishes
+the JWKS a verifier checks it against. `macp verify` checks a receipt offline.
+
+**Issuance is lazy.** A receipt is built on the first `GetDecisionReceipt` for
+a session, persisted first-writer-wins, and every later call -- across
+restarts, eviction from memory and key rotation -- serves the same bytes.
+Nothing on the message path, in replay or in recovery issues a receipt, so a
+receipt problem can never fail or delay a Commitment. A session that is not
+resolved, or whose mode is an extension (`ext.*`, including
+`ext.multi_round.v1`), gets `RECEIPT_UNAVAILABLE`.
+
+**Generate a key** and keep it secret; never commit it:
+
+```bash
+openssl genpkey -algorithm ed25519 -out receipt-signing.pem
+export MACP_RECEIPT_SIGNING_KEY_PATH=$PWD/receipt-signing.pem
+export MACP_RECEIPT_SIGNING_KID=prod-2026-10
+export MACP_RUNTIME_ID=prod-eu-1
+```
+
+A malformed key, a PEM without `MACP_RECEIPT_SIGNING_KID`, a `kid` conflict, or
+a published key carrying a private member aborts startup naming the variable;
+the key text is never logged.
+
+**`MACP_RUNTIME_ID` is part of every receipt.** The `issuer` is
+`runtime:<MACP_RUNTIME_ID>`, so it must be stable across restarts and distinct
+per deployment -- two deployments sharing one `issuer` cannot be told apart by
+a verifier. Unset, every deployment shares `runtime:macp-runtime`; the runtime
+warns at startup when it signs without one. There is no hostname fallback.
+
+**Rotating a key.** Move the old public key into the JWKS at
+`MACP_RECEIPT_PUBLIC_KEYS_PATH` and configure the new private key under a new
+`kid`. Receipts already issued keep their original signature and keep verifying
+against the published old key; new sessions are signed with the new one.
+
+**Durability.** The `file` backend stores `sessions/<id>/receipt.json` with an
+atomic hard link, `rocksdb` and `redis` with a compare-and-set. On a file
+system without hard links, in memory-only mode, or on a third-party backend
+without receipt support, a receipt lives only in memory, so a restart can
+serve a different signed receipt for the same session; the runtime warns at
+startup when it signs on such a backend. Disk GC deletes a receipt with its
+session.
+
 ## Crash recovery
 
 When persistence is enabled, the runtime rebuilds all sessions from their append-only logs on startup. This process is fully automatic:
@@ -390,6 +443,8 @@ The runtime provides operational visibility through several mechanisms:
 **Mode deadlines** -- The same background task observes deadlines a mode computes, on the same interval. The one in the standards-track modes today is the handoff implicit accept (RFC-MACP-0010 §5.1(2)): an outstanding `HandoffOffer` past its `acceptance.implicit_accept_timeout_ms` is accepted by the runtime, which appends the `HandoffAccept` to accepted history and publishes it to `StreamSession` subscribers. `MACP_CLEANUP_INTERVAL_SECS` is therefore the observation-latency bound on that acceptance -- but only the latency: the recorded `timestamp_unix_ms` is the computed deadline whichever path emits it, so changing the interval never changes permanent history. The deadline is also observed on demand, ahead of the next session-scoped message, so no message is ever evaluated against a stale offer regardless of the interval. The sweep runs *after* TTL expiry within a pass: a session whose TTL and implicit-accept deadline both lapsed unobserved expires rather than accepting, matching the on-demand path's precedence.
 
 **Session eviction** -- Terminal sessions (resolved, expired, or cancelled) are evicted from memory once their age exceeds `MACP_SESSION_RETENTION_SECS` (default one hour), measured from session **start** rather than from when they became terminal. This is on by default and bounds memory usage. Their data remains on disk and can be replayed if needed. Deleting that durable data is a separate, opt-in step governed by `MACP_SESSION_DISK_RETENTION_SECS`, which defaults to `0` -- disk GC does not run at all unless you set it.
+
+**Decision receipts** -- The `/metrics` endpoint reports `macp_receipts_issued_total{signed="true|false"}` (receipts issued and persisted) and `macp_receipt_issue_failures_total` (storage failures or unbuildable receipts on `GetDecisionReceipt`).
 
 **Log compaction** -- When a session reaches a terminal state, the runtime compacts its log into a single checkpoint entry by default. This shrinks storage for completed sessions, but it discards the history that `WhatIfReplay` and `StreamSession` replay from the start need. `MACP_COMPACT_TERMINAL_LOGS` is the runtime's history-retention control (RFC-MACP-0012 §8.1 item 8). Set it to `0` to keep the full log; the runtime then appends a checkpoint instead. The self-host stack in `deploy/` sets it. Only sessions that end after the change keep their history; a log already compacted cannot be restored, and `WhatIfReplay` refuses it with `HISTORY_UNAVAILABLE`. A kept log is never trimmed by the runtime; `MACP_SESSION_DISK_RETENTION_SECS` still deletes a terminal session's durable data at its age limit.
 

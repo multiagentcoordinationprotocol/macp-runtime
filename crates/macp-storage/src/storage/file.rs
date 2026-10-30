@@ -147,12 +147,16 @@ impl StorageBackend for FileBackend {
         let tmp = self
             .session_dir(session_id)
             .join(format!("receipt.json.{}.tmp", uuid::Uuid::new_v4()));
-        {
+        let written = async {
             let mut file = tfs::File::create(&tmp).await?;
             file.write_all(receipt).await?;
-            file.sync_data().await?;
+            file.sync_data().await
         }
-        let linked = tfs::hard_link(&tmp, &path).await;
+        .await;
+        let linked = match written {
+            Ok(()) => tfs::hard_link(&tmp, &path).await,
+            Err(e) => Err(e),
+        };
         let _ = tfs::remove_file(&tmp).await;
         match linked {
             Ok(()) => {

@@ -128,7 +128,7 @@ and nothing is releasable until the RPCs are real. `/implement` may decide other
   registry tests.
 
 ### P1 — `macp_core::receipt` behind the non-default `receipts` feature
-- **Status:** TODO
+- **Status:** DONE (e73aaf6)
 - **Delivers:** a single shared implementation of JCS, the §3 projection, receipt building,
   Ed25519 JWS sign and verify, key loading and JWKS rendering, in `macp-core` behind `receipts`.
   The CLI uses it.
@@ -250,7 +250,7 @@ and nothing is releasable until the RPCs are real. `/implement` may decide other
   - `tests/vectors/receipt/SOURCE.md`.
 
 ### P2 — Receipt storage, first-writer-wins
-- **Status:** TODO
+- **Status:** DONE (59530f0; tmp cleanup on a failed write landed with P3)
 - **Delivers:** each backend persists a receipt beside its session, write-once, and deletes it
   with the session.
 - **Depends on:** —. It stores opaque bytes.

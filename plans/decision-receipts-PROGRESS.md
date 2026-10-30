@@ -66,3 +66,5 @@ Plan: `plans/decision-receipts.md`. Branch: `feat/decision-receipts`. It is reba
 ## Phase log
 - P0 DONE — 9e72405. Stubs + RECEIPT_UNAVAILABLE + SPEC_REV. Pin first set to spec main 122ad47, corrected to 6bb4426 after plan-review round 2 (lands with P1). Verify: workspace tests green; registry parity vs git-archive of 6bb4426 green.
 - Plan review: round 1 REVISE (23), round 2 REVISE (5), all applied.
+- P1 DONE — e73aaf6. macp_core::receipt (jcs/build/keys/verify) behind `receipts`; CLI re-exports. Verify (fresh Opus, batched with P2): PASS, 1 round.
+- P2 DONE — 59530f0. First-writer-wins receipt store on file/rocksdb/redis. Verify: PASS (batched). Minor: file tmp now removed on a failed write too (fixed in P3 commit).

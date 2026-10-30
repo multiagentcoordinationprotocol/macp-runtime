@@ -3,14 +3,12 @@ use macp_runtime::mode_registry::ModeRegistry;
 use macp_runtime::pb;
 use macp_runtime::policy::registry::PolicyRegistry;
 use macp_runtime::registry::SessionRegistry;
-use macp_runtime::replay::replay_session;
 use macp_runtime::runtime::Runtime;
 use macp_runtime::security::SecurityLayer;
 use macp_runtime::server::MacpServer;
 use macp_runtime::storage::{
     cleanup_temp_files, migrate_if_needed, FileBackend, MemoryBackend, StorageBackend,
 };
-use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -112,6 +110,11 @@ fn validate_env_config() -> Vec<String> {
                 ));
             }
         }
+    }
+
+    // Decision-receipt keys: a bad key is fatal, never a silently unsigned runtime.
+    if let Err(e) = macp_runtime::receipts::ReceiptConfig::from_env() {
+        errors.push(e);
     }
 
     // Validate non-negative integer environment variable
@@ -309,105 +312,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!(count, dir = %dir, "loaded governance policies from directory");
     }
 
-    let mut recovery_replay_mismatches: u64 = 0;
-    if !memory_only {
-        // Replay sessions from logs
-        let session_ids = storage.list_session_ids().await?;
-        let mut recovered = 0usize;
-        for session_id in session_ids {
-            let log_entries = match storage.load_log(&session_id).await {
-                Ok(entries) => entries,
-                Err(e) if strict_recovery => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("strict recovery: failed to load log for {session_id}: {e}"),
-                    )
-                    .into());
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        error = %e,
-                        "failed to load session log; skipping"
-                    );
-                    continue;
-                }
-            };
-            if log_entries.is_empty() {
-                continue;
-            }
-
-            match replay_session(
-                &session_id,
-                &log_entries,
-                &mode_registry,
-                Some(&policy_registry),
-            ) {
-                Ok(session) => {
-                    // D7: warn-only divergence check against the stored
-                    // snapshot BEFORE we overwrite it with the replayed state.
-                    if let Ok(Some(snapshot)) = storage.load_session(&session_id).await {
-                        recovery_replay_mismatches +=
-                            macp_runtime::replay::validate_replay_consistency(
-                                &session_id,
-                                &session,
-                                &snapshot,
-                            ) as u64;
-                    }
-                    if let Err(e) = storage.save_session(&session).await {
-                        if strict_recovery {
-                            return Err(io::Error::other(format!(
-                                "strict recovery: failed to persist recovered session {session_id}: {e}"
-                            ))
-                            .into());
-                        }
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %e,
-                            "failed to persist recovered session"
-                        );
-                    }
-
-                    log_store.create_session_log(&session_id).await;
-                    for log_entry in &log_entries {
-                        log_store.append(&session_id, log_entry.clone()).await;
-                    }
-
-                    registry.insert_recovered_session(session_id, session).await;
-                    recovered += 1;
-                }
-                Err(e) if strict_recovery => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("strict recovery: failed to replay session {session_id}: {e}"),
-                    )
-                    .into());
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        error = %e,
-                        "failed to replay session; skipping"
-                    );
-                }
-            }
+    // Validated in validate_env_config; read again for the runtime.
+    let receipt_config = macp_runtime::receipts::ReceiptConfig::from_env()?;
+    if receipt_config.signed() {
+        tracing::info!(
+            kid = receipt_config.kid().unwrap_or_default(),
+            issuer = receipt_config.issuer(),
+            "decision receipts are signed"
+        );
+        if !receipt_config.runtime_id_set() {
+            tracing::warn!(
+                "MACP_RUNTIME_ID is unset: signed receipts carry the shared issuer \
+                 runtime:macp-runtime; set a distinct MACP_RUNTIME_ID per deployment"
+            );
         }
-        if recovered > 0 {
-            tracing::info!(
-                count = recovered,
-                strict_recovery,
-                "replayed sessions from log"
+        if !storage.receipts_durable() {
+            tracing::warn!(
+                "the storage backend cannot persist decision receipts: a restart may \
+                 serve a different signed receipt for the same session"
             );
         }
     }
 
-    let runtime = Arc::new(Runtime::with_registries(
-        Arc::clone(&storage),
-        Arc::clone(&registry),
-        Arc::clone(&log_store),
-        mode_registry,
-        policy_registry,
-    ));
+    let mut recovery_replay_mismatches: u64 = 0;
+    if !memory_only {
+        let report = macp_runtime::recovery::recover_sessions(
+            storage.as_ref(),
+            &registry,
+            &log_store,
+            &mode_registry,
+            &policy_registry,
+            strict_recovery,
+        )
+        .await?;
+        recovery_replay_mismatches = report.replay_mismatches;
+    }
+
+    let runtime = Arc::new(
+        Runtime::with_registries(
+            Arc::clone(&storage),
+            Arc::clone(&registry),
+            Arc::clone(&log_store),
+            mode_registry,
+            policy_registry,
+        )
+        .with_receipt_config(receipt_config),
+    );
     if recovery_replay_mismatches > 0 {
         tracing::warn!(
             mismatches = recovery_replay_mismatches,
@@ -613,6 +563,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "macp_replay_mismatches_total {}\n",
                         rt.metrics().replay_mismatches()
                     ));
+                    rt.metrics().receipt_prometheus_lines(&mut body);
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
