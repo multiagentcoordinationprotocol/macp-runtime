@@ -64,3 +64,5 @@ Plan: `plans/decision-receipts.md`. Branch: `feat/decision-receipts`. It is reba
   - `examples/discovery/receipt_keys.json`
 
 ## Phase log
+- P0 DONE — 9e72405. Stubs + RECEIPT_UNAVAILABLE + SPEC_REV. Pin first set to spec main 122ad47, corrected to 6bb4426 after plan-review round 2 (lands with P1). Verify: workspace tests green; registry parity vs git-archive of 6bb4426 green.
+- Plan review: round 1 REVISE (23), round 2 REVISE (5), all applied.

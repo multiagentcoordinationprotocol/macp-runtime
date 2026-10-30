@@ -317,7 +317,7 @@ fn add_key(key: &str, trusted: &mut TrustedKeys) -> Result<(), String> {
     let doc: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(key).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
-    match receipt::add_jwks(&doc, trusted)? {
+    match receipt::add_jwks(&doc, trusted).map_err(|e| e.to_string())? {
         0 => Err("no Ed25519 key in it".into()),
         _ => Ok(()),
     }

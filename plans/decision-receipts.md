@@ -87,7 +87,7 @@ All phases land in macp-runtime. The plan aims at one PR: P0 is the prerequisite
 and nothing is releasable until the RPCs are real. `/implement` may decide otherwise.
 
 ### P0 — macp-proto 0.1.13 compiles; error code; spec pin
-- **Status:** TODO
+- **Status:** DONE (9e72405; pin corrected to `6bb4426` in the P1 commit)
 - **Delivers:**
   - The workspace builds and passes tests on macp-proto 0.1.13.
   - Both new RPCs return `UNIMPLEMENTED`, and `Capabilities.decision_receipt` is `None`. This is
@@ -110,7 +110,9 @@ and nothing is releasable until the RPCs are real. `/implement` may decide other
 - **Approach:**
   - Add stub methods to `impl MacpRuntimeService for MacpServer` (`server.rs:1044`), and set
     `decision_receipt: None` in `initialize` (`:1080`).
-  - Bump `SPEC_REV` to `6bb4426`, or to the current spec `main` if nothing vendored differs.
+  - Bump `SPEC_REV` to exactly `6bb4426` (proto-v0.1.13). Not spec `main`: that adds normative
+    behaviour this runtime does not implement yet (RFC-0006 HTTP binding, RFC-0001 §10), and
+    spec-drift.yml:358 requires implementing before bumping.
   - Run `git diff 8d20dc5 <rev> -- <vendored source paths>`. If any vendored file changed,
     refresh the copy byte-identically in this phase.
 - **Edge cases:** the vendored directories may have drifted between revs; the diff check above
@@ -271,9 +273,11 @@ and nothing is releasable until the RPCs are real. `/implement` may decide other
     - Compaction never touches it.
     - The startup sweep (`storage/recovery.rs:26-48`, run at `main.rs:268`) already matches
       `extension == "tmp"`, so orphaned tmps are cleaned.
-    - **Hard-link probe.** On a filesystem without hard links, a one-time probe (when the
-      backend is constructed) logs a `warn!` and makes the receipt methods return `Unsupported`.
-      Any other link error at write time is returned as `Err`.
+    - **Hard-link probe.** `FileBackend::new` is sync, so it probes with `std::fs::hard_link`
+      on two uuid-named files in `base_dir` (never under `sessions/`, which `list_session_ids`
+      would read as a session) and removes both best-effort; the result is a `hard_links: bool`
+      field. Without hard links it logs a `warn!` and the receipt methods return `Unsupported`.
+      Any other link error at write time, including `ENOENT` for a GC'd session dir, is `Err`.
   - **RocksDB.**
     - Add a `receipts` column family in `open` (`rocksdb.rs:18-30`).
     - Do get-then-put under a `tokio::Mutex<()>` held **inside** the backend, so first-writer-wins
@@ -353,9 +357,17 @@ and nothing is releasable until the RPCs are real. `/implement` may decide other
     - Lazy is exactly what req 7 describes ("issued only by a later call"), and it keeps issuance
       off the Commitment path entirely.
   - **Evicted sessions.** `Runtime::session_for_read(id)` tries the registry first, then
-    `storage.load_session` → `Session` (via `From<PersistedSession>`, which carries `resolution`
-    and `semantics_rev`, `registry.rs:45,75`). It does **not** re-insert the session into the
-    registry. The receipt RPC's access check (P4) and the issuance source both use it. The
+    `storage.load_session` (already returns `Session`; conversion at `registry.rs:125`). It does
+    **not** re-insert the session into the registry. The stored snapshot is saved on resolve
+    before compaction, so it is accurate under either compaction setting. Caveats: the resolve
+    save is best-effort (`runtime.rs:525-533`), so a failed save leaves the OPEN snapshot and the
+    call gives `RECEIPT_UNAVAILABLE` until a restart replays the log (safe direction); and
+    `MemoryBackend::load_session` is always `None`, so an evicted memory-only session is
+    `SESSION_NOT_FOUND`. Receipts for sessions that came from storage are **not** cached (keeps
+    the cache bounded by the registry).
+  - **GC vs. issuance.** `gc_disk_sessions` takes the same stripe lock around `delete_session`,
+    and issuance re-checks `load_session` under the lock before storing, so no orphan receipt
+    key survives GC. The receipt RPC's access check (P4) and the issuance source both use it. The
     general `get_session` is not changed.
   - **Serving.** Hold a fixed array of 64 `tokio::Mutex<()>`, striped by a hash of `session_id`.
     That keeps memory bounded with no pruning. Then:
@@ -367,14 +379,17 @@ and nothing is releasable until the RPCs are real. `/implement` may decide other
          served (req 6).
        - `Unsupported` → cache only.
     4. Any storage `Err` → `StorageFailed` (`INTERNAL_ERROR`). Count it, and cache nothing.
-  - **Non-durable warning.** If a signing key is configured and the receipt store reports
-    `Unsupported`, startup logs one `warn!`. This covers the memory backend, `MACP_MEMORY_ONLY`,
+  - **Non-durable warning.** A defaulted trait method `fn receipts_durable(&self) -> bool
+    { false }` (file: its `hard_links` probe result; RocksDB and Redis: `true`). If a signing key
+    is configured and the backend is not durable, startup logs one `warn!`. This covers the memory backend, `MACP_MEMORY_ONLY`,
     a hard-link-less volume, and third-party default backends. In those cases a restart can serve
     a different attested receipt.
   - **Cache bounds.** Cache entries are removed in `evict_stale_sessions` (the bytes stay in
     storage) and on GC delete.
   - **Recovery** moves into the library: `main.rs:312-402` becomes
-    `pub async fn recover_sessions(…)` in `src/recovery.rs`, and `main.rs` calls it. Recovery
+    `pub async fn recover_sessions(…) -> io::Result<RecoveryReport{recovered, replay_mismatches}>`
+    in `src/recovery.rs`, and `main.rs` calls it. The mismatch metric hand-off
+    (`main.rs:411-419`, after the `Runtime` is built) and the `memory_only` guard stay in main. Recovery
     never calls issuance, which is structural (S-a, req 7). It also lets the tests do real
     restarts.
   - **Metrics.** Per-instance `RuntimeMetrics` fields (`src/metrics.rs:45-49`, following
@@ -437,9 +452,11 @@ and nothing is releasable until the RPCs are real. `/implement` may decide other
 - **Files:** `src/server.rs`.
 - **Approach:**
   - **`get_decision_receipt`:**
-    - Run the same authentication, participant/initiator/observer and policy-engine checks as
-      `authenticate_session_access`, over `session_for_read`. Implement it as one helper, so
-      `get_session`'s logic isn't duplicated.
+    - Split `authorize_session_read(&identity, &Session) -> Result<(), Status>` (membership +
+      policy engine) out of `authenticate_session_access` (`server.rs:295-331`), which becomes
+      authenticate + `get_session_checked` + authorize, so `get_session` and `what_if_replay`
+      are unchanged. The receipt RPC is authenticate + `session_for_read` + authorize, then the
+      rate limit, in `what_if_replay`'s order (`:1978-1984`).
     - There is no extra `session_id` validation, because `get_session` has none either; an empty
       id gives `SESSION_NOT_FOUND`.
     - Then `enforce_rate_limit(&identity.sender, false)`, as `what_if_replay` does.
@@ -627,4 +644,9 @@ and nothing is releasable until the RPCs are real. `/implement` may decide other
     - the semver-breaking label and MIGRATING heading in P0;
     - lockfile churn from the `pem` feature.
   - The key-set ambiguity was escalated to the spec session.
-- **Round 2:** pending.
+- **Round 2 (fresh Opus, changed parts only): REVISE**, 5 edits, all applied: pin exactly
+  `6bb4426`; `load_session` shape and the stale-snapshot/memory-only caveats; recovery return
+  type and what stays in main; sync hard-link probe in `base_dir`; `receipts_durable()` trait
+  method, no caching of storage-loaded receipts, GC takes the stripe lock, and the
+  `authorize_session_read` split. The invalid-receipt-keys fixtures carry a top-level
+  `_invalid_because`, which the P1 harness ignores. Structure unchanged; plan accepted.

@@ -1,0 +1,12 @@
+{
+  "_invalid_because": "every key MUST carry a `kty` ($defs.jwk `required`, member kty)",
+  "keys": [
+    {
+      "crv": "Ed25519",
+      "kid": "example-1",
+      "alg": "EdDSA",
+      "use": "sig",
+      "x": "TDVzkxaSf6_Oxu7mmn5TbCkF80s8Ulh33qKQsi0gnZM"
+    }
+  ]
+}

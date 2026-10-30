@@ -31,7 +31,7 @@ bump fails without it. Patch releases have no entry.
 
 ### Fixtures and vectors
 
-- `SPEC_REV` moved to spec `122ad47`. No vendored fixture changed.
+- `SPEC_REV` moved to spec `6bb4426`. No vendored fixture changed.
 
 ## 0.10.0 — what-if replay
 
