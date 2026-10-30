@@ -5,13 +5,17 @@ use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, WriteBatchWithTrans
 use std::io;
 use std::path::Path;
 
-use super::StorageBackend;
+use super::{ReceiptWrite, StorageBackend};
 
 const CF_SESSIONS: &str = "sessions";
 const CF_LOGS: &str = "logs";
+const CF_RECEIPTS: &str = "receipts";
 
 pub struct RocksDbBackend {
     db: DB,
+    /// Serializes `store_receipt_if_absent`'s get-then-put, so first writer
+    /// wins by this backend's own guarantee (RocksDB is single-process).
+    receipt_lock: tokio::sync::Mutex<()>,
 }
 
 impl RocksDbBackend {
@@ -22,11 +26,15 @@ impl RocksDbBackend {
 
         let cf_sessions = ColumnFamilyDescriptor::new(CF_SESSIONS, Options::default());
         let cf_logs = ColumnFamilyDescriptor::new(CF_LOGS, Options::default());
+        let cf_receipts = ColumnFamilyDescriptor::new(CF_RECEIPTS, Options::default());
 
-        let db = DB::open_cf_descriptors(&opts, path, vec![cf_sessions, cf_logs])
+        let db = DB::open_cf_descriptors(&opts, path, vec![cf_sessions, cf_logs, cf_receipts])
             .map_err(io::Error::other)?;
 
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            receipt_lock: tokio::sync::Mutex::new(()),
+        })
     }
 
     /// Composite key for log entries: `{session_id}\x00{seq:08}`
@@ -138,8 +146,13 @@ impl StorageBackend for RocksDbBackend {
 
         let mut batch = WriteBatchWithTransaction::<false>::default();
 
-        // Delete session record
+        // Delete session record and its receipt
         batch.delete_cf(&sessions_cf, session_id.as_bytes());
+        let receipts_cf = self
+            .db
+            .cf_handle(CF_RECEIPTS)
+            .ok_or_else(|| io::Error::other("missing receipts CF"))?;
+        batch.delete_cf(&receipts_cf, session_id.as_bytes());
 
         // Delete all log entries with this session's prefix
         let prefix = Self::log_prefix(session_id);
@@ -153,6 +166,39 @@ impl StorageBackend for RocksDbBackend {
         }
 
         self.db.write(batch).map_err(io::Error::other)
+    }
+
+    async fn load_receipt(&self, session_id: &str) -> io::Result<Option<Vec<u8>>> {
+        let cf = self
+            .db
+            .cf_handle(CF_RECEIPTS)
+            .ok_or_else(|| io::Error::other("missing receipts CF"))?;
+        self.db
+            .get_cf(&cf, session_id.as_bytes())
+            .map_err(io::Error::other)
+    }
+
+    async fn store_receipt_if_absent(
+        &self,
+        session_id: &str,
+        receipt: &[u8],
+    ) -> io::Result<ReceiptWrite> {
+        let _guard = self.receipt_lock.lock().await;
+        if let Some(existing) = self.load_receipt(session_id).await? {
+            return Ok(ReceiptWrite::Existing(existing));
+        }
+        let cf = self
+            .db
+            .cf_handle(CF_RECEIPTS)
+            .ok_or_else(|| io::Error::other("missing receipts CF"))?;
+        self.db
+            .put_cf(&cf, session_id.as_bytes(), receipt)
+            .map_err(io::Error::other)?;
+        Ok(ReceiptWrite::Stored)
+    }
+
+    fn receipts_durable(&self) -> bool {
+        true
     }
 
     async fn list_session_ids(&self) -> io::Result<Vec<String>> {
@@ -443,5 +489,19 @@ mod tests {
         assert_eq!(entries.len(), 2, "corrupt entry skipped, valid ones kept");
         assert_eq!(entries[0].message_id, "m1");
         assert_eq!(entries[1].message_id, "m2");
+    }
+
+    #[tokio::test]
+    async fn rocksdb_receipt_first_writer_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = RocksDbBackend::open(dir.path()).unwrap();
+        crate::storage::receipt_contract::first_writer_wins(&backend, "r1").await;
+    }
+
+    #[tokio::test]
+    async fn rocksdb_receipt_one_winner_under_concurrency() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = std::sync::Arc::new(RocksDbBackend::open(dir.path()).unwrap());
+        crate::storage::receipt_contract::one_winner_under_concurrency(backend, "r1").await;
     }
 }
