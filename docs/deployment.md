@@ -387,6 +387,12 @@ receipt problem can never fail or delay a Commitment. A session that is not
 resolved, or whose mode is an extension (`ext.*`, including
 `ext.multi_round.v1`), gets `RECEIPT_UNAVAILABLE`.
 
+**A receipt discloses the whole Commitment.** It carries the payload verbatim,
+`reason` and every other field included, and anyone holding it can show it to
+a third party -- that is its purpose. `GetDecisionReceipt` is authorized like
+`GetSession` (the session's initiator and participants, and observers), so
+treat a Commitment's `reason` as something every reader may publish.
+
 **Generate a key** and keep it secret; never commit it:
 
 ```bash
@@ -396,9 +402,11 @@ export MACP_RECEIPT_SIGNING_KID=prod-2026-10
 export MACP_RUNTIME_ID=prod-eu-1
 ```
 
-A malformed key, a PEM without `MACP_RECEIPT_SIGNING_KID`, a `kid` conflict, or
-a published key carrying a private member aborts startup naming the variable;
-the key text is never logged.
+A malformed or unreadable key, both `MACP_RECEIPT_SIGNING_KEY` and
+`MACP_RECEIPT_SIGNING_KEY_PATH` set, `MACP_RECEIPT_SIGNING_KID` without a key, a
+PEM without `MACP_RECEIPT_SIGNING_KID`, a `kid` conflict, or a published key
+carrying a private member or reusing the active `kid` aborts startup naming the
+variable; the key text is never logged.
 
 **`MACP_RUNTIME_ID` is part of every receipt.** The `issuer` is
 `runtime:<MACP_RUNTIME_ID>`, so it must be stable across restarts and distinct
@@ -414,9 +422,10 @@ against the published old key; new sessions are signed with the new one.
 **Durability.** The `file` backend stores `sessions/<id>/receipt.json` with an
 atomic hard link, `rocksdb` and `redis` with a compare-and-set. On a file
 system without hard links, in memory-only mode, or on a third-party backend
-without receipt support, a receipt lives only in memory, so a restart can
-serve a different signed receipt for the same session; the runtime warns at
-startup when it signs on such a backend. Disk GC deletes a receipt with its
+without receipt support, a receipt lives only in memory: it is kept for as
+long as the session can be read, eviction included, but a restart can serve a
+different signed receipt for the same session. The runtime warns at startup
+when it signs on such a backend. Disk GC deletes a receipt with its
 session.
 
 ## Crash recovery
@@ -444,7 +453,7 @@ The runtime provides operational visibility through several mechanisms:
 
 **Session eviction** -- Terminal sessions (resolved, expired, or cancelled) are evicted from memory once their age exceeds `MACP_SESSION_RETENTION_SECS` (default one hour), measured from session **start** rather than from when they became terminal. This is on by default and bounds memory usage. Their data remains on disk and can be replayed if needed. Deleting that durable data is a separate, opt-in step governed by `MACP_SESSION_DISK_RETENTION_SECS`, which defaults to `0` -- disk GC does not run at all unless you set it.
 
-**Decision receipts** -- The `/metrics` endpoint reports `macp_receipts_issued_total{signed="true|false"}` (receipts issued and persisted) and `macp_receipt_issue_failures_total` (storage failures or unbuildable receipts on `GetDecisionReceipt`).
+**Decision receipts** -- The `/metrics` endpoint reports `macp_receipts_issued_total{signed="true|false"}` (receipts issued, persisted or, on a backend without receipt support, held in memory) and `macp_receipt_issue_failures_total` (storage failures or unbuildable receipts on `GetDecisionReceipt`).
 
 **Log compaction** -- When a session reaches a terminal state, the runtime compacts its log into a single checkpoint entry by default. This shrinks storage for completed sessions, but it discards the history that `WhatIfReplay` and `StreamSession` replay from the start need. `MACP_COMPACT_TERMINAL_LOGS` is the runtime's history-retention control (RFC-MACP-0012 §8.1 item 8). Set it to `0` to keep the full log; the runtime then appends a checkpoint instead. The self-host stack in `deploy/` sets it. Only sessions that end after the change keep their history; a log already compacted cannot be restored, and `WhatIfReplay` refuses it with `HISTORY_UNAVAILABLE`. A kept log is never trimmed by the runtime; `MACP_SESSION_DISK_RETENTION_SECS` still deletes a terminal session's durable data at its age limit.
 

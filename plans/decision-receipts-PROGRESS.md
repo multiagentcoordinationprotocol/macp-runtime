@@ -68,3 +68,5 @@ Plan: `plans/decision-receipts.md`. Branch: `feat/decision-receipts`. It is reba
 - Plan review: round 1 REVISE (23), round 2 REVISE (5), all applied.
 - P1 DONE — e73aaf6. macp_core::receipt (jcs/build/keys/verify) behind `receipts`; CLI re-exports. Verify (fresh Opus, batched with P2): PASS, 1 round.
 - P2 DONE — 59530f0. First-writer-wins receipt store on file/rocksdb/redis. Verify: PASS (batched). Minor: file tmp now removed on a failed write too (fixed in P3 commit).
+- P3 DONE — 670fa2f, plus a round-2 fix commit. Verify round 1 FAIL: (1) §13(6) on a non-durable backend, where eviction dropped the only copy of a receipt; (2) the eviction/issuance cache race; (3) passthrough, suspended and acceptance items 5/9 untested; (4) doc drift. All fixed: `unpersisted` map kept until the session is unreadable, eviction under the stripe, 3 new tests (14 in total), deployment doc corrected. Minor, accepted: a NotHashable session bumps the failure counter on every call.
+- P4 committed d43f85c (verify pending, batched with P5). Divergence: observer and rate-limit coverage is in the P5 integration tests, because SecurityLayer has no test constructors outside macp-auth.

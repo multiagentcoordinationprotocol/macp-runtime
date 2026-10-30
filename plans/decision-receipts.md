@@ -306,7 +306,7 @@ and nothing is releasable until the RPCs are real. `/implement` may decide other
   5. A backend using the defaults returns `None` and `Unsupported`.
 
 ### P3 — Runtime issuance: config, eligibility, lazy issue-and-persist
-- **Status:** TODO
+- **Status:** DONE (670fa2f + round-2 fixes: an unpersisted receipt is kept until its session is gone; eviction takes the stripe; passthrough/suspended tests)
 - **Delivers:** `Runtime::decision_receipt(session_id) -> Result<Arc<Vec<u8>>, MacpError>`,
   together with its configuration, the evicted-session read path, metrics, and a recovery loop
   extracted into the library.

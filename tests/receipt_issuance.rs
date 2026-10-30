@@ -394,6 +394,8 @@ async fn expired_cancelled_extension_and_unhashable_sessions_get_no_receipt() {
 struct FlakyReceipts {
     inner: FileBackend,
     fail: std::sync::atomic::AtomicBool,
+    /// Store receipts like a backend without receipt support.
+    unsupported: bool,
 }
 
 #[async_trait::async_trait]
@@ -447,6 +449,12 @@ impl StorageBackend for FlakyReceipts {
         if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(std::io::Error::other("disk full"));
         }
+        if self.unsupported {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "no receipts here",
+            ));
+        }
         self.inner.store_receipt_if_absent(id, receipt).await
     }
     fn receipts_durable(&self) -> bool {
@@ -460,6 +468,7 @@ async fn a_failed_receipt_write_is_internal_and_retried() {
     let flaky = Arc::new(FlakyReceipts {
         inner: FileBackend::new(dir.path().to_path_buf()).unwrap(),
         fail: std::sync::atomic::AtomicBool::new(true),
+        unsupported: false,
     });
     let rt = runtime(flaky.clone(), signed_config(7, "k1"));
     let sid = decide(&rt, false).await;
@@ -506,4 +515,92 @@ async fn replay_is_unchanged_by_issuance() {
         rt.decision_receipt(&sid).await.unwrap();
         assert_eq!(replayed().await, before);
     }
+}
+
+/// A backend that keeps sessions but not receipts: the in-memory receipt is
+/// the only copy, so eviction must not drop it while the session is readable
+/// -- a rebuild would serve a second, differently signed receipt.
+#[tokio::test]
+async fn an_unpersisted_receipt_survives_eviction() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(FlakyReceipts {
+        inner: FileBackend::new(dir.path().to_path_buf()).unwrap(),
+        fail: std::sync::atomic::AtomicBool::new(false),
+        unsupported: true,
+    });
+    let rt = runtime(backend, signed_config(7, "k1"));
+    let sid = decide(&rt, false).await;
+    let first = rt.decision_receipt(&sid).await.unwrap();
+    rt.evict_stale_sessions(0).await;
+    assert!(rt.registry.get_shared(&sid).await.is_none());
+    assert_eq!(rt.decision_receipt(&sid).await.unwrap(), first);
+    assert_eq!(rt.metrics().receipts_issued(), (1, 0));
+}
+
+#[tokio::test]
+async fn memory_backend_eviction_ends_the_session() {
+    let rt = runtime(Arc::new(MemoryBackend), signed_config(7, "k1"));
+    let sid = decide(&rt, false).await;
+    rt.decision_receipt(&sid).await.unwrap();
+    rt.evict_stale_sessions(0).await;
+    assert!(matches!(
+        rt.decision_receipt(&sid).await,
+        Err(MacpError::UnknownSession)
+    ));
+}
+
+#[tokio::test]
+async fn suspended_and_passthrough_sessions_get_no_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = runtime(file_storage(&dir), signed_config(7, "k1"));
+    let suspended = decide(&rt, true).await;
+    rt.suspend_session(&suspended, "hold", "agent://o")
+        .await
+        .unwrap();
+    assert!(matches!(
+        rt.decision_receipt(&suspended).await,
+        Err(MacpError::ReceiptUnavailable)
+    ));
+
+    // Seam S-e: a passthrough (extension) mode resolves to a JSON summary,
+    // never the Commitment bytes, and gets no receipt.
+    let mode = "ext.receipts.passthrough.v1";
+    rt.register_extension(macp_runtime::pb::ModeDescriptor {
+        mode: mode.into(),
+        mode_version: "1.0.0".into(),
+        message_types: vec!["SessionStart".into(), "Commitment".into()],
+        terminal_message_types: vec!["Commitment".into()],
+        ..Default::default()
+    })
+    .unwrap();
+    let sid = uuid::Uuid::new_v4().as_hyphenated().to_string();
+    let start = SessionStartPayload {
+        intent: "passthrough".into(),
+        participants: vec!["agent://o".into()],
+        mode_version: "1.0.0".into(),
+        configuration_version: "cfg-1".into(),
+        ttl_ms: 60_000,
+        ..Default::default()
+    }
+    .encode_to_vec();
+    for (message_type, id, payload) in [
+        ("SessionStart", "m1", start),
+        ("Commitment", "m2", commitment_wire()),
+    ] {
+        let mut env = envelope(message_type, id, &sid, "agent://o", payload);
+        env.mode = mode.into();
+        rt.process(&env, None).await.unwrap();
+    }
+    let session = rt.get_session_checked(&sid).await.unwrap();
+    assert_eq!(session.state, SessionState::Resolved);
+    let summary: serde_json::Value =
+        serde_json::from_slice(session.resolution.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        summary,
+        serde_json::json!({ "action": "decision.selected", "commitment_id": "c1" })
+    );
+    assert!(matches!(
+        rt.decision_receipt(&sid).await,
+        Err(MacpError::ReceiptUnavailable)
+    ));
 }

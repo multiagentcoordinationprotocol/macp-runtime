@@ -164,12 +164,17 @@ impl ReceiptConfig {
 }
 
 /// Per-runtime issuer state: configuration, the published JWKS text, a
-/// striped lock serializing issuance per session, and a cache of served bytes.
+/// striped lock serializing issuance per session, and the served bytes.
 pub(crate) struct ReceiptIssuer {
     pub(crate) config: ReceiptConfig,
     pub(crate) jwks_json: String,
     stripes: Vec<Mutex<()>>,
+    /// Copies of stored receipts, for sessions the registry holds; dropped
+    /// on eviction (storage still has them).
     cache: RwLock<HashMap<String, Arc<Vec<u8>>>>,
+    /// Receipts the backend could not persist: the only copy, so kept until
+    /// the session itself is gone, or a rebuild would serve a second one.
+    unpersisted: RwLock<HashMap<String, Arc<Vec<u8>>>>,
 }
 
 impl ReceiptIssuer {
@@ -180,6 +185,7 @@ impl ReceiptIssuer {
             jwks_json,
             stripes: (0..STRIPES).map(|_| Mutex::new(())).collect(),
             cache: RwLock::new(HashMap::new()),
+            unpersisted: RwLock::new(HashMap::new()),
         }
     }
 
@@ -192,24 +198,46 @@ impl ReceiptIssuer {
     }
 
     pub(crate) async fn cached(&self, session_id: &str) -> Option<Arc<Vec<u8>>> {
+        if let Some(bytes) = self.unpersisted.read().await.get(session_id) {
+            return Some(bytes.clone());
+        }
         self.cache.read().await.get(session_id).cloned()
     }
 
-    /// Cache `bytes` unless an entry exists; returns the entry kept.
+    /// Cache a stored receipt's bytes.
     pub(crate) async fn cache(&self, session_id: &str, bytes: Vec<u8>) -> Arc<Vec<u8>> {
+        let bytes = Arc::new(bytes);
         self.cache
             .write()
             .await
-            .entry(session_id.to_string())
-            .or_insert_with(|| Arc::new(bytes))
-            .clone()
+            .insert(session_id.to_string(), bytes.clone());
+        bytes
     }
 
-    pub(crate) async fn forget(&self, session_ids: &[String]) {
-        let mut cache = self.cache.write().await;
-        for id in session_ids {
-            cache.remove(id);
-        }
+    /// Keep a receipt the backend could not persist.
+    pub(crate) async fn keep_unpersisted(&self, session_id: &str, bytes: Vec<u8>) -> Arc<Vec<u8>> {
+        let bytes = Arc::new(bytes);
+        self.unpersisted
+            .write()
+            .await
+            .insert(session_id.to_string(), bytes.clone());
+        bytes
+    }
+
+    /// Whether `session_id`'s only copy is in memory.
+    pub(crate) async fn is_unpersisted(&self, session_id: &str) -> bool {
+        self.unpersisted.read().await.contains_key(session_id)
+    }
+
+    /// Drop the cached copy; the caller holds the session's stripe.
+    pub(crate) async fn evict(&self, session_id: &str) {
+        self.cache.write().await.remove(session_id);
+    }
+
+    /// Drop every copy: the session is gone. The caller holds its stripe.
+    pub(crate) async fn forget(&self, session_id: &str) {
+        self.cache.write().await.remove(session_id);
+        self.unpersisted.write().await.remove(session_id);
     }
 }
 

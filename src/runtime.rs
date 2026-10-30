@@ -1266,18 +1266,16 @@ impl Runtime {
                 "unknown receipt write outcome",
             ))),
             Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
-                // Not persistable here: the in-memory copy is the receipt.
-                let kept = self.receipts.cache(session_id, bytes.clone()).await;
-                if *kept == bytes {
-                    self.metrics.record_receipt_issued(signed);
-                    tracing::info!(
-                        session_id,
-                        signed,
-                        durable = false,
-                        "decision receipt issued"
-                    );
-                }
-                Ok(kept)
+                // Not persistable here: the in-memory copy is the receipt,
+                // kept for as long as the session is readable.
+                self.metrics.record_receipt_issued(signed);
+                tracing::info!(
+                    session_id,
+                    signed,
+                    durable = false,
+                    "decision receipt issued"
+                );
+                Ok(self.receipts.keep_unpersisted(session_id, bytes).await)
             }
             Err(e) => Err(failed(e)),
         }
@@ -1912,7 +1910,7 @@ impl Runtime {
                     }
                     self.log_store.remove_session_log(&id).await;
                     let _ = self.stream_bus.remove_if_unused(&id);
-                    self.receipts.forget(std::slice::from_ref(&id)).await;
+                    self.receipts.forget(&id).await;
                     removed += 1;
                 }
                 Err(e) => {
@@ -1963,8 +1961,18 @@ impl Runtime {
                 guard.remove(id);
             }
         }
-        // The stored receipt stays; only the in-memory copy goes.
-        self.receipts.forget(&evict_ids).await;
+        for id in &evict_ids {
+            // Under the stripe, so an issuance that saw the session in memory
+            // has cached before this runs. A stored receipt stays in storage;
+            // an unpersisted one stays while the session can still be read.
+            let _issuing = self.receipts.stripe(id).lock().await;
+            self.receipts.evict(id).await;
+            if self.receipts.is_unpersisted(id).await
+                && !matches!(self.storage.load_session(id).await, Ok(Some(_)))
+            {
+                self.receipts.forget(id).await;
+            }
+        }
         for id in &evict_ids {
             self.log_store.remove_session_log(id).await;
             // Left in place if a subscriber is still attached; retried on the
