@@ -656,7 +656,7 @@ async fn path_like_session_ids_never_reach_storage() {
     copy_dir(&stored, &dir.path().join("sessions").join(&other));
     assert!(matches!(
         rt.decision_receipt(&other).await,
-        Err(MacpError::StorageFailed)
+        Err(MacpError::UnknownSession)
     ));
 
     // The real id still works, and the receipt names it.

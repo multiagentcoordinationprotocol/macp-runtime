@@ -36,10 +36,16 @@ impl FileBackend {
         self.session_dir(session_id).join("receipt.json")
     }
 
-    /// Refuse an id that is not one plain path component: it would resolve
-    /// outside `sessions/` (an absolute path replaces the base directory).
+    /// Refuse an id that could resolve outside `sessions/` (an absolute path
+    /// replaces the base directory). Narrower than
+    /// [`super::is_storage_safe_session_id`], so a legacy directory name with
+    /// `\` or over 255 bytes still recovers.
     fn check(session_id: &str) -> io::Result<()> {
-        if super::is_storage_safe_session_id(session_id) {
+        if !session_id.is_empty()
+            && session_id != "."
+            && session_id != ".."
+            && !session_id.contains(['/', '\0'])
+        {
             Ok(())
         } else {
             Err(io::Error::new(
@@ -573,16 +579,7 @@ mod tests {
         let backend = FileBackend::new(dir.path().to_path_buf()).unwrap();
         let outside = tempfile::tempdir().unwrap();
         let absolute = outside.path().to_string_lossy().to_string();
-        for id in [
-            "",
-            ".",
-            "..",
-            "../x",
-            "a/b",
-            "a\\b",
-            "a\0b",
-            absolute.as_str(),
-        ] {
+        for id in ["", ".", "..", "../x", "a/b", "a\0b", absolute.as_str()] {
             let refused = |r: io::Result<()>| {
                 assert_eq!(r.unwrap_err().kind(), io::ErrorKind::InvalidInput, "{id:?}")
             };
@@ -594,6 +591,19 @@ mod tests {
             refused(backend.create_session_storage(id).await);
         }
         assert!(outside.path().exists(), "delete_session must not escape");
+    }
+
+    /// Ids admitted before `SessionStart` validated them may hold `\`; they
+    /// cannot escape on Unix and must still recover.
+    #[tokio::test]
+    async fn legacy_backslash_ids_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileBackend::new(dir.path().to_path_buf()).unwrap();
+        let id = "legacy\\id";
+        backend.create_session_storage(id).await.unwrap();
+        assert_eq!(backend.list_session_ids().await.unwrap(), [id]);
+        assert!(backend.load_log(id).await.unwrap().is_empty());
+        backend.delete_session(id).await.unwrap();
     }
 
     #[tokio::test]

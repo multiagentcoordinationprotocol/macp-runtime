@@ -958,4 +958,4 @@ Analysis: fresh Opus, checked against RFC-MACP-0013 1.4.2-draft §13 (spec 50ae6
   - The ids are UUID v4/v7 or 22+ char tokens, so they cannot be enumerated.
   - The authorization rule itself is identical to GetSession's.
   - Reopen if session ids ever become guessable.
-- **Same review, fixed:** the path traversal. A wire id now reaches storage only as one plain path component (`macp_storage::storage::is_storage_safe_session_id`), checked both in `Runtime::session_for_read` and in every keyed `FileBackend` operation. A stored snapshot whose id differs from the request is refused, and the receipt is built from `session.session_id`.
+- **Same review, fixed:** the path traversal. A wire id now reaches storage only as one plain path component (`macp_storage::storage::is_storage_safe_session_id`), checked both in `Runtime::session_for_read` and in every keyed `FileBackend` operation. A stored snapshot whose id differs from the request (a file-system alias) is unknown, and the receipt is built from `session.session_id`. FileBackend's own check is narrower (empty, `.`, `..`, `/`, NUL), so legacy ids holding `\` still recover.

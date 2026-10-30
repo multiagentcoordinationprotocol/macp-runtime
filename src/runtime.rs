@@ -1198,10 +1198,8 @@ impl Runtime {
         }
         match self.storage.load_session(session_id).await {
             Ok(Some(session)) if session.session_id == session_id => Ok(session),
-            Ok(Some(_)) => {
-                tracing::warn!(session_id, "stored session names another session id");
-                Err(MacpError::StorageFailed)
-            }
+            // A file-system alias (e.g. case folding) of another session.
+            Ok(Some(_)) => Err(MacpError::UnknownSession),
             Ok(None) => Err(MacpError::UnknownSession),
             Err(e) => {
                 tracing::warn!(session_id, error = %e, "cannot load an evicted session");

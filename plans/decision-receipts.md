@@ -443,7 +443,7 @@ and nothing is releasable until the RPCs are real. `/implement` may decide other
   locally only.
 
 ### P4 — gRPC surface
-- **Status:** TODO
+- **Status:** DONE (d43f85c + 056dee1: path-like ids never reach storage. Divergence: observer/rate-limit coverage lives in the P5 integration tests)
 - **Delivers:** real `GetDecisionReceipt` and `GetReceiptKeys`, plus
   `Initialize.capabilities.decision_receipt = {get_decision_receipt: true, signed: <active key
   configured>}`. `GetManifest` is unchanged (`AgentManifest` has no capabilities,
@@ -482,7 +482,7 @@ and nothing is releasable until the RPCs are real. `/implement` may decide other
   8. An evicted session's receipt is served (gRPC-level twin of P3 acceptance 7).
 
 ### P5 — `macp verify --keys-from`, gRPC integration tests, docs
-- **Status:** TODO
+- **Status:** DONE (799fed9; signing requires MACP_RUNTIME_ID per /reconcile)
 - **Delivers:**
   - The CLI fetches the JWKS over gRPC.
   - The brief's criteria are proven at the real gRPC boundary.

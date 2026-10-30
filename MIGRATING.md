@@ -60,11 +60,12 @@ bump fails without it. Patch releases have no entry.
   startup when it signs. To persist them, implement both methods first writer
   wins, never replace a stored receipt, and delete it in `delete_session`.
   The outcome type `ReceiptWrite` is `#[non_exhaustive]`.
-- New `is_storage_safe_session_id(&str)`. `FileBackend` now refuses, with
-  `InvalidInput`, any id that is not one plain path component (empty, `.`,
-  `..`, or containing `/`, `\` or NUL). Every id `SessionStart` accepts
-  passes. A third-party backend that keys paths by session id should apply
-  the same check.
+- New `is_storage_safe_session_id(&str)`: whether a wire id may key storage
+  (one plain path component, at most 255 bytes, no `\`). The runtime checks it
+  before any storage read keyed by a request. `FileBackend` itself now
+  refuses, with `InvalidInput`, an id that could leave `sessions/`: empty,
+  `.`, `..`, or containing `/` or NUL. A third-party backend that keys paths
+  by session id should refuse the same.
 
 ### `macp-runtime` (as a library)
 
