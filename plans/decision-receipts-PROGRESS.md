@@ -76,3 +76,4 @@ Plan: `plans/decision-receipts.md`. Branch: `feat/decision-receipts`. It is reba
 
 - pushed feat/decision-receipts 26251f7
 - PR #264 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/264 (closed #261 as superseded)
+- merged #264

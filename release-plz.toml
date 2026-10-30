@@ -66,6 +66,12 @@ version_group = "macp"
 [[package]]
 name = "macp-cli"
 version_group = "macp"
+# No semver baseline either, for the same reason as macp-runtime below: the
+# published macp-cli depends on macp-runtime, whose build.rs regenerates the
+# service trait from the newest macp-proto 0.1.x. macp-proto 0.1.13 added the
+# receipt RPCs, so building the 0.10.1 baseline fails (E0046), and release-plz
+# cannot compute the 0.11.0 release PR. MIGRATING.md lists macp-cli's breaks.
+semver_check = false
 [[package]]
 name = "macp-runtime"
 version_group = "macp"
