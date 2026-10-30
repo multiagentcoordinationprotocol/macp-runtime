@@ -284,7 +284,7 @@ Two consequences worth knowing:
 | `MACP_RECEIPT_SIGNING_KEY` | -- | The same key inline, for platform secret stores. Setting both forms is a startup error |
 | `MACP_RECEIPT_SIGNING_KID` | -- | The signing key's `kid`. Required for a PEM; for a JWK it must match the JWK's own `kid` when both are set |
 | `MACP_RECEIPT_PUBLIC_KEYS_PATH` | -- | JWKS of retired public keys, still published by `GetReceiptKeys` so receipts signed before a rotation keep verifying |
-| `MACP_RUNTIME_ID` | `macp-runtime` | Receipt `issuer` is `runtime:<id>`. Set a distinct, stable value per deployment |
+| `MACP_RUNTIME_ID` | `macp-runtime` (unsigned only) | Receipt `issuer` is `runtime:<id>`. Required when a signing key is set; use a distinct, stable value per deployment |
 | `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE` | `100` | `ListSessions` page size when the request sends `page_size = 0` |
 | `MACP_LIST_SESSIONS_MAX_PAGE_SIZE` | `1000` | Hard cap a requested `ListSessions` `page_size` is clamped to |
 | `MACP_METRICS_ADDR` | -- (off) | Prometheus text endpoint bind address, e.g. `127.0.0.1:9464` (`src/main.rs:584`) |
@@ -404,15 +404,17 @@ export MACP_RUNTIME_ID=prod-eu-1
 
 A malformed or unreadable key, both `MACP_RECEIPT_SIGNING_KEY` and
 `MACP_RECEIPT_SIGNING_KEY_PATH` set, `MACP_RECEIPT_SIGNING_KID` without a key, a
-PEM without `MACP_RECEIPT_SIGNING_KID`, a `kid` conflict, or a published key
+PEM without `MACP_RECEIPT_SIGNING_KID`, a signing key without `MACP_RUNTIME_ID`,
+a `kid` conflict, or a published key
 carrying a private member or reusing the active `kid` aborts startup naming the
 variable; the key text is never logged.
 
 **`MACP_RUNTIME_ID` is part of every receipt.** The `issuer` is
 `runtime:<MACP_RUNTIME_ID>`, so it must be stable across restarts and distinct
 per deployment -- two deployments sharing one `issuer` cannot be told apart by
-a verifier. Unset, every deployment shares `runtime:macp-runtime`; the runtime
-warns at startup when it signs without one. There is no hostname fallback.
+a verifier. A signing key without `MACP_RUNTIME_ID` aborts startup, so no
+signed receipt carries a shared default. Unsigned receipts fall back to
+`runtime:macp-runtime`. There is no hostname fallback.
 
 **Rotating a key.** Move the old public key into the JWKS at
 `MACP_RECEIPT_PUBLIC_KEYS_PATH` and configure the new private key under a new

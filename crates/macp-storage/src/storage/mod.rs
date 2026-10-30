@@ -16,9 +16,22 @@ pub use redis_backend::RedisBackend;
 pub mod compaction;
 
 pub use file::FileBackend;
+
 pub use memory::MemoryBackend;
 pub use migration::migrate_if_needed;
 pub use recovery::{cleanup_temp_files, recover_session};
+
+/// Whether `session_id` names exactly one plain path component, so a backend
+/// may key files or directories by it: non-empty, at most 255 bytes, no `/`,
+/// `\` or NUL, and not `.` or `..`. Every id `SessionStart` accepts passes;
+/// a read keyed by an id from the wire must check it before touching storage.
+pub fn is_storage_safe_session_id(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && session_id.len() <= 255
+        && session_id != "."
+        && session_id != ".."
+        && !session_id.contains(['/', '\\', '\0'])
+}
 
 use crate::log_store::LogEntry;
 use macp_core::session::Session;

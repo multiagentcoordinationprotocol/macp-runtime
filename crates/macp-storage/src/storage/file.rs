@@ -36,6 +36,19 @@ impl FileBackend {
         self.session_dir(session_id).join("receipt.json")
     }
 
+    /// Refuse an id that is not one plain path component: it would resolve
+    /// outside `sessions/` (an absolute path replaces the base directory).
+    fn check(session_id: &str) -> io::Result<()> {
+        if super::is_storage_safe_session_id(session_id) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "session id is not a single path component",
+            ))
+        }
+    }
+
     fn session_dir(&self, session_id: &str) -> PathBuf {
         self.base_dir.join("sessions").join(session_id)
     }
@@ -84,10 +97,12 @@ fn probe_hard_links(base_dir: &Path) -> bool {
 #[async_trait::async_trait]
 impl StorageBackend for FileBackend {
     async fn create_session_storage(&self, session_id: &str) -> io::Result<()> {
+        Self::check(session_id)?;
         tfs::create_dir_all(self.session_dir(session_id)).await
     }
 
     async fn save_session(&self, session: &Session) -> io::Result<()> {
+        Self::check(&session.session_id)?;
         let persisted = PersistedSession::from(session);
         let bytes = serde_json::to_vec_pretty(&persisted)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -95,6 +110,7 @@ impl StorageBackend for FileBackend {
     }
 
     async fn load_session(&self, session_id: &str) -> io::Result<Option<Session>> {
+        Self::check(session_id)?;
         let path = self.session_file(session_id);
         if tfs::metadata(&path).await.is_err() {
             return Ok(None);
@@ -121,6 +137,7 @@ impl StorageBackend for FileBackend {
     }
 
     async fn load_receipt(&self, session_id: &str) -> io::Result<Option<Vec<u8>>> {
+        Self::check(session_id)?;
         match tfs::read(self.receipt_file(session_id)).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -137,6 +154,7 @@ impl StorageBackend for FileBackend {
         session_id: &str,
         receipt: &[u8],
     ) -> io::Result<ReceiptWrite> {
+        Self::check(session_id)?;
         if !self.hard_links {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -177,6 +195,7 @@ impl StorageBackend for FileBackend {
     }
 
     async fn delete_session(&self, session_id: &str) -> io::Result<()> {
+        Self::check(session_id)?;
         let dir = self.session_dir(session_id);
         if tfs::metadata(&dir).await.is_ok() {
             tfs::remove_dir_all(&dir).await?;
@@ -201,6 +220,7 @@ impl StorageBackend for FileBackend {
     }
 
     async fn append_log_entry(&self, session_id: &str, entry: &LogEntry) -> io::Result<()> {
+        Self::check(session_id)?;
         let path = self.log_file(session_id);
         let mut line = serde_json::to_string(entry)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -217,6 +237,7 @@ impl StorageBackend for FileBackend {
     }
 
     async fn load_log(&self, session_id: &str) -> io::Result<Vec<LogEntry>> {
+        Self::check(session_id)?;
         let path = self.log_file(session_id);
         if tfs::metadata(&path).await.is_err() {
             return Ok(vec![]);
@@ -242,6 +263,7 @@ impl StorageBackend for FileBackend {
     }
 
     async fn replace_log(&self, session_id: &str, entries: &[LogEntry]) -> io::Result<()> {
+        Self::check(session_id)?;
         let path = self.log_file(session_id);
         let mut data = String::new();
         for entry in entries {
@@ -543,6 +565,35 @@ mod tests {
 
         let err = backend.load_session("s1").await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn path_like_session_ids_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileBackend::new(dir.path().to_path_buf()).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let absolute = outside.path().to_string_lossy().to_string();
+        for id in [
+            "",
+            ".",
+            "..",
+            "../x",
+            "a/b",
+            "a\\b",
+            "a\0b",
+            absolute.as_str(),
+        ] {
+            let refused = |r: io::Result<()>| {
+                assert_eq!(r.unwrap_err().kind(), io::ErrorKind::InvalidInput, "{id:?}")
+            };
+            refused(backend.load_session(id).await.map(|_| ()));
+            refused(backend.load_receipt(id).await.map(|_| ()));
+            refused(backend.store_receipt_if_absent(id, b"{}").await.map(|_| ()));
+            refused(backend.load_log(id).await.map(|_| ()));
+            refused(backend.delete_session(id).await);
+            refused(backend.create_session_storage(id).await);
+        }
+        assert!(outside.path().exists(), "delete_session must not escape");
     }
 
     #[tokio::test]

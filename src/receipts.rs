@@ -14,8 +14,10 @@ use macp_core::session::{Session, SessionState};
 use macp_core::MacpError;
 use tokio::sync::{Mutex, RwLock};
 
-/// The `issuer` when `MACP_RUNTIME_ID` is unset: stable across restarts
-/// (§13 item 9), but shared by every deployment that leaves it unset.
+/// The `issuer` of unsigned receipts when `MACP_RUNTIME_ID` is unset: stable
+/// across restarts (§13 item 9). Frozen once released -- changing it would
+/// change the issuer of every deployment relying on it. Signing requires
+/// `MACP_RUNTIME_ID`, so no attested receipt carries this default.
 pub const DEFAULT_RUNTIME_ID: &str = "macp-runtime";
 
 /// The modes whose resolution is the resolving Commitment's payload bytes,
@@ -130,7 +132,15 @@ impl ReceiptConfig {
             }
             None => KeySet::new(),
         };
-        Self::new(signer, retired, var("MACP_RUNTIME_ID").as_deref())
+        let runtime_id = var("MACP_RUNTIME_ID");
+        if signer.is_some() && runtime_id.is_none() {
+            return Err(
+                "MACP_RUNTIME_ID must be set when receipts are signed: it is the issuer \
+                 (runtime:<id>) of every signed receipt, stable and distinct per deployment"
+                    .into(),
+            );
+        }
+        Self::new(signer, retired, runtime_id.as_deref())
     }
 
     /// Whether receipts are signed.

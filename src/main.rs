@@ -320,12 +320,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             issuer = receipt_config.issuer(),
             "decision receipts are signed"
         );
-        if !receipt_config.runtime_id_set() {
-            tracing::warn!(
-                "MACP_RUNTIME_ID is unset: signed receipts carry the shared issuer \
-                 runtime:macp-runtime; set a distinct MACP_RUNTIME_ID per deployment"
-            );
-        }
         if !storage.receipts_durable() {
             tracing::warn!(
                 "the storage backend cannot persist decision receipts: a restart may \

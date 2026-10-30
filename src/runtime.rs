@@ -1191,8 +1191,17 @@ impl Runtime {
         if let Some(session) = self.get_session_checked(session_id).await {
             return Ok(session);
         }
+        // The id comes from the wire: storage keys paths by it, so anything
+        // but one plain path component (`../x`, an absolute path) is unknown.
+        if !crate::storage::is_storage_safe_session_id(session_id) {
+            return Err(MacpError::UnknownSession);
+        }
         match self.storage.load_session(session_id).await {
-            Ok(Some(session)) => Ok(session),
+            Ok(Some(session)) if session.session_id == session_id => Ok(session),
+            Ok(Some(_)) => {
+                tracing::warn!(session_id, "stored session names another session id");
+                Err(MacpError::StorageFailed)
+            }
             Ok(None) => Err(MacpError::UnknownSession),
             Err(e) => {
                 tracing::warn!(session_id, error = %e, "cannot load an evicted session");
@@ -1242,9 +1251,14 @@ impl Runtime {
         let wire = crate::receipts::receipt_source(&session)?;
         let issued_at = crate::receipts::rfc3339_seconds(self.now_ms());
         let config = &self.receipts.config;
-        let inputs =
-            ReceiptInputs::new(session_id, &session.mode, wire, config.issuer(), &issued_at)
-                .semantics_rev(crate::receipts::IMPLEMENTATION, session.semantics_rev);
+        let inputs = ReceiptInputs::new(
+            &session.session_id,
+            &session.mode,
+            wire,
+            config.issuer(),
+            &issued_at,
+        )
+        .semantics_rev(crate::receipts::IMPLEMENTATION, session.semantics_rev);
         let bytes = build(&inputs, config.signer()).map_err(|e| {
             tracing::warn!(session_id, error = %e, "decision receipt: not issuable");
             self.metrics.record_receipt_failure();

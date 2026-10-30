@@ -1140,3 +1140,67 @@
   the `!` marker governs the crate's Rust API surface, not a wire payload's corrected
   computed value — no public contract broke. Re-check this call if a `log.jsonl`-scraping
   consumer is ever reported.
+
+## Decision receipts: issuer is runtime:<MACP_RUNTIME_ID>
+- **Plan:** `plans/decision-receipts.md` (open question 1; P3)
+- **Assumed:** RFC-MACP-0013 §13 item 9 requires a stable issuer identifier and does not prescribe its form.
+- **Chose:** `runtime:<MACP_RUNTIME_ID>`, defaulting to `runtime:macp-runtime`. The runtime warns at startup when it signs without the variable set.
+- **Alternatives:** The hostname, rejected because it is unstable. A generated id persisted in the data dir, rejected because memory-only mode has no data dir to keep it in.
+- **Blast radius if wrong:** Low. It affects only receipts not yet issued; already-issued receipts are stored and served byte-identically.
+- **Status:** CHANGED (2026-10-30) -- signing now requires MACP_RUNTIME_ID; see DECISIONS.md. Blast radius was understated: a default issuer on signed receipts is frozen at release.
+
+## Decision receipts: extension modes get RECEIPT_UNAVAILABLE
+- **Plan:** `plans/decision-receipts.md` (open question 2; P3)
+- **Assumed:** The brief and S-e scope receipts to the five standards-track modes, under the spec's catch-all for modes whose resolution is not a CommitmentPayload.
+- **Chose:** Every `ext.*` session gets `RECEIPT_UNAVAILABLE`, including multi_round, even when a CommitmentPayload resolved it.
+- **Alternatives:** Issue for an ext session whose last Incoming Commitment hashes. That would need a verbatim-bytes field, because passthrough's `resolution` is a JSON summary.
+- **Blast radius if wrong:** Low and additive. Lifting the restriction later issues receipts that were previously refused.
+- **Status:** UNCONFIRMED (deferred 2026-10-30) -- settles when a consumer asks for receipts on an ext.* session; see DECISIONS.md.
+
+## Decision receipts: no unattested-to-attested replacement
+- **Plan:** `plans/decision-receipts.md` (open question 3)
+- **Assumed:** §13 makes the replacement a MAY.
+- **Chose:** A receipt issued unsigned stays unsigned after a signing key is configured; first writer wins, always.
+- **Alternatives:** Replace an unattested receipt once a key exists.
+- **Blast radius if wrong:** Low. Allowing replacement later would be a store-side change only.
+- **Status:** CONFIRMED (2026-10-30)
+
+## Decision receipts: {"keys":[]} only when there are no keys at all
+- **Plan:** `plans/decision-receipts.md` (open question 4; P3/P4)
+- **Assumed:** Read literally, req 8 says an unsigned runtime publishes `{"keys":[]}`. Its key-retention rule says retired keys stay published so that old receipts keep verifying.
+- **Chose:** Retired keys from `MACP_RECEIPT_PUBLIC_KEYS_PATH` are published even when no signer is active. This was raised with the spec session, and no answer came back before P4.
+- **Alternatives:** Publish `{"keys":[]}` whenever unsigned, which breaks verification of receipts signed earlier.
+- **Blast radius if wrong:** Low. It is a one-line change in `ReceiptConfig::new`.
+- **Status:** CONFIRMED (2026-10-30) -- settled by spec #235 (50ae62e, RFC-MACP-0013 1.4.2-draft req 8).
+
+## Decision receipts: commitment_wire_b64 padded, issued_at whole seconds
+- **Plan:** `plans/decision-receipts.md` (open question 5; P1/P3)
+- **Assumed:** The spec's generator (`scripts/gen-receipt-vectors.py`) uses standard padded base64 and whole-second UTC.
+- **Chose:** Match the generator, pinned by `receipt_010_wire_match`.
+- **Alternatives:** Unpadded base64 or millisecond timestamps.
+- **Blast radius if wrong:** Medium. Issued receipts are immutable, so a format change only applies to new ones. Verifiers accept both, since the hash covers the commitment.
+- **Status:** CONFIRMED (2026-10-30) -- forced, not medium: the reference verifier decodes with validate=True and rejects unpadded input.
+
+## Decision receipts: inline MACP_RECEIPT_SIGNING_KEY
+- **Plan:** `plans/decision-receipts.md` (open question 6; P3)
+- **Assumed:** Platform secret stores (Railway, Doppler) inject values, not files.
+- **Chose:** Added `MACP_RECEIPT_SIGNING_KEY` (inline) next to the brief's `_PATH`. Setting both is a startup error.
+- **Alternatives:** Path only, which forces a file mount on PaaS.
+- **Blast radius if wrong:** Low. It is an additive env var.
+- **Status:** CONFIRMED (2026-10-30)
+
+## Decision receipts: lazy-only issuance
+- **Plan:** `plans/decision-receipts.md` (open question 7; P3)
+- **Assumed:** The brief says "issue at commit". S-a forbids issuance in step or replay, and a receipt failure must never fail a Commitment.
+- **Chose:** Issue on the first `GetDecisionReceipt`, persisted first-writer-wins, never on the message path.
+- **Alternatives:** Issue right after commit. That adds a write to every Commitment and needs a recovery story for a crash between commit and issuance.
+- **Blast radius if wrong:** Low. Eager issuance could be added later as a background sweep without changing the bytes served.
+- **Status:** CONFIRMED (2026-10-30)
+
+## Decision receipts: version 0.11.0
+- **Plan:** `plans/decision-receipts.md` (open question 8)
+- **Assumed:** macp-proto 0.1.13 adds `Capabilities.decision_receipt`, a field on a constructible prost struct, which is a semver break.
+- **Chose:** 0.11.0 with the `semver-breaking` label and a MIGRATING entry.
+- **Alternatives:** None that avoid the break.
+- **Blast radius if wrong:** None. The bump is forced.
+- **Status:** CONFIRMED (2026-10-30)

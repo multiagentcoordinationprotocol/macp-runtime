@@ -604,3 +604,62 @@ async fn suspended_and_passthrough_sessions_get_no_receipt() {
         Err(MacpError::ReceiptUnavailable)
     ));
 }
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+    }
+}
+
+/// A wire id is a storage key only when it is one plain path component: a
+/// planted `session.json` outside the data dir, or an alias of a real session,
+/// must never be signed.
+#[tokio::test]
+async fn path_like_session_ids_never_reach_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let rt = runtime(file_storage(&dir), signed_config(7, "k1"));
+    let sid = decide(&rt, false).await;
+    rt.evict_stale_sessions(0).await;
+    let stored = dir.path().join("sessions").join(&sid);
+    let planted = outside.path().join(&sid);
+    copy_dir(&stored, &planted);
+
+    let relative = format!(
+        "{}/{}",
+        "../".repeat(dir.path().components().count() + 1),
+        planted.strip_prefix("/").unwrap().display()
+    );
+    for id in [
+        planted.to_string_lossy().to_string(),
+        relative,
+        format!("./{sid}"),
+        format!("../sessions/{sid}"),
+        "..".to_string(),
+        String::new(),
+    ] {
+        assert!(
+            matches!(
+                rt.decision_receipt(&id).await,
+                Err(MacpError::UnknownSession)
+            ),
+            "{id:?} must be unknown"
+        );
+    }
+    assert!(!planted.join("receipt.json").exists());
+    assert!(!stored.join("receipt.json").exists());
+
+    // A stored snapshot naming another session is not served under this id.
+    let other = uuid::Uuid::new_v4().as_hyphenated().to_string();
+    copy_dir(&stored, &dir.path().join("sessions").join(&other));
+    assert!(matches!(
+        rt.decision_receipt(&other).await,
+        Err(MacpError::StorageFailed)
+    ));
+
+    // The real id still works, and the receipt names it.
+    let receipt = json(&rt.decision_receipt(&sid).await.unwrap());
+    assert_eq!(receipt["session_id"], sid);
+}

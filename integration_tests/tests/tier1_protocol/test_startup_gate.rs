@@ -543,6 +543,12 @@ fn startup_refuses_bad_receipt_keys() {
             "MACP_RECEIPT_SIGNING_KEY",
             "differs from the configured kid",
         ),
+        // A signed receipt's issuer is never a shared default.
+        (
+            vec![("MACP_RECEIPT_SIGNING_KEY", jwk.as_str())],
+            "MACP_RUNTIME_ID",
+            "must be set when receipts are signed",
+        ),
         (
             vec![("MACP_RECEIPT_PUBLIC_KEYS_PATH", private_keys)],
             "MACP_RECEIPT_PUBLIC_KEYS_PATH",
@@ -554,6 +560,7 @@ fn startup_refuses_bad_receipt_keys() {
                 ("MACP_RECEIPT_SIGNING_KEY_PATH", pem),
                 ("MACP_RECEIPT_SIGNING_KID", "jwk-1"),
                 ("MACP_RECEIPT_PUBLIC_KEYS_PATH", retired.as_str()),
+                ("MACP_RUNTIME_ID", "it"),
             ],
             "MACP_RECEIPT_PUBLIC_KEYS_PATH",
             "names more than one key",

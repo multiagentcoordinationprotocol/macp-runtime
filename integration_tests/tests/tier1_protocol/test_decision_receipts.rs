@@ -239,6 +239,12 @@ async fn signed_receipts_attest_and_are_byte_stable() {
         (err.code(), error_code(&err)),
         (tonic::Code::NotFound, "SESSION_NOT_FOUND")
     );
+    // A path-like id never reaches storage.
+    let alias = format!("{data_dir}/sessions/{sid}");
+    for id in [alias.as_str(), &format!("../sessions/{sid}")] {
+        let err = receipt(&mut rt.client, BUYER, id).await.unwrap_err();
+        assert_eq!(error_code(&err), "SESSION_NOT_FOUND", "{id}");
+    }
     let open = open_session(&mut rt.client).await;
     let err = receipt(&mut rt.client, BUYER, &open).await.unwrap_err();
     assert_eq!(
@@ -312,7 +318,11 @@ async fn rotated_keys_keep_old_receipts_verifiable() {
     // Key A issues.
     let mut rt = start(
         &data_dir,
-        &[(pem[0].0, pem[0].1.as_str()), (pem[1].0, pem[1].1.as_str())],
+        &[
+            (pem[0].0, pem[0].1.as_str()),
+            (pem[1].0, pem[1].1.as_str()),
+            ("MACP_RUNTIME_ID", "it-rotated"),
+        ],
     )
     .await;
     let old_sid = resolved_session(&mut rt.client).await;
@@ -337,6 +347,7 @@ async fn rotated_keys_keep_old_receipts_verifiable() {
         &[
             ("MACP_RECEIPT_SIGNING_KEY", key_b.as_str()),
             ("MACP_RECEIPT_PUBLIC_KEYS_PATH", key_a_path.as_str()),
+            ("MACP_RUNTIME_ID", "it-rotated"),
         ],
     )
     .await;
@@ -362,7 +373,14 @@ async fn rotated_keys_keep_old_receipts_verifiable() {
     rt.manager.stop();
 
     // Key B alone: --keys-from no longer trusts A; --key merges it back in.
-    let rt = start(&data_dir, &[("MACP_RECEIPT_SIGNING_KEY", key_b.as_str())]).await;
+    let rt = start(
+        &data_dir,
+        &[
+            ("MACP_RECEIPT_SIGNING_KEY", key_b.as_str()),
+            ("MACP_RUNTIME_ID", "it-rotated"),
+        ],
+    )
+    .await;
     let endpoint = rt.manager.endpoint.clone();
     let (code, stdout, _) = verify(data.path(), &old, &["--keys-from", &endpoint]);
     assert_eq!(code, 1, "{stdout}");

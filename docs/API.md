@@ -378,7 +378,7 @@ Advertised as `decision_receipt.get_decision_receipt`, with `decision_receipt.si
 
 ### GetReceiptKeys
 
-Returns the JWKS (`jwks_json`) a verifier checks receipt signatures against: the active public key first, then retired keys from `MACP_RECEIPT_PUBLIC_KEYS_PATH`. Never a private member. `{"keys":[]}` when receipts are unsigned. It needs no credentials.
+Returns the JWKS (`jwks_json`) a verifier checks receipt signatures against: the active public key first, then retired keys from `MACP_RECEIPT_PUBLIC_KEYS_PATH`. Never a private member. Retired keys stay published while receipts are unsigned; the set is `{"keys":[]}` only when there are no keys at all (RFC-MACP-0013 §13 item 8). It needs no credentials.
 
 ```protobuf
 rpc GetReceiptKeys(GetReceiptKeysRequest) returns (GetReceiptKeysResponse)

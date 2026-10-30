@@ -60,12 +60,18 @@ bump fails without it. Patch releases have no entry.
   startup when it signs. To persist them, implement both methods first writer
   wins, never replace a stored receipt, and delete it in `delete_session`.
   The outcome type `ReceiptWrite` is `#[non_exhaustive]`.
+- New `is_storage_safe_session_id(&str)`. `FileBackend` now refuses, with
+  `InvalidInput`, any id that is not one plain path component (empty, `.`,
+  `..`, or containing `/`, `\` or NUL). Every id `SessionStart` accepts
+  passes. A third-party backend that keys paths by session id should apply
+  the same check.
 
 ### `macp-runtime` (as a library)
 
 - `Runtime::with_receipt_config(ReceiptConfig)` and
   `Runtime::with_compact_terminal_logs(bool)` are builders; the default is
-  unsigned receipts with issuer `runtime:macp-runtime`. `decision_receipt`
+  unsigned receipts with issuer `runtime:macp-runtime`. `ReceiptConfig::from_env`
+  refuses a signing key without `MACP_RUNTIME_ID`. `decision_receipt`
   and `session_for_read` are new. Session recovery from storage moved into
   `macp_runtime::recovery::recover_sessions`, returning a `#[non_exhaustive]`
   `RecoveryReport`.
