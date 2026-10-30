@@ -932,3 +932,30 @@ inconsistency, not a runtime deviation**
   RFC-MACP-0012 §4.1/§5.2 read in full from the spec repo; cross-checked against the historical
   `plans/spec-99-schema-version-3-PROGRESS.md` finding from PR #165/#168, which reached the same
   conclusion independently on 2026-09-12).
+
+## 2026-10-30 -- Decision receipts (plans/decision-receipts.md), /reconcile of 8 entries
+Analysis: fresh Opus, checked against RFC-MACP-0013 1.4.2-draft §13 (spec 50ae62e), `scripts/gen-receipt-vectors.py`, `check-receipt-vectors.py` and the code.
+- **Issuer `runtime:<MACP_RUNTIME_ID>`: CHANGED, decided by Opus.**
+  - Analysis: req 9 requires a stable issuer. A default issuer on *signed* receipts is frozen once released, because changing it moves every deployment that relied on the default. Requiring the variable later would also break those configs.
+  - Decision: refuse to start when a signing key is set without `MACP_RUNTIME_ID`. This avoids the irreversible step: the requirement can be relaxed to a default later without breaking anyone, and the reverse is not true. Unsigned receipts keep the `runtime:macp-runtime` default; they carry no attestation.
+  - Reopen if operators need signing without a configured id.
+- **Extension modes get RECEIPT_UNAVAILABLE: DEFERRED.**
+  - Req 3 includes extension modes that resolve through a CommitmentPayload. Passthrough and multi_round store a JSON summary in `resolution`, and S-e forbids changing that, so the refusal rests on req 3's catch-all.
+  - Lifting it later is additive, via a verbatim-bytes field (`Session` is `#[non_exhaustive]`).
+  - Trigger: the first consumer that asks for an ext.* receipt.
+- **No unattested-to-attested replacement: CONFIRMED.** Req 6 makes replacement a MAY. Unconditional first-writer-wins avoids a one-transition compare-and-set across replicas, and `ReceiptWrite` is `#[non_exhaustive]`.
+- **`{"keys":[]}` only with no keys: CONFIRMED.** Spec #235 (50ae62e) rewrote req 8 to exactly this, raised by this runtime while building R1.
+- **Padded `commitment_wire_b64`, whole-second `issued_at`: CONFIRMED.** The format is forced: the reference verifier rejects unpadded base64, and vector 010 carries whole seconds.
+- **Inline `MACP_RECEIPT_SIGNING_KEY`: CONFIRMED.** Additive, mirroring `MACP_AUTH_TOKENS_JSON`.
+- **Lazy-only issuance: CONFIRMED.** Reqs 6 and 7 permit it, and S-a requires keeping writes off the Commitment path. Trade-offs: `issued_at` is the time of first fetch, and a session disk-GC'd before any fetch never gets a receipt.
+- **Version 0.11.0: CONFIRMED.** Forced by the `Capabilities.decision_receipt` field (`constructible_struct_adds_field`).
+- Follow-up applied in the R1 PR: the `docs/API.md` key-set sentence. `SPEC_REV` is left at 6bb4426: nothing fails there, and the policy forbids re-pinning without a failure.
+
+## 2026-10-30 -- GetDecisionReceipt answers FORBIDDEN, not SESSION_NOT_FOUND, for an evicted session (plans/decision-receipts.md P4)
+- **Finding (P4+P5 verifier):** `GetSession` answers `SESSION_NOT_FOUND` for a session evicted from memory. `GetDecisionReceipt` loads it from storage, so a stranger gets `FORBIDDEN`. That reveals the session exists, which `GetSession` does not.
+- **Decision: accepted, decided by Opus.**
+  - Receipts must stay readable after eviction (§13 item 7). An evicted session is not "unknown" under item 3.
+  - The ids are UUID v4/v7 or 22+ char tokens, so they cannot be enumerated.
+  - The authorization rule itself is identical to GetSession's.
+  - Reopen if session ids ever become guessable.
+- **Same review, fixed:** the path traversal. A wire id now reaches storage only as one plain path component (`macp_storage::storage::is_storage_safe_session_id`), checked both in `Runtime::session_for_read` and in every keyed `FileBackend` operation. A stored snapshot whose id differs from the request (a file-system alias) is unknown, and the receipt is built from `session.session_id`. FileBackend's own check is narrower (empty, `.`, `..`, `/`, NUL), so legacy ids holding `\` still recover.

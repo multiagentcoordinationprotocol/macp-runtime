@@ -14,6 +14,73 @@ Every release that may break an embeddable crate has an entry here, under a
 introduces a breaking API change must add it, and a release PR with a breaking
 bump fails without it. Patch releases have no entry.
 
+## 0.11.0 — decision receipts
+
+### `macp-pb` / macp-proto 0.1.13
+
+- macp-proto 0.1.13 adds `Capabilities.decision_receipt`
+  (`DecisionReceiptCapability`) and the `GetDecisionReceipt` / `GetReceiptKeys`
+  messages. `Capabilities` is a plain prost struct, so a struct literal must
+  now set `decision_receipt` (or use `..Default::default()`).
+
+### `macp_core::error`
+
+- New `MacpError::ReceiptUnavailable` (`RECEIPT_UNAVAILABLE`, gRPC
+  `FAILED_PRECONDITION`, HTTP 409), in `ERROR_CODE_REGISTRY`. The enum is
+  `#[non_exhaustive]`, so a wildcard arm already covers it.
+
+### `macp_core::receipt` (new, `receipts` feature)
+
+- Receipt building, verification and keys moved out of `macp-cli` into
+  `macp_core::receipt`, behind the non-default `receipts` feature (it pulls in
+  `base64` and `ed25519-dalek`; without it `macp-core` gains no dependency).
+  `build(&ReceiptInputs, Option<&ReceiptSigner>)` is pure: same inputs and key,
+  same bytes. `ReceiptSigner` loads a PKCS#8 PEM or a private OKP JWK;
+  `KeySet` is the published JWKS and refuses private members and duplicate
+  `kid`s. Errors are `KeyError` and `BuildError`, both `#[non_exhaustive]`.
+- `Integrity`, `AttestationOutcome`, `Verdict` and `Verification` are now
+  `#[non_exhaustive]`. Match them with a wildcard arm, and read
+  `Verification` fields rather than building one.
+- `add_jwks` returns `Result<usize, KeyError>` instead of `Result<usize,
+  String>`. Use `.to_string()` (or `{}`) where a `String` was expected.
+
+### `macp-cli`
+
+- `macp_cli::receipt` and `macp_cli::jcs` are re-exports of
+  `macp_core::receipt` and `macp_core::receipt::jcs`, so 0.10 paths keep
+  resolving. The changes above apply through them. `macp verify` gains
+  `--keys-from <target>` and `--token`.
+
+### `macp_storage::StorageBackend`
+
+- Three provided methods, so an existing implementation still compiles:
+  `load_receipt` (default `Ok(None)`), `store_receipt_if_absent` (default
+  `Unsupported`) and `receipts_durable` (default `false`). On a backend left
+  at the defaults the runtime keeps receipts in memory only and warns at
+  startup when it signs. To persist them, implement both methods first writer
+  wins, never replace a stored receipt, and delete it in `delete_session`.
+  The outcome type `ReceiptWrite` is `#[non_exhaustive]`.
+- New `is_storage_safe_session_id(&str)`: whether a wire id may key storage
+  (one plain path component, at most 255 bytes, no `\`). The runtime checks it
+  before any storage read keyed by a request. `FileBackend` itself now
+  refuses, with `InvalidInput`, an id that could leave `sessions/`: empty,
+  `.`, `..`, or containing `/` or NUL. A third-party backend that keys paths
+  by session id should refuse the same.
+
+### `macp-runtime` (as a library)
+
+- `Runtime::with_receipt_config(ReceiptConfig)` and
+  `Runtime::with_compact_terminal_logs(bool)` are builders; the default is
+  unsigned receipts with issuer `runtime:macp-runtime`. `ReceiptConfig::from_env`
+  refuses a signing key without `MACP_RUNTIME_ID`. `decision_receipt`
+  and `session_for_read` are new. Session recovery from storage moved into
+  `macp_runtime::recovery::recover_sessions`, returning a `#[non_exhaustive]`
+  `RecoveryReport`.
+
+### Fixtures and vectors
+
+- `SPEC_REV` moved to spec `6bb4426`. No vendored fixture changed.
+
 ## 0.10.0 — what-if replay
 
 Additive only: nothing an embedder calls changes.

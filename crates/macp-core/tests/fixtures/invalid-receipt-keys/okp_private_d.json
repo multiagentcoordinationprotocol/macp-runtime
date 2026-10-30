@@ -1,0 +1,14 @@
+{
+  "_invalid_because": "no key may carry the private member `d` ($defs.jwk properties.d = false)",
+  "keys": [
+    {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "kid": "example-1",
+      "alg": "EdDSA",
+      "use": "sig",
+      "x": "TDVzkxaSf6_Oxu7mmn5TbCkF80s8Ulh33qKQsi0gnZM",
+      "d": "nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A"
+    }
+  ]
+}

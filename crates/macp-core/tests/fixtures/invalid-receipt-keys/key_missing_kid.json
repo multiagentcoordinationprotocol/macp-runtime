@@ -1,0 +1,12 @@
+{
+  "_invalid_because": "every key MUST carry a `kid` ($defs.jwk `required`, member kid)",
+  "keys": [
+    {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "alg": "EdDSA",
+      "use": "sig",
+      "x": "TDVzkxaSf6_Oxu7mmn5TbCkF80s8Ulh33qKQsi0gnZM"
+    }
+  ]
+}

@@ -9,25 +9,29 @@
 //! implementation of the Section 3 projection and Section 4 algorithm, and
 //! `verify_commitment_hash` for the optional `commitment_wire_b64` (Section
 //! 6.1). The receipt body a `jws` attestation signs is canonicalized by
-//! [`crate::jcs`].
+//! [`super::jcs`].
 //!
 //! The spec's 12 reference vectors (`schemas/conformance/receipt/`) are
-//! vendored under `tests/vectors/receipt/` and run by this crate's tests.
+//! vendored under the repo's `tests/vectors/receipt/` and run by this crate's
+//! `receipt_vectors` test.
 
 use std::collections::BTreeMap;
 
+use crate::commitment_hash::{commitment_hash, verify_commitment_hash, VerifyOutcome};
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use ed25519_dalek::{Signature, VerifyingKey};
-use macp_core::commitment_hash::{commitment_hash, verify_commitment_hash};
 use macp_pb::pb::{CommitmentPayload, CommitmentRef};
 use serde::Serialize;
 use serde_json::{Map, Value};
+
+use super::keys::KeyError;
 
 /// The one receipt format this verifier implements.
 pub const FORMAT: &str = "macp-receipt/1";
 
 /// A.4 step 2.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Integrity {
@@ -37,6 +41,7 @@ pub enum Integrity {
 }
 
 /// A.4 step 3, one per attestation.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttestationOutcome {
@@ -49,6 +54,7 @@ pub enum AttestationOutcome {
 }
 
 /// A.4 step 4.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
@@ -63,6 +69,7 @@ pub enum Verdict {
 }
 
 impl Verdict {
+    /// The vector file's spelling (`attested`, `integrity_only`, ...).
     pub fn as_str(self) -> &'static str {
         match self {
             Verdict::Attested => "attested",
@@ -75,6 +82,7 @@ impl Verdict {
 
 /// What [`verify`] found. Field names and values are the vector file's
 /// `expected` shape, so a report compares directly against a vector.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Verification {
     /// `None` only when the receipt is refused.
@@ -145,7 +153,7 @@ fn integrity(receipt: &Value) -> Integrity {
     };
     match verify_commitment_hash(&wire, claimed.unwrap_or_default()) {
         o if o.is_match() => {}
-        macp_core::commitment_hash::VerifyOutcome::Mismatch { .. } => return Integrity::Mismatch,
+        VerifyOutcome::Mismatch { .. } => return Integrity::Mismatch,
         _ => return Integrity::CannotVerify,
     }
     // The wire hashes to the claim; it must also be the Commitment shown.
@@ -212,8 +220,10 @@ fn payload_of(commitment: &Value) -> Option<CommitmentPayload> {
     })
 }
 
-/// The Section 3 projection of a decoded payload.
-fn project(p: &CommitmentPayload) -> Value {
+/// The Section 3 projection of a decoded payload: the `commitment` member of
+/// a receipt. Every string member is present (empty when unset), as is
+/// `outcome_positive`; `supersedes` only when set.
+pub fn project(p: &CommitmentPayload) -> Value {
     let mut obj = serde_json::json!({
         "commitment_id": p.commitment_id,
         "action": p.action,
@@ -238,7 +248,7 @@ fn project(p: &CommitmentPayload) -> Value {
 fn receipt_body(receipt: &Value) -> Option<Vec<u8>> {
     let mut body = receipt.as_object()?.clone();
     body.remove("attestations");
-    crate::jcs::canonicalize(&Value::Object(body)).ok()
+    super::jcs::canonicalize(&Value::Object(body)).ok()
 }
 
 fn attestation(att: &Value, body: Option<&[u8]>, trusted: &TrustedKeys) -> AttestationOutcome {
@@ -292,10 +302,10 @@ fn verifying_key(x: &str) -> Option<VerifyingKey> {
 /// Add the keys in a JWK (`{"kty":"OKP","crv":"Ed25519","kid":…,"x":…}`) or a
 /// JWKS (`{"keys":[…]}`) document to `trusted`. Non-Ed25519 keys are skipped;
 /// returns how many were added.
-pub fn add_jwks(doc: &Value, trusted: &mut TrustedKeys) -> Result<usize, String> {
+pub fn add_jwks(doc: &Value, trusted: &mut TrustedKeys) -> Result<usize, KeyError> {
     let keys = match doc.get("keys") {
         Some(Value::Array(keys)) => keys.iter().collect(),
-        Some(_) => return Err("\"keys\" is not an array".into()),
+        Some(_) => return Err(KeyError::KeysNotArray),
         None => vec![doc],
     };
     let mut added = 0;
@@ -308,7 +318,11 @@ pub fn add_jwks(doc: &Value, trusted: &mut TrustedKeys) -> Result<usize, String>
         let kid = key.get("kid").and_then(Value::as_str);
         let x = key.get("x").and_then(Value::as_str);
         let (Some(kid), Some(x)) = (kid, x) else {
-            return Err("an Ed25519 JWK needs both \"kid\" and \"x\"".into());
+            return Err(KeyError::MissingMember(if kid.is_none() {
+                "kid"
+            } else {
+                "x"
+            }));
         };
         trusted.insert(kid.into(), x.into());
         added += 1;

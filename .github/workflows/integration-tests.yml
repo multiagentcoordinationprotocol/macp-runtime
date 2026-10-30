@@ -49,8 +49,9 @@ jobs:
           version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ github.token }}
 
-      - name: Build runtime binary
-        run: cargo build
+      # The `macp` CLI too: test_decision_receipts runs `macp verify --keys-from`.
+      - name: Build runtime and CLI binaries
+        run: cargo build -p macp-runtime -p macp-cli --bins
 
       - name: Run Tier 1+2 integration tests
         working-directory: integration_tests

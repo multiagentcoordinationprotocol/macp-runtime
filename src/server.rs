@@ -312,6 +312,17 @@ impl MacpServer {
                     format!("Session '{}' not found", session_id),
                 )
             })?;
+        self.authorize_session_read(&identity, &session).await?;
+        Ok(identity)
+    }
+
+    /// May `identity` read `session`: the initiator, a declared participant
+    /// or an observer, and then the ingress policy engine, if any.
+    async fn authorize_session_read(
+        &self,
+        identity: &AuthIdentity,
+        session: &crate::session::Session,
+    ) -> Result<(), Status> {
         let allowed = identity.is_observer
             || session.initiator_sender == identity.sender
             || session.participants.iter().any(|p| p == &identity.sender);
@@ -324,10 +335,10 @@ impl MacpServer {
         // External ingress policy engine (E3): may additionally restrict
         // reads beyond the built-in membership check (fail closed).
         if let Some(engine) = &self.policy_engine {
-            let decision = engine.evaluate_session_access(&identity, &session).await;
+            let decision = engine.evaluate_session_access(identity, session).await;
             crate::policy_engine::require_allow(decision, "session access")?;
         }
-        Ok(identity)
+        Ok(())
     }
 
     /// Subscribe-window dedupe (see `replay_dedup` in the stream loop): drop
@@ -1105,6 +1116,10 @@ impl MacpRuntimeService for MacpServer {
                     // Advisory (policy.proto): admission stays authoritative.
                     rule_extensions: self.runtime.policy_registry().rule_extension_names(),
                 }),
+                decision_receipt: Some(crate::pb::DecisionReceiptCapability {
+                    get_decision_receipt: true,
+                    signed: self.runtime.receipt_config().signed(),
+                }),
                 experimental: Some(crate::pb::ExperimentalCapabilities {
                     features: HashMap::from([
                         ("ext_mode_lifecycle".into(), "true".into()),
@@ -1412,6 +1427,58 @@ impl MacpRuntimeService for MacpServer {
                 // Empty: unary-first profile has no dedicated transport endpoints.
                 transport_endpoints: vec![],
             }),
+        }))
+    }
+
+    /// RFC-MACP-0013 §13: the session's decision receipt, issued on first
+    /// request. Readable by whoever may read the session, including after it
+    /// was evicted from memory.
+    async fn get_decision_receipt(
+        &self,
+        request: Request<crate::pb::GetDecisionReceiptRequest>,
+    ) -> Result<Response<crate::pb::GetDecisionReceiptResponse>, Status> {
+        let identity = self
+            .security
+            .authenticate_metadata(request.metadata())
+            .await
+            .map_err(Self::status_from_error)?;
+        let session_id = request.into_inner().session_id;
+        let session = self
+            .runtime
+            .session_for_read(&session_id)
+            .await
+            .map_err(|e| match e {
+                MacpError::UnknownSession => Self::coded_status(
+                    MacpError::UnknownSession,
+                    format!("Session '{}' not found", session_id),
+                ),
+                e => Self::status_from_error(e),
+            })?;
+        self.authorize_session_read(&identity, &session).await?;
+        self.security
+            .enforce_rate_limit(&identity.sender, false)
+            .await
+            .map_err(Self::status_from_error)?;
+        let bytes = self
+            .runtime
+            .decision_receipt(&session_id)
+            .await
+            .map_err(Self::status_from_error)?;
+        let receipt_json = String::from_utf8(bytes.to_vec())
+            .map_err(|_| Self::status_from_error(MacpError::StorageFailed))?;
+        Ok(Response::new(crate::pb::GetDecisionReceiptResponse {
+            receipt_json,
+        }))
+    }
+
+    /// RFC-MACP-0013 §13: the public keys receipts verify against, active
+    /// and retired. Open like `GetManifest`.
+    async fn get_receipt_keys(
+        &self,
+        _request: Request<crate::pb::GetReceiptKeysRequest>,
+    ) -> Result<Response<crate::pb::GetReceiptKeysResponse>, Status> {
+        Ok(Response::new(crate::pb::GetReceiptKeysResponse {
+            jwks_json: self.runtime.receipt_keys_json().to_string(),
         }))
     }
 
@@ -2537,6 +2604,224 @@ mod tests {
         assert!(manifest
             .supported_modes
             .contains(&"ext.multi_round.v1".to_string()));
+    }
+
+    // ── Decision receipts (RFC-MACP-0013 §13) ──────────────────────────
+
+    fn receipt_signer(seed: u8, kid: &str) -> macp_core::receipt::ReceiptSigner {
+        macp_core::receipt::ReceiptSigner::from_seed(&[seed; 32], kid).unwrap()
+    }
+
+    /// Signing with `k1`, publishing `retired` too.
+    fn receipt_config(retired: &[&str]) -> crate::receipts::ReceiptConfig {
+        let keys: Vec<_> = retired
+            .iter()
+            .enumerate()
+            .map(|(i, kid)| receipt_signer(100 + i as u8, kid).public_jwk())
+            .collect();
+        let retired =
+            macp_core::receipt::KeySet::retired_from_jwks(&serde_json::json!({ "keys": keys }))
+                .unwrap();
+        crate::receipts::ReceiptConfig::new(Some(receipt_signer(7, "k1")), retired, Some("t"))
+            .unwrap()
+    }
+
+    /// A server over a file backend (so eviction keeps sessions readable).
+    fn make_receipt_server(config: crate::receipts::ReceiptConfig) -> (MacpServer, Arc<Runtime>) {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let storage: Arc<dyn crate::storage::StorageBackend> =
+            Arc::new(crate::storage::FileBackend::new(dir).unwrap());
+        let runtime = Arc::new(
+            Runtime::new(
+                storage,
+                Arc::new(SessionRegistry::new()),
+                Arc::new(LogStore::new()),
+            )
+            .with_receipt_config(config),
+        );
+        (
+            MacpServer::new(runtime.clone(), SecurityLayer::dev_mode()),
+            runtime,
+        )
+    }
+
+    fn receipt_req(sender: &str, sid: &str) -> Request<crate::pb::GetDecisionReceiptRequest> {
+        let mut req = Request::new(crate::pb::GetDecisionReceiptRequest {
+            session_id: sid.into(),
+        });
+        req.metadata_mut()
+            .insert("authorization", format!("Bearer {sender}").parse().unwrap());
+        req
+    }
+
+    async fn receipt_keys(server: &MacpServer) -> serde_json::Value {
+        let jwks = server
+            .get_receipt_keys(Request::new(crate::pb::GetReceiptKeysRequest {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .jwks_json;
+        serde_json::from_str(&jwks).unwrap()
+    }
+
+    #[tokio::test]
+    async fn receipt_is_served_identically_to_every_reader() {
+        let (server, runtime) = make_receipt_server(receipt_config(&[]));
+        let sid = resolved_proposal_session(&server).await;
+        let buyer = server
+            .get_decision_receipt(receipt_req(BUYER, &sid))
+            .await
+            .unwrap()
+            .into_inner()
+            .receipt_json;
+        let seller = server
+            .get_decision_receipt(receipt_req(SELLER, &sid))
+            .await
+            .unwrap()
+            .into_inner()
+            .receipt_json;
+        assert_eq!(buyer, seller);
+        // An observer passes the same read check.
+        let session = runtime.session_for_read(&sid).await.unwrap();
+        server
+            .authorize_session_read(&observer_identity("agent://audit"), &session)
+            .await
+            .unwrap();
+
+        let mut trusted = macp_core::receipt::TrustedKeys::new();
+        macp_core::receipt::add_jwks(&receipt_keys(&server).await, &mut trusted).unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(&buyer).unwrap();
+        assert_eq!(
+            macp_core::receipt::verify(&receipt, &trusted).verdict,
+            macp_core::receipt::Verdict::Attested
+        );
+
+        // Evicted from memory: still served, byte-identical.
+        runtime.evict_stale_sessions(0).await;
+        assert!(runtime.registry.get_shared(&sid).await.is_none());
+        let evicted = server
+            .get_decision_receipt(receipt_req(SELLER, &sid))
+            .await
+            .unwrap()
+            .into_inner()
+            .receipt_json;
+        assert_eq!(evicted, buyer);
+    }
+
+    #[tokio::test]
+    async fn receipt_refusals_carry_their_registry_codes() {
+        let (server, _) = make_receipt_server(receipt_config(&[]));
+        let sid = resolved_proposal_session(&server).await;
+        let err = server
+            .get_decision_receipt(receipt_req("agent://stranger", &sid))
+            .await
+            .unwrap_err();
+        assert_coded(&err, "FORBIDDEN", tonic::Code::PermissionDenied);
+
+        let err = server
+            .get_decision_receipt(receipt_req(BUYER, &new_sid()))
+            .await
+            .unwrap_err();
+        assert_coded(&err, "SESSION_NOT_FOUND", tonic::Code::NotFound);
+
+        let open = new_sid();
+        let start = SessionStartPayload {
+            intent: "buy".into(),
+            participants: vec![BUYER.into(), SELLER.into()],
+            mode_version: "1.0.0".into(),
+            configuration_version: "cfg-1".into(),
+            ttl_ms: 60_000,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        do_send(&server, BUYER, penv("SessionStart", "m0", &open, start)).await;
+        let err = server
+            .get_decision_receipt(receipt_req(BUYER, &open))
+            .await
+            .unwrap_err();
+        assert_coded(&err, "RECEIPT_UNAVAILABLE", tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn receipt_read_denial_matches_get_session() {
+        let (server, _) = make_receipt_server(receipt_config(&[]));
+        let sid = resolved_proposal_session(&server).await;
+        let server = server.with_policy_engine(Arc::new(DenySenderEngine {
+            denied: SELLER.into(),
+        }));
+        let receipt = server
+            .get_decision_receipt(receipt_req(SELLER, &sid))
+            .await
+            .unwrap_err();
+        let mut req = Request::new(GetSessionRequest {
+            session_id: sid.clone(),
+        });
+        req.metadata_mut()
+            .insert("authorization", format!("Bearer {SELLER}").parse().unwrap());
+        let session = server.get_session(req).await.unwrap_err();
+        assert_eq!(receipt.code(), session.code());
+        assert_eq!(receipt.message(), session.message());
+        assert_eq!(
+            receipt.metadata().get("macp-error-code"),
+            session.metadata().get("macp-error-code")
+        );
+        assert_eq!(receipt.details(), session.details());
+    }
+
+    #[tokio::test]
+    async fn receipt_keys_publish_active_and_retired_public_keys() {
+        let (server, _) = make_receipt_server(crate::receipts::ReceiptConfig::default());
+        assert_eq!(
+            receipt_keys(&server).await,
+            serde_json::json!({ "keys": [] })
+        );
+
+        let (server, _) = make_receipt_server(receipt_config(&[]));
+        let keys = receipt_keys(&server).await;
+        assert_eq!(keys["keys"].as_array().unwrap().len(), 1);
+        assert_eq!(keys["keys"][0]["kid"], "k1");
+
+        let (server, _) = make_receipt_server(receipt_config(&["k0"]));
+        let keys = receipt_keys(&server).await;
+        let kids: Vec<_> = keys["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| k["kid"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(kids, ["k1", "k0"]);
+        for key in keys["keys"].as_array().unwrap() {
+            for member in macp_core::receipt::PRIVATE_MEMBERS {
+                assert!(key.get(member).is_none(), "published {member}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_advertises_receipts() {
+        for (config, signed) in [
+            (crate::receipts::ReceiptConfig::default(), false),
+            (receipt_config(&[]), true),
+        ] {
+            let (server, _) = make_receipt_server(config);
+            let caps = server
+                .initialize(Request::new(InitializeRequest {
+                    supported_protocol_versions: vec!["1.0".into()],
+                    ..Default::default()
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+                .capabilities
+                .unwrap();
+            assert_eq!(
+                caps.decision_receipt,
+                Some(crate::pb::DecisionReceiptCapability {
+                    get_decision_receipt: true,
+                    signed,
+                })
+            );
+        }
     }
 
     #[tokio::test]

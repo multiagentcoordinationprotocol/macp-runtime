@@ -36,7 +36,7 @@ env:
   # of truth -- and files one tracked issue when upstream moves ahead of it in a
   # way that touches the mirrored trees. Pin without that watcher and the gate
   # quietly rots; that pairing is the whole design.
-  SPEC_REV: "8d20dc5705117efb5d890327fdfdea429a0374f9"
+  SPEC_REV: "6bb4426730a947ec16fd4ddf02e7f370843ad3f3"
 
 jobs:
   actionlint:
@@ -299,6 +299,18 @@ jobs:
             echo "::error::macp-modes pulled a forbidden dependency"; exit 1
           fi
 
+      # Decision receipts (RFC-MACP-0013 §13) are behind macp-core's
+      # non-default `receipts` feature: the embeddable vocabulary crates carry
+      # no signature crates unless an embedder asks for them.
+      - name: receipt signing stays out of the default vocabulary crates
+        run: |
+          for crate in macp-core macp-modes macp-policy; do
+            deps=$(cargo tree -p "$crate" --edges normal)
+            if echo "$deps" | sed 's/ ([^)]*)//' | grep -qiE "ed25519|pkcs8"; then
+              echo "::error::$crate pulled receipt-signing crates by default"; exit 1
+            fi
+          done
+
       # The conformance library's in-process path must carry no transport.
       # Only tonic is checked: tokio already arrives through macp-modes and
       # macp-policy (tokio::sync::broadcast), so "no tokio" cannot hold here.
@@ -471,6 +483,11 @@ jobs:
       - name: Clippy (feature-gated code)
         run: cargo clippy -p macp-storage --features rocksdb-backend,redis-backend --all-targets -- -D warnings
 
+      - name: Clippy + test (macp-core receipts feature)
+        run: |
+          cargo clippy -p macp-core --features receipts --all-targets -- -D warnings
+          cargo test -p macp-core --features receipts
+
       # The otel exporter feature on the root crate was never compiled in CI.
       - name: Clippy (otel feature)
         run: cargo clippy -p macp-runtime --features otel --all-targets -- -D warnings
@@ -573,8 +590,9 @@ jobs:
       - name: Verify integration_tests/Cargo.lock is consistent with its manifest
         run: cargo metadata --locked --manifest-path integration_tests/Cargo.toml --format-version 1 > /dev/null
 
-      - name: Build runtime binary
-        run: cargo build
+      # The `macp` CLI too: test_decision_receipts runs `macp verify --keys-from`.
+      - name: Build runtime and CLI binaries
+        run: cargo build -p macp-runtime -p macp-cli --bins
 
       # Tier 2 (Rig ToolSet against the live server) is deterministic — no
       # LLM, no network beyond localhost — so it runs on every PR alongside

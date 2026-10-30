@@ -39,6 +39,16 @@ any release, so a field or variant addition to one of them is not a breaking
 change. Match them with a wildcard arm, and build them through their
 constructors and `with_*` builders.
 
+### Optional features
+
+`macp-core`'s `receipts` feature (off by default) adds `macp_core::receipt`:
+decision-receipt building, signing and verification (RFC-MACP-0013 §13,
+Appendix A). The module is public API under the same promise as the rest of
+the crate. With the feature off, `macp-core` carries no signature crates, which
+CI checks with `cargo tree`. The receipt bytes `receipt::build` emits for given
+inputs and key are part of that promise: a served receipt is permanent, so its
+layout (the JCS form of the whole receipt) never changes within `macp-receipt/1`.
+
 ## What counts as a breaking change
 
 A change is breaking when code or data that worked against the previous release

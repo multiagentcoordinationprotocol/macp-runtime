@@ -17,7 +17,7 @@ name = "macp"
 path = "src/main.rs"
 
 [dependencies]
-macp-core = { workspace = true }
+macp-core = { workspace = true, features = ["receipts"] }
 macp-pb = { workspace = true }
 macp-conform = { workspace = true, features = ["grpc"] }
 macp-runtime = { workspace = true }
@@ -29,4 +29,3 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tonic = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
-ed25519-dalek = "3"

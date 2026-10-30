@@ -1,0 +1,12 @@
+{
+  "_invalid_because": "an OKP key MUST name its curve ($defs.jwk then.required crv)",
+  "keys": [
+    {
+      "kty": "OKP",
+      "kid": "example-1",
+      "alg": "EdDSA",
+      "use": "sig",
+      "x": "TDVzkxaSf6_Oxu7mmn5TbCkF80s8Ulh33qKQsi0gnZM"
+    }
+  ]
+}

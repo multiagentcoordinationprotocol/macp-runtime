@@ -4,7 +4,7 @@ use macp_core::session::Session;
 use redis::AsyncCommands;
 use std::io;
 
-use super::StorageBackend;
+use super::{ReceiptWrite, StorageBackend};
 
 pub struct RedisBackend {
     conn: redis::aio::MultiplexedConnection,
@@ -37,6 +37,10 @@ impl RedisBackend {
 
     fn session_key(&self, session_id: &str) -> String {
         format!("{}:session:{}", self.prefix, session_id)
+    }
+
+    fn receipt_key(&self, session_id: &str) -> String {
+        format!("{}:receipt:{}", self.prefix, session_id)
     }
 
     fn log_key(&self, session_id: &str) -> String {
@@ -99,10 +103,44 @@ impl StorageBackend for RedisBackend {
         redis::pipe()
             .del(self.session_key(session_id))
             .del(self.log_key(session_id))
+            .del(self.receipt_key(session_id))
             .srem(self.index_key(), session_id)
             .exec_async(&mut conn)
             .await
             .map_err(io::Error::other)
+    }
+
+    async fn load_receipt(&self, session_id: &str) -> io::Result<Option<Vec<u8>>> {
+        let mut conn = self.conn.clone();
+        conn.get(self.receipt_key(session_id))
+            .await
+            .map_err(io::Error::other)
+    }
+
+    /// `SET NX`: first writer wins across every replica sharing this Redis.
+    async fn store_receipt_if_absent(
+        &self,
+        session_id: &str,
+        receipt: &[u8],
+    ) -> io::Result<ReceiptWrite> {
+        let mut conn = self.conn.clone();
+        let stored: bool = conn
+            .set_nx(self.receipt_key(session_id), receipt)
+            .await
+            .map_err(io::Error::other)?;
+        if stored {
+            return Ok(ReceiptWrite::Stored);
+        }
+        match self.load_receipt(session_id).await? {
+            Some(existing) => Ok(ReceiptWrite::Existing(existing)),
+            None => Err(io::Error::other(
+                "receipt key vanished between SET NX and GET",
+            )),
+        }
+    }
+
+    fn receipts_durable(&self) -> bool {
+        true
     }
 
     async fn list_session_ids(&self) -> io::Result<Vec<String>> {
@@ -227,6 +265,7 @@ mod tests {
             let _ = redis::pipe()
                 .del(backend.session_key(id))
                 .del(backend.log_key(id))
+                .del(backend.receipt_key(id))
                 .exec_async(&mut conn)
                 .await;
         }
@@ -304,6 +343,27 @@ mod tests {
         let log = backend.load_log("s1").await.unwrap();
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].message_id, "checkpoint");
+        cleanup(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn redis_receipt_first_writer_wins() {
+        let Some(backend) = make_backend().await else {
+            eprintln!("skipping redis test: MACP_TEST_REDIS_URL not set");
+            return;
+        };
+        crate::storage::receipt_contract::first_writer_wins(&backend, "r1").await;
+        cleanup(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn redis_receipt_one_winner_under_concurrency() {
+        let Some(backend) = make_backend().await else {
+            eprintln!("skipping redis test: MACP_TEST_REDIS_URL not set");
+            return;
+        };
+        let backend = std::sync::Arc::new(backend);
+        crate::storage::receipt_contract::one_winner_under_concurrency(backend.clone(), "r1").await;
         cleanup(&backend).await;
     }
 }

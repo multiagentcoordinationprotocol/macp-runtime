@@ -71,6 +71,11 @@ pub enum MacpError {
     /// longer held (e.g. compacted when it ended), RFC-MACP-0012 §8.1 item 8.
     #[error("HistoryUnavailable")]
     HistoryUnavailable,
+    /// `GetDecisionReceipt` named a session for which no decision receipt
+    /// can be issued: not RESOLVED, not resolved by a `CommitmentPayload`,
+    /// or issuance failed (RFC-MACP-0013 §13).
+    #[error("ReceiptUnavailable")]
+    ReceiptUnavailable,
 }
 
 impl MacpError {
@@ -102,6 +107,7 @@ impl MacpError {
             MacpError::StreamLagged => "STREAM_LAGGED",
             MacpError::AgentNotFound => "AGENT_NOT_FOUND",
             MacpError::HistoryUnavailable => "HISTORY_UNAVAILABLE",
+            MacpError::ReceiptUnavailable => "RECEIPT_UNAVAILABLE",
         }
     }
 }
@@ -220,6 +226,11 @@ pub const ERROR_CODE_REGISTRY: &[RegistryEntry] = &[
         TransportStatus::FailedPrecondition,
         409,
     ),
+    entry(
+        "RECEIPT_UNAVAILABLE",
+        TransportStatus::FailedPrecondition,
+        409,
+    ),
     // Deprecated alias for FORBIDDEN; never emitted, kept so a lookup of a
     // peer's legacy code still resolves.
     entry("UNAUTHORIZED", TransportStatus::PermissionDenied, 403),
@@ -298,6 +309,7 @@ mod tests {
             (MacpError::StreamLagged, "STREAM_LAGGED"),
             (MacpError::AgentNotFound, "AGENT_NOT_FOUND"),
             (MacpError::HistoryUnavailable, "HISTORY_UNAVAILABLE"),
+            (MacpError::ReceiptUnavailable, "RECEIPT_UNAVAILABLE"),
         ];
 
         for (error, expected_code) in cases {

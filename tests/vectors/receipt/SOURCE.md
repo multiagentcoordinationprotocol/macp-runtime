@@ -8,8 +8,8 @@ copied, byte-identical, point-in-time, from:
 multiagentcoordinationprotocol/schemas/conformance/receipt/
 ```
 
-in the spec repo, commit `8d20dc5705117efb5d890327fdfdea429a0374f9`, on
-2026-10-25. That commit must stay equal to `SPEC_REV` in
+in the spec repo, commit `6bb4426730a947ec16fd4ddf02e7f370843ad3f3`, on
+2026-10-30. That commit must stay equal to `SPEC_REV` in
 `.github/workflows/ci.yml`.
 
 The directory is `tests/vectors/receipt/`, the path both SDKs vendor these
@@ -18,14 +18,16 @@ too.
 
 **Gated by `check_dir` in `.github/workflows/ci.yml`'s `conformance-oracle`
 job**, in both directions, against the spec repo at `SPEC_REV`, as for
-`tests/conformance/`. `crates/macp-cli/tests/receipt_vectors.rs` runs every
-vector through `macp verify`'s verifier during `cargo test`.
+`tests/conformance/`. `crates/macp-core/tests/receipt_vectors.rs` runs every
+vector through `macp_core::receipt::verify` (the verifier `macp verify` uses)
+and reproduces `receipt_010_wire_match` byte for byte with
+`macp_core::receipt::build`.
 
 ## Re-vendoring after a `SPEC_REV` bump
 
 ```
 cp ../multiagentcoordinationprotocol/schemas/conformance/receipt/*.json tests/vectors/receipt/
-cargo test -p macp-cli --test receipt_vectors
+cargo test -p macp-core --features receipts --test receipt_vectors
 ```
 
 then update the commit hash and date above.

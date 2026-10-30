@@ -29,6 +29,8 @@ pub mod decision;
 pub mod error;
 pub mod mode;
 pub mod policy;
+#[cfg(feature = "receipts")]
+pub mod receipt;
 pub mod session;
 
 // Flat re-exports for the most commonly used types.

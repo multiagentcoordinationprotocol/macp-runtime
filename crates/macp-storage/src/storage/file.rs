@@ -7,16 +7,52 @@ use std::path::{Path, PathBuf};
 use tokio::fs as tfs;
 use tokio::io::AsyncWriteExt;
 
-use super::StorageBackend;
+use super::{ReceiptWrite, StorageBackend};
 
 pub struct FileBackend {
     base_dir: PathBuf,
+    /// Whether `base_dir`'s filesystem supports hard links, which the
+    /// first-writer-wins receipt store needs (probed once, in `new`).
+    hard_links: bool,
 }
 
 impl FileBackend {
     pub fn new(base_dir: PathBuf) -> io::Result<Self> {
         fs::create_dir_all(base_dir.join("sessions"))?;
-        Ok(Self { base_dir })
+        let hard_links = probe_hard_links(&base_dir);
+        if !hard_links {
+            tracing::warn!(
+                data_dir = %base_dir.display(),
+                "the data directory's filesystem does not support hard links; decision receipts will not be persisted"
+            );
+        }
+        Ok(Self {
+            base_dir,
+            hard_links,
+        })
+    }
+
+    fn receipt_file(&self, session_id: &str) -> PathBuf {
+        self.session_dir(session_id).join("receipt.json")
+    }
+
+    /// Refuse an id that could resolve outside `sessions/` (an absolute path
+    /// replaces the base directory). Narrower than
+    /// [`super::is_storage_safe_session_id`], so a legacy directory name with
+    /// `\` or over 255 bytes still recovers.
+    fn check(session_id: &str) -> io::Result<()> {
+        if !session_id.is_empty()
+            && session_id != "."
+            && session_id != ".."
+            && !session_id.contains(['/', '\0'])
+        {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "session id is not a single path component",
+            ))
+        }
     }
 
     fn session_dir(&self, session_id: &str) -> PathBuf {
@@ -52,13 +88,27 @@ impl FileBackend {
     }
 }
 
+/// Link one uuid-named file to another in `base_dir` (never under
+/// `sessions/`, where a directory would read as a session) and clean up.
+fn probe_hard_links(base_dir: &Path) -> bool {
+    let id = uuid::Uuid::new_v4();
+    let src = base_dir.join(format!(".link-probe-{id}.tmp"));
+    let dst = base_dir.join(format!(".link-probe-{id}.link.tmp"));
+    let ok = fs::write(&src, b"").is_ok() && fs::hard_link(&src, &dst).is_ok();
+    let _ = fs::remove_file(&dst);
+    let _ = fs::remove_file(&src);
+    ok
+}
+
 #[async_trait::async_trait]
 impl StorageBackend for FileBackend {
     async fn create_session_storage(&self, session_id: &str) -> io::Result<()> {
+        Self::check(session_id)?;
         tfs::create_dir_all(self.session_dir(session_id)).await
     }
 
     async fn save_session(&self, session: &Session) -> io::Result<()> {
+        Self::check(&session.session_id)?;
         let persisted = PersistedSession::from(session);
         let bytes = serde_json::to_vec_pretty(&persisted)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -66,6 +116,7 @@ impl StorageBackend for FileBackend {
     }
 
     async fn load_session(&self, session_id: &str) -> io::Result<Option<Session>> {
+        Self::check(session_id)?;
         let path = self.session_file(session_id);
         if tfs::metadata(&path).await.is_err() {
             return Ok(None);
@@ -91,7 +142,66 @@ impl StorageBackend for FileBackend {
         Ok(sessions)
     }
 
+    async fn load_receipt(&self, session_id: &str) -> io::Result<Option<Vec<u8>>> {
+        Self::check(session_id)?;
+        match tfs::read(self.receipt_file(session_id)).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Write a uniquely named tmp file, fsync it, then hard-link it to
+    /// `receipt.json`: the link is atomic and fails with `AlreadyExists` for
+    /// every writer but the first, so a stored receipt is never torn and never
+    /// replaced. An orphaned tmp is swept by `cleanup_temp_files`.
+    async fn store_receipt_if_absent(
+        &self,
+        session_id: &str,
+        receipt: &[u8],
+    ) -> io::Result<ReceiptWrite> {
+        Self::check(session_id)?;
+        if !self.hard_links {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the data directory's filesystem does not support hard links",
+            ));
+        }
+        let path = self.receipt_file(session_id);
+        let tmp = self
+            .session_dir(session_id)
+            .join(format!("receipt.json.{}.tmp", uuid::Uuid::new_v4()));
+        let written = async {
+            let mut file = tfs::File::create(&tmp).await?;
+            file.write_all(receipt).await?;
+            file.sync_data().await
+        }
+        .await;
+        let linked = match written {
+            Ok(()) => tfs::hard_link(&tmp, &path).await,
+            Err(e) => Err(e),
+        };
+        let _ = tfs::remove_file(&tmp).await;
+        match linked {
+            Ok(()) => {
+                if let Ok(dir) = tfs::File::open(self.session_dir(session_id)).await {
+                    let _ = dir.sync_data().await;
+                }
+                Ok(ReceiptWrite::Stored)
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                Ok(ReceiptWrite::Existing(tfs::read(&path).await?))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn receipts_durable(&self) -> bool {
+        self.hard_links
+    }
+
     async fn delete_session(&self, session_id: &str) -> io::Result<()> {
+        Self::check(session_id)?;
         let dir = self.session_dir(session_id);
         if tfs::metadata(&dir).await.is_ok() {
             tfs::remove_dir_all(&dir).await?;
@@ -116,6 +226,7 @@ impl StorageBackend for FileBackend {
     }
 
     async fn append_log_entry(&self, session_id: &str, entry: &LogEntry) -> io::Result<()> {
+        Self::check(session_id)?;
         let path = self.log_file(session_id);
         let mut line = serde_json::to_string(entry)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -132,6 +243,7 @@ impl StorageBackend for FileBackend {
     }
 
     async fn load_log(&self, session_id: &str) -> io::Result<Vec<LogEntry>> {
+        Self::check(session_id)?;
         let path = self.log_file(session_id);
         if tfs::metadata(&path).await.is_err() {
             return Ok(vec![]);
@@ -157,6 +269,7 @@ impl StorageBackend for FileBackend {
     }
 
     async fn replace_log(&self, session_id: &str, entries: &[LogEntry]) -> io::Result<()> {
+        Self::check(session_id)?;
         let path = self.log_file(session_id);
         let mut data = String::new();
         for entry in entries {
@@ -458,5 +571,89 @@ mod tests {
 
         let err = backend.load_session("s1").await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn path_like_session_ids_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileBackend::new(dir.path().to_path_buf()).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let absolute = outside.path().to_string_lossy().to_string();
+        for id in ["", ".", "..", "../x", "a/b", "a\0b", absolute.as_str()] {
+            let refused = |r: io::Result<()>| {
+                assert_eq!(r.unwrap_err().kind(), io::ErrorKind::InvalidInput, "{id:?}")
+            };
+            refused(backend.load_session(id).await.map(|_| ()));
+            refused(backend.load_receipt(id).await.map(|_| ()));
+            refused(backend.store_receipt_if_absent(id, b"{}").await.map(|_| ()));
+            refused(backend.load_log(id).await.map(|_| ()));
+            refused(backend.delete_session(id).await);
+            refused(backend.create_session_storage(id).await);
+        }
+        assert!(outside.path().exists(), "delete_session must not escape");
+    }
+
+    /// Ids admitted before `SessionStart` validated them may hold `\`; they
+    /// cannot escape on Unix and must still recover.
+    #[tokio::test]
+    async fn legacy_backslash_ids_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileBackend::new(dir.path().to_path_buf()).unwrap();
+        let id = "legacy\\id";
+        backend.create_session_storage(id).await.unwrap();
+        assert_eq!(backend.list_session_ids().await.unwrap(), [id]);
+        assert!(backend.load_log(id).await.unwrap().is_empty());
+        backend.delete_session(id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_receipt_first_writer_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileBackend::new(dir.path().to_path_buf()).unwrap();
+        crate::storage::receipt_contract::first_writer_wins(&backend, "r1").await;
+    }
+
+    #[tokio::test]
+    async fn file_receipt_one_winner_under_concurrency() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = std::sync::Arc::new(FileBackend::new(dir.path().to_path_buf()).unwrap());
+        crate::storage::receipt_contract::one_winner_under_concurrency(backend, "r1").await;
+        // No tmp file survives a store.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path().join("sessions/r1"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        // Nor does the hard-link probe leave anything in the data dir.
+        let probes: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".link-probe"))
+            .collect();
+        assert!(probes.is_empty(), "{probes:?}");
+    }
+
+    #[tokio::test]
+    async fn file_receipt_for_a_deleted_session_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileBackend::new(dir.path().to_path_buf()).unwrap();
+        assert!(backend.store_receipt_if_absent("gone", b"x").await.is_err());
+        assert_eq!(backend.load_receipt("gone").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_backend_without_receipt_support_says_so() {
+        let backend = crate::storage::MemoryBackend;
+        assert_eq!(backend.load_receipt("s").await.unwrap(), None);
+        assert_eq!(
+            backend
+                .store_receipt_if_absent("s", b"x")
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert!(!backend.receipts_durable());
     }
 }

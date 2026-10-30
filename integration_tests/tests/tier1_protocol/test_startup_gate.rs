@@ -131,6 +131,11 @@ fn metrics_endpoint_serves_prometheus_text() {
     };
     assert!(response.starts_with("HTTP/1.1 200 OK"), "got: {response}");
     assert!(response.contains("text/plain"), "got: {response}");
+    assert!(
+        response.contains("macp_receipts_issued_total{signed=\"false\"} 0")
+            && response.contains("macp_receipt_issue_failures_total 0"),
+        "got: {response}"
+    );
 }
 
 /// E1 (RFC-MACP-0012 §9): policies preload from MACP_POLICIES_DIR; the wire
@@ -271,6 +276,10 @@ fn run_expecting_startup_abort(
         // shell cannot mask or manufacture the condition under test.
         .env_remove("MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE")
         .env_remove("MACP_LIST_SESSIONS_MAX_PAGE_SIZE")
+        .env_remove("MACP_RECEIPT_SIGNING_KEY_PATH")
+        .env_remove("MACP_RECEIPT_SIGNING_KEY")
+        .env_remove("MACP_RECEIPT_SIGNING_KID")
+        .env_remove("MACP_RECEIPT_PUBLIC_KEYS_PATH")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     for (key, value) in extra_env {
@@ -456,6 +465,120 @@ fn startup_refuses_default_page_size_above_max() {
         assert!(
             ok.try_wait().expect("try_wait").is_none(),
             "default={default_size} max={max_size} is a valid configuration and must not abort startup"
+        );
+    }
+}
+
+/// RFC-MACP-0013 §13: a misconfigured receipt signing key aborts startup
+/// rather than running silently unsigned, names the variable, and never
+/// echoes the key text.
+#[test]
+fn startup_refuses_bad_receipt_keys() {
+    use base64::Engine as _;
+    let binary =
+        std::env::var("MACP_TEST_BINARY").unwrap_or_else(|_| "../target/debug/macp-runtime".into());
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, text: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        path.to_str().unwrap().to_string()
+    };
+    let not_json = write("keys.json", "not json");
+    let secret = "SECRET-KEY-MATERIAL-do-not-echo";
+    let fixtures = "../crates/macp-core/tests/fixtures";
+    let pem = &format!("{fixtures}/test-receipt-key.pem");
+    let private_keys = &format!("{fixtures}/invalid-receipt-keys/okp_private_d.json");
+    // A valid private JWK, kid "jwk-1".
+    let seed = [42u8; 32];
+    let d = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(seed);
+    let mut jwk = macp_runtime::macp_core::receipt::ReceiptSigner::from_seed(&seed, "jwk-1")
+        .unwrap()
+        .public_jwk();
+    let retired = write(
+        "retired.json",
+        &serde_json::json!({ "keys": [jwk.clone()] }).to_string(),
+    );
+    jwk["d"] = d.clone().into();
+    let jwk = jwk.to_string();
+
+    for (env, var, reason) in [
+        (
+            vec![("MACP_RECEIPT_SIGNING_KEY", secret)],
+            "MACP_RECEIPT_SIGNING_KEY",
+            "not a PKCS#8 PEM or a JWK",
+        ),
+        (
+            vec![
+                ("MACP_RECEIPT_SIGNING_KEY", secret),
+                ("MACP_RECEIPT_SIGNING_KEY_PATH", "/nonexistent/key.pem"),
+            ],
+            "MACP_RECEIPT_SIGNING_KEY",
+            "both set",
+        ),
+        (
+            vec![("MACP_RECEIPT_SIGNING_KEY_PATH", "/nonexistent/key.pem")],
+            "MACP_RECEIPT_SIGNING_KEY_PATH",
+            "cannot read",
+        ),
+        (
+            vec![("MACP_RECEIPT_SIGNING_KID", "k1")],
+            "MACP_RECEIPT_SIGNING_KID",
+            "no signing key",
+        ),
+        (
+            vec![("MACP_RECEIPT_PUBLIC_KEYS_PATH", not_json.as_str())],
+            "MACP_RECEIPT_PUBLIC_KEYS_PATH",
+            "is not JSON",
+        ),
+        (
+            vec![("MACP_RECEIPT_SIGNING_KEY_PATH", pem)],
+            "MACP_RECEIPT_SIGNING_KEY_PATH",
+            "no kid",
+        ),
+        (
+            vec![
+                ("MACP_RECEIPT_SIGNING_KEY", jwk.as_str()),
+                ("MACP_RECEIPT_SIGNING_KID", "other"),
+            ],
+            "MACP_RECEIPT_SIGNING_KEY",
+            "differs from the configured kid",
+        ),
+        // A signed receipt's issuer is never a shared default.
+        (
+            vec![("MACP_RECEIPT_SIGNING_KEY", jwk.as_str())],
+            "MACP_RUNTIME_ID",
+            "must be set when receipts are signed",
+        ),
+        (
+            vec![("MACP_RECEIPT_PUBLIC_KEYS_PATH", private_keys)],
+            "MACP_RECEIPT_PUBLIC_KEYS_PATH",
+            "private member",
+        ),
+        // A retired key reusing the active kid with another public key.
+        (
+            vec![
+                ("MACP_RECEIPT_SIGNING_KEY_PATH", pem),
+                ("MACP_RECEIPT_SIGNING_KID", "jwk-1"),
+                ("MACP_RECEIPT_PUBLIC_KEYS_PATH", retired.as_str()),
+                ("MACP_RUNTIME_ID", "it"),
+            ],
+            "MACP_RECEIPT_PUBLIC_KEYS_PATH",
+            "names more than one key",
+        ),
+    ] {
+        let mut env = env;
+        env.push(("RUST_LOG", "off"));
+        let (stdout, stderr, status) = run_expecting_startup_abort(&binary, &env);
+        assert!(!status.success(), "{env:?} must be fatal at startup");
+        assert!(
+            stderr.contains("startup aborted") && stderr.contains(var) && stderr.contains(reason),
+            "{env:?}: stderr must name {var} and say {reason:?}; stderr: {stderr}"
+        );
+        assert!(
+            ![secret, d.as_str()]
+                .iter()
+                .any(|k| stderr.contains(k) || stdout.contains(k)),
+            "{env:?}: key text must never be echoed"
         );
     }
 }

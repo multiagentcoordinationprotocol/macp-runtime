@@ -115,6 +115,7 @@ pub struct Runtime {
     compact_terminal_logs: bool,
     audit: AuditConfig,
     clock: Arc<dyn Clock>,
+    receipts: Arc<crate::receipts::ReceiptIssuer>,
 }
 
 /// A `WhatIfReplay` result: the library report, plus each replay event's
@@ -297,6 +298,9 @@ impl Runtime {
             compact_terminal_logs,
             audit: AuditConfig::from_env(),
             clock: Arc::new(SystemClock),
+            receipts: Arc::new(crate::receipts::ReceiptIssuer::new(
+                crate::receipts::ReceiptConfig::default(),
+            )),
         }
     }
 
@@ -314,6 +318,29 @@ impl Runtime {
     /// The acceptance clock, in Unix milliseconds.
     pub fn now_ms(&self) -> i64 {
         self.clock.now_ms()
+    }
+
+    /// Override `MACP_COMPACT_TERMINAL_LOGS` read at construction.
+    pub fn with_compact_terminal_logs(mut self, compact: bool) -> Self {
+        self.compact_terminal_logs = compact;
+        self
+    }
+
+    /// Replace the decision-receipt configuration (default: unsigned, no
+    /// published keys, issuer `runtime:macp-runtime`).
+    pub fn with_receipt_config(mut self, config: crate::receipts::ReceiptConfig) -> Self {
+        self.receipts = Arc::new(crate::receipts::ReceiptIssuer::new(config));
+        self
+    }
+
+    /// The decision-receipt configuration in force.
+    pub fn receipt_config(&self) -> &crate::receipts::ReceiptConfig {
+        &self.receipts.config
+    }
+
+    /// The `GetReceiptKeys` JWKS text, rendered once at construction.
+    pub fn receipt_keys_json(&self) -> &str {
+        &self.receipts.jwks_json
     }
 
     /// Replace the audit verbosity read from the environment at construction.
@@ -1157,6 +1184,115 @@ impl Runtime {
         Some(session.clone())
     }
 
+    /// A session for a read-only RPC: the registry's copy (expiring it if
+    /// due, as [`Self::get_session_checked`] does), else the stored snapshot
+    /// of a session evicted from memory. The stored one is not re-inserted.
+    pub async fn session_for_read(&self, session_id: &str) -> Result<Session, MacpError> {
+        if let Some(session) = self.get_session_checked(session_id).await {
+            return Ok(session);
+        }
+        // The id comes from the wire: storage keys paths by it, so anything
+        // but one plain path component (`../x`, an absolute path) is unknown.
+        if !crate::storage::is_storage_safe_session_id(session_id) {
+            return Err(MacpError::UnknownSession);
+        }
+        match self.storage.load_session(session_id).await {
+            Ok(Some(session)) if session.session_id == session_id => Ok(session),
+            // A file-system alias (e.g. case folding) of another session.
+            Ok(Some(_)) => Err(MacpError::UnknownSession),
+            Ok(None) => Err(MacpError::UnknownSession),
+            Err(e) => {
+                tracing::warn!(session_id, error = %e, "cannot load an evicted session");
+                Err(MacpError::StorageFailed)
+            }
+        }
+    }
+
+    /// The decision receipt for `session_id` (RFC-MACP-0013 §13): the stored
+    /// one when there is one, else issued now and persisted first-writer-wins.
+    /// Every call for a session serves the same bytes. `ReceiptUnavailable`
+    /// when the session is not eligible; `StorageFailed` when storage fails.
+    pub async fn decision_receipt(&self, session_id: &str) -> Result<Arc<Vec<u8>>, MacpError> {
+        use crate::storage::ReceiptWrite;
+        use macp_core::receipt::{build, ReceiptInputs};
+
+        if let Some(bytes) = self.receipts.cached(session_id).await {
+            return Ok(bytes);
+        }
+        let _issuing = self.receipts.stripe(session_id).lock().await;
+        if let Some(bytes) = self.receipts.cached(session_id).await {
+            return Ok(bytes);
+        }
+        // Read under the lock: disk GC deletes under it too, so a session
+        // seen here is not deleted before its receipt is stored.
+        let in_memory = self.registry.get_shared(session_id).await.is_some();
+        let session = self.session_for_read(session_id).await?;
+        // Cache only sessions the registry holds, so eviction bounds the cache.
+        let keep = |bytes: Vec<u8>| async move {
+            if in_memory {
+                self.receipts.cache(session_id, bytes).await
+            } else {
+                Arc::new(bytes)
+            }
+        };
+        let failed = |e: std::io::Error| {
+            tracing::warn!(session_id, error = %e, "decision receipt: storage failed");
+            self.metrics.record_receipt_failure();
+            MacpError::StorageFailed
+        };
+        match self.storage.load_receipt(session_id).await {
+            Ok(Some(bytes)) => return Ok(keep(bytes).await),
+            Ok(None) => {}
+            Err(e) => return Err(failed(e)),
+        }
+
+        let wire = crate::receipts::receipt_source(&session)?;
+        let issued_at = crate::receipts::rfc3339_seconds(self.now_ms());
+        let config = &self.receipts.config;
+        let inputs = ReceiptInputs::new(
+            &session.session_id,
+            &session.mode,
+            wire,
+            config.issuer(),
+            &issued_at,
+        )
+        .semantics_rev(crate::receipts::IMPLEMENTATION, session.semantics_rev);
+        let bytes = build(&inputs, config.signer()).map_err(|e| {
+            tracing::warn!(session_id, error = %e, "decision receipt: not issuable");
+            self.metrics.record_receipt_failure();
+            MacpError::ReceiptUnavailable
+        })?;
+        let signed = config.signed();
+        match self
+            .storage
+            .store_receipt_if_absent(session_id, &bytes)
+            .await
+        {
+            Ok(ReceiptWrite::Stored) => {
+                self.metrics.record_receipt_issued(signed);
+                tracing::info!(session_id, signed, "decision receipt issued");
+                Ok(keep(bytes).await)
+            }
+            Ok(ReceiptWrite::Existing(stored)) => Ok(keep(stored).await),
+            Ok(_) => Err(failed(std::io::Error::other(
+                "unknown receipt write outcome",
+            ))),
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                // Not persistable here: the in-memory copy is the receipt,
+                // kept for as long as the session is readable.
+                self.metrics.record_receipt_issued(signed);
+                tracing::info!(
+                    session_id,
+                    signed,
+                    durable = false,
+                    "decision receipt issued"
+                );
+                Ok(self.receipts.keep_unpersisted(session_id, bytes).await)
+            }
+            Err(e) => Err(failed(e)),
+        }
+    }
+
     /// RFC-MACP-0012 §8.1 what-if replay: replay the session's accepted
     /// history under its bound policy and under `candidate`, and report the
     /// difference. Read-only: no envelope is emitted, and the session, its
@@ -1774,6 +1910,10 @@ impl Runtime {
             if !eligible {
                 continue;
             }
+            // Hold the session's receipt lock so an issuance in flight either
+            // stores before this delete (and is deleted with it) or sees the
+            // session gone.
+            let _issuing = self.receipts.stripe(&id).lock().await;
             match self.storage.delete_session(&id).await {
                 Ok(()) => {
                     {
@@ -1782,6 +1922,7 @@ impl Runtime {
                     }
                     self.log_store.remove_session_log(&id).await;
                     let _ = self.stream_bus.remove_if_unused(&id);
+                    self.receipts.forget(&id).await;
                     removed += 1;
                 }
                 Err(e) => {
@@ -1830,6 +1971,18 @@ impl Runtime {
             let mut guard = self.registry.sessions.write().await;
             for id in &evict_ids {
                 guard.remove(id);
+            }
+        }
+        for id in &evict_ids {
+            // Under the stripe, so an issuance that saw the session in memory
+            // has cached before this runs. A stored receipt stays in storage;
+            // an unpersisted one stays while the session can still be read.
+            let _issuing = self.receipts.stripe(id).lock().await;
+            self.receipts.evict(id).await;
+            if self.receipts.is_unpersisted(id).await
+                && !matches!(self.storage.load_session(id).await, Ok(Some(_)))
+            {
+                self.receipts.forget(id).await;
             }
         }
         for id in &evict_ids {

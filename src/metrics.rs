@@ -47,6 +47,11 @@ pub struct RuntimeMetrics {
     per_mode: RwLock<HashMap<String, Arc<ModeMetrics>>>,
     /// Replay/snapshot divergences observed during startup recovery (D7).
     replay_mismatches: AtomicU64,
+    /// Decision receipts issued and persisted, signed / unsigned.
+    receipts_issued_signed: AtomicU64,
+    receipts_issued_unsigned: AtomicU64,
+    /// `GetDecisionReceipt` calls that failed in storage or could not build.
+    receipt_failures: AtomicU64,
 }
 
 impl RuntimeMetrics {
@@ -54,6 +59,9 @@ impl RuntimeMetrics {
         Self {
             per_mode: RwLock::new(HashMap::new()),
             replay_mismatches: AtomicU64::new(0),
+            receipts_issued_signed: AtomicU64::new(0),
+            receipts_issued_unsigned: AtomicU64::new(0),
+            receipt_failures: AtomicU64::new(0),
         }
     }
 
@@ -147,6 +155,40 @@ impl RuntimeMetrics {
 
     pub fn replay_mismatches(&self) -> u64 {
         self.replay_mismatches.load(Ordering::Relaxed)
+    }
+
+    pub fn record_receipt_issued(&self, signed: bool) {
+        let counter = if signed {
+            &self.receipts_issued_signed
+        } else {
+            &self.receipts_issued_unsigned
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_receipt_failure(&self) {
+        self.receipt_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `(signed, unsigned)` receipts issued.
+    pub fn receipts_issued(&self) -> (u64, u64) {
+        (
+            self.receipts_issued_signed.load(Ordering::Relaxed),
+            self.receipts_issued_unsigned.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn receipt_failures(&self) -> u64 {
+        self.receipt_failures.load(Ordering::Relaxed)
+    }
+
+    /// The receipt counters as Prometheus text lines.
+    pub fn receipt_prometheus_lines(&self, out: &mut String) {
+        let (signed, unsigned) = self.receipts_issued();
+        out.push_str(&format!(
+            "macp_receipts_issued_total{{signed=\"true\"}} {signed}\nmacp_receipts_issued_total{{signed=\"false\"}} {unsigned}\nmacp_receipt_issue_failures_total {}\n",
+            self.receipt_failures()
+        ));
     }
 
     pub fn snapshot(&self) -> Vec<(String, MetricsSnapshot)> {

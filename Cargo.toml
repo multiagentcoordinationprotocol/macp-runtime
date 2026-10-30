@@ -64,10 +64,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rocksdb = { version = "0.25" }
 redis = { version = "1.2", features = ["tokio-comp", "aio"] }
-macp-proto = "0.1.12"
+macp-proto = "0.1.13"
 tonic-prost-build = "0.14"
 tempfile = "3"
 base64 = "0.23"
+ed25519-dalek = { version = "3", default-features = false }
 sha2 = "0.11"
 
 [features]
@@ -82,7 +83,7 @@ reflection = ["dep:tonic-reflection"]
 
 [dependencies]
 macp-pb = { workspace = true }
-macp-core = { workspace = true }
+macp-core = { workspace = true, features = ["receipts"] }
 macp-storage = { workspace = true }
 macp-policy = { workspace = true }
 macp-modes = { workspace = true }

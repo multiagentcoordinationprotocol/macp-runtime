@@ -29,6 +29,8 @@ pub use macp_core;
 
 pub mod error;
 pub mod metrics;
+pub mod receipts;
+pub mod recovery;
 pub mod replay;
 pub mod runtime;
 pub mod session;

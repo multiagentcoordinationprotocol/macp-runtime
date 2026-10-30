@@ -55,6 +55,11 @@ services:
       # the console's what-if replay can re-run them under a candidate policy.
       # Takes effect from runtime 0.10; older images ignore it.
       MACP_COMPACT_TERMINAL_LOGS: "0"
+      # Decision receipts (RFC-MACP-0013 §13). Empty means unsigned receipts
+      # issued as runtime:macp-runtime. Takes effect from runtime 0.11.
+      MACP_RECEIPT_SIGNING_KEY: ${MACP_RECEIPT_SIGNING_KEY:-}
+      MACP_RECEIPT_SIGNING_KID: ${MACP_RECEIPT_SIGNING_KID:-}
+      MACP_RUNTIME_ID: ${MACP_RUNTIME_ID:-}
       # Agents authenticate with auth-service JWTs...
       MACP_AUTH_ISSUER: macp-auth-service
       MACP_AUTH_AUDIENCE: macp-runtime

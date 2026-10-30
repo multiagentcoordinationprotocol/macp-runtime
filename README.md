@@ -298,6 +298,8 @@ development aids for exercising a local server, not a supported SDK.
 | `ListPolicies` | implemented |
 | `WatchPolicies` | implemented |
 | `WhatIfReplay` | implemented |
+| `GetDecisionReceipt` | implemented |
+| `GetReceiptKeys` | implemented |
 
 ## Architecture
 

@@ -38,7 +38,7 @@ The client sends its supported protocol versions in descending preference order.
 
 Returns `UNSUPPORTED_PROTOCOL_VERSION` if no mutual version exists.
 
-**Capabilities advertised**: `sessions.stream`, `sessions.list_sessions`, `sessions.watch_sessions`, `cancellation.cancel_session`, `progress.progress`, `manifest.get_manifest`, `mode_registry.list_modes`, `mode_registry.list_changed`, `roots.list_roots`, `roots.list_changed`, `policy_registry.register_policy`, `policy_registry.list_policies`, `policy_registry.list_changed`, `policy_registry.what_if_replay`, and `policy_registry.rule_extensions` (the vendor-extension keys the policy registry admits, sorted; empty unless an embedder registered `RuleExtension`s -- advisory, admission is authoritative).
+**Capabilities advertised**: `sessions.stream`, `sessions.list_sessions`, `sessions.watch_sessions`, `cancellation.cancel_session`, `progress.progress`, `manifest.get_manifest`, `mode_registry.list_modes`, `mode_registry.list_changed`, `roots.list_roots`, `roots.list_changed`, `policy_registry.register_policy`, `policy_registry.list_policies`, `policy_registry.list_changed`, `policy_registry.what_if_replay`, `policy_registry.rule_extensions` (the vendor-extension keys the policy registry admits, sorted; empty unless an embedder registered `RuleExtension`s -- advisory, admission is authoritative), and `decision_receipt.get_decision_receipt` with `decision_receipt.signed` (whether receipts carry a signature).
 
 ## Message Transport
 
@@ -358,6 +358,31 @@ rpc WhatIfReplay(WhatIfReplayRequest) returns (WhatIfReplayResponse)
 - **Compacted history.** By default a session's log is compacted to a single checkpoint when it ends, which leaves nothing to replay. A session whose full history is gone is refused with `HISTORY_UNAVAILABLE` (gRPC `FAILED_PRECONDITION`, RFC-MACP-0012 §8.1 item 8). The runtime never reports from a partial history. `MACP_COMPACT_TERMINAL_LOGS` is the retention control: set it to `0` to keep ended sessions replayable (see [Deployment](deployment.md#storage-backends)).
 
 Advertised as `policy_registry.what_if_replay`.
+
+## Decision Receipts
+
+### GetDecisionReceipt
+
+Returns the `macp-receipt/1` decision receipt for a resolved session (RFC-MACP-0013 §13) as `receipt_json`: the JCS bytes of the receipt, UTF-8.
+
+```protobuf
+rpc GetDecisionReceipt(GetDecisionReceiptRequest) returns (GetDecisionReceiptResponse)
+```
+
+- **Authorization** is the same as `GetSession`: an observer, the initiator, or a declared participant. Otherwise `SESSION_NOT_FOUND` or `FORBIDDEN`. The call counts against the sender's message rate limit.
+- **Eligibility.** Only a `Resolved` session of a standards-track mode has a receipt. Any other session -- open, suspended, expired, cancelled, or of an extension mode -- gets `RECEIPT_UNAVAILABLE` (gRPC `FAILED_PRECONDITION`).
+- **Stable bytes.** The first call issues the receipt and persists it first-writer-wins; every later call, from any reader and across restarts, eviction and key rotation, returns the same bytes. A storage failure is `INTERNAL_ERROR` and nothing is kept, so the call can be retried.
+- **Content.** The receipt carries the resolving `CommitmentPayload` verbatim (`commitment_wire_b64`), its `commitment_hash`, `issuer` (`runtime:<MACP_RUNTIME_ID>`), `issued_at`, and `semantics_rev`. With a signing key configured, `attestations` holds one detached EdDSA JWS; otherwise it is empty. See [Deployment](deployment.md#decision-receipts) for keys and durability.
+
+Advertised as `decision_receipt.get_decision_receipt`, with `decision_receipt.signed`.
+
+### GetReceiptKeys
+
+Returns the JWKS (`jwks_json`) a verifier checks receipt signatures against: the active public key first, then retired keys from `MACP_RECEIPT_PUBLIC_KEYS_PATH`. Never a private member. Retired keys stay published while receipts are unsigned; the set is `{"keys":[]}` only when there are no keys at all (RFC-MACP-0013 §13 item 8). It needs no credentials.
+
+```protobuf
+rpc GetReceiptKeys(GetReceiptKeysRequest) returns (GetReceiptKeysResponse)
+```
 
 ## Streaming Watches
 

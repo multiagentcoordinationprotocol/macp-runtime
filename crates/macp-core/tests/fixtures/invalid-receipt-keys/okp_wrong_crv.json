@@ -1,0 +1,13 @@
+{
+  "_invalid_because": "an OKP key MUST be an Ed25519 key ($defs.jwk then.properties.crv const)",
+  "keys": [
+    {
+      "kty": "OKP",
+      "crv": "X25519",
+      "kid": "example-1",
+      "alg": "EdDSA",
+      "use": "sig",
+      "x": "TDVzkxaSf6_Oxu7mmn5TbCkF80s8Ulh33qKQsi0gnZM"
+    }
+  ]
+}
