@@ -1105,6 +1105,8 @@ impl MacpRuntimeService for MacpServer {
                     // Advisory (policy.proto): admission stays authoritative.
                     rule_extensions: self.runtime.policy_registry().rule_extension_names(),
                 }),
+                // RFC-MACP-0013 §13: not advertised until the RPCs are served.
+                decision_receipt: None,
                 experimental: Some(crate::pb::ExperimentalCapabilities {
                     features: HashMap::from([
                         ("ext_mode_lifecycle".into(), "true".into()),
@@ -1413,6 +1415,22 @@ impl MacpRuntimeService for MacpServer {
                 transport_endpoints: vec![],
             }),
         }))
+    }
+
+    async fn get_decision_receipt(
+        &self,
+        _request: Request<crate::pb::GetDecisionReceiptRequest>,
+    ) -> Result<Response<crate::pb::GetDecisionReceiptResponse>, Status> {
+        Err(Status::unimplemented(
+            "GetDecisionReceipt is not implemented",
+        ))
+    }
+
+    async fn get_receipt_keys(
+        &self,
+        _request: Request<crate::pb::GetReceiptKeysRequest>,
+    ) -> Result<Response<crate::pb::GetReceiptKeysResponse>, Status> {
+        Err(Status::unimplemented("GetReceiptKeys is not implemented"))
     }
 
     async fn list_modes(
@@ -2537,6 +2555,34 @@ mod tests {
         assert!(manifest
             .supported_modes
             .contains(&"ext.multi_round.v1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn receipt_rpcs_unimplemented_before_issuance() {
+        let (server, _) = make_server();
+        let err = server
+            .get_decision_receipt(Request::new(crate::pb::GetDecisionReceiptRequest {
+                session_id: new_sid(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        let err = server
+            .get_receipt_keys(Request::new(crate::pb::GetReceiptKeysRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        let caps = server
+            .initialize(Request::new(InitializeRequest {
+                supported_protocol_versions: vec!["1.0".into()],
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .capabilities
+            .unwrap();
+        assert!(caps.decision_receipt.is_none());
     }
 
     #[tokio::test]

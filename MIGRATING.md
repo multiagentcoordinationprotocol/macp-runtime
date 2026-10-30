@@ -14,6 +14,25 @@ Every release that may break an embeddable crate has an entry here, under a
 introduces a breaking API change must add it, and a release PR with a breaking
 bump fails without it. Patch releases have no entry.
 
+## 0.11.0 — decision receipts
+
+### `macp-pb` / macp-proto 0.1.13
+
+- macp-proto 0.1.13 adds `Capabilities.decision_receipt`
+  (`DecisionReceiptCapability`) and the `GetDecisionReceipt` / `GetReceiptKeys`
+  messages. `Capabilities` is a plain prost struct, so a struct literal must
+  now set `decision_receipt` (or use `..Default::default()`).
+
+### `macp_core::error`
+
+- New `MacpError::ReceiptUnavailable` (`RECEIPT_UNAVAILABLE`, gRPC
+  `FAILED_PRECONDITION`, HTTP 409), in `ERROR_CODE_REGISTRY`. The enum is
+  `#[non_exhaustive]`, so a wildcard arm already covers it.
+
+### Fixtures and vectors
+
+- `SPEC_REV` moved to spec `122ad47`. No vendored fixture changed.
+
 ## 0.10.0 — what-if replay
 
 Additive only: nothing an embedder calls changes.

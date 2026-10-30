@@ -8,8 +8,8 @@ copied, byte-identical, point-in-time, from:
 multiagentcoordinationprotocol/schemas/conformance/receipt/
 ```
 
-in the spec repo, commit `8d20dc5705117efb5d890327fdfdea429a0374f9`, on
-2026-10-25. That commit must stay equal to `SPEC_REV` in
+in the spec repo, commit `122ad473879617e8cf79304b55a55a82aa40123e`, on
+2026-10-30. That commit must stay equal to `SPEC_REV` in
 `.github/workflows/ci.yml`.
 
 The directory is `tests/vectors/receipt/`, the path both SDKs vendor these

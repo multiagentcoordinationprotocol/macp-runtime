@@ -8,8 +8,8 @@ multiagentcoordinationprotocol/schemas/conformance/
 multiagentcoordinationprotocol/schemas/conformance/cmt-hash/
 ```
 
-in the spec repo, commit `8d20dc5705117efb5d890327fdfdea429a0374f9`, on
-2026-10-25. That commit and date record the provenance of this import; this
+in the spec repo, commit `122ad473879617e8cf79304b55a55a82aa40123e`, on
+2026-10-30. That commit and date record the provenance of this import; this
 must stay equal to `SPEC_REV` in `.github/workflows/ci.yml`.
 
 **Gated by `check_dir` in `.github/workflows/ci.yml`'s `conformance-oracle`
