@@ -74,3 +74,5 @@ Plan: `plans/decision-receipts.md`. Branch: `feat/decision-receipts`. It is reba
 - /reconcile: 8 entries. 6 CONFIRMED, 1 CHANGED (signing requires MACP_RUNTIME_ID), 1 deferred (ext.* receipts). All settled by Opus, none needed the user. DECISIONS.md updated.
 - Finalization: workspace tests, clippy -D warnings (workspace + integration_tests), both lockfiles --locked, tier1 136/136, tier1_jwt 9/9, tier2 5/5.
 
+- pushed feat/decision-receipts 26251f7
+- PR #264 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/264 (closed #261 as superseded)
