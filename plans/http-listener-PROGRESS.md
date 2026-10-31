@@ -2,7 +2,7 @@
 
 Plan: `plans/http-listener.md`. Suggested branch: `feat/http-listener`, based on main a8c3ffd (0.11.0, R1 + R2 merged).
 Spec: normative at `99f3cfa` (`99f3cfa090b4bfb72b3063ca0134ec661436c3ef`; HTTP binding #234 = `122ad47`, JSON
-mapping #233 = `018e1fc`). `SPEC_REV` is currently `0f77753` and moves to `99f3cfa` in P0.
+mapping #233 = `018e1fc`). `SPEC_REV` moved from `0f77753` to `99f3cfa` in P0 (05da2ad).
 
 ## Repo map
 - `Cargo.toml`: `[workspace.package]` 0.11.0; `default = []`; `otel` feature (`:78`) uses optional `tower-http`,
@@ -64,7 +64,7 @@ mapping #233 = `018e1fc`). `SPEC_REV` is currently `0f77753` and moves to `99f3c
 | P0 spec re-pin + vendoring | simple | DONE | 05da2ad | Opus, 1 round, PASS (batched with P1) | 14 vendored files byte-equal to 99f3cfa; DRIFT on 1-byte mutation |
 | P1 gRPC HISTORY_UNAVAILABLE | simple | DONE | ad34084 | Opus, 1 round, PASS (batched with P0) | workspace 1132 pass; tier1 passive_subscribe 7 pass |
 | P1b SIGTERM shared shutdown | simple | DONE | 4cc11f7 | Opus, 1 round, GAPS→fixed inline (MIGRATING section pasted into 0.11.0/0.10.0, stale env-table refs) | workspace 1136 pass; shutdown_binary 4/4 x3 |
-| P2 server seams | complex | DONE | af6c924 + (this commit) | Opus, 1 round, PASS (G1 doc(hidden), G2 P6 note closed inline; G3 bound-stream ordinal untested, gRPC discards ordinals) | workspace 1146, otel 441, tier1 137; semver-checks clean vs 0.11.0 |
+| P2 server seams | complex | DONE | af6c924 + edf68f6 | Opus, 1 round, PASS (G1 doc(hidden), G2 P6 note closed inline; G3 bound-stream ordinal untested, gRPC discards ordinals) | workspace 1146, otel 441, tier1 137; semver-checks clean vs 0.11.0 |
 | P3 canonical JSON codec | complex | TODO | | | |
 | P4 listener skeleton | complex | TODO | | | |
 | P5 unary + errors + Send layers | complex | TODO | | | |
@@ -76,3 +76,5 @@ mapping #233 = `018e1fc`). `SPEC_REV` is currently `0f77753` and moves to `99f3c
 | P11 docs, image, release notes | simple | TODO | | | |
 
 Plan review round 1 (REVISE, 17 findings) applied to the plan on 2026-10-31; see `## Plan review` there. Round 2 (A: rate limits in band, B: SIGTERM moved to P1b in PR A, C: stale P2 item dropped) applied; verdict SOUND after 2 rounds.
+
+- 2026-10-31 PR A ship gate (Fable): GAPS 2 (MIGRATING heading must be literal `## 0.12.0`; PROGRESS refs) fixed; one-way door (gRPC compacted resume) ship as-is, no user input needed: spec-mandated at both pins, no deployed consumer breaks.

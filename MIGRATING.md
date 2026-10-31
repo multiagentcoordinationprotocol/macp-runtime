@@ -14,7 +14,7 @@ Every release that may break an embeddable crate has an entry here, under a
 introduces a breaking API change must add it, and a release PR with a breaking
 bump fails without it. Patch releases have no entry.
 
-## The release after 0.11.0 — gRPC compacted resume, spec re-pin, SIGTERM drain
+## 0.12.0 — gRPC compacted resume, spec re-pin, SIGTERM drain
 
 ### gRPC wire (`macp-runtime` server)
 

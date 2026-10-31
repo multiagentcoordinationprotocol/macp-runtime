@@ -997,3 +997,8 @@ Fable analyzed each before the merge, and the user confirmed all of its recommen
 - **Not `122ad47`** (the HTTP binding commit): it avoids the contract change but pins behind spec fixes R1 already implements and leaves a known drift open.
 - The HTTP artifacts are vendored under `tests/http/` and drift-checked (`check_dir` for the two directories, a new one-file `check_file` for the schema); `spec-drift.yml` watches the three paths.
 - **Rev 99f3cfa also makes §3.2's `HISTORY_UNAVAILABLE` binding-wide**, which gRPC did not honour; fixed in P1 of the same plan.
+
+## 2026-10-31 — R4 PR A: gRPC compacted resume ends the stream with HISTORY_UNAVAILABLE (decided by Fable analysis, Opus)
+- **Change:** `fix(stream)!` (P1): a StreamSession subscribe below the compacted base is a terminal `FAILED_PRECONDITION` + `macp-error-code: HISTORY_UNAVAILABLE` + details `{"lowest_available_sequence":N}` instead of an inline `INVALID_ENVELOPE` frame; the old status sentence is kept.
+- **Analysis (Fable):** RFC-0006 §3.2 required `FAILED_PRECONDITION` already at the old pin `0f77753` (`:176`) and adds the code and details at `99f3cfa` (`:178`), so this is a conformance fix. `macp-control-plane` matches the kept sentence on its terminal path (`stream-consumer.service.ts:298-319`); the Python and TypeScript SDKs document both shapes and do not loop. No deployed consumer breaks.
+- **Verdict:** ship as-is; no user input needed. MIGRATING heading is the literal `## 0.12.0` the release gate requires.

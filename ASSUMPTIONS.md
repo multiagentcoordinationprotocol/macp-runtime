@@ -1537,7 +1537,7 @@
 - **Chose:** a `## The release after 0.11.0 — gRPC compacted resume, spec re-pin` section, mirroring `docs/deployment.md`'s existing "Upgrading to the release after 0.11.0" heading. The release PR renames it to the computed version.
 - **Alternatives:** `## 0.12.0` now (guesses release-plz's answer; wrong if the next release is 0.11.1).
 - **Blast radius if wrong:** Low; a heading rename. If a breaking change already sits on main, the embedder-contract gate asks for `## <next>` regardless of this section.
-- **Status:** UNCONFIRMED
+- **Status:** CHANGED (2026-10-31, PR A ship gate). `fix(stream)!` makes the bump 0.11.0 → 0.12.0 certain, and `scripts/embedder_contract.py:73` (`release_migrating`) requires the literal `## 0.12.0` heading on `main` (`docs/stability.md:104-106`); a human commit on the release PR would only make release-plz reopen it. Renamed to `## 0.12.0 — …` in PR A.
 
 ## P1b: the "second signal exits immediately" behaviour did not exist before; it is new
 - **Plan:** `plans/http-listener.md` (P1b)
