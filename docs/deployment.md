@@ -16,7 +16,7 @@ Before exposing the runtime to production traffic, ensure these four items are c
 
 ## Upgrading an `otel` build (OpenTelemetry bootstrap)
 
-This affects only binaries built with `--features otel`; the default build and the published image are unchanged.
+This affects only binaries built with `--features otel`; the default `cargo build` is unchanged. Published images up to and including `0.11.0` do not include `otel`; images published after it do (see [Container deployment](#container-deployment)), and start with this behaviour, so they export nothing until an endpoint is set.
 
 1. **No more default export to `localhost:4317`.** An `otel` build used to export traces to `http://localhost:4317` whenever `OTEL_EXPORTER_OTLP_ENDPOINT` was unset. It now exports nothing until an endpoint variable is set. Set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` to keep the old behaviour.
 2. **Signal-specific endpoints are honoured.** `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` used to be overridden by the programmatic endpoint; it now wins over the generic variable, and setting it alone turns telemetry on.
@@ -332,7 +332,7 @@ Two consequences worth knowing:
 
 ### OpenTelemetry
 
-These variables take effect **only in a binary built with the `otel` Cargo feature** (`cargo build --features otel`). The published Docker image and a default `cargo build` do not include it; such a binary logs one warning at startup when an endpoint variable below is set, and otherwise ignores every `OTEL_*` variable.
+These variables take effect **only in a binary built with the `otel` Cargo feature** (`cargo build --features otel`). Images published after `0.11.0` include it (see [Container deployment](#container-deployment)); a default `cargo build` and images up to `0.11.0` do not. A binary without the feature logs one warning at startup when an endpoint variable below is set, and otherwise ignores every `OTEL_*` variable.
 
 Telemetry is **off unless an endpoint is configured**. It turns on when at least one of `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` is set to a non-empty value and `OTEL_SDK_DISABLED` is not `true`. With telemetry off the runtime installs no exporter and no propagator, opens no connection, and logs exactly what a default build logs. A telemetry misconfiguration never stops the runtime: it logs one `ERROR` line naming the variable and runs with telemetry off.
 
@@ -602,6 +602,41 @@ Kubernetes `runAsUser`), the entrypoint changes nothing and that user needs
 write access to the directory. A cluster that enforces `runAsNonRoot` must set
 `runAsUser` for that reason.
 
+#### OpenTelemetry in the image
+
+Images published after `0.11.0` are built with `--features otel`
+(`docker.yml` passes `--build-arg CARGO_FEATURES=otel`; so does the CI
+`docker-build` gate). The feature is inert until you configure it:
+
+- **Zero egress without `OTEL_*`.** With none of `OTEL_EXPORTER_OTLP_ENDPOINT`,
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
+  set (or with `OTEL_SDK_DISABLED=true`), the runtime installs no exporter and
+  no propagator and opens **no connection** of any kind for telemetry. There is
+  no built-in default endpoint: nothing dials `localhost:4317`. Its log output
+  and gRPC responses are identical to the plain build's.
+  `tests/otel_binary.rs` pins this against the real binary with a listener on
+  `127.0.0.1:4317`, and `scripts/measure-otel-image.sh` compares the two
+  images' responses and log lines.
+- **Turning it on** takes one variable, for example
+  `-e OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317`. See
+  [OpenTelemetry](#opentelemetry) for the rest.
+- **Cost.** Measured with `scripts/measure-otel-image.sh` on one host (Apple
+  M4 Pro, Docker 28.4; `linux/arm64` native and `linux/amd64` emulated): the
+  binary grows by about 3.5 MiB and the image by about 1 MiB compressed (5 MB
+  unpacked). With no `OTEL_*` variable set, median startup-to-SERVING moved by
+  under 3 ms and idle memory by under 1 MiB, both within run-to-run noise.
+
+To build an image **without** the feature, build the repository's
+`Dockerfile` with the default (empty) build argument; to add it to a self-built
+image, pass it explicitly:
+
+```bash
+docker build -t macp-runtime:plain .                                  # no otel
+docker build --build-arg CARGO_FEATURES=otel -t macp-runtime:otel .  # otel
+```
+
+`CARGO_FEATURES` is passed verbatim to `cargo build --release --features`.
+
 When deploying in containers:
 
 - Mount a persistent volume at `MACP_DATA_DIR` so session logs survive container restarts.
@@ -612,7 +647,11 @@ When deploying in containers:
 ### Published image tags
 
 Every image is multi-arch (`linux/amd64`, `linux/arm64`) with SLSA provenance
-and an SBOM attached, built by `.github/workflows/docker.yml`. Every push to
+and an SBOM attached, built by `.github/workflows/docker.yml`. Every image
+published after `0.11.0`, release or branch build, is built with
+`--features otel` (inert until an `OTEL_EXPORTER_OTLP_*` endpoint is set; see
+[OpenTelemetry in the image](#opentelemetry-in-the-image)); `0.11.0` and
+earlier are plain builds. Every push to
 `main` (a "branch build") publishes three of these together, always pointing
 at the same digest; a release publishes the other two, also always sharing a
 digest with each other but never with a branch build's:

@@ -144,8 +144,8 @@ tempfile = { workspace = true }
 # fixture through it, against this runtime and against its in-process target.
 macp-conform = { workspace = true }
 criterion = "0.8"
-# `otel` tests: the in-memory span exporter (`testing`), the OTLP collector
-# service stubs for the fake collector in `tests/support/fake_collector.rs`,
+# `otel` tests: the in-memory span exporter (`testing`), the OTLP trace and
+# metrics collector service stubs for the fake collector in `tests/support/fake_collector.rs`,
 # and a throwaway CA for the OTLP TLS test.
 opentelemetry = "0.32"
 opentelemetry_sdk = { version = "0.32", features = ["testing"] }
@@ -153,6 +153,7 @@ tracing-opentelemetry = "0.33"
 opentelemetry-proto = { version = "0.32", default-features = false, features = [
     "gen-tonic",
     "trace",
+    "metrics",
 ] }
 rcgen = "0.13"
 

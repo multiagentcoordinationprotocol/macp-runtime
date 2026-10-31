@@ -207,14 +207,22 @@ mod otel {
             .port()
     }
 
-    async fn wait_serving(addr: &str) -> bool {
+    /// Poll `grpc.health.v1` until SERVING, for at most 30 s. Fails fast,
+    /// with the reason, if the child exits first; every connect and call is
+    /// individually bounded, so a hung attempt cannot eat the deadline.
+    async fn wait_serving(child: &mut std::process::Child, addr: &str) -> Result<(), String> {
         use tonic_health::pb::health_check_response::ServingStatus;
         use tonic_health::pb::health_client::HealthClient;
         use tonic_health::pb::HealthCheckRequest;
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
+            if let Some(status) = child.try_wait().unwrap() {
+                return Err(format!("runtime exited with {status} before SERVING"));
+            }
             if let Ok(channel) = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
                 .unwrap()
+                .connect_timeout(Duration::from_secs(1))
+                .timeout(Duration::from_secs(2))
                 .connect()
                 .await
             {
@@ -226,13 +234,13 @@ mod otel {
                     .await
                 {
                     if resp.into_inner().status == ServingStatus::Serving as i32 {
-                        return true;
+                        return Ok(());
                     }
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        false
+        Err("runtime never reported SERVING within 30 s".to_string())
     }
 
     /// Start the binary with `extra` env, wait for health SERVING, stop it,
@@ -289,15 +297,17 @@ mod otel {
             command.env(k, v);
         }
         let mut child = Child(command.spawn().expect("spawn macp-runtime"));
-        let serving = wait_serving(&addr).await;
-        if serving {
+        let serving = wait_serving(&mut child.0, &addr).await;
+        if serving.is_ok() {
             after(addr.clone()).await;
         }
         let _ = child.0.kill();
         let _ = child.0.wait();
         let (stdout, stderr) = read_all(&mut child.0);
         let output = normalize(&format!("{stdout}{stderr}"));
-        assert!(serving, "runtime never reported SERVING; output:\n{output}");
+        if let Err(reason) = serving {
+            panic!("{reason}; output:\n{output}");
+        }
         output
     }
 

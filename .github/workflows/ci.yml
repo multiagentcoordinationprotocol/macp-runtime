@@ -890,6 +890,9 @@ jobs:
         with:
           context: .
           push: false
+          # Same features as the published image (docker.yml).
+          build-args: |
+            CARGO_FEATURES=otel
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

@@ -1,8 +1,9 @@
 //! A minimal fake OTLP/gRPC collector for the `otel` tests.
 //!
-//! It serves `opentelemetry.proto.collector.trace.v1.TraceService/Export` on
-//! `127.0.0.1:<ephemeral>`, plaintext or TLS, and records every request it
-//! receives. Nothing is ever forwarded. Shared by `tests/otel_bootstrap.rs`
+//! It serves `opentelemetry.proto.collector.trace.v1.TraceService/Export`
+//! and `opentelemetry.proto.collector.metrics.v1.MetricsService/Export` on
+//! `127.0.0.1:<ephemeral>`, plaintext or TLS, answers every export OK (so the
+//! exporter never retries), and records every request it receives. Nothing is ever forwarded. Shared by `tests/otel_bootstrap.rs`
 //! (P1) and the end-to-end export tests that come later; include it with
 //! `#[path = "support/fake_collector.rs"] mod fake_collector;`.
 #![allow(dead_code)] // each including test binary uses a different subset
@@ -11,12 +12,19 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::{
+    MetricsService, MetricsServiceServer,
+};
+use opentelemetry_proto::tonic::collector::metrics::v1::{
+    ExportMetricsServiceRequest, ExportMetricsServiceResponse,
+};
 use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::{
     TraceService, TraceServiceServer,
 };
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
+use opentelemetry_proto::tonic::metrics::v1::Metric;
 use opentelemetry_proto::tonic::trace::v1::Span;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
@@ -24,6 +32,7 @@ use tonic::transport::{Identity, Server, ServerTlsConfig};
 #[derive(Clone, Default)]
 struct Recorder {
     requests: Arc<Mutex<Vec<ExportTraceServiceRequest>>>,
+    metric_requests: Arc<Mutex<Vec<ExportMetricsServiceRequest>>>,
 }
 
 #[tonic::async_trait]
@@ -34,6 +43,22 @@ impl TraceService for Recorder {
     ) -> Result<tonic::Response<ExportTraceServiceResponse>, tonic::Status> {
         self.requests.lock().unwrap().push(request.into_inner());
         Ok(tonic::Response::new(ExportTraceServiceResponse {
+            partial_success: None,
+        }))
+    }
+}
+
+#[tonic::async_trait]
+impl MetricsService for Recorder {
+    async fn export(
+        &self,
+        request: tonic::Request<ExportMetricsServiceRequest>,
+    ) -> Result<tonic::Response<ExportMetricsServiceResponse>, tonic::Status> {
+        self.metric_requests
+            .lock()
+            .unwrap()
+            .push(request.into_inner());
+        Ok(tonic::Response::new(ExportMetricsServiceResponse {
             partial_success: None,
         }))
     }
@@ -73,7 +98,9 @@ impl FakeCollector {
                 .tls_config(ServerTlsConfig::new().identity(identity))
                 .expect("fake collector TLS config");
         }
-        let router = builder.add_service(TraceServiceServer::new(recorder.clone()));
+        let router = builder
+            .add_service(TraceServiceServer::new(recorder.clone()))
+            .add_service(MetricsServiceServer::new(recorder.clone()));
         tokio::spawn(async move {
             let _ = router
                 .serve_with_incoming_shutdown(TcpIncoming::from(listener), async {
@@ -95,7 +122,22 @@ impl FakeCollector {
         format!("{scheme}://{}", self.addr)
     }
 
-    /// Every export request received so far.
+    /// Every metrics export request received so far.
+    pub fn metric_requests(&self) -> Vec<ExportMetricsServiceRequest> {
+        self.recorder.metric_requests.lock().unwrap().clone()
+    }
+
+    /// Every metric data point batch received so far, across requests.
+    pub fn metrics(&self) -> Vec<Metric> {
+        self.metric_requests()
+            .into_iter()
+            .flat_map(|r| r.resource_metrics)
+            .flat_map(|rm| rm.scope_metrics)
+            .flat_map(|sm| sm.metrics)
+            .collect()
+    }
+
+    /// Every trace export request received so far.
     pub fn requests(&self) -> Vec<ExportTraceServiceRequest> {
         self.recorder.requests.lock().unwrap().clone()
     }

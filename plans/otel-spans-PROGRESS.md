@@ -164,4 +164,23 @@ Risk tiers: P0 simple; P1-P6 complex; P7 simple. Each phase is implemented by a 
   - Tests: workspace 1126, otel 417, macp-storage rocksdb 67, rocksdb+redis against a live temporary redis 74 (executor run).
   - Semver: additive (3 defaulted trait methods, 1 builder).
   - Next: P6.
+- 2026-10-31 P6 DONE. PASS in round 1 (Opus verifier, gated alone because it crosses process and image boundaries).
+  - Measurements: Apple M4 Pro, Docker 28.4; startup polled with grpcurl, 20 runs; raw output in the session scratchpad.
+
+    | plain → otel | arm64 (native) | amd64 (emulated) |
+    |---|---|---|
+    | image (inspect .Size) | 34.53 → 35.67 MiB (Δ 1.14) | 34.71 → 35.74 (Δ 1.03) |
+    | image (unpacked) | 167 → 172 MB | 145 → 150 MB |
+    | binary | 12.72 → 16.21 MiB (Δ 3.48) | 13.21 → 16.70 (Δ 3.49) |
+    | startup median/p90, no vars | 144.4/162.5 → 142.2/156.6 ms (Δ −2.2) | 1196.2/1212.9 → 1199.0/1206.8 (Δ +2.8) |
+    | startup median/p90, blackhole endpoint | 150.5/168.2 (Δ +6.1) | 1202.0/1216.8 (Δ +5.8) |
+    | idle VmRSS Δ, no vars | 0.57 MiB | 0.70 MiB |
+    | idle VmRSS Δ, blackhole | 2.07 MiB | 3.19 MiB |
+    | behaviour equivalence | identical | identical |
+
+  - Rule verdict: PASS (image Δ ≤ 8 MiB, startup Δ ≤ 50 ms, RSS Δ ≤ 5 MiB, no behaviour difference) → the published image builds with otel.
+  - Before commit, applied the verifier's notes: fail-fast `wait_serving` with child output and client timeouts; zero-egress also watches `[::1]:4317` and 4318.
+  - Files: tests/otel_binary.rs, tests/{otel_bootstrap.rs,support/fake_collector.rs}, Cargo.toml, Dockerfile, scripts/measure-otel-image.sh, .github/workflows/{docker,ci}.yml, docs/deployment.md, ASSUMPTIONS.md.
+  - Tests: workspace 1126, otel 420.
+  - Next: P7.
 

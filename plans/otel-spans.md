@@ -985,7 +985,13 @@ and with the feature on.
   - The rollback notes above.
 
 ### P6 — Real-binary check, image decision, measurement
-- **Status:** TODO
+- **Status:** DONE (2026-10-31). The decision rule PASSED and was applied: docker.yml and the ci.yml docker-build gate pass `CARGO_FEATURES=otel`. Divergences, each recorded in ASSUMPTIONS.md:
+  - Measured on an Apple M4 Pro: arm64 native, amd64 under emulation (only deltas are meaningful there). No CI runner was measured.
+  - The memory rule uses the larger of the `docker stats` and process VmRSS deltas.
+  - Case 1 ends with CancelSession so the duration metric records.
+  - The SIGINT bound includes `MACP_SHUTDOWN_DRAIN_SECS=1`.
+  - The zero-egress case also watches `[::1]:4317` and `127.0.0.1:4318`.
+  - The binary tests fail fast if the child exits before SERVING.
 - **Delivers:**
   - End-to-end proof through the real binary and exporter.
   - The measured cost of `--features otel` in the GHCR image.

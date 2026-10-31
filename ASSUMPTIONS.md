@@ -1482,3 +1482,43 @@
 - **Residual:** A SessionStart that *reuses the id* of a session GC'd by a pre-anchor binary, landing between the sweep's check and its batched delete, could lose its new anchor. The cost is span links only.
 - **Blast radius if wrong:** Low.
 - **Status:** UNCONFIRMED
+
+## otel-spans: the P6 measurement ran on an arm64 Mac, amd64 under emulation
+- **Plan:** `plans/otel-spans.md` (P6 measurement protocol step 1: "on linux/amd64. Also arm64 if buildx and QEMU are available")
+- **Assumed:** The host is an Apple M4 Pro (aarch64, Docker 28.4, containerd image store). There is no native linux/amd64 host.
+- **Chose:** arm64 is measured natively, which gives the primary numbers. The same protocol was also run on linux/amd64 under Docker Desktop's emulation. Its startup (~1.2 s on both images) is dominated by emulation, so its absolute startup figures mean nothing; its deltas, sizes and equivalence still apply. Both pass the rule.
+- **Blast radius if wrong:** Low. The CI runners (ubuntu amd64) never measured. Re-run `scripts/measure-otel-image.sh` on an amd64 host to confirm.
+- **Status:** UNCONFIRMED
+
+## otel-spans: how "image size" and "idle RSS" are read for the P6 decision rule
+- **Plan:** `plans/otel-spans.md` (P6 steps 2 and 4: `docker image inspect -f '{{.Size}}'`, idle RSS "from `docker stats --no-stream`")
+- **Assumed:** Under the containerd image store, `.Size` is the compressed content size, not the unpacked size. `docker stats` reports cgroup memory (~1.9 MiB), which is not the process RSS.
+- **Chose:** The script reports `.Size` as the plan says, and also prints the unpacked `docker image ls` size for reference (Δ 5 MB, which passes either way). For memory, it also reads PID 1's `VmRSS` (the entrypoint `exec`s the runtime). The RSS criterion uses the larger of the two deltas.
+- **Blast radius if wrong:** Low. Every reading is well inside the bounds.
+- **Status:** UNCONFIRMED
+
+## otel-spans: startup timing and the step-5 equivalence script
+- **Plan:** `plans/otel-spans.md` (P6 steps 3 and 5)
+- **Chose:**
+  - Startup runs from just before `docker run -d` to the first `grpc.health.v1.Health/Check` that returns SERVING. It is polled from the host with `grpcurl` (protos come from the locked `tonic-health`/`macp-proto` crates via `cargo metadata`) and a 10 ms sleep between polls. Each grpcurl call costs ~15 ms, which is the same for every image, so only the deltas are meaningful. One unrecorded warm-up run precedes each 20-run series.
+  - The blackhole is a host socket that accepts and never answers, reached at `host.docker.internal`.
+  - Step 5 runs SessionStart, Proposal and Commitment as the sole participant `coordinator`, with hand-encoded protobuf payloads, then `docker stop` (SIGTERM). It compares the grpcurl JSON with `acceptedAtUnixMs` dropped, and the log lines with the leading timestamp and ANSI codes stripped.
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED
+
+## otel-spans: P6 binary test details
+- **Plan:** `plans/otel-spans.md` (P6 binary test cases 1-3)
+- **Chose:**
+  - The existing `tests/support/fake_collector.rs` gains the metrics service. The dev-dependency `opentelemetry-proto` gains the `metrics` feature, which adds no new crate, so neither lockfile changed. Existing tests that set the generic endpoint now get OK for metric exports instead of UNIMPLEMENTED.
+  - Case 1 ends the session with `CancelSession`, not a Commitment, so that `macp.session.duration` is recorded.
+  - Case 3 sets `OTEL_BSP_SCHEDULE_DELAY=60000` and asserts the collector is empty before SIGINT. With `MACP_SHUTDOWN_DRAIN_SECS=1`, it asserts that SIGINT-to-exit and SIGINT-to-spans-at-the-collector are both ≤ 5 s, so the drain is included in the bound.
+  - The file is `#![cfg(all(feature = "otel", unix))]`, because SIGINT is sent with `kill -INT`.
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED
+
+## otel-spans: docs say "images published after 0.11.0" include otel
+- **Plan:** `plans/otel-spans.md` (P6 Docs: "whether the image includes otel")
+- **Assumed:** release-plz computes the next version, so the first otel image's version is not known yet.
+- **Chose:** `docs/deployment.md` says "after `0.11.0`" rather than naming a version. P7 or the release PR can name it.
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED

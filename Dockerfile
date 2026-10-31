@@ -16,7 +16,10 @@ COPY src/ src/
 # benches/ is declared as a [[bench]] target in Cargo.toml; cargo refuses to
 # parse the manifest if the file is missing, even for a release build.
 COPY benches/ benches/
-RUN cargo build --release
+# Optional Cargo features, e.g. `--build-arg CARGO_FEATURES=otel` for the
+# OpenTelemetry export path. Empty (the default) builds the plain binary.
+ARG CARGO_FEATURES=""
+RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"}
 
 # Stage 2: Minimal runtime image
 FROM debian:bookworm-slim
