@@ -1373,14 +1373,14 @@
 
 ## otel-spans: the anchor cache uses std::sync::RwLock, not tokio's
 - **Plan:** `plans/otel-spans.md` (P4 Files: anchor map behind a tokio `RwLock`)
-- **Chose:** `telemetry::anchor::AnchorCache` holds a `std::sync::RwLock<HashMap<String, SpanContext>>`, locked only for one map operation and never across an `.await` (the brief's rule); lookups are synchronous after the async registry residency check. The registry-wide prune holds the registry's read guard (async) while taking the std write lock briefly inside it, so a concurrent SessionStart cannot be pruned mid-insert.
+- **Chose:** `telemetry::anchor::AnchorCache` holds a `std::sync::RwLock<HashMap<String, Option<SpanContext>>>` (P5 added the `None` negative entries, see the P5 entry below), locked only for one map operation and never across an `.await` (the brief's rule). The map operations are synchronous; since P5 a cache miss is followed by one async `load_trace_anchor` outside the lock (`Runtime::resident_anchor`). The registry-wide prune holds the registry's read guard (async) while taking the std write lock briefly inside it, so a concurrent SessionStart cannot be pruned mid-insert.
 - **Alternatives:** tokio `RwLock` as planned (every lookup an await).
 - **Blast radius if wrong:** Low; internal.
 - **Status:** UNCONFIRMED
 
 ## otel-spans: `observe_transition` is synchronous and the transition span is created after the state change
 - **Plan:** `plans/otel-spans.md` (P4 Approach: `async fn observe_transition`, span entered around the transition)
-- **Chose:** A synchronous `fn observe_transition(op, &Session, now_ms, resolving_type)` called right after each state change (session mutex still held, nothing awaited), which bumps the legacy counter, the semconv metrics, and creates/links/ends a zero-length transition span. The span does not cover the log append.
+- **Chose:** (Superseded in part by P5: `observe_transition` is now `async`, and its only await is the lazy anchor load; see "`observe_transition` became async" below.) A `fn observe_transition(op, &Session, now_ms, resolving_type)` called right after each state change (session mutex still held), which bumps the legacy counter, the semconv metrics, and creates/links/ends a zero-length transition span. The span does not cover the log append.
 - **Alternatives:** Enter the span around the append (span durations would include storage latency; needs restructuring each site).
 - **Blast radius if wrong:** Low; span durations only.
 - **Status:** UNCONFIRMED
@@ -1521,4 +1521,12 @@
 - **Assumed:** release-plz computes the next version, so the first otel image's version is not known yet.
 - **Chose:** `docs/deployment.md` says "after `0.11.0`" rather than naming a version. P7 or the release PR can name it.
 - **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED
+
+## otel-spans: `Instruments` asserts `UnwindSafe`/`RefUnwindSafe` instead of a MIGRATING.md entry
+- **Plan:** `plans/otel-spans.md` (P7 semver check: "Expected result: no failures")
+- **Assumed:** The workspace `cargo semver-checks` against 0.11.0 (all non-unstable features, so `otel` on) reported `auto_trait_impl_removed`: `RuntimeMetrics` was no longer `UnwindSafe`/`RefUnwindSafe`, because its `otel`-only `OnceLock<Arc<Instruments>>` holds OpenTelemetry `Counter`/`Histogram` handles (`Arc<dyn SyncInstrument>`). The default build was unaffected.
+- **Chose:** `impl UnwindSafe`/`RefUnwindSafe for Instruments` (`src/telemetry/instruments.rs`): the handles are immutable after construction and the SDK synchronizes its own state. Pinned by `metrics::tests::runtime_metrics_stays_unwind_safe`, which fails to compile without the impls in an `otel` build. No MIGRATING.md entry, since nothing breaks.
+- **Alternatives:** Keep the break and document it in MIGRATING.md (forces a minor bump for an otel-only auto-trait loss).
+- **Blast radius if wrong:** Low. At worst a caller that catches a panic raised inside the SDK during a recording keeps using metric handles whose SDK-side aggregation state the SDK itself guards.
 - **Status:** UNCONFIRMED

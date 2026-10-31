@@ -16,6 +16,12 @@ use crate::session::{
 use crate::storage::StorageBackend;
 use crate::stream_bus::SessionStreamBus;
 
+/// Upper bound on loading a stored trace anchor after a restart. The load
+/// runs under the session mutex, so a slow backend costs at most this once
+/// per session; a timeout is a cached miss (the spans go unlinked).
+#[cfg(feature = "otel")]
+const ANCHOR_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 #[derive(Debug)]
 pub struct ProcessResult {
     pub session_state: SessionState,
@@ -491,7 +497,20 @@ impl Runtime {
         if let Some(cached) = self.anchors.lookup(session_id) {
             return cached;
         }
-        let loaded = match self.storage.load_trace_anchor(session_id).await {
+        // Bounded: callers hold the session mutex, so a slow backend must
+        // not stall the session's transition for longer than this.
+        let load = tokio::time::timeout(
+            ANCHOR_LOAD_TIMEOUT,
+            self.storage.load_trace_anchor(session_id),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "trace anchor load timed out",
+            ))
+        });
+        let loaded = match load {
             Ok(Some(bytes)) => {
                 let cx = crate::telemetry::anchor::decode(&bytes);
                 if cx.is_none() {

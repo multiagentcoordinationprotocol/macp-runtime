@@ -373,8 +373,8 @@ impl RuntimeMetrics {
     }
 
     /// The semconv families in Prometheus text format: the Envelope families
-    /// ([`Self::envelope_prometheus_lines`]) then the session families
-    /// ([`Self::session_prometheus_lines`]). A family with no series yet
+    /// (`envelope_prometheus_lines`) then the session families
+    /// (`session_prometheus_lines`). A family with no series yet
     /// renders nothing.
     pub fn semconv_prometheus_lines(&self, out: &mut String) {
         self.envelope_prometheus_lines(out);
@@ -677,6 +677,14 @@ impl MetricsSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `RuntimeMetrics` was `UnwindSafe + RefUnwindSafe` in 0.11.0; losing
+    // either (as the `otel` build briefly did) is a semver major finding.
+    #[test]
+    fn runtime_metrics_stays_unwind_safe() {
+        fn assert_unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        assert_unwind_safe::<RuntimeMetrics>();
+    }
 
     const EXPECTED_METRIC_NAMES: [&str; 10] = [
         "macp_messages_accepted_total",

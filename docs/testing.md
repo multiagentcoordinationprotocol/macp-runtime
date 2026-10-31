@@ -143,6 +143,25 @@ Every pull request runs the full gate in `.github/workflows/ci.yml`: MSRV check 
 
 The `features` job runs `cargo test -p macp-runtime --features otel` as well as clippy, so the `otel` feature is tested, not only compiled. The vendored OpenTelemetry semantic conventions (`tests/otel/macp-semconv.json`, see `tests/otel/SOURCE.md`) are drift-checked by the conformance oracle and pinned to the runtime's span and metric set by `cargo test --test otel_semconv`.
 
+### OpenTelemetry tests
+
+The `otel` feature is tested in the root crate, not in `integration_tests/`. Run `cargo test -p macp-runtime --features otel`; the `features` job's "Test otel feature" step runs exactly that on every PR, after its "Clippy (otel feature)" step. Spans are captured in-process with the SDK's in-memory exporter, and OTLP export with `tests/support/fake_collector.rs`, a local OTLP/gRPC collector. No test needs network access or a real collector.
+
+| File | Covers |
+|------|--------|
+| `tests/otel_semconv.rs` | The vendored `tests/otel/macp-semconv.json` is `macp-semconv/0.1`, and its span and metric groups equal the runtime's set (runs without the feature too) |
+| `tests/otel_bootstrap.rs` | A wrong protocol, an unreadable certificate or a non-URI endpoint logs one error and the runtime still serves; the feature-off warning; bounded shutdown against a dead collector; TLS with the configured CA; log lines unchanged, even when `RUST_LOG` names the telemetry target |
+| `tests/otel_grpc.rs` | The gRPC SERVER span: W3C `traceparent` from metadata, health checks unspanned, `_OTHER` naming, codes from headers and trailers, stream span lifetime |
+| `tests/otel_process.rs` | `process` spans on `Send` and `StreamSession`, parents, rejection codes, privacy (no payload or `reason`), storage failure and panic as ERROR, and the `macp_envelope_*` metrics |
+| `tests/otel_transitions.rs` | Transition spans, their parents and anchor links, `expire` as a root on every path, the commitment hash on `resolve`, the anchor cache's bound, and the `macp_session_*` metrics |
+| `tests/otel_anchor_restart.rs` | The stored anchor across a restart (`FileBackend`), including the whole chain for a StreamSession Commitment after a restart (client `traceparent` → SERVER → `process` → `resolve`, both linked to the pre-restart anchor), corrupt records, memory-only storage, disk GC, store ordering, and anchor storage failures that never fail a message |
+| `tests/otel_replay_equivalence.rs` | Telemetry on and off produce the same session state and replay, with and without compaction |
+| `tests/otel_binary.rs` | The real binary: export to the fake collector, zero egress on the default OTLP ports with no `OTEL_*` set, and the SIGINT flush bound |
+
+Activation, resource, endpoint/protocol/certificate resolution, label folding and the anchor record format are unit tests in `src/telemetry/`.
+
+The `macp-storage` anchor contract (`store_trace_anchor`/`load_trace_anchor`/`sweep_orphan_trace_anchors`) is unit-tested per backend in `crates/macp-storage/src/storage/`; the RocksDB tests need `cargo test -p macp-storage --features rocksdb-backend`.
+
 The conformance oracle reads the spec repo at a pinned revision (`SPEC_REV` in `ci.yml`), not at its default branch, so the check stays reproducible regardless of upstream merge timing. A separate scheduled workflow, `spec-drift.yml`, watches that pin daily and files a tracked `spec-drift`-labelled issue — but only when the upstream change is one the oracle's gates can actually act on. A change it can prove inert (a file outside the oracle's scope, or a policy-schema edit that is provably annotation-only once `description`/`$comment`/`title` are stripped) is reported on the workflow run's step summary instead of escalated, so the label stays a reliable signal rather than routine noise.
 
 Tier 3 runs only via manual GitHub Actions dispatch:

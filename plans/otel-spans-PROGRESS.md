@@ -183,4 +183,13 @@ Risk tiers: P0 simple; P1-P6 complex; P7 simple. Each phase is implemented by a 
   - Files: tests/otel_binary.rs, tests/{otel_bootstrap.rs,support/fake_collector.rs}, Cargo.toml, Dockerfile, scripts/measure-otel-image.sh, .github/workflows/{docker,ci}.yml, docs/deployment.md, ASSUMPTIONS.md.
   - Tests: workspace 1126, otel 420.
   - Next: P7.
+- 2026-10-31 P7 and finalization DONE. Final fresh-Opus verify: (A) P7 PASS, (B) whole feature PASS, minor gaps closed.
+  - Gaps closed: the semver re-run output is recorded; the anchor-load timeout (once per session, under the session mutex); the unwind-safety comment no longer overclaims.
+  - Tests: workspace 1127, otel 422, macp-storage rocksdb 67.
+  - Integration: tier1 136, jwt 9, tier2 5, identical for the plain binary and the otel binary with no vars.
+  - semver-checks: clean.
+  - Flagged for the pre-merge review:
+    - one-way doors: the anchor key and format, the StorageBackend method names, the Prometheus semconv family names;
+    - trust boundary: the published image can export sender and session ids to an operator-set endpoint.
+  - Next: /reconcile, then /ship.
 

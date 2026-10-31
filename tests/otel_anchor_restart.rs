@@ -25,7 +25,9 @@ use macp_runtime::macp_core::ManualClock;
 use macp_runtime::mode_registry::ModeRegistry;
 use macp_runtime::pb::macp_runtime_service_client::MacpRuntimeServiceClient;
 use macp_runtime::pb::macp_runtime_service_server::MacpRuntimeServiceServer;
-use macp_runtime::pb::{Ack, Envelope, SendRequest, SessionStartPayload};
+use macp_runtime::pb::{
+    Ack, CommitmentPayload, Envelope, SendRequest, SessionStartPayload, StreamSessionRequest,
+};
 use macp_runtime::policy::registry::PolicyRegistry;
 use macp_runtime::registry::SessionRegistry;
 use macp_runtime::runtime::Runtime;
@@ -33,7 +35,7 @@ use macp_runtime::security::SecurityLayer;
 use macp_runtime::server::MacpServer;
 use macp_runtime::storage::{FileBackend, MemoryBackend, StorageBackend};
 use macp_runtime::telemetry::{grpc, init, Telemetry};
-use opentelemetry::trace::SpanId;
+use opentelemetry::trace::{SpanId, TraceId};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
 use prost::Message;
@@ -233,6 +235,22 @@ fn proposal(message_id: &str, sid: &str) -> Envelope {
     envelope("Proposal", message_id, sid, payload)
 }
 
+fn commitment(message_id: &str, sid: &str) -> Envelope {
+    let payload = CommitmentPayload {
+        commitment_id: "c1".into(),
+        action: "decision.selected".into(),
+        authority_scope: "test".into(),
+        reason: "done".into(),
+        mode_version: "1.0.0".into(),
+        policy_version: "policy.default".into(),
+        configuration_version: "cfg-1".into(),
+        outcome_positive: true,
+        supersedes: None,
+    }
+    .encode_to_vec();
+    envelope("Commitment", message_id, sid, payload)
+}
+
 /// Poll the backend until the spawned anchor write for `sid` landed.
 async fn wait_for_stored_anchor(storage: &dyn StorageBackend, sid: &str) -> Vec<u8> {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -314,6 +332,111 @@ async fn links_survive_a_restart() {
     // One storage read per resident session, then the cache serves it.
     assert_eq!(counting.loads(), 2);
     assert_eq!(after.runtime.trace_anchor_count(), 2);
+}
+
+// Whole-feature seam (P2 + P3 + P4 + P5): after a restart, a Commitment sent
+// on a StreamSession carrying the client's `traceparent` produces the full
+// chain client -> SERVER (stream open) -> `process` -> `resolve`, and both the
+// `process` and the `resolve` span link to the pre-restart SessionStart anchor
+// loaded from storage. Each phase's own tests cover one link of this chain on
+// one path (unary, or no restart); none covers them together.
+#[tokio::test]
+async fn stream_commitment_after_a_restart_chains_and_links_the_stored_anchor() {
+    const CLIENT_TRACE: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const CLIENT_SPAN: &str = "00f067aa0ba902b7";
+    let dir = tempfile::tempdir().unwrap();
+    let storage: Arc<dyn StorageBackend> =
+        Arc::new(FileBackend::new(dir.path().to_path_buf()).unwrap());
+    let s = sid(7);
+
+    let before = Node::boot(Arc::clone(&storage), true, NOW).await;
+    assert!(before.send(start(&s)).await.ok);
+    assert!(before.send(proposal("p-before", &s)).await.ok);
+    let anchor = before.anchor_of(&s);
+    wait_for_stored_anchor(storage.as_ref(), &s).await;
+    drop(before);
+
+    let after = Node::boot(Arc::clone(&storage), true, NOW + 1_000).await;
+    assert_eq!(after.runtime.trace_anchor_count(), 0, "loaded lazily");
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let mut req = tonic::Request::new(tokio_stream::wrappers::ReceiverStream::new(rx));
+    req.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {INITIATOR}").parse().unwrap(),
+    );
+    req.metadata_mut().insert(
+        "traceparent",
+        format!("00-{CLIENT_TRACE}-{CLIENT_SPAN}-01")
+            .parse()
+            .unwrap(),
+    );
+    let mut inbound = MacpRuntimeServiceClient::new(after.channel.clone())
+        .stream_session(req)
+        .await
+        .unwrap()
+        .into_inner();
+    tx.send(StreamSessionRequest {
+        envelope: Some(commitment("c-after", &s)),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    use macp_runtime::pb::stream_session_response::Response;
+    match inbound.message().await.unwrap().unwrap().response {
+        Some(Response::Envelope(e)) => assert_eq!(e.message_id, "c-after"),
+        other => panic!("expected the echoed Commitment, got {other:?}"),
+    }
+    drop(tx);
+    while let Ok(Some(_)) = inbound.message().await {}
+
+    // The SERVER span ends with the stream; wait for it to be exported.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let server = loop {
+        if let Some(span) = after
+            .all()
+            .into_iter()
+            .find(|s| s.name == "macp.v1.MACPRuntimeService/StreamSession")
+        {
+            break span;
+        }
+        assert!(Instant::now() < deadline, "no StreamSession SERVER span");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    let client_trace = TraceId::from_hex(CLIENT_TRACE).unwrap();
+    assert_eq!(server.span_context.trace_id(), client_trace);
+    assert_eq!(
+        server.parent_span_id,
+        SpanId::from_hex(CLIENT_SPAN).unwrap()
+    );
+
+    let process = after.process_of("c-after");
+    assert_eq!(
+        attr(&process, "macp.envelope.outcome").as_deref(),
+        Some("accepted")
+    );
+    assert_eq!(process.parent_span_id, server.span_context.span_id());
+    assert_eq!(process.span_context.trace_id(), client_trace);
+    assert_eq!(process.links.len(), 1);
+    assert_eq!(process.links[0].span_context.span_id(), anchor);
+
+    let resolve = after
+        .all()
+        .into_iter()
+        .find(|sp| {
+            sp.name.starts_with("resolve ")
+                && attr(sp, "macp.session.id").as_deref() == Some(s.as_str())
+        })
+        .expect("a resolve span");
+    assert_eq!(resolve.parent_span_id, process.span_context.span_id());
+    assert_eq!(resolve.span_context.trace_id(), client_trace);
+    assert_eq!(resolve.links.len(), 1);
+    assert_eq!(resolve.links[0].span_context.span_id(), anchor);
+    assert_eq!(
+        attr(&resolve, "macp.session.state").as_deref(),
+        Some("SESSION_STATE_RESOLVED")
+    );
+    assert!(attr(&resolve, "macp.commitment.hash").is_some_and(|h| h.starts_with("sha256:")));
 }
 
 // A corrupt or unknown-version anchor record is ignored: no link, no error,

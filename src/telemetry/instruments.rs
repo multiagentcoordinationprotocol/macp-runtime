@@ -30,6 +30,16 @@ impl fmt::Debug for Instruments {
     }
 }
 
+// `Counter`/`Histogram` hold `Arc<dyn ..>` SDK handles, which are not
+// unwind-safe by auto trait. Without these impls `RuntimeMetrics` (which holds
+// the instruments in an `otel` build) lost `UnwindSafe`/`RefUnwindSafe`
+// against 0.11.0, a `cargo semver-checks` major finding. The handles are
+// immutable after construction and the SDK synchronizes its own aggregation
+// state, so the worst a panic while recording can do is poison an SDK lock
+// and drop later recordings: lost telemetry, never broken runtime state.
+impl std::panic::UnwindSafe for Instruments {}
+impl std::panic::RefUnwindSafe for Instruments {}
+
 impl Instruments {
     /// Create the instruments on `provider`'s [`METER_NAME`] meter.
     pub fn new(provider: &impl MeterProvider) -> Self {

@@ -1052,7 +1052,12 @@ and with the feature on.
   guarantee without `OTEL_*`.
 
 ### P7 — Documentation sweep and release notes
-- **Status:** TODO
+- **Status:** DONE (2026-10-31).
+  - **Semver:** the full-workspace `cargo semver-checks` against 0.11.0 built every crate. Its one failure, `auto_trait_impl_removed` (`RuntimeMetrics` lost `UnwindSafe`/`RefUnwindSafe` in an otel build), is fixed by unwind-safe impls on `Instruments`, with a compile test. The re-run of `-p macp-runtime` reports "no semver update required", and the other 8 crates were clean. MIGRATING.md needs no entry.
+  - **CI doc fix:** `cargo doc -D warnings` failed on private intra-doc links, now fixed.
+  - **CLAUDE.md** is gitignored in this repo, so its updates are local only.
+  - **Version wording:** "the release after 0.11.0", because the number depends on the squash title.
+  - **Finalization:** added a whole-feature seam test (StreamSession Commitment after a restart: SERVER → process → resolve, both linked to the stored anchor), plus a 2s timeout on the anchor load, which runs under the session mutex.
 - **Delivers:** consistent docs across files, plus the semver and changelog posture.
 - **Depends on:** P1-P6.
 - **Files:**
