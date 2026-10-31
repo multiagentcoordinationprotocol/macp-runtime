@@ -692,35 +692,74 @@ impl Runtime {
     /// ordinal, exclusive; 0 = from the start). `Err(base)` when the
     /// requested range was discarded by log compaction — the caller must
     /// surface an explicit error, not silently skip missing history.
+    ///
+    /// A wrapper over [`Self::subscribe_snapshot`] that drops the ordinals
+    /// and the high-water mark (kept as public API).
     pub async fn get_session_envelopes_after(
         &self,
         session_id: &str,
         after_sequence: u64,
     ) -> Result<Vec<Envelope>, u64> {
         Ok(self
-            .log_store
-            .get_incoming_after(session_id, after_sequence)
+            .subscribe_snapshot(session_id, after_sequence)
             .await?
+            .0
             .into_iter()
-            .map(|(_idx, entry)| Envelope {
-                macp_version: if entry.macp_version.is_empty() {
-                    macp_core::MACP_VERSION.into()
-                } else {
-                    entry.macp_version
-                },
-                mode: entry.mode,
-                message_type: entry.message_type,
-                message_id: entry.message_id,
-                session_id: entry.session_id,
-                sender: entry.sender,
-                timestamp_unix_ms: if entry.timestamp_unix_ms != 0 {
-                    entry.timestamp_unix_ms
-                } else {
-                    entry.received_at_ms
-                },
-                payload: entry.raw_payload,
-            })
+            .map(|(_ordinal, env)| env)
             .collect())
+    }
+
+    /// The subscribe snapshot: accepted envelopes strictly after
+    /// `after_sequence`, each with its accepted ordinal, and the session's
+    /// high-water mark (the highest accepted ordinal), all read under **one**
+    /// log read guard (`LogStore::get_incoming_after_with_high_water`).
+    /// `Err(base)` below the compaction base, as for
+    /// [`Self::get_session_envelopes_after`].
+    ///
+    /// Every accepted envelope is published to the session stream bus after
+    /// its append and before the per-session lock is released
+    /// (`process_session_start`, `synthesize_due_accept`, `process_message`),
+    /// so publish order is ordinal order. A subscriber that subscribed to the
+    /// bus before taking this snapshot therefore sees, after the replayed
+    /// duplicates, live envelopes numbered `high_water + 1`, `+ 2`, ...
+    pub(crate) async fn subscribe_snapshot(
+        &self,
+        session_id: &str,
+        after_sequence: u64,
+    ) -> Result<(Vec<(u64, Envelope)>, u64), u64> {
+        let (entries, high_water) = self
+            .log_store
+            .get_incoming_after_with_high_water(session_id, after_sequence)
+            .await?;
+        Ok((
+            entries
+                .into_iter()
+                .map(|(ordinal, entry)| (ordinal, Self::envelope_from_log_entry(entry)))
+                .collect(),
+            high_water,
+        ))
+    }
+
+    /// An accepted (`Incoming`) log entry as the Envelope a subscriber sees.
+    fn envelope_from_log_entry(entry: LogEntry) -> Envelope {
+        Envelope {
+            macp_version: if entry.macp_version.is_empty() {
+                macp_core::MACP_VERSION.into()
+            } else {
+                entry.macp_version
+            },
+            mode: entry.mode,
+            message_type: entry.message_type,
+            message_id: entry.message_id,
+            session_id: entry.session_id,
+            sender: entry.sender,
+            timestamp_unix_ms: if entry.timestamp_unix_ms != 0 {
+                entry.timestamp_unix_ms
+            } else {
+                entry.received_at_ms
+            },
+            payload: entry.raw_payload,
+        }
     }
 
     fn publish_accepted_envelope(&self, env: &Envelope) {

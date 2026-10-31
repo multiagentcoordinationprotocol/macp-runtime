@@ -275,7 +275,7 @@ ship first.
 - **Docs:** listed in Files. Commit `fix(shutdown): drain on SIGTERM as well as SIGINT`.
 
 ### P2 — Server seams shared by both bindings (zero gRPC behaviour change)
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; snapshot af6c924, 23 goldens byte-identical; seams are `pub(crate)`; `send_authenticated` includes the pure shape check; one-session-per-stream check stays in the gRPC frame handler; an over-high `after_sequence` mislabels a window envelope on gRPC as before, P6 filters it; additive `LogStore::get_incoming_after_with_high_water`, `SecurityLayer::with_rate_limits` is `#[doc(hidden)]` test support)
 - **Risk:** complex
 - **Delivers:**
   0. **First commit, before any refactor:** a characterization test (`tests/grpc_refusal_snapshot.rs`) that drives
@@ -553,7 +553,7 @@ ship first.
   - **`WatchSignals`:** each event is the canonical `WatchSignalsResponse` JSON; `sender_authenticated` is always
     emitted (defaults emitted, §10.10), never inside the Envelope (§4.4).
   - **Rejected:** `EventSource`-style GET (spec: POST only); long-polling (spec forbids).
-- **Edge cases:** slow consumer ⇒ hyper stops polling ⇒ broadcast lag ⇒ `STREAM_LAGGED` (503 code in the error
+- **Edge cases:** the cursor labels the first live envelope `high_water + 1` (P2); when the client's `after_sequence` exceeds the high water, drop every item with `ordinal <= after_sequence` so a subscribe-window envelope is never mislabelled or duplicated (P2 ASSUMPTIONS entry); slow consumer ⇒ hyper stops polling ⇒ broadcast lag ⇒ `STREAM_LAGGED` (503 code in the error
   event), as gRPC; client disconnect drops the stream and the bus receiver (`remove_if_unused` reclaims); keepalive
   writes surface dead peers; the SERVER span stays open for the stream's life (as gRPC); shutdown closes streams at
   the drain deadline.

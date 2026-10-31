@@ -1554,3 +1554,22 @@
 - **Alternatives:** a public `macp_runtime::shutdown` module (P4 could then live in the library; revisit in P4 if it does).
 - **Blast radius if wrong:** Low; moving the module into `lib.rs` later is additive.
 - **Status:** UNCONFIRMED
+
+## P2: live ordinal = high_water + 1 is exact only for an after_sequence the client could have learned
+- **Plan:** `plans/http-listener.md` (P2 Approach: "the first live envelope not deduped is `high_water + 1`, regardless of `after_sequence`")
+- **Assumed:** Publish order equals ordinal order (all three publish sites run after the append, under the per-session mutex: `src/runtime.rs` `process_session_start`, `synthesize_due_accept`, `process_message`). But an envelope accepted between the bus subscribe and the snapshot whose ordinal is `<= after_sequence` is not in the replay, so the existing message-id dedup misses it, delivers it, and the cursor numbers it `high_water + 1`. That needs `after_sequence` above every ordinal published before the subscribe, which no client can learn from this runtime (an ordinal is observable only after its publish), so only a guessed `after_sequence` hits it.
+- **Chose:** keep the existing dedup exactly (zero gRPC change, as the phase requires) and document the bound on `SubscriptionCursor`. P6 (SSE) may additionally drop any cursor item with `ordinal <= after_sequence`.
+- **Alternatives:** return message-id -> ordinal for the last bus-capacity ordinals under the same guard and skip every buffered envelope found there (exact for any `after_sequence`, but changes gRPC delivery in that race).
+- **Blast radius if wrong:** Low; a guessing client may see one mislabeled SSE `id:` in a race window.
+- **Status:** UNCONFIRMED
+
+## P2: seam shapes that differ slightly from the plan text
+- **Plan:** `plans/http-listener.md` (P2 items 1-2)
+- **Assumed / Chose:**
+  - `send_authenticated(identity, env, process: ProcessSpan) -> Ack` takes the span by value (it finishes it) and **includes** the Envelope shape check, since acceptance (i) requires an in-band `PAYLOAD_TOO_LARGE` from it. gRPC still runs shape check then `authenticate_metadata` first, so on gRPC the (pure) shape check runs twice; output is byte-identical (`tests/grpc_refusal_snapshot.rs`).
+  - The one-session-per-stream ("bound session") check stays in gRPC's `process_subscribe_frame`; `open_subscription(identity, session_id, after_sequence)` has no stream state to check it against.
+  - A subscribe frame on a gRPC stream that is already bound reuses that stream's receiver (authorize + snapshot on the existing cursor) instead of calling `open_subscription`, which would subscribe a fresh receiver and drop buffered envelopes. The unbound path (the common one) calls `open_subscription`.
+  - The existing server test module drives `process_stream_request(.., &mut events, ..)` with `let mut events = None`; the parameter is now `&mut Option<SubscriptionCursor>`, so those tests compile and pass unchanged.
+  - `SecurityLayer::with_rate_limits` (new, public, additive in `macp-auth`) lets the unit test set both buckets without process env; `cargo semver-checks` vs 0.11.0 reports no update required.
+- **Blast radius if wrong:** Low; all `pub(crate)` except the additive `LogStore::get_incoming_after_with_high_water` and `with_rate_limits`.
+- **Status:** UNCONFIRMED
