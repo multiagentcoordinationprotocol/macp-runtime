@@ -977,3 +977,15 @@ Decided by Opus (reconcile, reversible tier), checked against HEAD 5e574c8 plus 
 - **Labels and metrics: CONFIRMED.** Signal/Progress `_OTHER` under an `_OTHER` mode; the task-free label cache (drained now by the `try_lock` winner); duplicate SessionStart and stream `Inline` handling; the thread-bounded meter shutdown (SDK 0.32.1 still ignores the timeout); the float-accepting test validator; `record_session_duration` in milliseconds; the 2,000 session label-set cap; `Instruments` asserting `UnwindSafe`/`RefUnwindSafe`. All bounded, internal or test-only.
 - **Anchors and transitions: CONFIRMED.** The std `RwLock` cache; transition spans after the state change (the synchronous signature superseded by the async one); server-side process-span links; pruning orphans on every eviction pass; the wired-but-untestable synthetic-accept resolve; the standards-track-only commitment hash; `#[doc(hidden)]` `trace_anchor_count` (semver-checks ignores it); async `observe_transition` with lazy load; negative caching of load errors, now including the 2 s load timeout; storage-safe anchor ids; write-ordered orphan sweep. Each costs span links at worst.
 - **Tests and measurement method: CONFIRMED.** Replay equivalence comparing `seen_message_ids` as a set (both nondeterminisms change no replayed state, so no follow-up); how image size and RSS are read; startup timing and the step-5 script; the P6 binary test details; the "images published after 0.11.0" docs wording, which stays true whatever version is cut.
+
+## 2026-10-31 -- OTel spans (plans/otel-spans.md), one-way doors and trust boundary, decided by the user
+Fable analyzed each before the merge, and the user confirmed all of its recommendations:
+- **Published image builds with otel: CONFIRMED.** It is inert without an operator-set OTLP endpoint; zero egress is pinned by `tests/otel_binary.rs`. When active it exports `macp.sender.id` (Recommended in the semconv) and session ids, never payloads or reason text. It costs +1.1 MiB of image. Reversible by removing two build-args lines.
+- **Trace-anchor storage layout: CONFIRMED.**
+  - RocksDB `{id}\x00anchor` in the `receipts` CF. A new CF would break rollback to 0.11.
+  - `sessions/<id>/anchor.json` and Redis `{prefix}:anchor:{id}` with EX derived from `MAX_TTL_MS`.
+  - Record `v:1`.
+  - Three defaulted `StorageBackend` methods.
+  - Trigger to revisit with a generic sidecar API: a second per-session side record.
+- **Prometheus semconv family names and the one-minor deprecation of `macp_*_total{mode}`: CONFIRMED.** These are the names the OTel Prometheus exporter produces, and the deprecation window is the spec's.
+- **`OTEL_EXPORTER_OTLP_CERTIFICATE` as the sole trust anchor: CONFIRMED.** This matches the OTel SDK semantics in Go, Java and Python.

@@ -1211,7 +1211,7 @@
 - **Chose:** `telemetry::init::export_config` reads `OTEL_EXPORTER_OTLP_{TRACES_,METRICS_}CERTIFICATE` (signal-specific first). When set, that CA is the **only** trust anchor (`ClientTlsConfig::ca_certificate`, no `with_enabled_roots()`), matching the OTel spec's "the trusted certificate" and avoiding tonic's eager `NativeCertsNotFound` on a host without a native store (decided by the coordinator after the P1 verification). Native roots are used only when no certificate variable is set. An unreadable file logs an error and leaves telemetry inactive. Client-certificate variables stay unsupported and documented.
 - **Alternatives:** Document the variable as unsupported and drop the code.
 - **Blast radius if wrong:** Low. The variable is opt-in, and removing it deletes one branch and one test.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-10-31, by the user; see DECISIONS.md)
 
 ## otel-spans: the runtime resolves the OTLP endpoint and passes it with with_endpoint
 - **Plan:** `plans/otel-spans.md` (P1, Approach "Activation": "Do not call `.with_endpoint()`")
@@ -1341,9 +1341,9 @@
 - **Chose:** `RuntimeMetrics::record_envelope` keeps one series per `(mode, type, outcome)` (count, sum, 15 buckets) rendering both `macp_envelope_processed_total` and the duration histogram, and forwards the same, already-folded labels to the OTel instruments (installed via `Runtime::with_telemetry`). The 2,000-set backstop fold therefore applies to OTLP too. The Prometheus counter family is `# HELP/# TYPE macp_envelope_processed_total counter` (the `_total` name on the HELP/TYPE lines, as the existing exposition 0.0.4 text does).
 - **Alternatives:** Separate counters; fold only Prometheus; `# TYPE macp_envelope_processed counter` (OpenMetrics style).
 - **Blast radius if wrong:** Low.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-10-31, by the user; see DECISIONS.md)
 
-## otel-spans: `macp.sender.id` is recorded only after the full Send authentication
+## otel-spans: `macp.sender.id` is recorded once the Send sender is derived (was: after the full Send authentication)
 - **Plan:** `plans/otel-spans.md` (P3 Rejected: never the envelope's self-asserted sender)
 - **Chose:** `send` records it after `authenticate_send_request` succeeds (which also covers the session-start and rate-limit checks); the stream path after `apply_authenticated_sender`. An Envelope refused by a rate limit or allowed-mode check therefore has no `macp.sender.id`, though the caller was authenticated.
 - **Alternatives:** Record right after bearer authentication, before the policy checks.
@@ -1451,7 +1451,7 @@
 - **Chose:** `RedisBackend::with_disk_retention_secs(secs)` (additive builder, wired in `main.rs`). The expiry is `retention + MAX_TTL_MS/1000 (86,400) + 3,600` seconds when retention > 0, and there is no expiry at 0. This is never shorter than the plan's formula, because `ttl_ms <= MAX_TTL_MS`.
 - **Alternatives:** Add `ttl_ms` to the trait method, or read the session key.
 - **Blast radius if wrong:** Low. An orphan can live up to about a day longer, at ~100 bytes.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-10-31, by the user; see DECISIONS.md)
 
 ## otel-spans: `observe_transition` became async and loads the anchor lazily
 - **Plan:** `plans/otel-spans.md` (P5: `trace_anchor(sid)` loads on a cache miss; P4 made `observe_transition` synchronous)
