@@ -193,3 +193,6 @@ Risk tiers: P0 simple; P1-P6 complex; P7 simple. Each phase is implemented by a 
     - trust boundary: the published image can export sender and session ids to an operator-set endpoint.
   - Next: /reconcile, then /ship.
 
+- 2026-10-31 pushed feat/otel-spans 10d36d8
+- PR #268 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/268
+- 2026-10-31 merged #268 (a8c3ffd)
