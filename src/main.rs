@@ -333,6 +333,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(Telemetry::disabled);
     #[cfg(not(feature = "otel"))]
     let telemetry = Telemetry::disabled();
+    // The gRPC SERVER span layer, only when telemetry is active; inactive it
+    // is the identity layer and the server behaves exactly as without `otel`.
+    #[cfg(feature = "otel")]
+    let grpc_server_layer = macp_runtime::telemetry::grpc::optional_server_layer(&telemetry);
     let runtime = Arc::new(
         Runtime::with_registries(
             Arc::clone(&storage),
@@ -408,6 +412,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(std::time::Duration::from_secs(request_timeout_secs))
         .tcp_keepalive(Some(std::time::Duration::from_secs(60)))
         .http2_keepalive_interval(Some(std::time::Duration::from_secs(30)));
+    // Outside `add_service`, like tonic's own layers: message-size, timeout
+    // and concurrency semantics are unchanged.
+    #[cfg(feature = "otel")]
+    let builder = builder.layer(grpc_server_layer);
     let mut builder = match (tls_cert, tls_key) {
         (Some(cert_path), Some(key_path)) => {
             let cert = tokio::fs::read(cert_path).await?;

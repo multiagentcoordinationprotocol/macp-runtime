@@ -1268,3 +1268,54 @@
 - **Alternatives:** Add a startup span to the binary just for the test (a MACP-span-shaped thing P1 must not create).
 - **Blast radius if wrong:** Low.
 - **Status:** UNCONFIRMED
+
+## otel-spans: the SERVER span records status in on_response and on_eos, not on_failure
+- **Plan:** `plans/otel-spans.md` (P2 Approach: "`on_request`, `on_response` and `on_body_chunk` are `()`"; "`on_eos` and `on_failure` record `rpc.grpc.status_code`")
+- **Assumed:** In tower-http 0.6.8 a trailers-only response (tonic's form for any error raised before the first message, `NOT_FOUND` and `UNIMPLEMENTED` included) ends its body with no trailers, so `on_eos` gets `None`, and `on_failure` fires only for non-OK codes in the headers (`classify_eos` is never called on the trailers path, `trace/body.rs`). With `on_response = ()` an OK unary's code would come only from `on_eos`, and a trailers-only code only from `on_failure`.
+- **Chose:** `on_response` (`RecordTrailersOnly`) records a `grpc-status` found in the response headers, `on_eos` (`RecordEos`) one found in the trailers, and `on_failure` (`RecordFailure`) acts only on `GrpcFailureClass::Error` (a body/transport failure: status ERROR, no description). Each code is recorded exactly once. None of the three emits an event, which was the reason for `()`.
+- **Alternatives:** The plan's literal split (on_failure for codes), which leaves OK trailers-only responses unrecorded and duplicates the code attribute when both fire.
+- **Blast radius if wrong:** Low; internal to `src/telemetry/grpc.rs`, pinned by `tests/otel_grpc.rs`.
+- **Status:** UNCONFIRMED
+
+## otel-spans: ERROR status is set through otel.status_description alone
+- **Plan:** `plans/otel-spans.md` (P2: span declares `otel.status_code = Empty`; "`otel.status_code = "error"` ... `otel.status_description` is the status code name only")
+- **Assumed:** tracing-opentelemetry 0.33 maps a recorded `otel.status_description` to `Status::error(desc)`, and the span is already started when the status arrives, where the SDK's `set_status` only moves up the order `Unset < Error < Ok`. Recording `otel.status_code = "error"` first would set `Error("")` and the description could then be lost.
+- **Chose:** For a code in the error set, record only `otel.status_description = <CODE_NAME>`. `otel.status_code = "error"` is recorded only for a transport failure with no code.
+- **Alternatives:** Record both fields (description may be dropped).
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED
+
+## otel-spans: an unknown RPC method is `_OTHER` in the SERVER span name and rpc.method
+- **Plan:** `plans/otel-spans.md` (P2: `otel.name = "macp.v1.MACPRuntimeService/{Method}"`; spec #239 `_OTHER` rule is written for `process` span names and metric attributes)
+- **Assumed:** The path after `/macp.v1.MACPRuntimeService/` is client-chosen, so using it verbatim makes SERVER span-name cardinality unbounded, the problem #239 fixed for modes. The OpenTelemetry RPC conventions use `_OTHER` for a method unknown to the instrumentation.
+- **Chose:** `telemetry::grpc::METHODS` (the 27 generated methods, pinned to the generated `macp.v1.rs` by `methods_match_the_generated_service`); any other method under the service prefix is named `macp.v1.MACPRuntimeService/_OTHER` with `rpc.method = "_OTHER"`. The received value is not recorded.
+- **Alternatives:** Verbatim method name; or keep the received name in an extra attribute.
+- **Blast radius if wrong:** Low; one string.
+- **Status:** UNCONFIRMED
+
+## otel-spans: the SERVER layer re-boxes the body so option_layer type-checks
+- **Plan:** `plans/otel-spans.md` (P2 Files: `tower::util::option_layer(active.then(server_layer))`, fall back to two code paths if `Either` fails tonic's bounds)
+- **Assumed:** tower 0.5's `Either` service requires both arms to share `Response`; tower-http's `Trace` returns `Response<ResponseBody<..>>`, tonic's `Routes` `Response<tonic::body::Body>`.
+- **Chose:** `ServerLayer` wraps `Trace` in `tower::util::MapResponse` with `tonic::body::Body::new`, so `optional_server_layer(&Telemetry) -> Either<ServerLayer, Identity>` serves both paths with one `main.rs` code path. The extra boxing exists only when telemetry is active; inactive the service is `Either::Right(Routes)`. tower-http's span entry in both the future and the body is untouched (the map runs on the outer response, the traced body is boxed inside).
+- **Alternatives:** Two `main.rs` code paths duplicating the `add_service` chain.
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED
+
+## otel-spans: a timed-out request's SERVER span has no status code (known limitation)
+- **Plan:** `plans/otel-spans.md` (P2)
+- **Assumed:** tonic 0.14.6 applies `Server::timeout` (and the client's `grpc-timeout`) in `MakeSvc`, **outside** every `Server::layer` (`transport/server/mod.rs:1235-1238`), and only to the response future (`transport/service/grpc_timeout.rs:80-92`), so a stream whose headers have gone out is not affected. A request that times out before its headers drops the layer's future and tonic answers `CANCELLED` (1) (`status.rs:644-645`), not `DEADLINE_EXCEEDED`. CANCELLED is outside the error set, so the span's status (Unset) is right; the only thing lost is `rpc.grpc.status_code=1`.
+- **Chose:** Record it as a known limitation (module docs of `src/telemetry/grpc.rs`, `docs/deployment.md` Monitoring) and do not fix it: either fix needs a hand-written future wrapper that records the code when its future is dropped unfinished (the plan's rejected fallback), or a change to timeout semantics (moving the timeout inside the layer), which the plan forbids.
+- **Alternatives:** The two fixes above.
+- **Blast radius if wrong:** Low; one attribute missing on timed-out requests.
+- **Status:** UNCONFIRMED
+
+## otel-spans: P2 tests set the global propagator once per test process
+- **Plan:** `plans/otel-spans.md` (P2: extraction through `global::get_text_map_propagator`)
+- **Assumed:** The default global propagator is a no-op, so extraction needs the W3C propagator installed globally, as `init` does in production.
+- **Chose:** `tests/otel_grpc.rs` sets `TraceContextPropagator` through a `std::sync::Once`. It is the production value, never reset, and `tests/otel_grpc.rs` is its own test binary (process), so it cannot leak into other suites, and no test in the file depends on order. The layer is not given an injectable propagator.
+- **Alternatives:** Pass a propagator into `server_layer` (diverges from the production path the test is meant to pin).
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED
+
+## otel-spans: RPC attributes use the pre-1.37 OpenTelemetry names
+- **Plan:** `plans/otel-spans.md` (P2: `rpc.system`, `rpc.service`, `rpc.method`, `rpc.grpc.status_code`). Neither the spec's `docs/opentelemetry.md` nor `macp-semconv.json` pins an OpenTelemetry semconv version for the transport span, so the SERVER span uses the pre-1.37 RPC names the plan lists (not 1.37's `rpc.system.name`/`rpc.response.status_code`). **Status:** UNCONFIRMED

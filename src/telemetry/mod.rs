@@ -21,6 +21,8 @@
 //! See `docs/deployment.md`, "OpenTelemetry".
 
 #[cfg(feature = "otel")]
+pub mod grpc;
+#[cfg(feature = "otel")]
 pub mod init;
 
 /// The `tracing` target of every telemetry span.

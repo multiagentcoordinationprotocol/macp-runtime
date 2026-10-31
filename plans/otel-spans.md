@@ -465,7 +465,13 @@ and with the feature on.
   - An upgrade note: an `otel` build no longer exports to `localhost:4317` by default.
 
 ### P2 — gRPC SERVER span with W3C extraction
-- **Status:** TODO
+- **Status:** DONE (2026-10-31). Divergences, each recorded in ASSUMPTIONS.md:
+  - `on_response` and `on_eos` record the code. `on_failure` handles only body/transport errors, because tower-http never fires it for trailer codes.
+  - ERROR is set through `otel.status_description` alone.
+  - Unknown methods are named `_OTHER` in both the span name and `rpc.method`.
+  - The body is re-boxed so `option_layer` type-checks.
+  - The RPC attributes use the pre-1.37 OTel names.
+  - Known limitation: tonic's request timeout sits outside `Server::layer` and answers CANCELLED before the headers go out. Such a span loses only `rpc.grpc.status_code=1`; its status would be Unset either way.
 - **Delivers:**
   - Each `macp.v1.MACPRuntimeService` RPC gets a SERVER span whose parent is the client's propagated context.
   - The span lasts until the response body ends, which matters for streams.

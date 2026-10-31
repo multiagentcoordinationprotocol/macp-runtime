@@ -140,4 +140,10 @@ Risk tiers: P0 simple; P1-P6 complex; P7 simple. Each phase is implemented by a 
   - Tests: workspace 1100, otel 343, fmt and clippy clean on both builds.
   - Carry to P3: re-assert the wrong-protocol test's "collector receives nothing" with real spans, and add a meter provider to active_for_tests.
   - Next: P2.
+- 2026-10-31 P2 DONE. PASS in round 1 (Opus verifier, complex phase gated alone).
+  - Before commit, applied the verifier's notes: corrected the timeout limitation (CANCELLED, headers only); added tests for an error code in trailers, status 0 at stream end, and no span events; made the new internals pub(crate).
+  - Files: src/telemetry/{mod,grpc}.rs, src/main.rs, tests/otel_grpc.rs, docs/deployment.md, ASSUMPTIONS.md.
+  - Tests: workspace 1100, otel 356 (otel_grpc 8).
+  - Also deflaked tests/receipt_issuance.rs eviction: a pre-existing same-millisecond race, committed separately.
+  - Next: P3.
 
