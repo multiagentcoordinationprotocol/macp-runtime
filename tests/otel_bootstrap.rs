@@ -181,11 +181,10 @@ mod otel {
     use macp_runtime::security::SecurityLayer;
     use macp_runtime::server::MacpServer;
     use macp_runtime::telemetry::init::{self, SignalExport, TRACER_NAME};
-    use macp_runtime::telemetry::TARGET;
+    use macp_runtime::telemetry::{Telemetry, TARGET};
     use opentelemetry::trace::{Tracer as _, TracerProvider as _};
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
     use prost::Message;
-    use tracing::Instrument;
     use tracing_subscriber::fmt::MakeWriter;
     use tracing_subscriber::layer::{Layer, SubscriberExt};
     use tracing_subscriber::EnvFilter;
@@ -239,6 +238,41 @@ mod otel {
     /// Start the binary with `extra` env, wait for health SERVING, stop it,
     /// and return its combined, normalized output.
     async fn run_until_serving(extra: &[(&str, String)]) -> String {
+        run_serving_then(extra, |_| async {}).await
+    }
+
+    /// One accepted SessionStart through `Send` on the binary at `addr`, so
+    /// the runtime creates real SERVER and `process` spans (R2 P3).
+    async fn drive_one_send(addr: String) {
+        use macp_runtime::pb::macp_runtime_service_client::MacpRuntimeServiceClient;
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut req = tonic::Request::new(SendRequest {
+            envelope: Some(session_start_envelope()),
+        });
+        req.metadata_mut()
+            .insert("authorization", "Bearer agent://a".parse().unwrap());
+        let ack = MacpRuntimeServiceClient::new(channel)
+            .send(req)
+            .await
+            .unwrap()
+            .into_inner()
+            .ack
+            .unwrap();
+        assert!(ack.ok, "{ack:?}");
+    }
+
+    /// [`run_until_serving`], running `after(addr)` once the binary serves and
+    /// before stopping it. The batch span processor's delay is 100 ms, so
+    /// any span the traffic creates is exported while the binary still runs.
+    async fn run_serving_then<F, Fut>(extra: &[(&str, String)], after: F) -> String
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         let scratch = tempfile::tempdir().unwrap();
         let addr = format!("127.0.0.1:{}", free_port());
         let mut command = runtime_command();
@@ -248,6 +282,7 @@ mod otel {
             .env("MACP_MEMORY_ONLY", "1")
             .env("MACP_BIND_ADDR", &addr)
             .env("RUST_LOG", "info")
+            .env("OTEL_BSP_SCHEDULE_DELAY", "100")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         for (k, v) in extra {
@@ -255,6 +290,9 @@ mod otel {
         }
         let mut child = Child(command.spawn().expect("spawn macp-runtime"));
         let serving = wait_serving(&addr).await;
+        if serving {
+            after(addr.clone()).await;
+        }
         let _ = child.0.kill();
         let _ = child.0.wait();
         let (stdout, stderr) = read_all(&mut child.0);
@@ -273,10 +311,18 @@ mod otel {
     #[tokio::test(flavor = "multi_thread")]
     async fn wrong_protocol_logs_one_error_and_the_runtime_still_serves() {
         let collector = FakeCollector::start().await;
-        let output = run_until_serving(&[
-            ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint()),
-            ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf".to_string()),
-        ])
+        let output = run_serving_then(
+            &[
+                ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint()),
+                ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf".to_string()),
+            ],
+            |addr| async move {
+                drive_one_send(addr).await;
+                // Several batch delays: an active runtime would have exported
+                // by now (the control below proves it does).
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            },
+        )
         .await;
         let errors: Vec<&str> = output.lines().filter(|l| l.contains("ERROR")).collect();
         assert_eq!(errors.len(), 1, "output:\n{output}");
@@ -289,9 +335,7 @@ mod otel {
             !output.contains("OpenTelemetry enabled"),
             "telemetry must stay inactive; output:\n{output}"
         );
-        // Vacuous until P3: P1 creates no runtime spans, so even an active
-        // runtime would send nothing here. Kept so P3 (which re-asserts it
-        // with real spans) only has to drive traffic.
+        // Real traffic created real spans (R2 P3); none reached the collector.
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(collector.requests().is_empty());
     }
@@ -397,7 +441,7 @@ mod otel {
         let provider = SdkTracerProvider::builder()
             .with_simple_exporter(exporter.clone())
             .build();
-        let (dispatch, telemetry) = init::active_for_tests(&provider);
+        let (dispatch, telemetry) = init::active_for_tests(&provider, None);
         assert!(telemetry.is_enabled());
         let runtime = Runtime::new(
             Arc::new(macp_runtime::storage::MemoryBackend),
@@ -425,10 +469,25 @@ mod otel {
     #[tokio::test(flavor = "multi_thread")]
     async fn grpc_protocol_activates_and_the_runtime_serves() {
         let collector = FakeCollector::start().await;
-        let output = run_until_serving(&[
-            ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint()),
-            ("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc".to_string()),
-        ])
+        let output = run_serving_then(
+            &[
+                ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint()),
+                ("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc".to_string()),
+            ],
+            |addr| async {
+                drive_one_send(addr).await;
+                let spans = collector.wait_for_spans(2, Duration::from_secs(10)).await;
+                let names: Vec<&str> = spans.iter().map(|s| s.name.as_str()).collect();
+                assert!(
+                    names.contains(&"process macp.mode.decision.v1"),
+                    "{names:?}"
+                );
+                assert!(
+                    names.contains(&"macp.v1.MACPRuntimeService/Send"),
+                    "{names:?}"
+                );
+            },
+        )
         .await;
         assert!(
             output.contains("OpenTelemetry enabled"),
@@ -464,19 +523,7 @@ mod otel {
 
     const SID: &str = "0b7c1a3e-2f4d-4c6b-9a8e-1d2c3b4a5f60";
 
-    /// One SessionStart through `MacpServer::send`. Active, it runs inside a
-    /// hand-made stand-in for the P2/P3 spans (inactive telemetry creates no
-    /// span at all, which is what the fmt-only baseline models).
-    async fn scenario(active: bool) {
-        let runtime = Runtime::new(
-            Arc::new(macp_runtime::storage::MemoryBackend),
-            Arc::new(SessionRegistry::new()),
-            Arc::new(LogStore::new()),
-        )
-        .with_clock(Arc::new(macp_runtime::macp_core::ManualClock::new(
-            1_800_000_000_000,
-        )));
-        let server = MacpServer::new(Arc::new(runtime), SecurityLayer::dev_mode());
+    fn session_start_envelope() -> Envelope {
         let payload = SessionStartPayload {
             intent: "intent".into(),
             participants: vec!["agent://a".into()],
@@ -486,37 +533,40 @@ mod otel {
             ..Default::default()
         }
         .encode_to_vec();
+        Envelope {
+            macp_version: "1.0".into(),
+            mode: "macp.mode.decision.v1".into(),
+            message_type: "SessionStart".into(),
+            message_id: "m1".into(),
+            session_id: SID.into(),
+            sender: String::new(),
+            timestamp_unix_ms: 1_800_000_000_000,
+            payload,
+        }
+    }
+
+    /// One SessionStart through `MacpServer::send`, on a runtime carrying
+    /// `telemetry`. Active, the server creates the real `process` span (R2
+    /// P3) and the runtime logs inside it; inactive telemetry creates no span
+    /// at all, which is what the fmt-only baseline models.
+    async fn scenario(telemetry: Telemetry) {
+        let runtime = Runtime::new(
+            Arc::new(macp_runtime::storage::MemoryBackend),
+            Arc::new(SessionRegistry::new()),
+            Arc::new(LogStore::new()),
+        )
+        .with_clock(Arc::new(macp_runtime::macp_core::ManualClock::new(
+            1_800_000_000_000,
+        )))
+        .with_telemetry(telemetry);
+        let server = MacpServer::new(Arc::new(runtime), SecurityLayer::dev_mode());
         let mut req = tonic::Request::new(SendRequest {
-            envelope: Some(Envelope {
-                macp_version: "1.0".into(),
-                mode: "macp.mode.decision.v1".into(),
-                message_type: "SessionStart".into(),
-                message_id: "m1".into(),
-                session_id: SID.into(),
-                sender: String::new(),
-                timestamp_unix_ms: 1_800_000_000_000,
-                payload,
-            }),
+            envelope: Some(session_start_envelope()),
         });
         req.metadata_mut()
             .insert("authorization", "Bearer agent://a".parse().unwrap());
-        let span = if active {
-            tracing::info_span!(
-                target: TARGET,
-                "process",
-                otel.name = "process macp.mode.decision.v1",
-                otel.kind = "internal",
-                macp.message.id = "m1",
-            )
-        } else {
-            tracing::Span::none()
-        };
-        let work = async {
-            tracing::info!(target: "macp_runtime::test", session_id = SID, "inside the request");
-            let ack = server.send(req).await.unwrap().into_inner().ack.unwrap();
-            assert!(ack.ok, "{ack:?}");
-        };
-        work.instrument(span).await;
+        let ack = server.send(req).await.unwrap().into_inner().ack.unwrap();
+        assert!(ack.ok, "{ack:?}");
     }
 
     async fn fmt_only_output(directive: &str) -> String {
@@ -528,7 +578,7 @@ mod otel {
             .with_ansi(false)
             .finish();
         let _g = tracing::subscriber::set_default(subscriber);
-        scenario(false).await;
+        scenario(Telemetry::disabled()).await;
         buf.contents()
     }
 
@@ -551,7 +601,10 @@ mod otel {
             .with(init::otel_layer(provider.tracer(TRACER_NAME)));
         {
             let _g = tracing::subscriber::set_default(subscriber);
-            scenario(true).await;
+            // The active `Telemetry` only; this test's own subscriber (with
+            // the fmt layer) is the dispatcher.
+            let (_, telemetry) = init::active_for_tests(&provider, None);
+            scenario(telemetry).await;
         }
         provider.force_flush().unwrap();
         (buf.contents(), exporter.get_finished_spans().unwrap())
@@ -561,10 +614,10 @@ mod otel {
         let baseline = fmt_only_output(directive).await;
         let (active, spans) = active_output(directive).await;
 
-        // Falsifiable: the scenario logs something inside the span, and the
-        // otel layer really is live (it exported the stand-in span).
+        // Falsifiable: the runtime logs inside the `process` span, and the
+        // otel layer really is live (it exported that real span).
         assert!(
-            baseline.contains("inside the request"),
+            baseline.contains("session started"),
             "baseline:\n{baseline}"
         );
         assert_eq!(spans.len(), 1, "{spans:?}");

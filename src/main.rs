@@ -558,6 +558,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rt.metrics().replay_mismatches()
                     ));
                     rt.metrics().receipt_prometheus_lines(&mut body);
+                    // The semconv Envelope families (macp-semconv/0.1), after
+                    // every existing line, which stay byte-identical.
+                    rt.metrics().semconv_prometheus_lines(&mut body);
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),

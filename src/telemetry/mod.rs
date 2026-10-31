@@ -24,6 +24,10 @@
 pub mod grpc;
 #[cfg(feature = "otel")]
 pub mod init;
+#[cfg(feature = "otel")]
+pub mod instruments;
+pub mod labels;
+pub mod process;
 
 /// The `tracing` target of every telemetry span.
 pub const TARGET: &str = "macp_runtime::telemetry";
@@ -47,13 +51,16 @@ pub fn endpoint_configured(env: &impl Fn(&str) -> Option<String>) -> bool {
 
 /// The runtime's telemetry switch.
 ///
-/// With the `otel` feature it records whether telemetry is active; without it
-/// it is a zero-sized type and every query answers "inactive". Cloning is
-/// cheap. The default is [`Telemetry::disabled`].
+/// With the `otel` feature it records whether telemetry is active and holds
+/// the metric instruments when metrics export; without it it is a zero-sized
+/// type and every query answers "inactive". Cloning is cheap. The default is
+/// [`Telemetry::disabled`].
 #[derive(Clone, Debug, Default)]
 pub struct Telemetry {
     #[cfg(feature = "otel")]
     enabled: bool,
+    #[cfg(feature = "otel")]
+    instruments: Option<std::sync::Arc<instruments::Instruments>>,
 }
 
 impl Telemetry {
@@ -66,7 +73,26 @@ impl Telemetry {
     /// one, after the pipeline is installed.
     #[cfg(feature = "otel")]
     pub(crate) fn enabled() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            instruments: None,
+        }
+    }
+
+    /// Active telemetry whose Envelope metrics also feed `instruments`.
+    #[cfg(feature = "otel")]
+    pub(crate) fn with_instruments(
+        mut self,
+        instruments: Option<std::sync::Arc<instruments::Instruments>>,
+    ) -> Self {
+        self.instruments = instruments;
+        self
+    }
+
+    /// The metric instruments, when metrics export.
+    #[cfg(feature = "otel")]
+    pub(crate) fn instruments(&self) -> Option<&std::sync::Arc<instruments::Instruments>> {
+        self.instruments.as_ref()
     }
 
     /// Whether spans and instruments are recorded.

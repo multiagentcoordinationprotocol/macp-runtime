@@ -540,7 +540,14 @@ and with the feature on.
   gRPC metadata only (RFC-MACP-0006 §2.1).
 
 ### P3 — `process` spans and the Envelope metrics
-- **Status:** TODO
+- **Status:** DONE (2026-10-31). Divergences, each recorded in ASSUMPTIONS.md:
+  - `StreamFailure::Terminal` carries a non-optional `MacpError`.
+  - Tracer and meter shutdown run concurrently, so the 5s bound still holds.
+  - ERROR is set through `otel.status_description` alone. A dropped or panicked span also records `error.type=_OTHER`.
+  - The mode-label cache is read-mostly: the snapshot is rebuilt outside the lock and swapped in.
+  - One recorder feeds both Prometheus and OTLP, so the 2,000-label-set cap applies to both.
+  - `macp.sender.id` is recorded only after full authentication.
+  - Known pin lag: the `_OTHER` rule comes from spec 99f3cfa, which is newer than `SPEC_REV` 0f77753. The vendored semconv is byte-identical at both.
 - **Delivers:**
   - One `process {mode}` INTERNAL span per Envelope on `Send` and `StreamSession`, with every required and
     conditionally-required attribute and the recommended ones.

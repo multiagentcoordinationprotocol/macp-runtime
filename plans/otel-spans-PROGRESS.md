@@ -146,4 +146,10 @@ Risk tiers: P0 simple; P1-P6 complex; P7 simple. Each phase is implemented by a 
   - Tests: workspace 1100, otel 356 (otel_grpc 8).
   - Also deflaked tests/receipt_issuance.rs eviction: a pre-existing same-millisecond race, committed separately.
   - Next: P3.
+- 2026-10-31 P3 DONE. PASS in round 1 (Opus verifier, complex phase gated alone).
+  - Before commit, applied the verifier's minor notes: replaced the global label-cache mutex with a read-mostly snapshot (new concurrency test), added `error.type=_OTHER` on dropped spans, fixed an ASSUMPTIONS citation, and made the unreachable Inline arm a `debug_assert!`.
+  - Carried P1 items are done: the wrong-protocol negative uses real spans, and active_for_tests takes a meter provider.
+  - Files: src/telemetry/{process,labels,instruments,mod,init}.rs, src/{metrics,runtime,server,main}.rs, tests/{otel_process,otel_bootstrap,otel_grpc}.rs, docs/deployment.md, ASSUMPTIONS.md.
+  - Tests: workspace 1115, otel 383.
+  - Next: P4.
 

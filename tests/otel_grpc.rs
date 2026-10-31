@@ -68,7 +68,7 @@ impl Spans {
         let provider = SdkTracerProvider::builder()
             .with_simple_exporter(exporter.clone())
             .build();
-        let (dispatch, telemetry) = init::active_for_tests(&provider);
+        let (dispatch, telemetry) = init::active_for_tests(&provider, None);
         let guard = tracing::dispatcher::set_default(&dispatch);
         (
             Self {
@@ -80,8 +80,19 @@ impl Spans {
         )
     }
 
-    fn finished(&self) -> Vec<SpanData> {
+    /// Every ended span, SERVER and the `process` spans (R2 P3) alike.
+    fn all(&self) -> Vec<SpanData> {
         self.exporter.get_finished_spans().unwrap()
+    }
+
+    /// The ended SERVER spans, the subject of this file. Since P3 an RPC
+    /// carrying an Envelope also ends an INTERNAL `process` span, covered by
+    /// `tests/otel_process.rs`.
+    fn finished(&self) -> Vec<SpanData> {
+        self.all()
+            .into_iter()
+            .filter(|s| s.span_kind == opentelemetry::trace::SpanKind::Server)
+            .collect()
     }
 
     /// Wait (yielding to the server tasks) until `n` spans have ended. A
@@ -433,7 +444,7 @@ async fn inactive_telemetry_exports_nothing_and_answers_identically() {
 
     let inactive_responses = responses(serve(Telemetry::disabled()).await).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(spans.finished().is_empty(), "{:?}", spans.finished());
+    assert!(spans.all().is_empty(), "{:?}", spans.all());
 
     let active_responses = responses(serve(active).await).await;
     assert_eq!(spans.wait_for(3).await.len(), 3);

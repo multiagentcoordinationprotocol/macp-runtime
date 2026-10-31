@@ -119,6 +119,9 @@ pub struct Runtime {
     /// OpenTelemetry switch (inert unless `with_telemetry` installs an
     /// active one). Never part of session state or history.
     telemetry: crate::telemetry::Telemetry,
+    /// Registered modes and their message types, for the bounded Envelope
+    /// labels (`_OTHER`). Built on first use, refreshed on registry changes.
+    mode_labels: crate::telemetry::labels::ModeLabelCache,
 }
 
 /// A `WhatIfReplay` result: the library report, plus each replay event's
@@ -305,6 +308,7 @@ impl Runtime {
                 crate::receipts::ReceiptConfig::default(),
             )),
             telemetry: crate::telemetry::Telemetry::disabled(),
+            mode_labels: crate::telemetry::labels::ModeLabelCache::new(),
         }
     }
 
@@ -313,8 +317,33 @@ impl Runtime {
     /// active value only records spans and instruments; it never changes
     /// acceptance, history or replay.
     pub fn with_telemetry(mut self, telemetry: crate::telemetry::Telemetry) -> Self {
+        #[cfg(feature = "otel")]
+        if let Some(instruments) = telemetry.instruments() {
+            self.metrics.install_instruments(Arc::clone(instruments));
+        }
         self.telemetry = telemetry;
         self
+    }
+
+    /// The bounded telemetry labels of an Envelope: its mode if registered,
+    /// `_OTHER` if not, and its message type if that mode supports it
+    /// (spec #239). Never changes acceptance.
+    pub(crate) fn envelope_labels(
+        &self,
+        mode: &str,
+        message_type: &str,
+    ) -> crate::telemetry::labels::EnvelopeLabels {
+        self.mode_labels
+            .labels(&self.mode_registry, mode, message_type)
+    }
+
+    /// Record the session-bound versions and policy on the current `process`
+    /// span. A no-op when telemetry is inactive or no `process` span is
+    /// current. Reads the session only.
+    fn record_session_attrs(&self, session: &Session) {
+        if self.telemetry.is_enabled() {
+            crate::telemetry::process::record_session_attrs(&tracing::Span::current(), session);
+        }
     }
 
     /// The OpenTelemetry switch, read by the span sites (and `MacpServer`).
@@ -684,6 +713,7 @@ impl Runtime {
         if let Some(existing) = self.registry.get_shared(&env.session_id).await {
             let existing = existing.lock().await;
             if existing.seen_message_ids.contains(&env.message_id) {
+                self.record_session_attrs(&existing);
                 return Ok(ProcessResult {
                     session_state: existing.state.clone(),
                     duplicate: true,
@@ -713,6 +743,7 @@ impl Runtime {
         // reservation, so a rejection needs no rollback. Nothing is visible to
         // another task until the commit-point append below succeeds.
         let session = validated.accept(env, mode.as_ref(), Some(policy_definition))?;
+        self.record_session_attrs(&session);
         let semantics_rev = session.semantics_rev;
 
         // Reserve the session id atomically (dedup + max_open TOCTOU safety),
@@ -1031,6 +1062,7 @@ impl Runtime {
             .ok_or(MacpError::UnknownSession)?;
         let mut session_guard = shared.lock().await;
         let session = &mut *session_guard;
+        self.record_session_attrs(session);
 
         // Per-message kernel invariants (dedup, mode-binding, TTL, the monotonic
         // OPEN gate) live in `macp_modes::step` so any consumer of the

@@ -1319,3 +1319,54 @@
 
 ## otel-spans: RPC attributes use the pre-1.37 OpenTelemetry names
 - **Plan:** `plans/otel-spans.md` (P2: `rpc.system`, `rpc.service`, `rpc.method`, `rpc.grpc.status_code`). Neither the spec's `docs/opentelemetry.md` nor `macp-semconv.json` pins an OpenTelemetry semconv version for the transport span, so the SERVER span uses the pre-1.37 RPC names the plan lists (not 1.37's `rpc.system.name`/`rpc.response.status_code`). **Status:** UNCONFIRMED
+
+## otel-spans: under an `_OTHER` mode, Signal and Progress are `_OTHER` too
+- **Plan:** `plans/otel-spans.md` (P3 label normalization: "Every message type under an `_OTHER` mode is still `_OTHER`"; AC 1: "`macp.message.type = _OTHER`" for the unregistered mode)
+- **Assumed:** Signal and Progress are supported in every **registered** mode and in the empty mode; under an unregistered mode the plan's rule wins, so Signal and Progress are `_OTHER` there too. A session-scoped Progress under a registered mode keeps `Progress`. Spec `docs/opentelemetry.md` at 99f3cfa does not contradict this: it requires `_OTHER` for an unsupported value and does not single out Signal/Progress under an unsupported mode.
+- **Chose:** `EnvelopeLabels::new` (`src/telemetry/labels.rs`); pinned by `unregistered_mode_is_other_with_every_type_other` and `session_scoped_progress_under_a_registered_mode_keeps_its_type`.
+- **Alternatives:** Keep Signal/Progress even under `_OTHER` (two extra label sets per outcome, no cardinality risk).
+- **Blast radius if wrong:** Low; label values on rejected traffic only.
+- **Status:** UNCONFIRMED
+
+## otel-spans: the label cache is invalidated by draining the registry change channel, with no task
+- **Plan:** `plans/otel-spans.md` (P3: `runtime.mode_registry().get_mode(mode).is_some()`)
+- **Assumed:** `ModeRegistry` has no `get_mode`/descriptor-by-name lookup, and `all_mode_descriptors()` clones every descriptor.
+- **Chose:** `ModeLabelCache` (one per `Runtime`) snapshots registered modes and their declared types, subscribes to `ModeRegistry::subscribe_changes()` before the snapshot, and on each lookup drains `try_recv` (any event or `Lagged` triggers a rebuild). No background task; holds registered modes only. Pinned by `cache_is_invalidated_by_registry_changes`.
+- **Alternatives:** Add a lookup method to `macp-modes` (a library API change P3 does not need).
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED
+
+## otel-spans: one recorder feeds Prometheus and OTLP; the counter is the histogram's count
+- **Plan:** `plans/otel-spans.md` (P3 Files, `src/metrics.rs`)
+- **Chose:** `RuntimeMetrics::record_envelope` keeps one series per `(mode, type, outcome)` (count, sum, 15 buckets) rendering both `macp_envelope_processed_total` and the duration histogram, and forwards the same, already-folded labels to the OTel instruments (installed via `Runtime::with_telemetry`). The 2,000-set backstop fold therefore applies to OTLP too. The Prometheus counter family is `# HELP/# TYPE macp_envelope_processed_total counter` (the `_total` name on the HELP/TYPE lines, as the existing exposition 0.0.4 text does).
+- **Alternatives:** Separate counters; fold only Prometheus; `# TYPE macp_envelope_processed counter` (OpenMetrics style).
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED
+
+## otel-spans: `macp.sender.id` is recorded only after the full Send authentication
+- **Plan:** `plans/otel-spans.md` (P3 Rejected: never the envelope's self-asserted sender)
+- **Chose:** `send` records it after `authenticate_send_request` succeeds (which also covers the session-start and rate-limit checks); the stream path after `apply_authenticated_sender`. An Envelope refused by a rate limit or allowed-mode check therefore has no `macp.sender.id`, though the caller was authenticated.
+- **Alternatives:** Record right after bearer authentication, before the policy checks.
+- **Blast radius if wrong:** Low; one recommended attribute on some refusals.
+- **Status:** UNCONFIRMED
+
+## otel-spans: duplicate SessionStart and stream `Inline` handling
+- **Plan:** `plans/otel-spans.md` (P3 Edge cases: "Duplicate SessionStart → `duplicate`"; "Stream `Inline` refusals carry no envelope")
+- **Chose:** (1) The session-bound attributes (`macp.mode.version`, `macp.configuration.version`, `macp.policy.id`) are also recorded on a duplicate SessionStart, from the existing session. (2) `process_stream_envelope` never returns `Inline` today (only frame-level refusals do, before an Envelope exists); the arm is mapped to `rejected`/`INVALID_ENVELOPE` so a future change cannot leave the span unfinished. `StreamFailure::Terminal` now carries the `MacpError` so the span records the registry code (`coded_status_ref` added).
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED
+
+## otel-spans: meter shutdown is bounded by a thread, not the SDK timeout
+- **Plan:** `plans/otel-spans.md` (P1/P3: 5-second bounded shutdown)
+- **Assumed:** `SdkMeterProvider::shutdown_with_timeout` ignores its timeout in opentelemetry_sdk 0.32.1 (`metrics/meter_provider.rs:113`).
+- **Chose:** `Guard::shutdown` runs the tracer and meter shutdowns concurrently, each on its own thread waited for at most 5 s (`shutdown_bounded`), so the documented 5 s worst case holds with both signals.
+- **Alternatives:** Sequential flushes (10 s worst case).
+- **Blast radius if wrong:** Low; exit time against a dead collector.
+- **Status:** UNCONFIRMED
+
+## otel-spans: the private Prometheus line validator accepts float sample values
+- **Plan:** `plans/otel-spans.md` (P3 AC 7: every semconv line passes `assert_valid_prometheus_line`)
+- **Assumed:** The validator required a `u64` value; a histogram `_sum` is a float.
+- **Chose:** It now accepts a `u64` or a finite `f64`; `# HELP`/`# TYPE` lines are checked separately in the AC 7 test.
+- **Blast radius if wrong:** None at runtime; test-only.
+- **Status:** UNCONFIRMED

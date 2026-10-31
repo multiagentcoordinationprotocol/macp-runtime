@@ -11,6 +11,7 @@ use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::tonic_types::transport::{Certificate, ClientTlsConfig};
 use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{SdkTracer, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
@@ -21,6 +22,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
+use super::instruments::Instruments;
 use super::{non_empty, Telemetry, TARGET};
 
 /// `service.name` when neither `OTEL_SERVICE_NAME` nor
@@ -243,17 +245,45 @@ pub fn build_tracer_provider(
         // `NativeCertsNotFound` on a host without a native store
         // (tonic-0.14.6 `channel/service/tls.rs:86-94`), which would refuse
         // a private-CA collector for no reason.
-        let tls = match &traces.ca_pem {
-            Some(pem) => ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem)),
-            None => ClientTlsConfig::new().with_enabled_roots(),
-        };
-        builder = builder.with_tls_config(tls);
+        builder = builder.with_tls_config(tls_config(traces));
     }
     let exporter = builder
         .build()
         .map_err(|e| format!("OpenTelemetry disabled: cannot build the OTLP span exporter: {e}"))?;
     Ok(SdkTracerProvider::builder()
         .with_batch_exporter(exporter)
+        .with_resource(resource)
+        .build())
+}
+
+/// The TLS config for an `https://` signal: the configured CA as the only
+/// trust anchor, else the native roots. See [`build_tracer_provider`].
+fn tls_config(signal: &SignalExport) -> ClientTlsConfig {
+    match &signal.ca_pem {
+        Some(pem) => ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem)),
+        None => ClientTlsConfig::new().with_enabled_roots(),
+    }
+}
+
+/// Build the meter provider for `metrics`: an OTLP/gRPC `MetricExporter`
+/// behind a `PeriodicReader` (interval `OTEL_METRIC_EXPORT_INTERVAL`, which
+/// the SDK reads, default 60 s). TLS exactly as [`build_tracer_provider`].
+/// Must run inside a tokio runtime.
+pub fn build_meter_provider(
+    metrics: &SignalExport,
+    resource: Resource,
+) -> Result<SdkMeterProvider, String> {
+    let mut builder = opentelemetry_otlp::MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(metrics.endpoint.clone());
+    if metrics.is_https() {
+        builder = builder.with_tls_config(tls_config(metrics));
+    }
+    let exporter = builder.build().map_err(|e| {
+        format!("OpenTelemetry disabled: cannot build the OTLP metric exporter: {e}")
+    })?;
+    Ok(SdkMeterProvider::builder()
+        .with_periodic_exporter(exporter)
         .with_resource(resource)
         .build())
 }
@@ -308,6 +338,8 @@ where
 #[derive(Debug)]
 pub struct Guard {
     tracer_provider: Option<SdkTracerProvider>,
+    meter_provider: Option<SdkMeterProvider>,
+    instruments: Option<std::sync::Arc<Instruments>>,
 }
 
 impl Guard {
@@ -317,12 +349,15 @@ impl Guard {
     pub fn from_tracer_provider(tracer_provider: SdkTracerProvider) -> Self {
         Self {
             tracer_provider: Some(tracer_provider),
+            meter_provider: None,
+            instruments: None,
         }
     }
 
-    /// The switch to inject with `Runtime::with_telemetry`.
+    /// The switch to inject with `Runtime::with_telemetry`, carrying the
+    /// metric instruments when metrics export.
     pub fn telemetry(&self) -> Telemetry {
-        Telemetry::enabled()
+        Telemetry::enabled().with_instruments(self.instruments.clone())
     }
 
     /// Flush and shut down every provider, bounded by [`SHUTDOWN_TIMEOUT`].
@@ -333,29 +368,53 @@ impl Guard {
     /// timed out. A thread still running when the bound expires is abandoned,
     /// and process exit ends it.
     pub async fn shutdown(self) {
-        let Some(provider) = self.tracer_provider else {
-            return;
-        };
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let spawned = std::thread::Builder::new()
-            .name("otel-shutdown".into())
-            .spawn(move || {
-                let _ = tx.send(provider.shutdown_with_timeout(SHUTDOWN_TIMEOUT));
-            });
-        if let Err(e) = spawned {
-            tracing::warn!(error = %e, "OpenTelemetry shutdown thread failed to start");
-            return;
-        }
-        match tokio::time::timeout(SHUTDOWN_TIMEOUT, rx).await {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(e))) => {
-                tracing::warn!(error = %e, "OpenTelemetry tracer provider shutdown failed")
+        // Both providers flush concurrently, so the whole shutdown stays
+        // within one SHUTDOWN_TIMEOUT.
+        let tracer = async {
+            if let Some(provider) = self.tracer_provider {
+                shutdown_bounded("tracer", move || {
+                    provider.shutdown_with_timeout(SHUTDOWN_TIMEOUT)
+                })
+                .await;
             }
-            Ok(Err(_)) => tracing::warn!("OpenTelemetry tracer provider shutdown panicked"),
-            Err(_) => tracing::warn!(
-                "OpenTelemetry tracer provider shutdown timed out; abandoning the flush"
-            ),
+        };
+        let meter = async {
+            if let Some(provider) = self.meter_provider {
+                // `SdkMeterProvider::shutdown_with_timeout` ignores its timeout
+                // (opentelemetry_sdk 0.32.1 `metrics/meter_provider.rs:113`);
+                // the thread bound in `shutdown_bounded` is what holds.
+                shutdown_bounded("meter", move || provider.shutdown()).await;
+            }
+        };
+        tokio::join!(tracer, meter);
+    }
+}
+
+/// Run one provider's `shutdown` on a plain thread, bounded by
+/// [`SHUTDOWN_TIMEOUT`] (see [`Guard::shutdown`]).
+async fn shutdown_bounded<F>(which: &'static str, shutdown: F)
+where
+    F: FnOnce() -> opentelemetry_sdk::error::OTelSdkResult + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let spawned = std::thread::Builder::new()
+        .name("otel-shutdown".into())
+        .spawn(move || {
+            let _ = tx.send(shutdown());
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "OpenTelemetry {which} shutdown thread failed to start");
+        return;
+    }
+    match tokio::time::timeout(SHUTDOWN_TIMEOUT, rx).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => {
+            tracing::warn!(error = %e, "OpenTelemetry {which} provider shutdown failed")
         }
+        Ok(Err(_)) => tracing::warn!("OpenTelemetry {which} provider shutdown panicked"),
+        Err(_) => tracing::warn!(
+            "OpenTelemetry {which} provider shutdown timed out; abandoning the flush"
+        ),
     }
 }
 
@@ -364,14 +423,21 @@ impl Guard {
 /// inactive runtimes side by side without the global [`init`]. Install the
 /// dispatcher with `tracing::dispatcher::set_default` (or `with_default`) and
 /// pass the `Telemetry` to `Runtime::with_telemetry`. The dispatcher carries
-/// exactly the production [`otel_layer`] and no `fmt` layer. Not part of the
-/// supported API; the meter provider joins the signature when the metric
-/// instruments do.
+/// exactly the production [`otel_layer`] and no `fmt` layer. With a
+/// `meter_provider`, the `Telemetry` also carries the production metric
+/// instruments created on it. Not part of the supported API.
 #[doc(hidden)]
-pub fn active_for_tests(tracer_provider: &SdkTracerProvider) -> (tracing::Dispatch, Telemetry) {
+pub fn active_for_tests(
+    tracer_provider: &SdkTracerProvider,
+    meter_provider: Option<&SdkMeterProvider>,
+) -> (tracing::Dispatch, Telemetry) {
     let subscriber =
         tracing_subscriber::registry().with(otel_layer(tracer_provider.tracer(TRACER_NAME)));
-    (tracing::Dispatch::new(subscriber), Telemetry::enabled())
+    let instruments = meter_provider.map(|p| std::sync::Arc::new(Instruments::new(p)));
+    (
+        tracing::Dispatch::new(subscriber),
+        Telemetry::enabled().with_instruments(instruments),
+    )
 }
 
 /// Install the process-wide subscriber, and the telemetry pipeline when
@@ -394,14 +460,20 @@ pub fn init(env_filter: EnvFilter) -> Result<Option<Guard>, String> {
         return Ok(None);
     }
     let built = export_config(&env, activation).and_then(|config| {
-        config
+        let tracer = config
             .traces
             .as_ref()
             .map(|traces| build_tracer_provider(traces, resource(&env)))
-            .transpose()
+            .transpose()?;
+        let meter = config
+            .metrics
+            .as_ref()
+            .map(|metrics| build_meter_provider(metrics, resource(&env)))
+            .transpose()?;
+        Ok((tracer, meter))
     });
-    let tracer_provider = match built {
-        Ok(provider) => provider,
+    let (tracer_provider, meter_provider) = match built {
+        Ok(providers) => providers,
         Err(e) => {
             tracing_subscriber::fmt().with_env_filter(env_filter).init();
             return Err(e);
@@ -422,7 +494,14 @@ pub fn init(env_filter: EnvFilter) -> Result<Option<Guard>, String> {
         metrics = activation.metrics,
         "OpenTelemetry enabled"
     );
-    Ok(Some(Guard { tracer_provider }))
+    let instruments = meter_provider
+        .as_ref()
+        .map(|provider| std::sync::Arc::new(Instruments::new(provider)));
+    Ok(Some(Guard {
+        tracer_provider,
+        meter_provider,
+        instruments,
+    }))
 }
 
 #[cfg(test)]
