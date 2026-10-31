@@ -35,6 +35,7 @@ pub mod replay;
 pub mod runtime;
 pub mod session;
 pub mod stream_bus;
+pub mod telemetry;
 
 // The mode layer and registry now live in `macp-modes`; the default governance
 // policy engine in `macp-policy`. Re-exported so existing `crate::mode`,

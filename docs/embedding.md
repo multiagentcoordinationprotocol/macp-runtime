@@ -306,6 +306,20 @@ if report.outcome_changed() {
 - **For tools.** `WhatIfReport` is `serde::Serialize`. `candidate_session`, the
   full rebuilt session, is left out of the JSON.
 
+## Telemetry
+
+The library crates (`macp-core`, `macp-modes`, `macp-policy`, `macp-storage`,
+`macp-auth`, `macp-pb`) create no tracing spans and record no metrics: the
+MACP spans of `macp-semconv/0.1` (`process`, the session transitions and
+their anchor links) are emitted only by `macp-runtime`'s kernel and server in
+an `otel` build, and the `macp.envelope.*` and `macp.session.*` metrics only
+by `macp-runtime`'s `RuntimeMetrics`. An embedder that drives `step` directly gets none of them, and nothing
+trace-related ever enters a `Session`, a `PersistedSession` or a log entry. If
+you want visibility, wrap your own calls to `step` (and your own lifecycle
+calls) in your own spans, at whatever level suits you; if you want spans that
+match the MACP conventions, follow the protocol's
+[OpenTelemetry semantic conventions](https://github.com/multiagentcoordinationprotocol/multiagentcoordinationprotocol/blob/main/docs/opentelemetry.md).
+
 ## Other public building blocks (I17)
 
 These were already public before 0.9.0. Use them instead of reimplementing

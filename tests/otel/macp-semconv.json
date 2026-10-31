@@ -1,0 +1,645 @@
+{
+  "schema": "macp-semconv/0.1",
+  "docs": "docs/opentelemetry.md",
+  "groups": [
+    {
+      "id": "registry.macp",
+      "type": "attribute_group",
+      "brief": "MACP attributes.",
+      "stability": "experimental",
+      "attributes": [
+        {
+          "id": "macp.session.id",
+          "type": "string",
+          "brief": "The Envelope's session_id.",
+          "note": "An identifier. Never a metric attribute.",
+          "examples": [
+            "7f3c9e2a-0d1b-4c8e-9a51-3b6f2e8d4c10"
+          ],
+          "requirement_level": {
+            "conditionally_required": "when the Envelope or operation is session-scoped (session_id non-empty)"
+          },
+          "stability": "experimental"
+        },
+        {
+          "id": "macp.message.id",
+          "type": "string",
+          "brief": "The Envelope's message_id.",
+          "note": "An identifier. Never a metric attribute.",
+          "examples": [
+            "msg-01HZX3K8"
+          ],
+          "requirement_level": {
+            "conditionally_required": "when the span covers exactly one Envelope"
+          },
+          "stability": "experimental"
+        },
+        {
+          "id": "macp.message.type",
+          "type": "string",
+          "brief": "The Envelope's message_type, as on the wire.",
+          "note": "Wire string, interpreted relative to macp.mode.id for Mode-defined types (RFC-MACP-0001 Section 6). Never part of a span name.",
+          "examples": [
+            "SessionStart",
+            "Signal",
+            "Commitment",
+            "Vote"
+          ],
+          "requirement_level": {
+            "conditionally_required": "when the span covers exactly one Envelope"
+          },
+          "stability": "experimental"
+        },
+        {
+          "id": "macp.mode.id",
+          "type": "string",
+          "brief": "The Envelope's or session's mode identifier.",
+          "examples": [
+            "macp.mode.decision.v1",
+            "ext.multi_round.v1"
+          ],
+          "requirement_level": {
+            "conditionally_required": "when the mode is non-empty"
+          },
+          "stability": "experimental"
+        },
+        {
+          "id": "macp.mode.version",
+          "type": "string",
+          "brief": "The session's mode_version from SessionStartPayload.",
+          "examples": [
+            "1.0.0"
+          ],
+          "requirement_level": "recommended",
+          "stability": "experimental"
+        },
+        {
+          "id": "macp.configuration.version",
+          "type": "string",
+          "brief": "The session's configuration_version from SessionStartPayload.",
+          "examples": [
+            "cfg-2026-10-01"
+          ],
+          "requirement_level": "recommended",
+          "stability": "experimental"
+        },
+        {
+          "id": "macp.policy.id",
+          "type": "string",
+          "brief": "The resolved governance policy identifier bound to the session (SessionStartPayload.policy_version after resolution).",
+          "note": "There is no separate policy-version attribute: the resolved identifier already pins the version.",
+          "examples": [
+            "policy.default"
+          ],
+          "requirement_level": "recommended",
+          "stability": "experimental"
+        },
+        {
+          "id": "macp.sender.id",
+          "type": "string",
+          "brief": "The authenticated sender of the Envelope.",
+          "note": "Deployments MAY record a hash instead of the raw value; doing so breaks correlation with SessionMetadata. Never a metric attribute.",
+          "examples": [
+            "agent://planner"
+          ],
+          "requirement_level": "recommended",
+          "stability": "experimental"
+        },
+        {
+          "id": "macp.session.state",
+          "type": "enum",
+          "brief": "Session lifecycle state, as the SessionState enum's wire string.",
+          "members": [
+            {
+              "id": "unspecified",
+              "value": "SESSION_STATE_UNSPECIFIED",
+              "brief": "Unspecified.",
+              "stability": "experimental"
+            },
+            {
+              "id": "open",
+              "value": "SESSION_STATE_OPEN",
+              "brief": "Open.",
+              "stability": "experimental"
+            },
+            {
+              "id": "resolved",
+              "value": "SESSION_STATE_RESOLVED",
+              "brief": "Resolved (terminal).",
+              "stability": "experimental"
+            },
+            {
+              "id": "expired",
+              "value": "SESSION_STATE_EXPIRED",
+              "brief": "Expired (terminal).",
+              "stability": "experimental"
+            },
+            {
+              "id": "suspended",
+              "value": "SESSION_STATE_SUSPENDED",
+              "brief": "Suspended (non-terminal).",
+              "stability": "experimental"
+            },
+            {
+              "id": "cancelled",
+              "value": "SESSION_STATE_CANCELLED",
+              "brief": "Cancelled (terminal).",
+              "stability": "experimental"
+            }
+          ],
+          "requirement_level": "recommended",
+          "stability": "experimental"
+        },
+        {
+          "id": "macp.envelope.outcome",
+          "type": "enum",
+          "brief": "What the runtime did with the Envelope.",
+          "members": [
+            {
+              "id": "accepted",
+              "value": "accepted",
+              "brief": "Accepted into session history (or, for a Signal, accepted on the ambient plane).",
+              "stability": "experimental"
+            },
+            {
+              "id": "rejected",
+              "value": "rejected",
+              "brief": "Rejected with a MACPError; error.type carries the code.",
+              "stability": "experimental"
+            },
+            {
+              "id": "duplicate",
+              "value": "duplicate",
+              "brief": "A repeat of an already-accepted message_id; no side effects.",
+              "stability": "experimental"
+            }
+          ],
+          "requirement_level": "required",
+          "stability": "experimental"
+        },
+        {
+          "id": "macp.commitment.hash",
+          "type": "string",
+          "brief": "Canonical commitment hash of the resolving CommitmentPayload (RFC-MACP-0013).",
+          "note": "A hash, not commitment content.",
+          "examples": [
+            "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+          ],
+          "requirement_level": "recommended",
+          "stability": "experimental"
+        },
+        {
+          "id": "macp.version",
+          "type": "string",
+          "brief": "The Envelope's macp_version.",
+          "examples": [
+            "1.0"
+          ],
+          "requirement_level": "recommended",
+          "stability": "experimental"
+        },
+        {
+          "id": "macp.operation.name",
+          "type": "enum",
+          "brief": "The MACP operation a span or transition represents.",
+          "members": [
+            {
+              "id": "send",
+              "value": "send",
+              "brief": "A client sends one Envelope (SDK, CLIENT span).",
+              "stability": "experimental"
+            },
+            {
+              "id": "process",
+              "value": "process",
+              "brief": "The runtime processes one Envelope (INTERNAL span).",
+              "stability": "experimental"
+            },
+            {
+              "id": "resolve",
+              "value": "resolve",
+              "brief": "The session transitions to RESOLVED.",
+              "stability": "experimental"
+            },
+            {
+              "id": "expire",
+              "value": "expire",
+              "brief": "The session transitions to EXPIRED (timer-driven).",
+              "stability": "experimental"
+            },
+            {
+              "id": "cancel",
+              "value": "cancel",
+              "brief": "The session transitions to CANCELLED.",
+              "stability": "experimental"
+            },
+            {
+              "id": "suspend",
+              "value": "suspend",
+              "brief": "The session transitions to SUSPENDED.",
+              "stability": "experimental"
+            },
+            {
+              "id": "resume",
+              "value": "resume",
+              "brief": "The session transitions from SUSPENDED back to OPEN.",
+              "stability": "experimental"
+            }
+          ],
+          "requirement_level": "required",
+          "stability": "experimental"
+        }
+      ]
+    },
+    {
+      "id": "registry.macp.reused",
+      "type": "attribute_group",
+      "brief": "OpenTelemetry attributes MACP reuses rather than redefines.",
+      "stability": "experimental",
+      "attributes": [
+        {
+          "ref": "error.type",
+          "note": "The MACPError code (registries/error-codes.md), e.g. POLICY_DENIED. For an implementation failure without a MACP code, the OpenTelemetry convention applies. Never the error message.",
+          "requirement_level": {
+            "conditionally_required": "when the Envelope or operation was rejected or failed"
+          }
+        },
+        {
+          "ref": "service.name",
+          "note": "Resource attribute identifying the runtime, CP or SDK process, e.g. macp-runtime.",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "service.version",
+          "note": "Resource attribute: the implementation's release version.",
+          "requirement_level": "recommended"
+        }
+      ]
+    },
+    {
+      "id": "span.macp.send",
+      "type": "span",
+      "brief": "A client sends one Envelope to a runtime.",
+      "note": "Emitted by SDKs. The transport client span (for example gRPC) is its child.",
+      "stability": "experimental",
+      "span_kind": "client",
+      "span_name": "send {macp.mode.id}",
+      "attributes": [
+        {
+          "ref": "macp.operation.name",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.session.id",
+          "requirement_level": {
+            "conditionally_required": "when session_id is non-empty"
+          }
+        },
+        {
+          "ref": "macp.message.id",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.message.type",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.mode.id",
+          "requirement_level": {
+            "conditionally_required": "when mode is non-empty"
+          }
+        },
+        {
+          "ref": "macp.sender.id",
+          "requirement_level": "recommended"
+        },
+        {
+          "ref": "macp.version",
+          "requirement_level": "recommended"
+        },
+        {
+          "ref": "macp.envelope.outcome",
+          "requirement_level": {
+            "recommended": "when the Ack is received"
+          }
+        },
+        {
+          "ref": "error.type",
+          "requirement_level": {
+            "conditionally_required": "when the Ack rejects the Envelope or the call fails"
+          }
+        }
+      ]
+    },
+    {
+      "id": "span.macp.process",
+      "type": "span",
+      "brief": "The runtime processes one Envelope, from receipt to the accept/reject decision.",
+      "note": "The accepted SessionStart's process span is the session anchor; later spans of the session link to it.",
+      "stability": "experimental",
+      "span_kind": "internal",
+      "span_name": "process {macp.mode.id}",
+      "attributes": [
+        {
+          "ref": "macp.operation.name",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.session.id",
+          "requirement_level": {
+            "conditionally_required": "when session_id is non-empty"
+          }
+        },
+        {
+          "ref": "macp.message.id",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.message.type",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.mode.id",
+          "requirement_level": {
+            "conditionally_required": "when mode is non-empty"
+          }
+        },
+        {
+          "ref": "macp.sender.id",
+          "requirement_level": "recommended"
+        },
+        {
+          "ref": "macp.version",
+          "requirement_level": "recommended"
+        },
+        {
+          "ref": "macp.mode.version",
+          "requirement_level": "recommended"
+        },
+        {
+          "ref": "macp.configuration.version",
+          "requirement_level": "recommended"
+        },
+        {
+          "ref": "macp.policy.id",
+          "requirement_level": {
+            "recommended": "when a policy is bound to the session"
+          }
+        },
+        {
+          "ref": "macp.envelope.outcome",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "error.type",
+          "requirement_level": {
+            "conditionally_required": "when macp.envelope.outcome is rejected"
+          }
+        }
+      ]
+    },
+    {
+      "id": "span.macp.resolve",
+      "type": "span",
+      "brief": "The session transitions to RESOLVED.",
+      "stability": "experimental",
+      "span_kind": "internal",
+      "span_name": "resolve {macp.mode.id}",
+      "attributes": [
+        {
+          "ref": "macp.operation.name",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.session.id",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.mode.id",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.session.state",
+          "note": "The state entered.",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.commitment.hash",
+          "requirement_level": "recommended"
+        },
+        {
+          "ref": "macp.mode.version",
+          "requirement_level": "recommended"
+        },
+        {
+          "ref": "macp.configuration.version",
+          "requirement_level": "recommended"
+        },
+        {
+          "ref": "macp.policy.id",
+          "requirement_level": {
+            "recommended": "when a policy is bound to the session"
+          }
+        }
+      ]
+    },
+    {
+      "id": "span.macp.expire",
+      "type": "span",
+      "brief": "The session's TTL elapses and it transitions to EXPIRED.",
+      "stability": "experimental",
+      "span_kind": "internal",
+      "span_name": "expire {macp.mode.id}",
+      "attributes": [
+        {
+          "ref": "macp.operation.name",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.session.id",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.mode.id",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.session.state",
+          "note": "The state entered.",
+          "requirement_level": "required"
+        }
+      ],
+      "note": "A root span: no request triggers it. It links to the session anchor."
+    },
+    {
+      "id": "span.macp.cancel",
+      "type": "span",
+      "brief": "The session transitions to CANCELLED.",
+      "stability": "experimental",
+      "span_kind": "internal",
+      "span_name": "cancel {macp.mode.id}",
+      "attributes": [
+        {
+          "ref": "macp.operation.name",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.session.id",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.mode.id",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.session.state",
+          "note": "The state entered.",
+          "requirement_level": "required"
+        }
+      ]
+    },
+    {
+      "id": "span.macp.suspend",
+      "type": "span",
+      "brief": "The session transitions to SUSPENDED.",
+      "stability": "experimental",
+      "span_kind": "internal",
+      "span_name": "suspend {macp.mode.id}",
+      "attributes": [
+        {
+          "ref": "macp.operation.name",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.session.id",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.mode.id",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.session.state",
+          "note": "The state entered.",
+          "requirement_level": "required"
+        }
+      ]
+    },
+    {
+      "id": "span.macp.resume",
+      "type": "span",
+      "brief": "The session transitions from SUSPENDED back to OPEN.",
+      "stability": "experimental",
+      "span_kind": "internal",
+      "span_name": "resume {macp.mode.id}",
+      "attributes": [
+        {
+          "ref": "macp.operation.name",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.session.id",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.mode.id",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.session.state",
+          "note": "The state entered.",
+          "requirement_level": "required"
+        }
+      ]
+    },
+    {
+      "id": "metric.macp.envelope.processed",
+      "type": "metric",
+      "metric_name": "macp.envelope.processed",
+      "brief": "Envelopes the runtime processed, by outcome.",
+      "stability": "experimental",
+      "instrument": "counter",
+      "unit": "{envelope}",
+      "attributes": [
+        {
+          "ref": "macp.mode.id",
+          "requirement_level": {
+            "conditionally_required": "when mode is non-empty"
+          }
+        },
+        {
+          "ref": "macp.message.type",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.envelope.outcome",
+          "requirement_level": "required"
+        }
+      ]
+    },
+    {
+      "id": "metric.macp.envelope.process.duration",
+      "type": "metric",
+      "metric_name": "macp.envelope.process.duration",
+      "brief": "Time the runtime took to process one Envelope.",
+      "stability": "experimental",
+      "instrument": "histogram",
+      "unit": "s",
+      "attributes": [
+        {
+          "ref": "macp.mode.id",
+          "requirement_level": {
+            "conditionally_required": "when mode is non-empty"
+          }
+        },
+        {
+          "ref": "macp.message.type",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.envelope.outcome",
+          "requirement_level": "required"
+        }
+      ]
+    },
+    {
+      "id": "metric.macp.session.transitions",
+      "type": "metric",
+      "metric_name": "macp.session.transitions",
+      "brief": "Session lifecycle transitions.",
+      "stability": "experimental",
+      "instrument": "counter",
+      "unit": "{transition}",
+      "attributes": [
+        {
+          "ref": "macp.mode.id",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.operation.name",
+          "requirement_level": "required"
+        }
+      ]
+    },
+    {
+      "id": "metric.macp.session.duration",
+      "type": "metric",
+      "metric_name": "macp.session.duration",
+      "brief": "Session lifetime from SessionStart acceptance to its terminal state.",
+      "stability": "experimental",
+      "instrument": "histogram",
+      "unit": "s",
+      "attributes": [
+        {
+          "ref": "macp.mode.id",
+          "requirement_level": "required"
+        },
+        {
+          "ref": "macp.session.state",
+          "note": "The terminal state reached.",
+          "requirement_level": "required"
+        }
+      ]
+    }
+  ]
+}

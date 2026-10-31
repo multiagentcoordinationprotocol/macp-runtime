@@ -36,7 +36,7 @@ env:
   # of truth -- and files one tracked issue when upstream moves ahead of it in a
   # way that touches the mirrored trees. Pin without that watcher and the gate
   # quietly rots; that pairing is the whole design.
-  SPEC_REV: "6bb4426730a947ec16fd4ddf02e7f370843ad3f3"
+  SPEC_REV: "0f77753a24e9fc4b9b8e7abddac8a4b5c5145494"
 
 jobs:
   actionlint:
@@ -492,6 +492,10 @@ jobs:
       - name: Clippy (otel feature)
         run: cargo clippy -p macp-runtime --features otel --all-targets -- -D warnings
 
+      # ...and compiled but never tested; test it too (otel-spans P0).
+      - name: Test otel feature
+        run: cargo test -p macp-runtime --features otel
+
       # gRPC server reflection (dev/debug tooling, issue #187) -- opt-in,
       # non-default feature on the root crate.
       - name: Clippy (reflection feature)
@@ -667,6 +671,7 @@ jobs:
           check_dir "tests/conformance/cmt-hash" "spec-repo/schemas/conformance/cmt-hash"
           check_dir "tests/vectors/receipt" "spec-repo/schemas/conformance/receipt"
           check_dir "tests/parity" "spec-repo/schemas/parity"
+          check_dir "tests/otel" "spec-repo/schemas/otel"
           exit $status
 
       - name: Install Rust toolchain
@@ -885,6 +890,9 @@ jobs:
         with:
           context: .
           push: false
+          # Same features as the published image (docker.yml).
+          build-args: |
+            CARGO_FEATURES=otel
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

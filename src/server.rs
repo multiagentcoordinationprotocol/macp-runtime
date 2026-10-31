@@ -22,9 +22,11 @@ use crate::pb::{
 use crate::runtime::{Runtime, WhatIfError};
 use crate::security::{AuthIdentity, SecurityLayer};
 use crate::session::SessionState;
+use crate::telemetry::process::{Outcome, ProcessSpan};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
+use tracing::Instrument;
 
 type SessionResponseStream = std::pin::Pin<
     Box<dyn futures_core::Stream<Item = Result<StreamSessionResponse, Status>> + Send>,
@@ -58,6 +60,25 @@ impl MacpServer {
     pub fn with_read_only_policies(mut self) -> Self {
         self.policies_read_only = true;
         self
+    }
+
+    /// The OpenTelemetry switch, read from the runtime (no constructor
+    /// parameter of its own).
+    fn telemetry(&self) -> &crate::telemetry::Telemetry {
+        self.runtime.telemetry()
+    }
+
+    /// Link `process` to the anchor of `session_id` when that session is
+    /// resident and has one (accepted, duplicate and rejected envelopes
+    /// alike; the anchor's own span is skipped). Callers check that
+    /// telemetry is active first.
+    async fn link_process_anchor(&self, process: &ProcessSpan, session_id: &str) {
+        #[cfg(feature = "otel")]
+        if let Some(anchor) = self.runtime.trace_anchor(session_id).await {
+            process.link_anchor(anchor);
+        }
+        #[cfg(not(feature = "otel"))]
+        let _ = (process, session_id);
     }
 
     /// Install an external ingress policy engine (OPA/Cedar/custom). All
@@ -269,12 +290,17 @@ impl MacpServer {
         &self,
         request: &Request<SendRequest>,
         env: Envelope,
+        process: &ProcessSpan,
     ) -> Result<(Envelope, Option<usize>), MacpError> {
         let identity = self
             .security
             .authenticate_metadata(request.metadata())
             .await?;
         let env = Self::apply_authenticated_sender(&identity, env)?;
+        // The authenticated sender only, never the self-asserted one; recorded
+        // before the mode, rate-limit and ingress checks, as the stream path
+        // does, so those refusals carry it too.
+        process.record_sender(&env.sender);
         let is_session_start = env.message_type == "SessionStart";
         self.security
             .authorize_mode(&identity, &env.mode, is_session_start)?;
@@ -396,22 +422,27 @@ impl MacpServer {
     ///
     /// Returns `Ok(replay_envelopes)` — empty for normal sends, non-empty when
     /// a subscribe frame triggers history replay (RFC-MACP-0006-A1).
+    ///
+    /// A frame carrying an envelope gets a `process` span whose parent is
+    /// `stream_span`, the stream-open SERVER span (RFC-MACP-0006 §2.1: every
+    /// Envelope on a stream inherits the stream-open request's context).
     async fn process_stream_request(
         &self,
         identity: &AuthIdentity,
         req: StreamSessionRequest,
         bound_session_id: &mut Option<String>,
         session_events: &mut Option<tokio::sync::broadcast::Receiver<Envelope>>,
+        stream_span: &tracing::Span,
     ) -> Result<Vec<Envelope>, StreamFailure> {
         // RFC-MACP-0006-A1: Handle subscribe-only frame.
         // When subscribe_session_id is set and envelope is absent, subscribe to
         // the session's broadcast channel and replay accepted history.
         if !req.subscribe_session_id.is_empty() {
             if req.envelope.is_some() {
-                return Err(StreamFailure::Terminal(Self::coded_status(
+                return Err(StreamFailure::terminal(
                     MacpError::InvalidEnvelope,
                     "StreamSessionRequest must not contain both envelope and subscribe_session_id",
-                )));
+                ));
             }
             return self
                 .process_subscribe_frame(
@@ -425,11 +456,66 @@ impl MacpServer {
         }
 
         let envelope = req.envelope.ok_or_else(|| {
-            StreamFailure::Terminal(Self::coded_status(
+            StreamFailure::terminal(
                 MacpError::InvalidEnvelope,
                 "StreamSessionRequest must contain an envelope or subscribe_session_id",
-            ))
+            )
         })?;
+
+        let process = ProcessSpan::start(
+            self.telemetry(),
+            &envelope,
+            self.runtime
+                .envelope_labels(&envelope.mode, &envelope.message_type),
+            Some(stream_span),
+        );
+        // Kept only when telemetry is active, for the anchor link below.
+        let anchor_session = self
+            .telemetry()
+            .is_enabled()
+            .then(|| envelope.session_id.clone());
+        let result = self
+            .process_stream_envelope(
+                identity,
+                envelope,
+                bound_session_id,
+                session_events,
+                &process,
+            )
+            .instrument(process.span().clone())
+            .await;
+        if let Some(session_id) = anchor_session {
+            self.link_process_anchor(&process, &session_id).await;
+        }
+        let metrics = self.runtime.metrics();
+        match &result {
+            Ok(true) => process.finish(metrics, Outcome::Duplicate),
+            Ok(false) => process.finish(metrics, Outcome::Accepted),
+            Err(StreamFailure::Rejected { err, .. }) | Err(StreamFailure::Terminal { err, .. }) => {
+                process.finish(metrics, Outcome::Rejected(err))
+            }
+            // Built only by subscribe frames, never by
+            // `process_stream_envelope`. Release builds fall back to the
+            // registry code it would carry rather than leave the span
+            // unfinished (which would read as an implementation failure).
+            Err(StreamFailure::Inline { .. }) => {
+                debug_assert!(false, "process_stream_envelope never refuses Inline");
+                process.finish(metrics, Outcome::Rejected(&MacpError::InvalidEnvelope))
+            }
+        }
+        // Accepted and duplicate both answer with an empty reply.
+        result.map(|_duplicate| Vec::new())
+    }
+
+    /// The envelope half of [`Self::process_stream_request`]: `Ok(duplicate)`.
+    async fn process_stream_envelope(
+        &self,
+        identity: &AuthIdentity,
+        envelope: Envelope,
+        bound_session_id: &mut Option<String>,
+        session_events: &mut Option<tokio::sync::broadcast::Receiver<Envelope>>,
+        process: &ProcessSpan,
+    ) -> Result<bool, StreamFailure> {
         let message_id = envelope.message_id.clone();
         let rejected = |err: MacpError| StreamFailure::Rejected {
             err,
@@ -438,48 +524,49 @@ impl MacpServer {
 
         self.validate_envelope_shape(&envelope).map_err(rejected)?;
         if envelope.session_id.trim().is_empty() {
-            return Err(StreamFailure::Terminal(Self::coded_status(
+            return Err(StreamFailure::terminal(
                 MacpError::InvalidEnvelope,
                 "StreamSession requires a non-empty session_id",
-            )));
+            ));
         }
         if envelope.mode.trim().is_empty() {
-            return Err(StreamFailure::Terminal(Self::coded_status(
+            return Err(StreamFailure::terminal(
                 MacpError::InvalidEnvelope,
                 "StreamSession requires a non-empty mode",
-            )));
+            ));
         }
         if let Some(bound) = bound_session_id.as_ref() {
             if bound != &envelope.session_id {
-                return Err(StreamFailure::Terminal(Self::coded_status(
+                return Err(StreamFailure::terminal(
                     MacpError::InvalidEnvelope,
                     "StreamSession may only carry envelopes for one session_id",
-                )));
+                ));
             }
         }
 
         let envelope = Self::apply_authenticated_sender(identity, envelope).map_err(rejected)?;
+        process.record_sender(&envelope.sender);
         let is_session_start = envelope.message_type == "SessionStart";
 
         if !is_session_start {
             if let Some(session) = self.runtime.get_session_checked(&envelope.session_id).await {
                 if envelope.mode != session.mode {
-                    return Err(StreamFailure::Terminal(Self::coded_status(
+                    return Err(StreamFailure::terminal(
                         MacpError::InvalidEnvelope,
                         "INVALID_ENVELOPE: envelope mode does not match the bound session mode",
-                    )));
+                    ));
                 }
                 if session.state != SessionState::Open {
-                    return Err(StreamFailure::Terminal(Self::coded_status(
+                    return Err(StreamFailure::terminal(
                         MacpError::InvalidEnvelope,
                         "SESSION_NOT_OPEN",
-                    )));
+                    ));
                 }
             } else if envelope.message_type == "Signal" {
-                return Err(StreamFailure::Terminal(Self::coded_status(
+                return Err(StreamFailure::terminal(
                     MacpError::UnknownSession,
                     format!("Session '{}' not found", envelope.session_id),
-                )));
+                ));
             }
         }
 
@@ -507,11 +594,12 @@ impl MacpServer {
         } else {
             None
         };
-        self.runtime
+        let result = self
+            .runtime
             .process(&envelope, max_open)
             .await
             .map_err(rejected)?;
-        Ok(vec![])
+        Ok(result.duplicate)
     }
 
     /// RFC-MACP-0006-A1: Process a subscribe-only frame.
@@ -528,10 +616,10 @@ impl MacpServer {
         // Validate: only one session per stream
         if let Some(bound) = bound_session_id.as_ref() {
             if bound != session_id {
-                return Err(StreamFailure::Terminal(Self::coded_status(
+                return Err(StreamFailure::terminal(
                     MacpError::InvalidEnvelope,
                     "StreamSession may only carry envelopes for one session_id",
-                )));
+                ));
             }
         }
 
@@ -541,10 +629,10 @@ impl MacpServer {
             .get_session_checked(session_id)
             .await
             .ok_or_else(|| {
-                StreamFailure::Terminal(Self::coded_status(
+                StreamFailure::terminal(
                     MacpError::UnknownSession,
                     format!("Session '{}' not found", session_id),
-                ))
+                )
             })?;
 
         // Authorize: caller must be a declared participant, initiator, or observer
@@ -608,6 +696,7 @@ impl MacpServer {
         &self,
         identity: AuthIdentity,
         inbound: S,
+        stream_span: tracing::Span,
     ) -> SessionResponseStream
     where
         S: futures_core::Stream<Item = Result<StreamSessionRequest, Status>> + Send + 'static,
@@ -671,6 +760,7 @@ impl MacpServer {
                                     req,
                                     &mut bound_session_id,
                                     &mut session_events,
+                                    &stream_span,
                                 )
                                 .await
                             {
@@ -689,7 +779,7 @@ impl MacpServer {
                                         };
                                     }
                                 }
-                                Err(StreamFailure::Terminal(status)) => {
+                                Err(StreamFailure::Terminal { status, .. }) => {
                                     Err(status)?;
                                 }
                                 Err(StreamFailure::Rejected { err, .. }) if Self::is_stream_terminal_error(&err) => {
@@ -771,6 +861,7 @@ impl MacpServer {
                                     req,
                                     &mut bound_session_id,
                                     &mut session_events,
+                                    &stream_span,
                                 )
                                 .await
                             {
@@ -789,7 +880,7 @@ impl MacpServer {
                                         };
                                     }
                                 }
-                                Err(StreamFailure::Terminal(status)) => {
+                                Err(StreamFailure::Terminal { status, .. }) => {
                                     Err(status)?;
                                 }
                                 Err(StreamFailure::Rejected { err, .. }) if Self::is_stream_terminal_error(&err) => {
@@ -883,13 +974,18 @@ impl MacpServer {
     /// registry, so a control-plane RPC (GetSession, CancelSession, the policy
     /// registry, the watch streams) is as machine-branchable as `Send`.
     fn coded_status(err: MacpError, msg: impl Into<String>) -> Status {
+        Self::coded_status_ref(&err, msg)
+    }
+
+    /// [`Self::coded_status`] without consuming the error.
+    fn coded_status_ref(err: &MacpError, msg: impl Into<String>) -> Status {
         let code = tonic::Code::from_i32(err.transport_status().grpc_code());
         let mut status = Status::new(code, msg.into());
         status.metadata_mut().insert(
             "macp-error-code",
             tonic::metadata::MetadataValue::from_static(err.error_code()),
         );
-        let details = Self::error_details_bytes(&err);
+        let details = Self::error_details_bytes(err);
         if !details.is_empty() {
             let val = tonic::metadata::MetadataValue::from_bytes(&details);
             status
@@ -1020,7 +1116,12 @@ pub mod what_if {
 /// [`MacpServer::is_stream_terminal_error`]).
 #[derive(Debug)]
 enum StreamFailure {
-    Terminal(Status),
+    /// Ends the stream with `status`; `err` is the `MacpError` it carries
+    /// (its `macp-error-code`), kept for the `process` span's `error.type`.
+    Terminal {
+        status: Status,
+        err: MacpError,
+    },
     Rejected {
         err: MacpError,
         message_id: String,
@@ -1033,12 +1134,23 @@ enum StreamFailure {
     },
 }
 
+impl StreamFailure {
+    /// A stream-ending failure carrying `err`, with `msg` as the status
+    /// message (built exactly as [`MacpServer::coded_status`]).
+    fn terminal(err: MacpError, msg: impl Into<String>) -> Self {
+        StreamFailure::Terminal {
+            status: MacpServer::coded_status_ref(&err, msg),
+            err,
+        }
+    }
+}
+
 #[cfg(test)]
 impl StreamFailure {
     /// The gRPC code this failure carries (a rejection: its registry status).
     fn code(&self) -> tonic::Code {
         match self {
-            StreamFailure::Terminal(status) => status.code(),
+            StreamFailure::Terminal { status, .. } => status.code(),
             StreamFailure::Rejected { err, .. } => {
                 tonic::Code::from_i32(err.transport_status().grpc_code())
             }
@@ -1132,6 +1244,8 @@ impl MacpRuntimeService for MacpServer {
     }
 
     async fn send(&self, request: Request<SendRequest>) -> Result<Response<SendResponse>, Status> {
+        // An envelope-less request gets no `process` span (no message_id);
+        // the SERVER span carries its status.
         let env = request.get_ref().envelope.clone().ok_or_else(|| {
             Self::coded_status(
                 MacpError::InvalidEnvelope,
@@ -1139,15 +1253,38 @@ impl MacpRuntimeService for MacpServer {
             )
         })?;
 
+        // From receipt to the accept/reject decision: shape, authentication,
+        // authorization, rate limit, ingress policy and the kernel.
+        let process = ProcessSpan::start(
+            self.telemetry(),
+            &env,
+            self.runtime.envelope_labels(&env.mode, &env.message_type),
+            None,
+        );
         let result = async {
             self.validate_envelope_shape(&env)?;
-            let (env, max_open) = self.authenticate_send_request(&request, env).await?;
+            let (env, max_open) = self
+                .authenticate_send_request(&request, env, &process)
+                .await?;
             self.runtime
                 .process(&env, max_open)
                 .await
                 .map(|process_result| (env, process_result))
         }
+        .instrument(process.span().clone())
         .await;
+
+        if self.telemetry().is_enabled() {
+            if let Some(raw) = request.get_ref().envelope.as_ref() {
+                self.link_process_anchor(&process, &raw.session_id).await;
+            }
+        }
+        let metrics = self.runtime.metrics();
+        match &result {
+            Ok((_, r)) if r.duplicate => process.finish(metrics, Outcome::Duplicate),
+            Ok(_) => process.finish(metrics, Outcome::Accepted),
+            Err(err) => process.finish(metrics, Outcome::Rejected(err)),
+        }
 
         let ack = match result {
             Ok((env, process_result)) => Ack {
@@ -1510,9 +1647,15 @@ impl MacpRuntimeService for MacpServer {
             .await
             .map_err(Self::status_from_error)?;
         let inbound = request.into_inner();
-        Ok(Response::new(
-            self.build_stream_session_stream(identity, inbound),
-        ))
+        // The stream-open SERVER span, captured here: the stream body is
+        // polled by hyper outside this handler's future, so each Envelope's
+        // `process` span names it as its parent explicitly.
+        let stream_span = tracing::Span::current();
+        Ok(Response::new(self.build_stream_session_stream(
+            identity,
+            inbound,
+            stream_span,
+        )))
     }
 
     type WatchModeRegistryStream = std::pin::Pin<
@@ -2325,6 +2468,23 @@ mod tests {
         (server, runtime)
     }
 
+    #[test]
+    fn server_reads_telemetry_from_its_runtime() {
+        let (server, _) = make_server();
+        assert!(!server.telemetry().is_enabled());
+        #[cfg(feature = "otel")]
+        {
+            let runtime = Runtime::new(
+                Arc::new(crate::storage::MemoryBackend),
+                Arc::new(SessionRegistry::new()),
+                Arc::new(LogStore::new()),
+            )
+            .with_telemetry(crate::telemetry::Telemetry::enabled());
+            let server = MacpServer::new(Arc::new(runtime), SecurityLayer::dev_mode());
+            assert!(server.telemetry().is_enabled());
+        }
+    }
+
     fn send_req(sender: &str, env: Envelope) -> Request<SendRequest> {
         let mut req = Request::new(SendRequest {
             envelope: Some(env),
@@ -2486,8 +2646,11 @@ mod tests {
             }),
         })]);
 
-        let mut stream =
-            server.build_stream_session_stream(stream_identity("agent://orchestrator"), requests);
+        let mut stream = server.build_stream_session_stream(
+            stream_identity("agent://orchestrator"),
+            requests,
+            tracing::Span::none(),
+        );
 
         let response = stream.next().await.unwrap().unwrap();
         let envelope = match response.response.unwrap() {
@@ -2537,8 +2700,11 @@ mod tests {
             }),
         ]);
 
-        let mut stream =
-            server.build_stream_session_stream(stream_identity("agent://orchestrator"), requests);
+        let mut stream = server.build_stream_session_stream(
+            stream_identity("agent://orchestrator"),
+            requests,
+            tracing::Span::none(),
+        );
 
         let first = stream.next().await.unwrap().unwrap();
         let first_env = match first.response.unwrap() {
@@ -3446,6 +3612,7 @@ mod tests {
                 subscribe_frame(&sid, 0),
                 &mut bound,
                 &mut events,
+                &tracing::Span::none(),
             )
             .await
             .unwrap();
@@ -3483,6 +3650,7 @@ mod tests {
                 subscribe_frame(&sid, 2),
                 &mut bound,
                 &mut events,
+                &tracing::Span::none(),
             )
             .await
             .unwrap();
@@ -3502,6 +3670,7 @@ mod tests {
                 subscribe_frame("missing-session", 0),
                 &mut bound,
                 &mut events,
+                &tracing::Span::none(),
             )
             .await
             .unwrap_err();
@@ -3530,6 +3699,7 @@ mod tests {
                 subscribe_frame(&sid, 0),
                 &mut bound,
                 &mut events,
+                &tracing::Span::none(),
             )
             .await
             .unwrap_err();
@@ -3556,6 +3726,7 @@ mod tests {
                 subscribe_frame(&sid, 0),
                 &mut bound,
                 &mut events,
+                &tracing::Span::none(),
             )
             .await
             .unwrap();
@@ -3585,6 +3756,7 @@ mod tests {
                 subscribe_frame(&sid, 0),
                 &mut bound,
                 &mut events,
+                &tracing::Span::none(),
             )
             .await
             .unwrap();
@@ -3618,6 +3790,7 @@ mod tests {
                 req,
                 &mut bound,
                 &mut events,
+                &tracing::Span::none(),
             )
             .await
             .unwrap_err();
@@ -3654,6 +3827,7 @@ mod tests {
                 subscribe_frame(&sid1, 0),
                 &mut bound,
                 &mut events,
+                &tracing::Span::none(),
             )
             .await
             .unwrap();
@@ -3666,6 +3840,7 @@ mod tests {
                 subscribe_frame(&sid2, 0),
                 &mut bound,
                 &mut events,
+                &tracing::Span::none(),
             )
             .await
             .unwrap_err();
@@ -3901,7 +4076,13 @@ mod tests {
             after_sequence: 0,
         };
         let err = server
-            .process_stream_request(&embargoed, req, &mut bound, &mut events)
+            .process_stream_request(
+                &embargoed,
+                req,
+                &mut bound,
+                &mut events,
+                &tracing::Span::none(),
+            )
             .await
             .expect_err("stream envelope from embargoed sender must be denied");
         // A per-envelope rejection (inline MACPError on the stream, same
@@ -3927,7 +4108,13 @@ mod tests {
             after_sequence: 0,
         };
         let err = server
-            .process_stream_request(&embargoed, req, &mut bound, &mut events)
+            .process_stream_request(
+                &embargoed,
+                req,
+                &mut bound,
+                &mut events,
+                &tracing::Span::none(),
+            )
             .await
             .expect_err("stream subscribe from embargoed sender must be denied");
         assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}");

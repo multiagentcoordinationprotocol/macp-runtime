@@ -1204,3 +1204,329 @@
 - **Alternatives:** None that avoid the break.
 - **Blast radius if wrong:** None. The bump is forced.
 - **Status:** CONFIRMED (2026-10-30)
+
+## otel-spans: OTEL_EXPORTER_OTLP_CERTIFICATE implemented by the runtime
+- **Plan:** `plans/otel-spans.md` (OQ6; P1)
+- **Assumed:** The extra code is wanted. otlp 0.32 does not honour `OTEL_EXPORTER_OTLP_CERTIFICATE`, and a private-CA collector is common.
+- **Chose:** `telemetry::init::export_config` reads `OTEL_EXPORTER_OTLP_{TRACES_,METRICS_}CERTIFICATE` (signal-specific first). When set, that CA is the **only** trust anchor (`ClientTlsConfig::ca_certificate`, no `with_enabled_roots()`), matching the OTel spec's "the trusted certificate" and avoiding tonic's eager `NativeCertsNotFound` on a host without a native store (decided by the coordinator after the P1 verification). Native roots are used only when no certificate variable is set. An unreadable file logs an error and leaves telemetry inactive. Client-certificate variables stay unsupported and documented.
+- **Alternatives:** Document the variable as unsupported and drop the code.
+- **Blast radius if wrong:** Low. The variable is opt-in, and removing it deletes one branch and one test.
+- **Status:** CONFIRMED (2026-10-31, by the user; see DECISIONS.md)
+
+## otel-spans: the runtime resolves the OTLP endpoint and passes it with with_endpoint
+- **Plan:** `plans/otel-spans.md` (P1, Approach "Activation": "Do not call `.with_endpoint()`")
+- **Assumed:** The plan's concern was a programmatic *default* overriding the signal-specific variable.
+- **Chose:** `export_config` resolves each signal's endpoint with the exporter's own precedence (signal-specific variable, then the generic one, no default) and passes it to `.with_endpoint()`. Precedence is unchanged, an empty variable never reaches the exporter (the exporter would take it and fail with `InvalidUri`), the https decision uses the same value, and the TLS test can inject the env instead of mutating the process environment.
+- **Alternatives:** Let the exporter read the variables itself, as the plan says. Then an empty signal-specific variable shadows a valid generic one, and the TLS test needs process-env mutation.
+- **Blast radius if wrong:** Low. It is one call in `build_tracer_provider`.
+- **Status:** CONFIRMED (2026-10-31). `src/telemetry/init.rs:134` (`export_config`), `:242`/`:278` (`with_endpoint`).
+
+## otel-spans: no `macp_runtime::telemetry=off` directive on the fmt EnvFilter
+- **Plan:** `plans/otel-spans.md` (Design summary, "Subscriber layout": adding the directive "is harmless and documents intent")
+- **Assumed:** The directive is not harmless. `EnvFilter` directives match by target prefix, so it also silenced the events of `macp_runtime::telemetry::init` (the "OpenTelemetry enabled" notice and the shutdown warnings). The binary test caught this.
+- **Chose:** The exclusion is the `filter_fn(|m| m.target() != TARGET)` alone, which is exact-match and wins over any `RUST_LOG`. Pinned by `log_lines_are_unchanged_even_when_rust_log_names_the_telemetry_target`.
+- **Alternatives:** Keep the directive and log those events with an explicit `target: "macp_runtime"`.
+- **Blast radius if wrong:** None for output. The filter_fn already does the exclusion.
+- **Status:** CONFIRMED (2026-10-31). `filter_fn` at `src/telemetry/init.rs:294-312`; test `tests/otel_bootstrap.rs:651`.
+
+## otel-spans: telemetry::init installs the fmt-only subscriber itself when inactive
+- **Plan:** `plans/otel-spans.md` (P1, Files: `init(env_filter)` "returns `None` when inactive, and the caller then installs" the fmt subscriber)
+- **Assumed:** `EnvFilter` is consumed by `init`, and a misconfiguration must be logged through an installed subscriber.
+- **Chose:** `init` installs exactly `tracing_subscriber::fmt().with_env_filter(env_filter).init()` on both the inactive and the misconfigured path, then returns `Ok(None)` or `Err(msg)` for `main` to log at `error!`. The feature-off arm of `main.rs` is literally unchanged.
+- **Alternatives:** Hand the filter back to the caller in the `None`/`Err` cases (a different signature).
+- **Blast radius if wrong:** None. The installed subscriber is identical.
+- **Status:** CONFIRMED (2026-10-31)
+
+## otel-spans: otel layer also sets with_target(false) and an INFO max-level hint
+- **Plan:** `plans/otel-spans.md` (Design summary, "Subscriber layout": `with_threads(false)`, `with_location(false)`, `with_tracked_inactivity(false)`)
+- **Assumed:** tracing-opentelemetry 0.33 adds a `target` attribute to every span by default, which is not a semconv attribute.
+- **Chose:** Also `with_target(false)`. The otel filter admits spans of target `macp_runtime::telemetry` at INFO or above and carries `with_max_level_hint(INFO)`, and the fmt filter's `filter_fn` carries a TRACE hint, so the global max level stays what the `EnvFilter` alone gives (a hint-less `filter_fn` would make it TRACE).
+- **Alternatives:** Keep the default `target` attribute.
+- **Blast radius if wrong:** Low. It removes one attribute from spans; P3's attribute tests are the place to revisit.
+- **Status:** CONFIRMED (2026-10-31). `src/telemetry/init.rs:312`, `:328`, `:333`.
+
+## otel-spans: misconfiguration error goes to stdout, not stderr
+- **Plan:** `plans/otel-spans.md` (P1 acceptance: "stderr carries one error line naming the variable")
+- **Assumed:** The plan says both "logs one `error!`" and "stderr". `tracing`'s fmt writer is stdout, as for every other runtime log line.
+- **Chose:** One `tracing::error!`. `wrong_protocol_logs_one_error_and_the_runtime_still_serves` asserts exactly one ERROR line naming the variable in the combined stdout+stderr, as `tests/policies_dry_run.rs` does.
+- **Alternatives:** `eprintln!` as well (two lines), or switch the fmt writer to stderr (changes all log output).
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31). Every runtime log line is on stdout; a second stream for one line would be the inconsistency.
+
+## otel-spans: OTEL_RESOURCE_ATTRIBUTES may override service.version
+- **Plan:** `plans/otel-spans.md` (P1, Approach "Resource")
+- **Assumed:** An operator who sets `service.version` in `OTEL_RESOURCE_ATTRIBUTES` (a deployment version, say) means it.
+- **Chose:** `service.version=<crate version>` is laid down first, so `OTEL_RESOURCE_ATTRIBUTES` can replace it, as it can `service.name`. `OTEL_SERVICE_NAME` is applied last. `OTEL_RESOURCE_ATTRIBUTES` is parsed with a copy of the SDK's own `EnvResourceDetector` algorithm so `resource(env)` stays a pure function of the injected env.
+- **Alternatives:** Pin `service.version` to the crate version whatever the env says.
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31)
+
+## otel-spans: the P1 TLS test drives the exporter in-process, not the binary
+- **Plan:** `plans/otel-spans.md` (P1 acceptance, "TLS")
+- **Assumed:** P1 creates no runtime spans, so the binary has nothing to export to the fake collector.
+- **Chose:** `https_collector_is_reached_only_with_the_configured_ca` runs the exact `export_config` -> `build_tracer_provider` path `init` takes, with an injected env, and exports one test-made span: received with `OTEL_EXPORTER_OTLP_CERTIFICATE`, handshake failure and nothing received without it. P6's end-to-end export can repeat it through the binary once spans exist.
+- **Alternatives:** Add a startup span to the binary just for the test (a MACP-span-shaped thing P1 must not create).
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31). `tests/otel_bootstrap.rs:710`; it runs the exact `export_config` path `init` uses.
+
+## otel-spans: the SERVER span records status in on_response and on_eos, not on_failure
+- **Plan:** `plans/otel-spans.md` (P2 Approach: "`on_request`, `on_response` and `on_body_chunk` are `()`"; "`on_eos` and `on_failure` record `rpc.grpc.status_code`")
+- **Assumed:** In tower-http 0.6.8 a trailers-only response (tonic's form for any error raised before the first message, `NOT_FOUND` and `UNIMPLEMENTED` included) ends its body with no trailers, so `on_eos` gets `None`, and `on_failure` fires only for non-OK codes in the headers (`classify_eos` is never called on the trailers path, `trace/body.rs`). With `on_response = ()` an OK unary's code would come only from `on_eos`, and a trailers-only code only from `on_failure`.
+- **Chose:** `on_response` (`RecordTrailersOnly`) records a `grpc-status` found in the response headers, `on_eos` (`RecordEos`) one found in the trailers, and `on_failure` (`RecordFailure`) acts only on `GrpcFailureClass::Error` (a body/transport failure: status ERROR, no description). Each code is recorded exactly once. None of the three emits an event, which was the reason for `()`.
+- **Alternatives:** The plan's literal split (on_failure for codes), which leaves OK trailers-only responses unrecorded and duplicates the code attribute when both fire.
+- **Blast radius if wrong:** Low; internal to `src/telemetry/grpc.rs`, pinned by `tests/otel_grpc.rs`.
+- **Status:** CONFIRMED (2026-10-31). `src/telemetry/grpc.rs:238-285` (tower-http 0.6.8 per `Cargo.lock`).
+
+## otel-spans: ERROR status is set through otel.status_description alone
+- **Plan:** `plans/otel-spans.md` (P2: span declares `otel.status_code = Empty`; "`otel.status_code = "error"` ... `otel.status_description` is the status code name only")
+- **Assumed:** tracing-opentelemetry 0.33 maps a recorded `otel.status_description` to `Status::error(desc)`, and the span is already started when the status arrives, where the SDK's `set_status` only moves up the order `Unset < Error < Ok`. Recording `otel.status_code = "error"` first would set `Error("")` and the description could then be lost.
+- **Chose:** For a code in the error set, record only `otel.status_description = <CODE_NAME>`. `otel.status_code = "error"` is recorded only for a transport failure with no code.
+- **Alternatives:** Record both fields (description may be dropped).
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31)
+
+## otel-spans: an unknown RPC method is `_OTHER` in the SERVER span name and rpc.method
+- **Plan:** `plans/otel-spans.md` (P2: `otel.name = "macp.v1.MACPRuntimeService/{Method}"`; spec #239 `_OTHER` rule is written for `process` span names and metric attributes)
+- **Assumed:** The path after `/macp.v1.MACPRuntimeService/` is client-chosen, so using it verbatim makes SERVER span-name cardinality unbounded, the problem #239 fixed for modes. The OpenTelemetry RPC conventions use `_OTHER` for a method unknown to the instrumentation.
+- **Chose:** `telemetry::grpc::METHODS` (the 27 generated methods, pinned to the generated `macp.v1.rs` by `methods_match_the_generated_service`); any other method under the service prefix is named `macp.v1.MACPRuntimeService/_OTHER` with `rpc.method = "_OTHER"`. The received value is not recorded.
+- **Alternatives:** Verbatim method name; or keep the received name in an extra attribute.
+- **Blast radius if wrong:** Low; one string.
+- **Status:** CONFIRMED (2026-10-31). Pin at `src/telemetry/grpc.rs:368`.
+
+## otel-spans: the SERVER layer re-boxes the body so option_layer type-checks
+- **Plan:** `plans/otel-spans.md` (P2 Files: `tower::util::option_layer(active.then(server_layer))`, fall back to two code paths if `Either` fails tonic's bounds)
+- **Assumed:** tower 0.5's `Either` service requires both arms to share `Response`; tower-http's `Trace` returns `Response<ResponseBody<..>>`, tonic's `Routes` `Response<tonic::body::Body>`.
+- **Chose:** `ServerLayer` wraps `Trace` in `tower::util::MapResponse` with `tonic::body::Body::new`, so `optional_server_layer(&Telemetry) -> Either<ServerLayer, Identity>` serves both paths with one `main.rs` code path. The extra boxing exists only when telemetry is active; inactive the service is `Either::Right(Routes)`. tower-http's span entry in both the future and the body is untouched (the map runs on the outer response, the traced body is boxed inside).
+- **Alternatives:** Two `main.rs` code paths duplicating the `add_service` chain.
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31). `src/telemetry/grpc.rs:308-344`; `src/main.rs:367`.
+
+## otel-spans: a timed-out request's SERVER span has no status code (known limitation)
+- **Plan:** `plans/otel-spans.md` (P2)
+- **Assumed:** tonic 0.14.6 applies `Server::timeout` (and the client's `grpc-timeout`) in `MakeSvc`, **outside** every `Server::layer` (`transport/server/mod.rs:1235-1238`), and only to the response future (`transport/service/grpc_timeout.rs:80-92`), so a stream whose headers have gone out is not affected. A request that times out before its headers drops the layer's future and tonic answers `CANCELLED` (1) (`status.rs:644-645`), not `DEADLINE_EXCEEDED`. CANCELLED is outside the error set, so the span's status (Unset) is right; the only thing lost is `rpc.grpc.status_code=1`.
+- **Chose:** Record it as a known limitation (module docs of `src/telemetry/grpc.rs`, `docs/deployment.md` Monitoring) and do not fix it: either fix needs a hand-written future wrapper that records the code when its future is dropped unfinished (the plan's rejected fallback), or a change to timeout semantics (moving the timeout inside the layer), which the plan forbids.
+- **Alternatives:** The two fixes above.
+- **Blast radius if wrong:** Low; one attribute missing on timed-out requests.
+- **Status:** CONFIRMED (2026-10-31) as an accepted, documented limitation. tonic 0.14.6 citations re-checked (`server/mod.rs:1237`, `grpc_timeout.rs:80-92`, `status.rs:644-645`).
+
+## otel-spans: P2 tests set the global propagator once per test process
+- **Plan:** `plans/otel-spans.md` (P2: extraction through `global::get_text_map_propagator`)
+- **Assumed:** The default global propagator is a no-op, so extraction needs the W3C propagator installed globally, as `init` does in production.
+- **Chose:** `tests/otel_grpc.rs` sets `TraceContextPropagator` through a `std::sync::Once`. It is the production value, never reset, and `tests/otel_grpc.rs` is its own test binary (process), so it cannot leak into other suites, and no test in the file depends on order. The layer is not given an injectable propagator.
+- **Alternatives:** Pass a propagator into `server_layer` (diverges from the production path the test is meant to pin).
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31). `tests/otel_grpc.rs:49`.
+
+## otel-spans: RPC attributes use the pre-1.37 OpenTelemetry names
+- **Plan:** `plans/otel-spans.md` (P2: `rpc.system`, `rpc.service`, `rpc.method`, `rpc.grpc.status_code`). Neither the spec's `docs/opentelemetry.md` nor `macp-semconv.json` pins an OpenTelemetry semconv version for the transport span, so the SERVER span uses the pre-1.37 RPC names the plan lists (not 1.37's `rpc.system.name`/`rpc.response.status_code`). `src/telemetry/grpc.rs:186`. **Status:** Deferred (2026-10-31). Trigger: the spec's `docs/opentelemetry.md` or `macp-semconv.json` pins an OpenTelemetry semconv version (or RPC attribute names) for the transport span.
+
+## otel-spans: under an `_OTHER` mode, Signal and Progress are `_OTHER` too
+- **Plan:** `plans/otel-spans.md` (P3 label normalization: "Every message type under an `_OTHER` mode is still `_OTHER`"; AC 1: "`macp.message.type = _OTHER`" for the unregistered mode)
+- **Assumed:** Signal and Progress are supported in every **registered** mode and in the empty mode; under an unregistered mode the plan's rule wins, so Signal and Progress are `_OTHER` there too. A session-scoped Progress under a registered mode keeps `Progress`. Spec `docs/opentelemetry.md` at 99f3cfa does not contradict this: it requires `_OTHER` for an unsupported value and does not single out Signal/Progress under an unsupported mode.
+- **Chose:** `EnvelopeLabels::new` (`src/telemetry/labels.rs`); pinned by `unregistered_mode_is_other_with_every_type_other` and `session_scoped_progress_under_a_registered_mode_keeps_its_type`.
+- **Alternatives:** Keep Signal/Progress even under `_OTHER` (two extra label sets per outcome, no cardinality risk).
+- **Blast radius if wrong:** Low; label values on rejected traffic only.
+- **Status:** CONFIRMED (2026-10-31). `src/telemetry/labels.rs:70-95`; tests at `:237`, `:248`.
+
+## otel-spans: the label cache is invalidated by draining the registry change channel, with no task
+- **Plan:** `plans/otel-spans.md` (P3: `runtime.mode_registry().get_mode(mode).is_some()`)
+- **Assumed:** `ModeRegistry` has no `get_mode`/descriptor-by-name lookup, and `all_mode_descriptors()` clones every descriptor.
+- **Chose:** `ModeLabelCache` (one per `Runtime`) snapshots registered modes and their declared types, subscribes to `ModeRegistry::subscribe_changes()` before the snapshot, and on each lookup drains `try_recv` (any event or `Lagged` triggers a rebuild). No background task; holds registered modes only. Pinned by `cache_is_invalidated_by_registry_changes`.
+- **Alternatives:** Add a lookup method to `macp-modes` (a library API change P3 does not need).
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31). Drift: the channel is now drained only by the caller that wins a `try_lock` on it (`src/telemetry/labels.rs:115`, drain loop ~`:170`); others read the current snapshot. Still no task.
+
+## otel-spans: one recorder feeds Prometheus and OTLP; the counter is the histogram's count
+- **Plan:** `plans/otel-spans.md` (P3 Files, `src/metrics.rs`)
+- **Chose:** `RuntimeMetrics::record_envelope` keeps one series per `(mode, type, outcome)` (count, sum, 15 buckets) rendering both `macp_envelope_processed_total` and the duration histogram, and forwards the same, already-folded labels to the OTel instruments (installed via `Runtime::with_telemetry`). The 2,000-set backstop fold therefore applies to OTLP too. The Prometheus counter family is `# HELP/# TYPE macp_envelope_processed_total counter` (the `_total` name on the HELP/TYPE lines, as the existing exposition 0.0.4 text does).
+- **Alternatives:** Separate counters; fold only Prometheus; `# TYPE macp_envelope_processed counter` (OpenMetrics style).
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31, by the user; see DECISIONS.md)
+
+## otel-spans: `macp.sender.id` is recorded once the Send sender is derived (was: after the full Send authentication)
+- **Plan:** `plans/otel-spans.md` (P3 Rejected: never the envelope's self-asserted sender)
+- **Chose:** `send` records it after `authenticate_send_request` succeeds (which also covers the session-start and rate-limit checks); the stream path after `apply_authenticated_sender`. An Envelope refused by a rate limit or allowed-mode check therefore has no `macp.sender.id`, though the caller was authenticated.
+- **Alternatives:** Record right after bearer authentication, before the policy checks.
+- **Blast radius if wrong:** Low; one recommended attribute on some refusals.
+- **Status:** Changed (2026-10-31): `Send` now records the authenticated sender inside `authenticate_send_request`, right after `apply_authenticated_sender` and before the allowed-mode, rate-limit and ingress-policy checks (`src/server.rs:289-308`), matching the stream path (`src/server.rs:546`), which already recorded it there. The old split gave the same refusal a sender on one transport and not the other, and `docs/deployment.md:538` already promised "absent when refused before authentication". Pinned by `pre_kernel_refusal_after_authentication_records_the_sender` (`tests/otel_process.rs`).
+
+## otel-spans: duplicate SessionStart and stream `Inline` handling
+- **Plan:** `plans/otel-spans.md` (P3 Edge cases: "Duplicate SessionStart → `duplicate`"; "Stream `Inline` refusals carry no envelope")
+- **Chose:** (1) The session-bound attributes (`macp.mode.version`, `macp.configuration.version`, `macp.policy.id`) are also recorded on a duplicate SessionStart, from the existing session. (2) `process_stream_envelope` never returns `Inline` today (only frame-level refusals do, before an Envelope exists); the arm is mapped to `rejected`/`INVALID_ENVELOPE` so a future change cannot leave the span unfinished. `StreamFailure::Terminal` now carries the `MacpError` so the span records the registry code (`coded_status_ref` added).
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31). `coded_status_ref` at `src/server.rs:976`.
+
+## otel-spans: meter shutdown is bounded by a thread, not the SDK timeout
+- **Plan:** `plans/otel-spans.md` (P1/P3: 5-second bounded shutdown)
+- **Assumed:** `SdkMeterProvider::shutdown_with_timeout` ignores its timeout in opentelemetry_sdk 0.32.1 (`metrics/meter_provider.rs:113`).
+- **Chose:** `Guard::shutdown` runs the tracer and meter shutdowns concurrently, each on its own thread waited for at most 5 s (`shutdown_bounded`), so the documented 5 s worst case holds with both signals.
+- **Alternatives:** Sequential flushes (10 s worst case).
+- **Blast radius if wrong:** Low; exit time against a dead collector.
+- **Status:** CONFIRMED (2026-10-31). `shutdown_bounded` at `src/telemetry/init.rs:395`; SDK 0.32.1 `meter_provider.rs:113` still ignores `_timeout`.
+
+## otel-spans: the private Prometheus line validator accepts float sample values
+- **Plan:** `plans/otel-spans.md` (P3 AC 7: every semconv line passes `assert_valid_prometheus_line`)
+- **Assumed:** The validator required a `u64` value; a histogram `_sum` is a float.
+- **Chose:** It now accepts a `u64` or a finite `f64`; `# HELP`/`# TYPE` lines are checked separately in the AC 7 test.
+- **Blast radius if wrong:** None at runtime; test-only.
+- **Status:** CONFIRMED (2026-10-31). `src/metrics.rs:709`.
+
+## otel-spans: the anchor cache uses std::sync::RwLock, not tokio's
+- **Plan:** `plans/otel-spans.md` (P4 Files: anchor map behind a tokio `RwLock`)
+- **Chose:** `telemetry::anchor::AnchorCache` holds a `std::sync::RwLock<HashMap<String, Option<SpanContext>>>` (P5 added the `None` negative entries, see the P5 entry below), locked only for one map operation and never across an `.await` (the brief's rule). The map operations are synchronous; since P5 a cache miss is followed by one async `load_trace_anchor` outside the lock (`Runtime::resident_anchor`). The registry-wide prune holds the registry's read guard (async) while taking the std write lock briefly inside it, so a concurrent SessionStart cannot be pruned mid-insert.
+- **Alternatives:** tokio `RwLock` as planned (every lookup an await).
+- **Blast radius if wrong:** Low; internal.
+- **Status:** CONFIRMED (2026-10-31). `src/telemetry/anchor.rs:41`.
+
+## otel-spans: `observe_transition` is synchronous and the transition span is created after the state change
+- **Plan:** `plans/otel-spans.md` (P4 Approach: `async fn observe_transition`, span entered around the transition)
+- **Chose:** (Superseded in part by P5: `observe_transition` is now `async`, and its only await is the lazy anchor load; see "`observe_transition` became async" below.) A `fn observe_transition(op, &Session, now_ms, resolving_type)` called right after each state change (session mutex still held), which bumps the legacy counter, the semconv metrics, and creates/links/ends a zero-length transition span. The span does not cover the log append.
+- **Alternatives:** Enter the span around the append (span durations would include storage latency; needs restructuring each site).
+- **Blast radius if wrong:** Low; span durations only.
+- **Status:** CONFIRMED (2026-10-31) for the surviving part only (zero-length span created after the state change, not covering the append). The synchronous signature is superseded by the P5 entry below.
+
+## otel-spans: process-span anchor links are added in the server, just before `finish`
+- **Plan:** `plans/otel-spans.md` (P4: link in `process_message` / at finish)
+- **Chose:** `MacpServer::link_process_anchor` looks the anchor up (resident sessions only) and links it on every `process` span of `Send` and `StreamSession`, whatever the outcome, skipping the anchor span itself. A refusal before the kernel for a resident session therefore links too.
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31). `src/server.rs:75`.
+
+## otel-spans: `record_session_duration` takes milliseconds
+- **Plan:** `plans/otel-spans.md` (P4: `record_session_duration(mode, state, seconds: f64)`)
+- **Chose:** `millis: i64` (negative clamps to 0); the Prometheus `_sum` is kept as an exact integer millisecond sum and divided at render, the OTel histogram gets `millis / 1000.0`. AC 4's 62.5 s is exact either way.
+- **Blast radius if wrong:** None outside the crate's metrics API.
+- **Status:** CONFIRMED (2026-10-31). `src/metrics.rs:349`; OTel side `src/telemetry/instruments.rs:106`.
+
+## otel-spans: anchors of sessions removed by any other path are pruned on every eviction pass
+- **Plan:** `plans/otel-spans.md` (P4: forget on eviction and GC)
+- **Chose:** Besides `forget` on memory eviction and disk GC, `evict_stale_sessions` (every `MACP_CLEANUP_INTERVAL_SECS`) prunes anchors of sessions no longer in the registry (the registry map is public, so anything may remove from it), only when telemetry is on and the cache is non-empty. Between passes such an orphan is unreachable (lookups are residency-gated).
+- **Blast radius if wrong:** Low; one O(cache) pass per tick.
+- **Status:** CONFIRMED (2026-10-31). `src/runtime.rs:2294` (`evict_stale_sessions`).
+
+## otel-spans: a synthetic-accept resolve is wired but untestable with built-in modes
+- **Plan:** `plans/otel-spans.md` (P4: "the handoff synthetic implicit accept, where it causes a transition")
+- **Assumed:** No built-in mode resolves on a synthetic envelope (the handoff implicit accept leaves the session Open), and no public API registers a custom `Mode` impl.
+- **Chose:** `synthesize_due_accept` observes `Resolve` (timestamp = the synthetic's deadline, resolving type = its message type) only if the session newly entered Resolved; tested instead that the synthetic accept emits no transition span or metric on the lazy and sweep paths.
+- **Blast radius if wrong:** Low; the branch is covered by the AC 6 call-site count only.
+- **Status:** CONFIRMED (2026-10-31). `src/runtime.rs:1207`.
+
+## otel-spans: the commitment hash is gated on a standards-track `Commitment`
+- **Plan:** `plans/otel-spans.md` (P4 AC 4: no hash for Passthrough / `ext.*`)
+- **Chose:** `macp.commitment.hash` is recorded only when the resolving message type is `Commitment` **and** the mode is in `standard_mode_names()`, as `commitment_hash_of_wire(resolution).ok()`; a resolution that fails to decode records no hash and no error.
+- **Blast radius if wrong:** Low; one recommended attribute.
+- **Status:** CONFIRMED (2026-10-31)
+
+## otel-spans: session metric label sets are capped at 2,000
+- **Plan:** `plans/otel-spans.md` (P4 session metrics; mirrors P3's envelope backstop)
+- **Chose:** `MAX_SESSION_LABEL_SETS = 2_000` per family; beyond it new sets fold into `macp_mode_id="_OTHER"` with the same operation/state. Mode labels are already registry-bounded, so this is a backstop. Duration buckets `SESSION_DURATION_BOUNDARIES` = 1, 5, 15, 30, 60, 300, 900, 1800, 3600, 7200, 21600, 86400 s (the vendored semconv sets none).
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31). `src/metrics.rs:84`, `:93`.
+
+## otel-spans: `Runtime::trace_anchor_count` is a `#[doc(hidden)]` public accessor
+- **Plan:** `plans/otel-spans.md` (P4 tests: assert the anchor map does not grow)
+- **Chose:** Integration tests need the cache length, so `trace_anchor_count()` (otel builds) is public but `#[doc(hidden)]`.
+- **Blast radius if wrong:** Low; cargo-semver-checks sees one added method.
+- **Status:** CONFIRMED (2026-10-31). `src/runtime.rs:550`. cargo-semver-checks ignores `#[doc(hidden)]` items, so it stays removable.
+
+## otel-spans: replay equivalence compares `seen_message_ids` as a set and the compaction checkpoint without its timestamps
+- **Plan:** `plans/otel-spans.md` (P4 AC 5: `log.jsonl` and `session.json` byte-identical)
+- **Assumed:** Two runs with telemetry **off** are already not byte-identical: `PersistedSession.seen_message_ids` is collected from a `HashSet` (per-instance random order), and the terminal-compaction checkpoint is stamped with `chrono::Utc::now()` in `macp-storage/src/storage/compaction.rs:23`, not the injected clock. Both pre-date P4 and are unrelated to telemetry.
+- **Chose:** `tests/otel_replay_equivalence.rs` requires every log line byte-identical except a checkpoint, whose embedded `PersistedSession` is compared with `seen_message_ids` sorted and whose other fields must be identical (timestamps excepted only in the compaction-on variant); `session.json` likewise, compared as its raw `serde_json::Value` (key sets asserted equal, only `seen_message_ids` sorted, no struct round-trip); replayed `PersistedSession`s compared with that field sorted. Run with compaction off (strict) and on (default).
+- **Alternatives:** Make `seen_message_ids` serialization sorted and compaction use the runtime clock (a behaviour change to persisted bytes; out of P4's scope).
+- **Blast radius if wrong:** Low for telemetry; the two nondeterminisms are worth a follow-up.
+- **Status:** CONFIRMED (2026-10-31). `compaction.rs:23` still stamps `Utc::now()`. Both nondeterminisms change no replayed state, so no follow-up.
+
+## otel-spans: the 0.11 rollback test is a same-crate read-surface test, not a renamed `macp-storage =0.11.0` dev-dependency
+- **Plan:** `plans/otel-spans.md` (P5 acceptance: `tests/otel_anchor_rollback.rs` with `macp_storage_011 = { package = "macp-storage", version = "=0.11.0" }`)
+- **Assumed:** The renamed dev-dependency cannot land: the `deps-isolation` job's "Internal crate versions are in lockstep" step selects every dependency whose package name is a workspace member and requires `req == "^<workspace version>"`, so a `=0.11.0` requirement on `macp-storage` fails CI. The workspace is also still at 0.11.0, so the path crate and the registry crate would share name and version. The plan's own fallback (a CI worktree of tag `macp-storage-v0.11.0` running a fixture binary; the tag exists) needs a new CI step and a throwaway example binary, which is more than P5's storage scope.
+- **Chose:** Verified that `crates/macp-storage/src/storage/{file,rocksdb,redis_backend,mod,memory}.rs` at HEAD (before P5) are byte-identical to the published `macp-storage-0.11.0` sources in `~/.cargo/registry`. Tests `file_anchor_is_invisible_to_the_pre_anchor_read_surface` and `rocksdb_anchor_is_invisible_to_the_pre_anchor_read_surface` (macp-storage) assert that `list_session_ids`, `load_all_sessions`, `load_log` and `load_receipt` (whose code is unchanged from 0.11.0) return the same for a store with anchors as one without, and that the RocksDB DB still has exactly the three 0.11 column families. `rocksdb_sweep_removes_only_orphaned_anchors` simulates 0.11's `delete_session` (session, logs, `{id}` receipt key only).
+- **Not done:** The plan's CI-worktree fallback was **not** implemented. It needs a new `ci.yml` step, a `git worktree` of tag `macp-storage-v0.11.0`, and a throwaway example binary written into that old checkout. That is CI plumbing outside P5's storage and runtime scope, and the evidence it adds over the byte-identity check is marginal while the read methods stay unchanged.
+- **Alternatives:** The plan's CI-worktree fallback against tag `macp-storage-v0.11.0`, or exempting renamed dev-deps in the lockstep jq filter.
+- **Blast radius if wrong:** Low. A later edit to the unchanged read methods would stop them matching 0.11, and nothing would flag it.
+- **Status:** Deferred (2026-10-31). Trigger: the first change to `list_session_ids`/`load_all_sessions`/`load_log`/`load_receipt` in `crates/macp-storage/src/storage/{file,rocksdb}.rs` while 0.11.0 is still a supported rollback target; that change must re-prove 0.11 compatibility.
+
+## otel-spans: the Redis anchor expiry uses the maximum session TTL, not the session's own `ttl_ms`
+- **Plan:** `plans/otel-spans.md` (P5 rollback, Redis: `SET .. EX <disk_retention_secs + ttl_ms/1000 + 3600>`)
+- **Assumed:** The plan's trait signature `store_trace_anchor(&self, session_id, anchor)` carries no `ttl_ms`. Getting the session's own TTL would mean either a new trait parameter or a session read inside the spawned write, and that read can race the best-effort snapshot written after the commit point.
+- **Chose:** `RedisBackend::with_disk_retention_secs(secs)` (additive builder, wired in `main.rs`). The expiry is `retention + MAX_TTL_MS/1000 (86,400) + 3,600` seconds when retention > 0, and there is no expiry at 0. This is never shorter than the plan's formula, because `ttl_ms <= MAX_TTL_MS`.
+- **Alternatives:** Add `ttl_ms` to the trait method, or read the session key.
+- **Blast radius if wrong:** Low. An orphan can live up to about a day longer, at ~100 bytes.
+- **Status:** CONFIRMED (2026-10-31, by the user; see DECISIONS.md)
+
+## otel-spans: `observe_transition` became async and loads the anchor lazily
+- **Plan:** `plans/otel-spans.md` (P5: `trace_anchor(sid)` loads on a cache miss; P4 made `observe_transition` synchronous)
+- **Assumed:** After a restart, the `expire` root (and every other transition) must link to the stored anchor, and the plan only describes the lazy load inside `trace_anchor`. `observe_transition` read the in-memory cache synchronously.
+- **Chose:** `observe_transition` is now `async`. Before it builds the span, it calls the new private `Runtime::resident_anchor`, which serves the cache or else does one `load_trace_anchor` and caches the result. That read happens only when telemetry is active, at most once per resident session, and under the session mutex. It takes no registry lock, because a transitioning session is resident by construction. The 8 call sites add `.await`, and the inventory pin is unchanged.
+- **Alternatives:** Pre-warm the cache in `recover_sessions` (the plan says no eager loads), or keep the function synchronous and drop post-restart links on transition spans.
+- **Blast radius if wrong:** Low. It adds one small storage read per session per process on the first transition or envelope after a restart.
+- **Status:** CONFIRMED (2026-10-31). `src/runtime.rs:384`, 8 call sites, `resident_anchor` at `:496`.
+
+## otel-spans: anchor load errors and corrupt records are cached as negative entries; a SessionStart `put` wins over a racing load
+- **Plan:** `plans/otel-spans.md` (P5: cache the load result "including `None`"; a corrupt record decodes to `None`)
+- **Assumed:** The plan does not say what to do with a storage *error* on load, or with a load racing the SessionStart capture.
+- **Chose:** An `Err` from `load_trace_anchor` is logged at debug and cached as `None`, the same as a missing or corrupt record. That keeps the storage-read bound, at the cost that a transient error loses that session's links for its residency. `AnchorCache::put_loaded` uses `entry().or_insert`, so a load that started before the capture cannot overwrite the anchor. `AnchorCache` now maps to `Option<SpanContext>`, and `trace_anchor_count` counts negative entries too.
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31). `src/runtime.rs:496-540`, `src/telemetry/anchor.rs:75`. Drift: a load slower than `ANCHOR_LOAD_TIMEOUT` (2 s, `src/runtime.rs:23`) is treated as an `Err` and cached as `None` too.
+
+## otel-spans: anchor ids are refused unless storage-safe on RocksDB/Redis; `FileBackend` uses its narrower `check`
+- **Plan:** `plans/otel-spans.md` (P5 contract test: "path-like id refused")
+- **Chose:** RocksDB and Redis `store_trace_anchor`/`load_trace_anchor` refuse ids that fail `is_storage_safe_session_id`, since a NUL-bearing id could collide with `{id}\0anchor`. `FileBackend` uses `Self::check`, as the plan says. The startup orphan sweep runs only when `!MACP_MEMORY_ONLY && MACP_SESSION_DISK_RETENTION_SECS > 0`, in a spawned task, logging at info only when it removed something.
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31). `crates/macp-storage/src/storage/mod.rs:28`.
+
+## otel-spans: the orphan sweep vs. a concurrent SessionStart is resolved by write ordering
+- **Plan:** `plans/otel-spans.md` (P5: the startup sweep "runs once at startup, after recovery and off the serving path"; the anchor write is spawned "after the commit point")
+- **Assumed:** The plan did not consider that the sweep runs concurrently with serving. The anchor write was spawned before the best-effort `save_session` snapshot, so on RocksDB a sweep could see a fresh anchor key whose session was not yet in the sessions CF, and delete a live anchor. (P5 verifier finding.)
+- **Chose:** Ordering. `capture_anchor` still caches the anchor at the commit point under the session mutex, and now returns the encoded record. `persist_anchor` spawns the store only after `save_session` returns `Ok`. A stored anchor therefore always has a stored session, and the sweep's live sessions-CF check for any anchor key it sees finds that session. If the snapshot fails, no anchor record is written (it would only be an orphan); the in-memory anchor still links. Tested by `the_anchor_is_stored_only_after_the_session_snapshot`, which checks the write order through a recording backend. The RocksDB sweep also runs in `spawn_blocking` and writes its deletes in batches of 1,000 (`rocksdb_sweep_deletes_in_batches`).
+- **Alternatives:** A grace period on young anchors (needs a timestamp in the opaque record or the key), or awaiting the sweep before the server binds (adds O(receipts CF) to startup, which the plan rejected).
+- **Residual:** A SessionStart that *reuses the id* of a session GC'd by a pre-anchor binary, landing between the sweep's check and its batched delete, could lose its new anchor. The cost is span links only.
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31). `capture_anchor`/`persist_anchor` at `src/runtime.rs:449`/`:479`; test `tests/otel_anchor_restart.rs:595`.
+
+## otel-spans: the P6 measurement ran on an arm64 Mac, amd64 under emulation
+- **Plan:** `plans/otel-spans.md` (P6 measurement protocol step 1: "on linux/amd64. Also arm64 if buildx and QEMU are available")
+- **Assumed:** The host is an Apple M4 Pro (aarch64, Docker 28.4, containerd image store). There is no native linux/amd64 host.
+- **Chose:** arm64 is measured natively, which gives the primary numbers. The same protocol was also run on linux/amd64 under Docker Desktop's emulation. Its startup (~1.2 s on both images) is dominated by emulation, so its absolute startup figures mean nothing; its deltas, sizes and equivalence still apply. Both pass the rule.
+- **Blast radius if wrong:** Low. The CI runners (ubuntu amd64) never measured. Re-run `scripts/measure-otel-image.sh` on an amd64 host to confirm.
+- **Status:** Deferred (2026-10-31). Trigger: the first run of `scripts/measure-otel-image.sh` on a native linux/amd64 host.
+
+## otel-spans: how "image size" and "idle RSS" are read for the P6 decision rule
+- **Plan:** `plans/otel-spans.md` (P6 steps 2 and 4: `docker image inspect -f '{{.Size}}'`, idle RSS "from `docker stats --no-stream`")
+- **Assumed:** Under the containerd image store, `.Size` is the compressed content size, not the unpacked size. `docker stats` reports cgroup memory (~1.9 MiB), which is not the process RSS.
+- **Chose:** The script reports `.Size` as the plan says, and also prints the unpacked `docker image ls` size for reference (Δ 5 MB, which passes either way). For memory, it also reads PID 1's `VmRSS` (the entrypoint `exec`s the runtime). The RSS criterion uses the larger of the two deltas.
+- **Blast radius if wrong:** Low. Every reading is well inside the bounds.
+- **Status:** CONFIRMED (2026-10-31)
+
+## otel-spans: startup timing and the step-5 equivalence script
+- **Plan:** `plans/otel-spans.md` (P6 steps 3 and 5)
+- **Chose:**
+  - Startup runs from just before `docker run -d` to the first `grpc.health.v1.Health/Check` that returns SERVING. It is polled from the host with `grpcurl` (protos come from the locked `tonic-health`/`macp-proto` crates via `cargo metadata`) and a 10 ms sleep between polls. Each grpcurl call costs ~15 ms, which is the same for every image, so only the deltas are meaningful. One unrecorded warm-up run precedes each 20-run series.
+  - The blackhole is a host socket that accepts and never answers, reached at `host.docker.internal`.
+  - Step 5 runs SessionStart, Proposal and Commitment as the sole participant `coordinator`, with hand-encoded protobuf payloads, then `docker stop` (SIGTERM). It compares the grpcurl JSON with `acceptedAtUnixMs` dropped, and the log lines with the leading timestamp and ANSI codes stripped.
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31)
+
+## otel-spans: P6 binary test details
+- **Plan:** `plans/otel-spans.md` (P6 binary test cases 1-3)
+- **Chose:**
+  - The existing `tests/support/fake_collector.rs` gains the metrics service. The dev-dependency `opentelemetry-proto` gains the `metrics` feature, which adds no new crate, so neither lockfile changed. Existing tests that set the generic endpoint now get OK for metric exports instead of UNIMPLEMENTED.
+  - Case 1 ends the session with `CancelSession`, not a Commitment, so that `macp.session.duration` is recorded.
+  - Case 3 sets `OTEL_BSP_SCHEDULE_DELAY=60000` and asserts the collector is empty before SIGINT. With `MACP_SHUTDOWN_DRAIN_SECS=1`, it asserts that SIGINT-to-exit and SIGINT-to-spans-at-the-collector are both ≤ 5 s, so the drain is included in the bound.
+  - The file is `#![cfg(all(feature = "otel", unix))]`, because SIGINT is sent with `kill -INT`.
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31)
+
+## otel-spans: docs say "images published after 0.11.0" include otel
+- **Plan:** `plans/otel-spans.md` (P6 Docs: "whether the image includes otel")
+- **Assumed:** release-plz computes the next version, so the first otel image's version is not known yet.
+- **Chose:** `docs/deployment.md` says "after `0.11.0`" rather than naming a version. P7 or the release PR can name it.
+- **Blast radius if wrong:** Low.
+- **Status:** CONFIRMED (2026-10-31). The wording (`docs/deployment.md:338`, `:610`, `:654`) stays true whatever version release-plz cuts.
+
+## otel-spans: `Instruments` asserts `UnwindSafe`/`RefUnwindSafe` instead of a MIGRATING.md entry
+- **Plan:** `plans/otel-spans.md` (P7 semver check: "Expected result: no failures")
+- **Assumed:** The workspace `cargo semver-checks` against 0.11.0 (all non-unstable features, so `otel` on) reported `auto_trait_impl_removed`: `RuntimeMetrics` was no longer `UnwindSafe`/`RefUnwindSafe`, because its `otel`-only `OnceLock<Arc<Instruments>>` holds OpenTelemetry `Counter`/`Histogram` handles (`Arc<dyn SyncInstrument>`). The default build was unaffected.
+- **Chose:** `impl UnwindSafe`/`RefUnwindSafe for Instruments` (`src/telemetry/instruments.rs`): the handles are immutable after construction and the SDK synchronizes its own state. Pinned by `metrics::tests::runtime_metrics_stays_unwind_safe`, which fails to compile without the impls in an `otel` build. No MIGRATING.md entry, since nothing breaks.
+- **Alternatives:** Keep the break and document it in MIGRATING.md (forces a minor bump for an otel-only auto-trait loss).
+- **Blast radius if wrong:** Low. At worst a caller that catches a panic raised inside the SDK during a recording keeps using metric handles whose SDK-side aggregation state the SDK itself guards.
+- **Status:** CONFIRMED (2026-10-31). `src/telemetry/instruments.rs:40-41`; pin `src/metrics.rs:684`.

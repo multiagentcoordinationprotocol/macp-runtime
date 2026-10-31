@@ -1,0 +1,4 @@
+--- stdout
+OK       policies/majority.json (policy.golden.majority)
+1 policy file(s) checked in policies, 0 rejected
+--- stderr

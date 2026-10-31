@@ -49,6 +49,27 @@ CI checks with `cargo tree`. The receipt bytes `receipt::build` emits for given
 inputs and key are part of that promise: a served receipt is permanent, so its
 layout (the JCS form of the whole receipt) never changes within `macp-receipt/1`.
 
+### Telemetry and metric names
+
+Span, attribute and metric names are not part of the embeddable crates' API:
+the library crates emit no spans and no metrics (see
+[Embedding](embedding.md#telemetry)). `macp-runtime` emits them, and promises
+less than the crate API does:
+
+- **OpenTelemetry names** (the `process` and transition spans, `macp.*`
+  attributes, `macp.envelope.*` and `macp.session.*` metrics, and their
+  Prometheus renderings `macp_envelope_*` and `macp_session_*`) follow the
+  protocol's semantic conventions at `macp-semconv/0.1`, vendored in
+  `tests/otel/`. That version is **experimental** upstream, so a name can
+  change in any minor release that moves the pin. Such a change is listed in
+  the release's upgrade notes in [Deployment](deployment.md).
+- **The per-mode Prometheus families** (`macp_sessions_started_total`,
+  `macp_messages_accepted_total` and the other `macp_*_total{mode="..."}`
+  counters) are **deprecated** compatibility names. They stay byte-identical
+  until they are removed, which is no earlier than the next minor release
+  after the one that introduces their replacements (0.12.0 if that release is
+  0.11.x, 0.13.0 if it is 0.12.0).
+
 ## What counts as a breaking change
 
 A change is breaking when code or data that worked against the previous release

@@ -9,6 +9,7 @@ use macp_runtime::server::MacpServer;
 use macp_runtime::storage::{
     cleanup_temp_files, migrate_if_needed, FileBackend, MemoryBackend, StorageBackend,
 };
+use macp_runtime::telemetry::Telemetry;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -191,42 +192,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
+    // `otel` builds: telemetry is active only with an OTLP endpoint variable
+    // set (see `macp_runtime::telemetry`). Inactive, `init` installs exactly
+    // the feature-off subscriber below. A misconfiguration is logged and
+    // leaves telemetry off; it never aborts startup.
     #[cfg(feature = "otel")]
-    let tracer_provider = {
-        use opentelemetry::trace::TracerProvider as _;
-        use opentelemetry_otlp::WithExportConfig;
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
-
-        let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-            .unwrap_or_else(|_| "http://localhost:4317".into());
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .with_endpoint(&otlp_endpoint)
-            .build()
-            .expect("failed to build OTLP span exporter");
-        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-            .with_batch_exporter(exporter)
-            .build();
-        let tracer = provider.tracer("macp-runtime");
-        let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(tracing_subscriber::fmt::layer())
-            .with(otel_layer)
-            .init();
-        tracing::info!(
-            "OpenTelemetry tracing enabled (endpoint: {})",
-            otlp_endpoint
-        );
-        provider
+    let telemetry_guard = match macp_runtime::telemetry::init::init(env_filter) {
+        Ok(guard) => guard,
+        Err(e) => {
+            tracing::error!("{e}");
+            None
+        }
     };
 
     #[cfg(not(feature = "otel"))]
     {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
+    #[cfg(not(feature = "otel"))]
+    macp_runtime::telemetry::warn_if_configured_without_feature(&|k: &str| std::env::var(k).ok());
 
     // Validate environment configuration early
     let config_errors = validate_env_config();
@@ -260,6 +244,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         PathBuf::from(std::env::var("MACP_DATA_DIR").unwrap_or_else(|_| ".macp-data".into()));
     let strict_recovery = std::env::var("MACP_STRICT_RECOVERY").ok().as_deref() == Some("1");
 
+    // Opt-in durable-data retention: 0 (default) keeps history forever.
+    // Read before the backend is built: Redis expires trace-anchor keys
+    // only when sessions are garbage-collected.
+    let disk_retention_secs: u64 = std::env::var("MACP_SESSION_DISK_RETENTION_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
     let backend_name = std::env::var("MACP_STORAGE_BACKEND").unwrap_or_else(|_| "file".into());
     let storage: Arc<dyn StorageBackend> = if memory_only {
         Arc::new(MemoryBackend)
@@ -281,7 +273,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "redis" => {
                 let url = std::env::var("MACP_REDIS_URL")
                     .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-                Arc::new(macp_runtime::storage::RedisBackend::connect(&url, "macp").await?)
+                Arc::new(
+                    macp_runtime::storage::RedisBackend::connect(&url, "macp")
+                        .await?
+                        .with_disk_retention_secs(disk_retention_secs),
+                )
             }
             other => {
                 return Err(format!(
@@ -342,6 +338,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         recovery_replay_mismatches = report.replay_mismatches;
     }
 
+    // Trace anchors orphaned by a binary that predates them (its disk GC
+    // deleted sessions but not their anchors): swept once, after recovery
+    // and off the serving path. Only when sessions are ever GC'd, since
+    // nothing is orphaned otherwise. Backends that cannot orphan one do
+    // nothing.
+    if !memory_only && disk_retention_secs > 0 {
+        let sweep_storage = Arc::clone(&storage);
+        tokio::spawn(async move {
+            match sweep_storage.sweep_orphan_trace_anchors().await {
+                Ok(0) => {}
+                Ok(count) => tracing::info!(count, "removed orphaned trace anchors"),
+                Err(e) => tracing::warn!(error = %e, "trace-anchor orphan sweep failed"),
+            }
+        });
+    }
+
+    #[cfg(feature = "otel")]
+    let telemetry = telemetry_guard
+        .as_ref()
+        .map(macp_runtime::telemetry::init::Guard::telemetry)
+        .unwrap_or_else(Telemetry::disabled);
+    #[cfg(not(feature = "otel"))]
+    let telemetry = Telemetry::disabled();
+    // The gRPC SERVER span layer, only when telemetry is active; inactive it
+    // is the identity layer and the server behaves exactly as without `otel`.
+    #[cfg(feature = "otel")]
+    let grpc_server_layer = macp_runtime::telemetry::grpc::optional_server_layer(&telemetry);
     let runtime = Arc::new(
         Runtime::with_registries(
             Arc::clone(&storage),
@@ -350,7 +373,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mode_registry,
             policy_registry,
         )
-        .with_receipt_config(receipt_config),
+        .with_receipt_config(receipt_config)
+        .with_telemetry(telemetry),
     );
     if recovery_replay_mismatches > 0 {
         tracing::warn!(
@@ -416,6 +440,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(std::time::Duration::from_secs(request_timeout_secs))
         .tcp_keepalive(Some(std::time::Duration::from_secs(60)))
         .http2_keepalive_interval(Some(std::time::Duration::from_secs(30)));
+    // Outside `add_service`, like tonic's own layers: message-size, timeout
+    // and concurrency semantics are unchanged.
+    #[cfg(feature = "otel")]
+    let builder = builder.layer(grpc_server_layer);
     let mut builder = match (tls_cert, tls_key) {
         (Some(cert_path), Some(key_path)) => {
             let cert = tokio::fs::read(cert_path).await?;
@@ -491,11 +519,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3600);
-    // Opt-in durable-data retention: 0 (default) keeps history forever.
-    let disk_retention_secs: u64 = std::env::var("MACP_SESSION_DISK_RETENTION_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
     let cleanup_runtime = runtime.clone();
     let cleanup_handle = tokio::spawn(async move {
         let mut interval =
@@ -558,6 +581,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rt.metrics().replay_mismatches()
                     ));
                     rt.metrics().receipt_prometheus_lines(&mut body);
+                    // The semconv Envelope families (macp-semconv/0.1), after
+                    // every existing line, which stay byte-identical.
+                    rt.metrics().semconv_prometheus_lines(&mut body);
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
@@ -604,11 +630,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     tracing::info!("state persisted, goodbye");
 
-    // Flush and shut down the OTLP batch span processor before exiting so
-    // buffered spans (including shutdown-path spans) are exported.
+    // Flush and shut down the OTLP providers before exiting so buffered
+    // spans are exported; bounded, so a dead collector cannot hold the exit.
     #[cfg(feature = "otel")]
-    if let Err(e) = tracer_provider.shutdown() {
-        tracing::warn!(error = %e, "failed to shut down OpenTelemetry tracer provider");
+    if let Some(guard) = telemetry_guard {
+        guard.shutdown().await;
     }
 
     Ok(())

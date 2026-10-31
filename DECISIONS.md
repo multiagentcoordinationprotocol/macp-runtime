@@ -959,3 +959,33 @@ Analysis: fresh Opus, checked against RFC-MACP-0013 1.4.2-draft §13 (spec 50ae6
   - The authorization rule itself is identical to GetSession's.
   - Reopen if session ids ever become guessable.
 - **Same review, fixed:** the path traversal. A wire id now reaches storage only as one plain path component (`macp_storage::storage::is_storage_safe_session_id`), checked both in `Runtime::session_for_read` and in every keyed `FileBackend` operation. A stored snapshot whose id differs from the request (a file-system alias) is unknown, and the receipt is built from `session.session_id`. FileBackend's own check is narrower (empty, `.`, `..`, `/`, NUL), so legacy ids holding `\` still recover.
+
+## 2026-10-31 -- SPEC_REV re-pinned to 0f77753 for the OTel semconv (plans/otel-spans.md P0)
+- **Context:** the R1 entry above left `SPEC_REV` at 6bb4426, because the policy forbids re-pinning without a failure.
+- **Decision: re-pin, decided by Opus.** R2 needs `schemas/otel/macp-semconv.json`, which first appears in 0f77753, the direct child of 6bb4426. A missing input is a failure in the policy's sense. 0f77753 changes nothing else this repo vendors: the diff over `schemas/conformance`, `schemas/parity` and `schemas/json/policy` is empty.
+- **Not spec main (99f3cfa+):** it would also bring the parity-contract change (`RECEIPT_UNAVAILABLE` permanent) and the HTTP fixtures, which belong to R4.
+- `spec-drift.yml` now watches `schemas/otel` as well.
+
+## 2026-10-31 -- OTel spans (plans/otel-spans.md), /reconcile reversible tier, 41 entries
+Decided by Opus (reconcile, reversible tier), checked against HEAD 5e574c8 plus the change below. Three `otel-spans:` entries are left UNCONFIRMED for the separate one-way-door analysis: the OTLP certificate as sole trust anchor, the shared recorder (it fixes the Prometheus semconv family names), and the Redis anchor expiry (it hangs on the published `store_trace_anchor` signature and the `:anchor:` key).
+- **`macp.sender.id` is recorded only after the full Send authentication: CHANGED.** `Send` recorded it after the mode, rate-limit and ingress checks while `StreamSession` recorded it before them, so one refusal carried the sender on one transport only. `Send` now records it right after sender derivation (`src/server.rs` `authenticate_send_request`), pinned by `pre_kernel_refusal_after_authentication_records_the_sender`.
+- **RPC attributes use the pre-1.37 OpenTelemetry names: DEFERRED.** The spec pins no semconv version for the transport span, and both name sets are still experimental upstream. Trigger: the spec pins one.
+- **The 0.11 rollback test is a same-crate read-surface test: DEFERRED.** The byte-identity evidence holds only while the four read methods are unchanged. Trigger: the first edit to them while 0.11.0 is a supported rollback target.
+- **The P6 measurement ran on an arm64 Mac: DEFERRED.** Every reading is far inside the bounds, but amd64 was only emulated. Trigger: a run of `scripts/measure-otel-image.sh` on native linux/amd64.
+- **Exporter configuration: CONFIRMED.** Resolving the endpoint and passing `with_endpoint`; no `telemetry=off` directive (the exact-match `filter_fn` is the stronger exclusion); `init` installing the fmt subscriber itself; `with_target(false)` with max-level hints; the misconfiguration error on stdout like every other log line; `OTEL_RESOURCE_ATTRIBUTES` overriding `service.version`; the in-process P1 TLS test. Each matches the code and keeps precedence with the exporter's own.
+- **SERVER span: CONFIRMED.** Status recorded in `on_response`/`on_eos`, not `on_failure`; ERROR through `otel.status_description` alone; `_OTHER` for an unknown RPC method; the re-boxed body for `option_layer`; the timed-out-request limitation (tonic 0.14.6 citations re-checked, the fix needs a drop-guard future the plan rejected); the once-per-process global propagator in tests. Each is the narrowest correct option against tower-http 0.6.8 and tracing-opentelemetry 0.33.
+- **Labels and metrics: CONFIRMED.** Signal/Progress `_OTHER` under an `_OTHER` mode; the task-free label cache (drained now by the `try_lock` winner); duplicate SessionStart and stream `Inline` handling; the thread-bounded meter shutdown (SDK 0.32.1 still ignores the timeout); the float-accepting test validator; `record_session_duration` in milliseconds; the 2,000 session label-set cap; `Instruments` asserting `UnwindSafe`/`RefUnwindSafe`. All bounded, internal or test-only.
+- **Anchors and transitions: CONFIRMED.** The std `RwLock` cache; transition spans after the state change (the synchronous signature superseded by the async one); server-side process-span links; pruning orphans on every eviction pass; the wired-but-untestable synthetic-accept resolve; the standards-track-only commitment hash; `#[doc(hidden)]` `trace_anchor_count` (semver-checks ignores it); async `observe_transition` with lazy load; negative caching of load errors, now including the 2 s load timeout; storage-safe anchor ids; write-ordered orphan sweep. Each costs span links at worst.
+- **Tests and measurement method: CONFIRMED.** Replay equivalence comparing `seen_message_ids` as a set (both nondeterminisms change no replayed state, so no follow-up); how image size and RSS are read; startup timing and the step-5 script; the P6 binary test details; the "images published after 0.11.0" docs wording, which stays true whatever version is cut.
+
+## 2026-10-31 -- OTel spans (plans/otel-spans.md), one-way doors and trust boundary, decided by the user
+Fable analyzed each before the merge, and the user confirmed all of its recommendations:
+- **Published image builds with otel: CONFIRMED.** It is inert without an operator-set OTLP endpoint; zero egress is pinned by `tests/otel_binary.rs`. When active it exports `macp.sender.id` (Recommended in the semconv) and session ids, never payloads or reason text. It costs +1.1 MiB of image. Reversible by removing two build-args lines.
+- **Trace-anchor storage layout: CONFIRMED.**
+  - RocksDB `{id}\x00anchor` in the `receipts` CF. A new CF would break rollback to 0.11.
+  - `sessions/<id>/anchor.json` and Redis `{prefix}:anchor:{id}` with EX derived from `MAX_TTL_MS`.
+  - Record `v:1`.
+  - Three defaulted `StorageBackend` methods.
+  - Trigger to revisit with a generic sidecar API: a second per-session side record.
+- **Prometheus semconv family names and the one-minor deprecation of `macp_*_total{mode}`: CONFIRMED.** These are the names the OTel Prometheus exporter produces, and the deprecation window is the spec's.
+- **`OTEL_EXPORTER_OTLP_CERTIFICATE` as the sole trust anchor: CONFIRMED.** This matches the OTel SDK semantics in Go, Java and Python.

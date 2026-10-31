@@ -67,4 +67,10 @@ mod tests {
         assert!(backend.list_session_ids().await.unwrap().is_empty());
         backend.delete_session("s1").await.unwrap();
     }
+
+    /// The trait default: anchors are kept by the caller in memory only.
+    #[tokio::test]
+    async fn memory_backend_keeps_no_trace_anchor() {
+        crate::storage::anchor_contract::store_load_delete(&MemoryBackend, "a1", false).await;
+    }
 }

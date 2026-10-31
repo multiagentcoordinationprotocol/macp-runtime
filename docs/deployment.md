@@ -14,6 +14,18 @@ Before exposing the runtime to production traffic, ensure these four items are c
 
 4. **Bind address** -- Set `MACP_BIND_ADDR` to the desired listen address. The default `127.0.0.1:50051` only accepts local connections.
 
+## Upgrading to the release after 0.11.0 (OpenTelemetry)
+
+This release adds OpenTelemetry traces and metrics (`macp-semconv/0.1`, experimental). Nothing about sessions, messages, replay or recovery behaves differently, with or without telemetry. Items 3, 4, 5 and 7 affect only a binary built with `--features otel`; published images up to and including `0.11.0` are plain builds, and images published after it include `otel` (see [Container deployment](#container-deployment)) and export nothing until an endpoint is set.
+
+1. **New `/metrics` families, in every build.** With `MACP_METRICS_ADDR` set, `/metrics` also renders `macp_envelope_processed_total`, `macp_envelope_process_duration_seconds_{bucket,sum,count}`, `macp_session_transitions_total` and `macp_session_duration_seconds_{bucket,sum,count}`, after every existing line. Each appears only after its first observation. Labels are bounded (2,000 label sets, then `_OTHER`) and never carry a session, message or sender id. See [Monitoring](#monitoring).
+2. **The per-mode `macp_*_total{mode="..."}` families are deprecated.** `macp_sessions_started_total`, `macp_messages_accepted_total` and the rest are unchanged, byte for byte, until they are removed no earlier than the next minor release after the one that introduces their replacements (0.12.0 if that release is 0.11.x, 0.13.0 if it is 0.12.0). Move dashboards and alerts to the families in item 1.
+3. **An `otel` build no longer exports by default.** It used to export traces to `http://localhost:4317` whenever `OTEL_EXPORTER_OTLP_ENDPOINT` was unset; it now exports nothing until an endpoint variable is set. Set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` to keep the old behaviour. Also: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` now wins over the generic variable and turns telemetry on by itself; `service.name` is `macp-runtime` (was `unknown_service`) unless `OTEL_SERVICE_NAME` or `OTEL_RESOURCE_ATTRIBUTES` names one; and `RUST_LOG` no longer filters telemetry. See [OpenTelemetry](#opentelemetry).
+4. **New storage records** (`otel` build with telemetry on only). Each session's trace anchor is written to `sessions/<id>/anchor.json` (`file`), key `<id>\0anchor` in the existing `receipts` column family (`rocksdb`, no new column family), or `<prefix>:anchor:<id>` (`redis`). Nothing is written with telemetry off or with `MACP_MEMORY_ONLY=1`. See "Trace anchor" under [the durability matrix](#durability-matrix).
+5. **Rollback is safe.** A 0.11.0 binary ignores all three records and reads the same sessions and logs. Its disk GC (`MACP_SESSION_DISK_RETENTION_SECS > 0`) deletes a `file` anchor with the session directory, but leaves the `redis` and `rocksdb` keys behind: a `redis` anchor key expires by itself (its expiry is set whenever retention is above 0); a `rocksdb` orphan stays until a newer binary with retention above 0 starts, which sweeps orphans once after recovery, off the serving path. With retention 0 nothing is ever GC'd, so nothing is orphaned.
+6. **Two counters now differ by design.** `macp_messages_accepted_total` counts the runtime's handoff synthetic implicit accepts (RFC-MACP-0010 §5.1(2)); `macp_envelope_processed_total{macp_envelope_outcome="accepted"}` does not, because no Envelope is received. Do not alert on the two being unequal.
+7. **A telemetry misconfiguration never stops the runtime.** An unsupported `OTEL_EXPORTER_OTLP_PROTOCOL` (anything but `grpc`, including the `_TRACES_`/`_METRICS_` variants), an unreadable `OTEL_EXPORTER_OTLP_CERTIFICATE` (or a per-signal variant), or an invalid endpoint logs one `ERROR` line naming the variable and leaves telemetry off; the runtime serves normally.
+
 ## Upgrading to 0.11.0
 
 0.11.0 adds decision receipts (RFC-MACP-0013 §13). Nothing changes for a deployment that sets none of the receipt variables: it serves unsigned receipts with issuer `runtime:macp-runtime`, and no message, replay or recovery path behaves differently.
@@ -321,6 +333,34 @@ Two consequences worth knowing:
 - **Point it at a clean `git archive` export of the spec commit CI reads, never at a sibling working tree.** CI checks the spec repo out at `SPEC_REV` (`.github/workflows/ci.yml`), so a sibling checkout that is dirty, or ahead of or behind that pin, produces parity failures that do not exist in CI -- and it can move under you mid-session. Export first: `git -C <spec-repo> archive <sha> schemas/ | tar -x -C <tmpdir>`, then point the variable at `<tmpdir>/schemas/json/policy`.
 - **A set-but-missing directory panics by design.** Setting the variable asserts the canonical schemas are available, so the test refuses to skip silently. Unset it to fall back to a sibling checkout, or to skip the parity check entirely when no checkout exists.
 
+### OpenTelemetry
+
+These variables take effect **only in a binary built with the `otel` Cargo feature** (`cargo build --features otel`). Images published after `0.11.0` include it (see [Container deployment](#container-deployment)); a default `cargo build` and images up to `0.11.0` do not. A binary without the feature logs one warning at startup when an endpoint variable below is set, and otherwise ignores every `OTEL_*` variable.
+
+Telemetry is **off unless an endpoint is configured**. It turns on when at least one of `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` is set to a non-empty value and `OTEL_SDK_DISABLED` is not `true`. With telemetry off the runtime installs no exporter and no propagator, opens no connection, and logs exactly what a default build logs. A telemetry misconfiguration never stops the runtime: it logs one `ERROR` line naming the variable and runs with telemetry off.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | -- (off) | OTLP/gRPC collector for traces and metrics, `http://host:4317` or `https://host:4317`. There is no built-in default endpoint |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | -- | Traces only; overrides the generic endpoint for traces. Setting only this exports traces and no metrics |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | -- | Metrics only; overrides the generic endpoint for metrics |
+| `OTEL_EXPORTER_OTLP_HEADERS` | -- | Extra gRPC metadata for the collector, `key1=value1,key2=value2` (`_TRACES_`/`_METRICS_` variants too) |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Only `grpc` is supported, here and in `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` / `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL`. Any other value logs an error and leaves telemetry off |
+| `OTEL_EXPORTER_OTLP_CERTIFICATE` | -- | PEM file of the CA to trust for an `https://` endpoint. When set it is the **only** trust anchor (the platform's native roots are not consulted, so it works on a host without a root store); `OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE` / `OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE` override it per signal. Read by the runtime itself, because the OTLP exporter does not honour it. An unreadable file logs an error and leaves telemetry off |
+| `OTEL_SERVICE_NAME` | `macp-runtime` | `service.name` resource attribute; beats a `service.name` in `OTEL_RESOURCE_ATTRIBUTES` |
+| `OTEL_RESOURCE_ATTRIBUTES` | -- | Extra resource attributes, `key1=value1,key2=value2`. `service.version` defaults to the runtime version |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | Trace sampler, read by the OpenTelemetry SDK (`always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off`, `parentbased_traceidratio`) |
+| `OTEL_METRIC_EXPORT_INTERVAL` | `60000` | Metric export interval in milliseconds |
+| `OTEL_SDK_DISABLED` | `false` | `true` (any case) turns telemetry off even with an endpoint set |
+
+Notes:
+
+- **TLS.** An `https://` endpoint is verified against `OTEL_EXPORTER_OTLP_CERTIFICATE` alone when it is set, and otherwise against the platform's native root store (the published image installs `ca-certificates`; a host with no root store needs the certificate variable). Client certificates (`OTEL_EXPORTER_OTLP_CLIENT_KEY`, `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE`) are **not supported**.
+- **Propagation.** With telemetry on, the only propagator installed is W3C trace context (`traceparent`/`tracestate`, carried in gRPC metadata per RFC-MACP-0006 §2.1). No baggage propagator is installed, and trace context never enters an Envelope or accepted history.
+- **What is exported today.** This release installs the pipeline (resource, propagator, exporter, sampler), the gRPC SERVER span of every RPC, the Envelope `process` spans, the session transition spans with their anchor links, and the `macp.envelope.*` and `macp.session.*` metric instruments of `macp-semconv/0.1` (see Monitoring).
+- **Logs are unchanged.** `RUST_LOG` governs logging only: it can neither silence telemetry spans nor add them to log lines, and no log event (including any `reason` text) is exported as telemetry.
+- **An unreachable collector is not fatal.** Exports fail in the background, the OpenTelemetry SDK's own warnings reach the log subject to `RUST_LOG`, and shutdown waits at most 5 seconds for the final flush. That 5-second cap comes **after** the `MACP_SHUTDOWN_DRAIN_SECS` drain (and the final session snapshot), so the worst-case exit time with telemetry on is the drain deadline plus 5 seconds.
+
 ### Governance policy files
 
 Validate a policies directory before you roll it out: `MACP_POLICIES_DRY_RUN=1 MACP_POLICIES_DIR=/etc/macp/policies macp-runtime` reports every file by name and exits `0`/`1` without starting the server. See [Policy](policy.md#validating-a-policies-directory-before-startup).
@@ -347,6 +387,30 @@ What that acknowledgement guarantees differs by backend:
 | `file` | yes | yes | log appends `fsync` before ack; snapshots are tmp-fsync-rename atomic |
 | `rocksdb` | yes | yes | log appends sync the WAL before ack; session snapshots are async (recovered via replay) |
 | `redis` | yes (Redis process survives) | **no** | RPUSH acks in Redis memory; no WAIT/AOF barrier. Cache-tier / single-writer only — the runtime logs a warning at startup |
+
+**Trace anchor** (`otel` feature with telemetry active only): each session's
+anchor (the SessionStart span context, `{"v":1,"traceparent":"00-…"}`) is a
+best-effort side record outside session state, the log and checkpoints. It is
+written once per session off the SessionStart path, never awaited by the ack,
+and loaded lazily after a restart so later spans keep linking to the
+pre-restart SessionStart. A crash right after a SessionStart can lose it; the
+session itself is unaffected and its later spans simply have no link. A
+missing or unreadable anchor means no link, never an error.
+
+| Backend | Where | Survives restart | Removed by disk GC |
+|---|---|---|---|
+| `file` | `sessions/<id>/anchor.json` | yes | yes (the session directory) |
+| `rocksdb` | `receipts` column family, key `<id>\0anchor` (no new column family) | yes | yes |
+| `redis` | `<prefix>:anchor:<id>`; with `MACP_SESSION_DISK_RETENTION_SECS > 0` it expires after retention + 24 h + 1 h | yes | yes |
+| memory (`MACP_MEMORY_ONLY=1`) | the runtime's memory only | no | n/a |
+
+Rolling back to a binary that predates anchors keeps all three backends
+working: the old binary ignores `anchor.json` and the extra RocksDB/Redis key.
+Its disk GC does not delete the RocksDB/Redis anchor key, though. Redis
+expires such a key by itself (its expiry is set whenever retention > 0), and
+on RocksDB the next start of a newer binary with
+`MACP_SESSION_DISK_RETENTION_SECS > 0` sweeps those orphans once, after
+recovery, off the serving path.
 
 All backends skip individually corrupt log entries on load (with a warning)
 rather than failing the whole session; `MACP_STRICT_RECOVERY=1` makes
@@ -469,6 +533,22 @@ The runtime provides operational visibility through several mechanisms:
 
 **Log compaction** -- When a session reaches a terminal state, the runtime compacts its log into a single checkpoint entry by default. This shrinks storage for completed sessions, but it discards the history that `WhatIfReplay` and `StreamSession` replay from the start need. `MACP_COMPACT_TERMINAL_LOGS` is the runtime's history-retention control (RFC-MACP-0012 §8.1 item 8). Set it to `0` to keep the full log; the runtime then appends a checkpoint instead. The self-host stack in `deploy/` sets it. Only sessions that end after the change keep their history; a log already compacted cannot be restored, and `WhatIfReplay` refuses it with `HISTORY_UNAVAILABLE`. A kept log is never trimmed by the runtime; `MACP_SESSION_DISK_RETENTION_SECS` still deletes a terminal session's durable data at its age limit.
 
+**Tracing** (`otel` builds with telemetry on; see "OpenTelemetry" under Environment variables) -- Every `macp.v1.MACPRuntimeService` RPC gets one OpenTelemetry span of kind SERVER, named `macp.v1.MACPRuntimeService/{Method}` (a method the service does not define is named `_OTHER`), with the gRPC attributes `rpc.system=grpc`, `rpc.service`, `rpc.method` and `rpc.grpc.status_code`. Its parent is the caller's W3C `traceparent`/`tracestate`, read from **gRPC metadata only** (RFC-MACP-0006 §2.1), never from an Envelope; without a valid `traceparent` the span starts a new trace. The span status is ERROR only for `UNKNOWN`, `DEADLINE_EXCEEDED`, `UNIMPLEMENTED`, `INTERNAL`, `UNAVAILABLE` and `DATA_LOSS`, with the code name as its description (never the error message); `NOT_FOUND`, `INVALID_ARGUMENT`, `PERMISSION_DENIED` and the other codes are protocol outcomes and leave it unset. A streaming RPC's span lasts until its stream ends, so a long-lived `Watch*` stream is exported when the client disconnects (and is lost on a hard shutdown). Health checks and reflection get no span, and no peer address is recorded. A request that hits `MACP_REQUEST_TIMEOUT_SECS` before its response headers go out ends its span without `rpc.grpc.status_code` (tonic answers `CANCELLED`, outside the error set, and applies that timeout outside the tracing layer).
+
+**Envelope processing spans** (`otel` builds with telemetry on) -- Every received Envelope gets one INTERNAL span covering receipt to the accept/reject decision, named `process {macp.mode.id}` (`process _OTHER` for a mode the runtime has not registered, bare `process` for an ambient Signal or Progress). On `Send` its parent is the RPC's SERVER span; on `StreamSession` every Envelope on a stream is a child of the stream-open SERVER span. The attributes are those of `span.macp.process` in the protocol's [OpenTelemetry semantic conventions](https://github.com/multiagentcoordinationprotocol/multiagentcoordinationprotocol/blob/main/docs/opentelemetry.md) (`macp-semconv/0.1`); `macp.mode.id` keeps the mode as received, and `macp.sender.id` is the **authenticated** sender, absent when the Envelope is refused before authentication. Privacy defaults: spans carry identifiers and types only -- never a payload, an extension value, a `reason`, or an error message. Every client-supplied string is cut to 256 bytes. A rejection records its registry code as `error.type` and outcome `rejected`, and leaves the span status unset; only an implementation failure (a storage failure, recorded as `INTERNAL_ERROR`) or a span that never reached a decision (a panic, or a client that disconnected mid-request) is ERROR, with `INTERNAL_ERROR` as the description. An Envelope-less `SendRequest`, a stream subscribe frame, and the handoff synthetic implicit accept (no Envelope is received) get no `process` span.
+
+**Envelope metrics** -- In **every** build, `/metrics` also renders the semconv Envelope families, after all the lines above: `macp_envelope_processed_total{macp_mode_id,macp_message_type,macp_envelope_outcome}` (a counter; `macp_envelope_outcome` is `accepted`, `duplicate` or `rejected`) and the histogram `macp_envelope_process_duration_seconds_{bucket,sum,count}` with the same labels and the bucket bounds 0.5 ms to 10 s. `macp_mode_id` is omitted for an ambient Signal or Progress. Neither family appears before the first Envelope. An `otel` build with metrics export on also exports them over OTLP as `macp.envelope.processed` and `macp.envelope.process.duration`, every `OTEL_METRIC_EXPORT_INTERVAL` (default 60 s). Labels cannot be grown by a client: a mode the runtime has not registered is recorded as `_OTHER` with message type `_OTHER`, a message type the mode's descriptor does not list is `_OTHER` (`Signal` and `Progress` are kept under every registered mode), and beyond 2,000 label sets new ones fold into `macp_mode_id="_OTHER",macp_message_type="_OTHER"`. No session, message or sender identifier is ever a label. Every received Envelope is counted, including those refused before the kernel (shape, authentication, rate limit) and those on `StreamSession`. `macp_messages_accepted_total` also counts the runtime's handoff synthetic implicit accepts, which `macp_envelope_processed_total` does not (no Envelope is received), so the two differ by that number; this is expected.
+
+**Session transition spans** (`otel` builds with telemetry on) -- Every session lifecycle transition gets one INTERNAL span, named `{op} {macp.mode.id}` (`{op} _OTHER` once the session's mode is no longer registered), where `{op}` is `resolve`, `expire`, `cancel`, `suspend` or `resume` -- the `span.macp.{op}` groups of `macp-semconv/0.1`. Each carries `macp.operation.name`, `macp.session.id`, `macp.mode.id` and `macp.session.state`, the `SESSION_STATE_*` value the session **entered** (`resume` enters `SESSION_STATE_OPEN`). `resolve` also carries `macp.mode.version`, `macp.configuration.version` and `macp.policy.id`, plus `macp.commitment.hash` (the RFC-MACP-0013 `sha256:<hex>` hash of the payload) when a `Commitment` resolved a standards-track session; an extension or passthrough mode's resolve carries no hash, whatever its payload. `resolve` is a child of the resolving Envelope's `process` span; `cancel`, `suspend` and `resume` are children of their RPC's SERVER span. A resume that force-expires the session (past its suspension cap, or past the suspend/resume cycle cap) is an `expire`, not a `resume`. The handoff synthetic implicit accept leaves the session open, so it emits no transition span.
+
+**Session anchor and links** -- The `process` span of a session's accepted `SessionStart` is its **anchor**. Every later span of the session -- each `process` span, whatever its outcome (accepted, duplicate or rejected), and each transition span -- carries exactly one span link to the anchor, so a backend can gather every trace that touched a session from one span. The anchor is cached in memory beside the session registry and also stored as a best-effort side record (see "Trace anchor" under the durability matrix): it is never written to the log, the session snapshot or a checkpoint, never replayed, and it changes nothing a client sees. It is recorded only for a session the runtime accepted, looked up only for a session resident in memory, and dropped from memory when the session leaves it (`MACP_SESSION_RETENTION_SECS` eviction, `MACP_SESSION_DISK_RETENTION_SECS` deletion, or any other removal, pruned on the next maintenance pass), so Envelopes naming arbitrary session ids cannot grow it. After a restart the first span of a resident session loads the stored anchor once (a miss is cached), so spans keep linking to the pre-restart SessionStart; a session whose anchor was never stored (started before telemetry was on, memory-only storage, or a crash right after its SessionStart) has no link.
+
+**`expire` is a root span** -- No request causes an expiry, even when a request is what observes it: a message sent after the deadline, a read such as `GetSession`, a cancel or suspend that finds the session past its TTL, the background sweep every `MACP_CLEANUP_INTERVAL_SECS`, or a force-expiring resume. So `expire` always starts its own trace (it has no parent) and is reachable only through its link to the anchor; it is not in the trace of the request that observed it.
+
+**Session metrics** -- In **every** build, `/metrics` also renders the semconv session families after the Envelope families: the counter `macp_session_transitions_total{macp_mode_id,macp_operation_name}` and the histogram `macp_session_duration_seconds_{bucket,sum,count}{macp_mode_id,macp_session_state}`, with bucket bounds 1 s to 24 h. The duration is recorded once per session, on its terminal transition (`RESOLVED`, `EXPIRED` or `CANCELLED`), as the time from `SessionStart` acceptance to the transition on the runtime's clock -- for an expiry, the moment the expiry was observed (the sweep or the late message), which is at or after `started_at + ttl_ms`; a suspension is not subtracted. An `otel` build with metrics export on also exports them over OTLP as `macp.session.transitions` (unit `{transition}`) and `macp.session.duration` (unit `s`). A mode no longer registered is labelled `_OTHER`, beyond 2,000 label sets new ones fold into `macp_mode_id="_OTHER"`, and no session identifier is ever a label. Neither family appears before the first transition. The legacy `macp_sessions_{resolved,expired,cancelled,suspended,resumed}_total{mode}` counters are bumped at the same points.
+
+> **Deprecation.** The per-mode `macp_*_total{mode="..."}` families (`macp_sessions_started_total`, `macp_messages_accepted_total` and the rest) are a compatibility rendering, kept byte-identical until they are removed no earlier than the next minor release after the one that introduces their replacements (0.12.0 if that release is 0.11.x, 0.13.0 if it is 0.12.0). Move dashboards and alerts to the `macp_envelope_*` families.
+
 **gRPC reflection** (dev/debug only) -- Build with the `reflection` Cargo feature (`cargo build --features reflection`) to enable the standard gRPC Server Reflection API, so tools like `grpcurl`/`grpcui` can call RPCs without a local `.proto`/`.protoset` file (e.g. `grpcurl -plaintext localhost:50051 list`). Off by default and never enabled in the published Docker image -- it exposes the full service/message schema to any client that can reach the port, so treat it the same as `MACP_ALLOW_INSECURE`: fine for a local instance or an ephemeral CI container, not for a production deployment. The runtime logs a warning at startup when it's active. Without this feature, point `grpcurl -proto`/`-protoset` at the published proto instead (`@multiagentcoordinationprotocol/proto` on npm, `macp-proto` on crates.io).
 
 ## Container deployment
@@ -525,6 +605,41 @@ Kubernetes `runAsUser`), the entrypoint changes nothing and that user needs
 write access to the directory. A cluster that enforces `runAsNonRoot` must set
 `runAsUser` for that reason.
 
+#### OpenTelemetry in the image
+
+Images published after `0.11.0` are built with `--features otel`
+(`docker.yml` passes `--build-arg CARGO_FEATURES=otel`; so does the CI
+`docker-build` gate). The feature is inert until you configure it:
+
+- **Zero egress without `OTEL_*`.** With none of `OTEL_EXPORTER_OTLP_ENDPOINT`,
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
+  set (or with `OTEL_SDK_DISABLED=true`), the runtime installs no exporter and
+  no propagator and opens **no connection** of any kind for telemetry. There is
+  no built-in default endpoint: nothing dials `localhost:4317`. Its log output
+  and gRPC responses are identical to the plain build's.
+  `tests/otel_binary.rs` pins this against the real binary with a listener on
+  `127.0.0.1:4317`, and `scripts/measure-otel-image.sh` compares the two
+  images' responses and log lines.
+- **Turning it on** takes one variable, for example
+  `-e OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317`. See
+  [OpenTelemetry](#opentelemetry) for the rest.
+- **Cost.** Measured with `scripts/measure-otel-image.sh` on one host (Apple
+  M4 Pro, Docker 28.4; `linux/arm64` native and `linux/amd64` emulated): the
+  binary grows by about 3.5 MiB and the image by about 1 MiB compressed (5 MB
+  unpacked). With no `OTEL_*` variable set, median startup-to-SERVING moved by
+  under 3 ms and idle memory by under 1 MiB, both within run-to-run noise.
+
+To build an image **without** the feature, build the repository's
+`Dockerfile` with the default (empty) build argument; to add it to a self-built
+image, pass it explicitly:
+
+```bash
+docker build -t macp-runtime:plain .                                  # no otel
+docker build --build-arg CARGO_FEATURES=otel -t macp-runtime:otel .  # otel
+```
+
+`CARGO_FEATURES` is passed verbatim to `cargo build --release --features`.
+
 When deploying in containers:
 
 - Mount a persistent volume at `MACP_DATA_DIR` so session logs survive container restarts.
@@ -535,7 +650,11 @@ When deploying in containers:
 ### Published image tags
 
 Every image is multi-arch (`linux/amd64`, `linux/arm64`) with SLSA provenance
-and an SBOM attached, built by `.github/workflows/docker.yml`. Every push to
+and an SBOM attached, built by `.github/workflows/docker.yml`. Every image
+published after `0.11.0`, release or branch build, is built with
+`--features otel` (inert until an `OTEL_EXPORTER_OTLP_*` endpoint is set; see
+[OpenTelemetry in the image](#opentelemetry-in-the-image)); `0.11.0` and
+earlier are plain builds. Every push to
 `main` (a "branch build") publishes three of these together, always pointing
 at the same digest; a release publishes the other two, also always sharing a
 digest with each other but never with a branch build's:
