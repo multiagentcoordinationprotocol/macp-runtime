@@ -142,6 +142,22 @@ impl ProcessSpan {
         }
     }
 
+    /// Link the span to its session's anchor, unless it *is* the anchor
+    /// (the accepted SessionStart's own span). One link at most: the caller
+    /// links once, just before [`Self::finish`].
+    #[cfg(feature = "otel")]
+    pub fn link_anchor(&self, anchor: opentelemetry::trace::SpanContext) {
+        use opentelemetry::trace::TraceContextExt;
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+        if self.span.is_none() {
+            return;
+        }
+        let own = self.span.context().span().span_context().span_id();
+        if own != anchor.span_id() {
+            self.span.add_link(anchor);
+        }
+    }
+
     /// Record the decision on the span and in the metrics.
     pub fn finish(mut self, metrics: &RuntimeMetrics, outcome: Outcome<'_>) {
         self.finished = true;

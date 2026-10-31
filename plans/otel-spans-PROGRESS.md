@@ -152,4 +152,10 @@ Risk tiers: P0 simple; P1-P6 complex; P7 simple. Each phase is implemented by a 
   - Files: src/telemetry/{process,labels,instruments,mod,init}.rs, src/{metrics,runtime,server,main}.rs, tests/{otel_process,otel_bootstrap,otel_grpc}.rs, docs/deployment.md, ASSUMPTIONS.md.
   - Tests: workspace 1115, otel 383.
   - Next: P4.
+- 2026-10-31 P4 DONE. PASS in round 1 (Opus verifier, complex phase gated alone).
+  - Before commit, applied the verifier's minor notes: test that cancel/suspend/resume are children of their SERVER spans; the replay test compares raw JSON values and key sets; the new surface is pub(crate) (only SESSION_DURATION_BOUNDARIES and Runtime::trace_anchor_count stay #[doc(hidden)] pub).
+  - Transition call sites: runtime.rs maybe_expire_session, resolve, synthetic resolve, cancel, suspend, resume, resume force-expire, sweep, all pinned by an inventory test.
+  - Files: src/telemetry/{anchor,transition,instruments,mod,process}.rs, src/{metrics,runtime,server}.rs, tests/{otel_transitions,otel_replay_equivalence,otel_process}.rs, docs/{deployment,embedding}.md, ASSUMPTIONS.md.
+  - Tests: workspace 1122, otel 408.
+  - Next: P5.
 

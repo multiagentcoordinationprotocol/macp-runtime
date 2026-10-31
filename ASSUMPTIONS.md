@@ -1370,3 +1370,68 @@
 - **Chose:** It now accepts a `u64` or a finite `f64`; `# HELP`/`# TYPE` lines are checked separately in the AC 7 test.
 - **Blast radius if wrong:** None at runtime; test-only.
 - **Status:** UNCONFIRMED
+
+## otel-spans: the anchor cache uses std::sync::RwLock, not tokio's
+- **Plan:** `plans/otel-spans.md` (P4 Files: anchor map behind a tokio `RwLock`)
+- **Chose:** `telemetry::anchor::AnchorCache` holds a `std::sync::RwLock<HashMap<String, SpanContext>>`, locked only for one map operation and never across an `.await` (the brief's rule); lookups are synchronous after the async registry residency check. The registry-wide prune holds the registry's read guard (async) while taking the std write lock briefly inside it, so a concurrent SessionStart cannot be pruned mid-insert.
+- **Alternatives:** tokio `RwLock` as planned (every lookup an await).
+- **Blast radius if wrong:** Low; internal.
+- **Status:** UNCONFIRMED
+
+## otel-spans: `observe_transition` is synchronous and the transition span is created after the state change
+- **Plan:** `plans/otel-spans.md` (P4 Approach: `async fn observe_transition`, span entered around the transition)
+- **Chose:** A synchronous `fn observe_transition(op, &Session, now_ms, resolving_type)` called right after each state change (session mutex still held, nothing awaited), which bumps the legacy counter, the semconv metrics, and creates/links/ends a zero-length transition span. The span does not cover the log append.
+- **Alternatives:** Enter the span around the append (span durations would include storage latency; needs restructuring each site).
+- **Blast radius if wrong:** Low; span durations only.
+- **Status:** UNCONFIRMED
+
+## otel-spans: process-span anchor links are added in the server, just before `finish`
+- **Plan:** `plans/otel-spans.md` (P4: link in `process_message` / at finish)
+- **Chose:** `MacpServer::link_process_anchor` looks the anchor up (resident sessions only) and links it on every `process` span of `Send` and `StreamSession`, whatever the outcome, skipping the anchor span itself. A refusal before the kernel for a resident session therefore links too.
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED
+
+## otel-spans: `record_session_duration` takes milliseconds
+- **Plan:** `plans/otel-spans.md` (P4: `record_session_duration(mode, state, seconds: f64)`)
+- **Chose:** `millis: i64` (negative clamps to 0); the Prometheus `_sum` is kept as an exact integer millisecond sum and divided at render, the OTel histogram gets `millis / 1000.0`. AC 4's 62.5 s is exact either way.
+- **Blast radius if wrong:** None outside the crate's metrics API.
+- **Status:** UNCONFIRMED
+
+## otel-spans: anchors of sessions removed by any other path are pruned on every eviction pass
+- **Plan:** `plans/otel-spans.md` (P4: forget on eviction and GC)
+- **Chose:** Besides `forget` on memory eviction and disk GC, `evict_stale_sessions` (every `MACP_CLEANUP_INTERVAL_SECS`) prunes anchors of sessions no longer in the registry (the registry map is public, so anything may remove from it), only when telemetry is on and the cache is non-empty. Between passes such an orphan is unreachable (lookups are residency-gated).
+- **Blast radius if wrong:** Low; one O(cache) pass per tick.
+- **Status:** UNCONFIRMED
+
+## otel-spans: a synthetic-accept resolve is wired but untestable with built-in modes
+- **Plan:** `plans/otel-spans.md` (P4: "the handoff synthetic implicit accept, where it causes a transition")
+- **Assumed:** No built-in mode resolves on a synthetic envelope (the handoff implicit accept leaves the session Open), and no public API registers a custom `Mode` impl.
+- **Chose:** `synthesize_due_accept` observes `Resolve` (timestamp = the synthetic's deadline, resolving type = its message type) only if the session newly entered Resolved; tested instead that the synthetic accept emits no transition span or metric on the lazy and sweep paths.
+- **Blast radius if wrong:** Low; the branch is covered by the AC 6 call-site count only.
+- **Status:** UNCONFIRMED
+
+## otel-spans: the commitment hash is gated on a standards-track `Commitment`
+- **Plan:** `plans/otel-spans.md` (P4 AC 4: no hash for Passthrough / `ext.*`)
+- **Chose:** `macp.commitment.hash` is recorded only when the resolving message type is `Commitment` **and** the mode is in `standard_mode_names()`, as `commitment_hash_of_wire(resolution).ok()`; a resolution that fails to decode records no hash and no error.
+- **Blast radius if wrong:** Low; one recommended attribute.
+- **Status:** UNCONFIRMED
+
+## otel-spans: session metric label sets are capped at 2,000
+- **Plan:** `plans/otel-spans.md` (P4 session metrics; mirrors P3's envelope backstop)
+- **Chose:** `MAX_SESSION_LABEL_SETS = 2_000` per family; beyond it new sets fold into `macp_mode_id="_OTHER"` with the same operation/state. Mode labels are already registry-bounded, so this is a backstop. Duration buckets `SESSION_DURATION_BOUNDARIES` = 1, 5, 15, 30, 60, 300, 900, 1800, 3600, 7200, 21600, 86400 s (the vendored semconv sets none).
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED
+
+## otel-spans: `Runtime::trace_anchor_count` is a `#[doc(hidden)]` public accessor
+- **Plan:** `plans/otel-spans.md` (P4 tests: assert the anchor map does not grow)
+- **Chose:** Integration tests need the cache length, so `trace_anchor_count()` (otel builds) is public but `#[doc(hidden)]`.
+- **Blast radius if wrong:** Low; cargo-semver-checks sees one added method.
+- **Status:** UNCONFIRMED
+
+## otel-spans: replay equivalence compares `seen_message_ids` as a set and the compaction checkpoint without its timestamps
+- **Plan:** `plans/otel-spans.md` (P4 AC 5: `log.jsonl` and `session.json` byte-identical)
+- **Assumed:** Two runs with telemetry **off** are already not byte-identical: `PersistedSession.seen_message_ids` is collected from a `HashSet` (per-instance random order), and the terminal-compaction checkpoint is stamped with `chrono::Utc::now()` in `macp-storage/src/storage/compaction.rs:23`, not the injected clock. Both pre-date P4 and are unrelated to telemetry.
+- **Chose:** `tests/otel_replay_equivalence.rs` requires every log line byte-identical except a checkpoint, whose embedded `PersistedSession` is compared with `seen_message_ids` sorted and whose other fields must be identical (timestamps excepted only in the compaction-on variant); `session.json` likewise, compared as its raw `serde_json::Value` (key sets asserted equal, only `seen_message_ids` sorted, no struct round-trip); replayed `PersistedSession`s compared with that field sorted. Run with compaction off (strict) and on (default).
+- **Alternatives:** Make `seen_message_ids` serialization sorted and compaction use the runtime clock (a behaviour change to persisted bytes; out of P4's scope).
+- **Blast radius if wrong:** Low for telemetry; the two nondeterminisms are worth a follow-up.
+- **Status:** UNCONFIRMED

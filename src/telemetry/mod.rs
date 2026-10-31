@@ -21,6 +21,8 @@
 //! See `docs/deployment.md`, "OpenTelemetry".
 
 #[cfg(feature = "otel")]
+pub(crate) mod anchor;
+#[cfg(feature = "otel")]
 pub mod grpc;
 #[cfg(feature = "otel")]
 pub mod init;
@@ -28,6 +30,7 @@ pub mod init;
 pub mod instruments;
 pub mod labels;
 pub mod process;
+pub(crate) mod transition;
 
 /// The `tracing` target of every telemetry span.
 pub const TARGET: &str = "macp_runtime::telemetry";

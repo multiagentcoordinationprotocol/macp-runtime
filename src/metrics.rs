@@ -78,10 +78,55 @@ struct EnvelopeSeries {
     buckets: [AtomicU64; ENVELOPE_DURATION_BOUNDARIES.len() + 1],
 }
 
+/// Bucket boundaries, in seconds, of `macp.session.duration`: the same for
+/// the OTLP histogram and the Prometheus rendering.
+#[doc(hidden)]
+pub const SESSION_DURATION_BOUNDARIES: [f64; 12] = [
+    1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 1800.0, 3600.0, 7200.0, 21600.0, 86400.0,
+];
+
+/// Backstop on distinct label sets of each session metric
+/// (`macp.session.transitions`, `macp.session.duration`). Their labels are
+/// already bounded (a registered mode or `_OTHER`, times five operations or
+/// three terminal states); the cap only matters because extension modes
+/// register at runtime. Beyond it a new set folds its mode into `_OTHER`.
+pub(crate) const MAX_SESSION_LABEL_SETS: usize = 2_000;
+
+/// The label set of one `macp.session.transitions` series: the normalized
+/// mode (a registered mode or `_OTHER`) and the operation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct TransitionKey {
+    mode: String,
+    operation: &'static str,
+}
+
+/// The label set of one `macp.session.duration` series: the normalized mode
+/// and the terminal `SESSION_STATE_*` reached.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct DurationKey {
+    mode: String,
+    state: &'static str,
+}
+
+/// One `macp.session.duration` series.
+#[derive(Default)]
+struct DurationSeries {
+    count: AtomicU64,
+    /// Sum in milliseconds: every observation is a whole number of
+    /// milliseconds on the session timeline, so the sum is exact.
+    sum_millis: AtomicU64,
+    /// Non-cumulative per-boundary counts; the last slot is `+Inf`.
+    buckets: [AtomicU64; SESSION_DURATION_BOUNDARIES.len() + 1],
+}
+
 pub struct RuntimeMetrics {
     per_mode: RwLock<HashMap<String, Arc<ModeMetrics>>>,
     /// `macp.envelope.processed` / `macp.envelope.process.duration`.
     envelopes: RwLock<HashMap<EnvelopeKey, Arc<EnvelopeSeries>>>,
+    /// `macp.session.transitions`.
+    transitions: RwLock<HashMap<TransitionKey, Arc<AtomicU64>>>,
+    /// `macp.session.duration`.
+    durations: RwLock<HashMap<DurationKey, Arc<DurationSeries>>>,
     /// The OpenTelemetry instruments, installed from an active `Telemetry`.
     #[cfg(feature = "otel")]
     instruments: std::sync::OnceLock<Arc<crate::telemetry::instruments::Instruments>>,
@@ -99,6 +144,8 @@ impl RuntimeMetrics {
         Self {
             per_mode: RwLock::new(HashMap::new()),
             envelopes: RwLock::new(HashMap::new()),
+            transitions: RwLock::new(HashMap::new()),
+            durations: RwLock::new(HashMap::new()),
             #[cfg(feature = "otel")]
             instruments: std::sync::OnceLock::new(),
             replay_mismatches: AtomicU64::new(0),
@@ -273,6 +320,128 @@ impl RuntimeMetrics {
         (key, series)
     }
 
+    /// Record one session transition (`macp.session.transitions`), on the
+    /// Prometheus rendering always and on the OpenTelemetry instruments when
+    /// installed. `mode` is already normalized: a registered mode or
+    /// `_OTHER`. `operation` is `resolve|expire|cancel|suspend|resume`.
+    pub(crate) fn record_transition(&self, mode: &str, operation: &'static str) {
+        let key = TransitionKey {
+            mode: mode.to_owned(),
+            operation,
+        };
+        let (key, counter) = bounded_series(&self.transitions, key, |k| TransitionKey {
+            mode: OTHER.to_owned(),
+            operation: k.operation,
+        });
+        counter.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "otel")]
+        if let Some(instruments) = self.instruments.get() {
+            instruments.record_transition(&key.mode, key.operation);
+        }
+        #[cfg(not(feature = "otel"))]
+        let _ = key;
+    }
+
+    /// Record one session lifetime (`macp.session.duration`), from
+    /// SessionStart acceptance to the terminal `state` (a `SESSION_STATE_*`
+    /// string), in whole milliseconds on the session timeline. Negative
+    /// values (client clock skew) clamp to 0. `mode` is already normalized.
+    pub(crate) fn record_session_duration(&self, mode: &str, state: &'static str, millis: i64) {
+        let millis = millis.max(0) as u64;
+        let seconds = millis as f64 / 1000.0;
+        let key = DurationKey {
+            mode: mode.to_owned(),
+            state,
+        };
+        let (key, series) = bounded_series(&self.durations, key, |k| DurationKey {
+            mode: OTHER.to_owned(),
+            state: k.state,
+        });
+        series.count.fetch_add(1, Ordering::Relaxed);
+        series.sum_millis.fetch_add(millis, Ordering::Relaxed);
+        let slot = SESSION_DURATION_BOUNDARIES
+            .iter()
+            .position(|b| seconds <= *b)
+            .unwrap_or(SESSION_DURATION_BOUNDARIES.len());
+        series.buckets[slot].fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "otel")]
+        if let Some(instruments) = self.instruments.get() {
+            instruments.record_session_duration(&key.mode, key.state, seconds);
+        }
+        #[cfg(not(feature = "otel"))]
+        let _ = key;
+    }
+
+    /// The semconv families in Prometheus text format: the Envelope families
+    /// ([`Self::envelope_prometheus_lines`]) then the session families
+    /// ([`Self::session_prometheus_lines`]). A family with no series yet
+    /// renders nothing.
+    pub fn semconv_prometheus_lines(&self, out: &mut String) {
+        self.envelope_prometheus_lines(out);
+        self.session_prometheus_lines(out);
+    }
+
+    /// The semconv session families in Prometheus text format:
+    /// `macp_session_transitions_total{macp_mode_id,macp_operation_name}` and
+    /// `macp_session_duration_seconds_{bucket,sum,count}{macp_mode_id,macp_session_state}`,
+    /// each contiguous, in label order.
+    fn session_prometheus_lines(&self, out: &mut String) {
+        use std::fmt::Write;
+        let mut transitions = snapshot_series(&self.transitions);
+        if !transitions.is_empty() {
+            transitions.sort_by(|a, b| a.0.cmp(&b.0));
+            out.push_str(
+                "# HELP macp_session_transitions_total Session lifecycle transitions.\n\
+                 # TYPE macp_session_transitions_total counter\n",
+            );
+            for (k, c) in &transitions {
+                let _ = writeln!(
+                    out,
+                    "macp_session_transitions_total{{macp_mode_id=\"{}\",macp_operation_name=\"{}\"}} {}",
+                    escape_label(&k.mode),
+                    k.operation,
+                    c.load(Ordering::Relaxed)
+                );
+            }
+        }
+        let mut durations = snapshot_series(&self.durations);
+        if durations.is_empty() {
+            return;
+        }
+        durations.sort_by(|a, b| a.0.cmp(&b.0));
+        out.push_str(
+            "# HELP macp_session_duration_seconds Session lifetime from SessionStart acceptance to its terminal state.\n\
+             # TYPE macp_session_duration_seconds histogram\n",
+        );
+        for (k, s) in &durations {
+            let l = format!(
+                "macp_mode_id=\"{}\",macp_session_state=\"{}\"",
+                escape_label(&k.mode),
+                k.state
+            );
+            let mut cumulative = 0u64;
+            for (i, bound) in SESSION_DURATION_BOUNDARIES.iter().enumerate() {
+                cumulative += s.buckets[i].load(Ordering::Relaxed);
+                let _ = writeln!(
+                    out,
+                    "macp_session_duration_seconds_bucket{{{l},le=\"{bound}\"}} {cumulative}"
+                );
+            }
+            cumulative += s.buckets[SESSION_DURATION_BOUNDARIES.len()].load(Ordering::Relaxed);
+            let _ = writeln!(
+                out,
+                "macp_session_duration_seconds_bucket{{{l},le=\"+Inf\"}} {cumulative}"
+            );
+            let sum = s.sum_millis.load(Ordering::Relaxed) as f64 / 1000.0;
+            let _ = writeln!(out, "macp_session_duration_seconds_sum{{{l}}} {sum}");
+            let _ = writeln!(
+                out,
+                "macp_session_duration_seconds_count{{{l}}} {}",
+                s.count.load(Ordering::Relaxed)
+            );
+        }
+    }
+
     /// The semconv Envelope families in Prometheus text format, following
     /// the OpenTelemetry-to-Prometheus compatibility rules:
     /// `macp_envelope_processed_total` and
@@ -281,7 +450,7 @@ impl RuntimeMetrics {
     /// `macp_envelope_outcome`. Each family renders contiguously: its
     /// `# HELP` and `# TYPE` lines, then every series in label order. Nothing
     /// is rendered before the first Envelope.
-    pub fn semconv_prometheus_lines(&self, out: &mut String) {
+    fn envelope_prometheus_lines(&self, out: &mut String) {
         use std::fmt::Write;
         let mut series: Vec<(EnvelopeKey, Arc<EnvelopeSeries>)> = {
             let guard = self.envelopes.read().unwrap_or_else(|e| e.into_inner());
@@ -424,6 +593,42 @@ impl Default for RuntimeMetrics {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The series for `key` in `map`, folding a new key beyond
+/// [`MAX_SESSION_LABEL_SETS`] into `fold(&key)`. Returns the key used.
+fn bounded_series<K, V>(
+    map: &RwLock<HashMap<K, Arc<V>>>,
+    key: K,
+    fold: impl FnOnce(&K) -> K,
+) -> (K, Arc<V>)
+where
+    K: Clone + Eq + std::hash::Hash,
+    V: Default,
+{
+    {
+        let guard = map.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(series) = guard.get(&key) {
+            return (key, Arc::clone(series));
+        }
+    }
+    let mut guard = map.write().unwrap_or_else(|e| e.into_inner());
+    let key = if guard.len() >= MAX_SESSION_LABEL_SETS && !guard.contains_key(&key) {
+        fold(&key)
+    } else {
+        key
+    };
+    let series = Arc::clone(guard.entry(key.clone()).or_default());
+    (key, series)
+}
+
+/// A point-in-time copy of every `(key, series)` in `map`.
+fn snapshot_series<K: Clone, V>(map: &RwLock<HashMap<K, Arc<V>>>) -> Vec<(K, Arc<V>)> {
+    let guard = map.read().unwrap_or_else(|e| e.into_inner());
+    guard
+        .iter()
+        .map(|(k, v)| (k.clone(), Arc::clone(v)))
+        .collect()
 }
 
 /// A Prometheus label value with `\\`, `"` and newlines escaped.
@@ -855,5 +1060,108 @@ mod tests {
     #[test]
     fn label_values_are_escaped() {
         assert_eq!(escape_label("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
+    }
+
+    /// The session families render as valid, contiguous exposition lines;
+    /// the duration histogram is cumulative, its sum exact in milliseconds,
+    /// and a negative duration (clock skew) clamps to 0.
+    #[test]
+    fn session_families_are_valid_contiguous_and_exact() {
+        let m = RuntimeMetrics::new();
+        m.record_transition("macp.mode.decision.v1", "resolve");
+        m.record_transition("macp.mode.decision.v1", "resolve");
+        m.record_transition("_OTHER", "cancel");
+        m.record_session_duration("macp.mode.decision.v1", "SESSION_STATE_EXPIRED", 62_500);
+        m.record_session_duration("macp.mode.decision.v1", "SESSION_STATE_EXPIRED", 1);
+        m.record_session_duration("macp.mode.decision.v1", "SESSION_STATE_CANCELLED", -5);
+        m.record_session_duration(
+            "macp.mode.decision.v1",
+            "SESSION_STATE_RESOLVED",
+            100_000_000,
+        );
+        let mut body = String::new();
+        m.semconv_prometheus_lines(&mut body);
+
+        let l =
+            "macp_mode_id=\"macp.mode.decision.v1\",macp_session_state=\"SESSION_STATE_EXPIRED\"";
+        for line in [
+            "macp_session_transitions_total{macp_mode_id=\"_OTHER\",macp_operation_name=\"cancel\"} 1".to_string(),
+            "macp_session_transitions_total{macp_mode_id=\"macp.mode.decision.v1\",macp_operation_name=\"resolve\"} 2".into(),
+            format!("macp_session_duration_seconds_bucket{{{l},le=\"1\"}} 1"),
+            format!("macp_session_duration_seconds_bucket{{{l},le=\"60\"}} 1"),
+            format!("macp_session_duration_seconds_bucket{{{l},le=\"300\"}} 2"),
+            format!("macp_session_duration_seconds_bucket{{{l},le=\"+Inf\"}} 2"),
+            format!("macp_session_duration_seconds_sum{{{l}}} 62.501"),
+            format!("macp_session_duration_seconds_count{{{l}}} 2"),
+            "macp_session_duration_seconds_sum{macp_mode_id=\"macp.mode.decision.v1\",macp_session_state=\"SESSION_STATE_CANCELLED\"} 0".into(),
+            // Beyond the last boundary: only +Inf counts it.
+            "macp_session_duration_seconds_bucket{macp_mode_id=\"macp.mode.decision.v1\",macp_session_state=\"SESSION_STATE_RESOLVED\",le=\"86400\"} 0".into(),
+            "macp_session_duration_seconds_bucket{macp_mode_id=\"macp.mode.decision.v1\",macp_session_state=\"SESSION_STATE_RESOLVED\",le=\"+Inf\"} 1".into(),
+        ] {
+            assert!(body.lines().any(|b| b == line), "missing {line}\n{body}");
+        }
+        // Every line is a comment or `name{labels} value`, and each family
+        // is one contiguous block opened by its HELP and TYPE.
+        let mut seen = Vec::<&str>::new();
+        for line in body.lines() {
+            let family = if let Some(rest) = line.strip_prefix("# ") {
+                rest.split(' ').nth(1).unwrap()
+            } else {
+                let (series, value) = line.rsplit_once(' ').expect("value");
+                value.parse::<f64>().expect("numeric value");
+                let name = series.split('{').next().unwrap();
+                assert!(series.ends_with('}'), "{line}");
+                name.trim_end_matches("_bucket")
+                    .trim_end_matches("_sum")
+                    .trim_end_matches("_count")
+            };
+            if seen.last() != Some(&family) {
+                assert!(!seen.contains(&family), "{family} is not contiguous");
+                assert!(line.starts_with("# HELP"), "{family} opens with HELP");
+                seen.push(family);
+            }
+        }
+        assert_eq!(
+            seen,
+            [
+                "macp_session_transitions_total",
+                "macp_session_duration_seconds"
+            ]
+        );
+    }
+
+    /// Beyond the backstop cap, new session label sets fold into `_OTHER`
+    /// for their operation or state; existing ones keep counting.
+    #[test]
+    fn session_label_sets_fold_into_other_beyond_the_backstop_cap() {
+        let m = RuntimeMetrics::new();
+        for i in 0..MAX_SESSION_LABEL_SETS {
+            m.record_transition(&format!("ext.m{i}.v1"), "cancel");
+            m.record_session_duration(&format!("ext.m{i}.v1"), "SESSION_STATE_CANCELLED", 1_000);
+        }
+        m.record_transition("ext.beyond.v1", "cancel");
+        m.record_transition("ext.beyond.v2", "cancel");
+        m.record_transition("ext.m0.v1", "cancel");
+        m.record_session_duration("ext.beyond.v1", "SESSION_STATE_CANCELLED", 2_000);
+        let mut body = String::new();
+        m.semconv_prometheus_lines(&mut body);
+        assert!(
+            !body.contains("ext.beyond"),
+            "a set beyond the cap was kept"
+        );
+        assert!(body.contains(
+            "macp_session_transitions_total{macp_mode_id=\"_OTHER\",macp_operation_name=\"cancel\"} 2\n"
+        ));
+        assert!(body.contains(
+            "macp_session_transitions_total{macp_mode_id=\"ext.m0.v1\",macp_operation_name=\"cancel\"} 2\n"
+        ));
+        assert!(body.contains(
+            "macp_session_duration_seconds_sum{macp_mode_id=\"_OTHER\",macp_session_state=\"SESSION_STATE_CANCELLED\"} 2\n"
+        ));
+        let samples = body
+            .lines()
+            .filter(|l| l.starts_with("macp_session_transitions_total{"))
+            .count();
+        assert_eq!(samples, MAX_SESSION_LABEL_SETS + 1);
     }
 }

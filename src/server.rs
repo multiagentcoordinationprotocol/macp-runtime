@@ -68,6 +68,19 @@ impl MacpServer {
         self.runtime.telemetry()
     }
 
+    /// Link `process` to the anchor of `session_id` when that session is
+    /// resident and has one (accepted, duplicate and rejected envelopes
+    /// alike; the anchor's own span is skipped). Callers check that
+    /// telemetry is active first.
+    async fn link_process_anchor(&self, process: &ProcessSpan, session_id: &str) {
+        #[cfg(feature = "otel")]
+        if let Some(anchor) = self.runtime.trace_anchor(session_id).await {
+            process.link_anchor(anchor);
+        }
+        #[cfg(not(feature = "otel"))]
+        let _ = (process, session_id);
+    }
+
     /// Install an external ingress policy engine (OPA/Cedar/custom). All
     /// session starts, session-scoped sends, and session reads are then
     /// additionally gated on it (fail closed).
@@ -451,6 +464,11 @@ impl MacpServer {
                 .envelope_labels(&envelope.mode, &envelope.message_type),
             Some(stream_span),
         );
+        // Kept only when telemetry is active, for the anchor link below.
+        let anchor_session = self
+            .telemetry()
+            .is_enabled()
+            .then(|| envelope.session_id.clone());
         let result = self
             .process_stream_envelope(
                 identity,
@@ -461,6 +479,9 @@ impl MacpServer {
             )
             .instrument(process.span().clone())
             .await;
+        if let Some(session_id) = anchor_session {
+            self.link_process_anchor(&process, &session_id).await;
+        }
         let metrics = self.runtime.metrics();
         match &result {
             Ok(true) => process.finish(metrics, Outcome::Duplicate),
@@ -1248,6 +1269,11 @@ impl MacpRuntimeService for MacpServer {
         .instrument(process.span().clone())
         .await;
 
+        if self.telemetry().is_enabled() {
+            if let Some(raw) = request.get_ref().envelope.as_ref() {
+                self.link_process_anchor(&process, &raw.session_id).await;
+            }
+        }
         let metrics = self.runtime.metrics();
         match &result {
             Ok((_, r)) if r.duplicate => process.finish(metrics, Outcome::Duplicate),

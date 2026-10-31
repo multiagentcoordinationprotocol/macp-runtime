@@ -725,7 +725,15 @@ and with the feature on.
     release.
 
 ### P4 — Session anchor (in memory), transition spans, session metrics
-- **Status:** TODO
+- **Status:** DONE (2026-10-31). Divergences, each recorded in ASSUMPTIONS.md:
+  - The anchor cache is a std `RwLock` with no negative entries, not tokio `RwLock<Option<_>>`.
+  - `observe_transition` is synchronous and creates a zero-length span after the state change.
+  - `process` span links are added in server.rs, which also covers server-side rejections.
+  - The duration argument is in ms and is exported in seconds.
+  - Anchors are pruned on every eviction pass.
+  - The synthetic-resolve branch has no positive test, since no built-in mode reaches it.
+  - The replay-equivalence test sorts `seen_message_ids` and clears the compaction timestamps. Both differ between runs even with telemetry off: HashSet order, and `chrono::Utc::now()` at `macp-storage compaction.rs:23`.
+  - The anchor encode/decode helpers landed early and are unused until P5.
 - **Delivers:**
   - An anchor taken from the accepted SessionStart's `process` span.
   - Links from every later `process` span and every transition span.

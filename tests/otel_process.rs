@@ -690,12 +690,19 @@ async fn payload_and_reason_text_never_reach_telemetry() {
     assert_eq!(all.len(), 3, "{all:?}");
     let all = pipeline.all();
     assert_eq!(pipeline.process().len(), 2);
+    // Since P4 a later span of the session links to the SessionStart's
+    // `process` span (the anchor); such a link carries no attribute.
+    let anchor = by_message_id(&all, "m1")[0].span_context.span_id();
     for span in &all {
         let rendered = format!("{span:?}");
         for sentinel in [SENTINEL_PAYLOAD, SENTINEL_REASON] {
             assert!(!rendered.contains(sentinel), "{sentinel} in {rendered}");
         }
-        assert!(span.events.is_empty() && span.links.is_empty(), "{span:?}");
+        assert!(span.events.is_empty(), "{span:?}");
+        for link in span.links.iter() {
+            assert_eq!(link.span_context.span_id(), anchor, "{span:?}");
+            assert!(link.attributes.is_empty(), "{span:?}");
+        }
     }
 }
 
