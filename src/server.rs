@@ -290,12 +290,17 @@ impl MacpServer {
         &self,
         request: &Request<SendRequest>,
         env: Envelope,
+        process: &ProcessSpan,
     ) -> Result<(Envelope, Option<usize>), MacpError> {
         let identity = self
             .security
             .authenticate_metadata(request.metadata())
             .await?;
         let env = Self::apply_authenticated_sender(&identity, env)?;
+        // The authenticated sender only, never the self-asserted one; recorded
+        // before the mode, rate-limit and ingress checks, as the stream path
+        // does, so those refusals carry it too.
+        process.record_sender(&env.sender);
         let is_session_start = env.message_type == "SessionStart";
         self.security
             .authorize_mode(&identity, &env.mode, is_session_start)?;
@@ -1258,9 +1263,9 @@ impl MacpRuntimeService for MacpServer {
         );
         let result = async {
             self.validate_envelope_shape(&env)?;
-            let (env, max_open) = self.authenticate_send_request(&request, env).await?;
-            // The authenticated sender only, never the self-asserted one.
-            process.record_sender(&env.sender);
+            let (env, max_open) = self
+                .authenticate_send_request(&request, env, &process)
+                .await?;
             self.runtime
                 .process(&env, max_open)
                 .await

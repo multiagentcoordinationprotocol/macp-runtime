@@ -1025,3 +1025,67 @@ async fn inactive_telemetry_creates_no_process_span_and_still_counts() {
          macp_message_type=\"SessionStart\",macp_envelope_outcome=\"accepted\"} 1"
     ));
 }
+
+/// An ingress engine that denies every decision point.
+struct DenyAll;
+
+#[async_trait::async_trait]
+impl macp_runtime::policy_engine::PolicyEngine for DenyAll {
+    async fn evaluate_session_start(
+        &self,
+        _identity: &macp_runtime::security::AuthIdentity,
+        _mode: &str,
+        _env: &Envelope,
+    ) -> macp_runtime::macp_core::policy::PolicyDecision {
+        macp_runtime::macp_core::policy::PolicyDecision::Deny { reasons: vec![] }
+    }
+
+    async fn evaluate_message(
+        &self,
+        _identity: &macp_runtime::security::AuthIdentity,
+        _session: &Session,
+        _env: &Envelope,
+    ) -> macp_runtime::macp_core::policy::PolicyDecision {
+        macp_runtime::macp_core::policy::PolicyDecision::Deny { reasons: vec![] }
+    }
+
+    async fn evaluate_session_access(
+        &self,
+        _identity: &macp_runtime::security::AuthIdentity,
+        _session: &Session,
+    ) -> macp_runtime::macp_core::policy::PolicyDecision {
+        macp_runtime::macp_core::policy::PolicyDecision::Deny { reasons: vec![] }
+    }
+}
+
+// A `Send` refused after authentication but before the kernel (here by the
+// ingress engine; a rate limit or allowed-mode refusal takes the same path)
+// carries the authenticated `macp.sender.id`, as the stream path's does.
+#[tokio::test]
+async fn pre_kernel_refusal_after_authentication_records_the_sender() {
+    let (pipeline, telemetry) = Pipeline::install();
+    let rt = runtime(Arc::new(macp_runtime::storage::MemoryBackend), telemetry);
+    let svc = MacpServer::new(Arc::new(rt), SecurityLayer::dev_mode())
+        .with_policy_engine(Arc::new(DenyAll));
+    let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = incoming.local_addr().unwrap();
+    let router = Server::builder()
+        .layer(grpc::server_layer())
+        .add_service(MacpRuntimeServiceServer::new(svc));
+    tokio::spawn(router.serve_with_incoming(incoming));
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+
+    let ack = send(&channel, start(DECISION, "m1", SID)).await;
+    assert!(!ack.ok);
+    let spans = pipeline.process();
+    let span = by_message_id(&spans, "m1")[0];
+    assert_eq!(
+        attr_str(span, "macp.envelope.outcome").as_deref(),
+        Some("rejected")
+    );
+    assert_eq!(attr_str(span, "macp.sender.id").as_deref(), Some(INITIATOR));
+}
