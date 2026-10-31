@@ -542,6 +542,9 @@ async fn memory_backend_eviction_ends_the_session() {
     let rt = runtime(Arc::new(MemoryBackend), signed_config(7, "k1"));
     let sid = decide(&rt, false).await;
     rt.decision_receipt(&sid).await.unwrap();
+    // The cutoff is strict (`started_at < now - 0`), so a session started in
+    // the current millisecond would not be evicted.
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     rt.evict_stale_sessions(0).await;
     assert!(matches!(
         rt.decision_receipt(&sid).await,
