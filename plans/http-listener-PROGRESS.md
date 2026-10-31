@@ -61,9 +61,9 @@ mapping #233 = `018e1fc`). `SPEC_REV` is currently `0f77753` and moves to `99f3c
 
 | Phase | Risk | Status | Commit | Verified | Notes |
 |-------|------|--------|--------|----------|-------|
-| P0 spec re-pin + vendoring | simple | DONE | (P0 commit) | Opus, 1 round, PASS (batched with P1) | 14 vendored files byte-equal to 99f3cfa; DRIFT on 1-byte mutation |
-| P1 gRPC HISTORY_UNAVAILABLE | simple | DONE | (P1 commit) | Opus, 1 round, PASS (batched with P0) | workspace 1132 pass; tier1 passive_subscribe 7 pass |
-| P1b SIGTERM shared shutdown | simple | TODO | | | |
+| P0 spec re-pin + vendoring | simple | DONE | 05da2ad | Opus, 1 round, PASS (batched with P1) | 14 vendored files byte-equal to 99f3cfa; DRIFT on 1-byte mutation |
+| P1 gRPC HISTORY_UNAVAILABLE | simple | DONE | ad34084 | Opus, 1 round, PASS (batched with P0) | workspace 1132 pass; tier1 passive_subscribe 7 pass |
+| P1b SIGTERM shared shutdown | simple | DONE | (this commit) | Opus, 1 round, GAPS→fixed inline (MIGRATING section pasted into 0.11.0/0.10.0, stale env-table refs) | workspace 1136 pass; shutdown_binary 4/4 x3 |
 | P2 server seams | complex | TODO | | | |
 | P3 canonical JSON codec | complex | TODO | | | |
 | P4 listener skeleton | complex | TODO | | | |

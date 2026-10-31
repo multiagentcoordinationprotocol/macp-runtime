@@ -15,6 +15,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 
+mod shutdown;
+use shutdown::ShutdownSignal;
+
 /// Validate environment variables at startup. Returns a list of errors, if any.
 fn validate_env_config() -> Vec<String> {
     let mut errors = Vec::new();
@@ -490,17 +493,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(1_048_576);
     const ENVELOPE_OVERHEAD_BYTES: usize = 64 * 1024;
 
-    // Graceful shutdown: on ctrl-c stop accepting and drain in-flight
-    // requests; long-lived watch streams would hold the drain open forever,
-    // so a hard deadline forces exit afterwards.
+    // Graceful shutdown: on SIGINT or SIGTERM stop accepting and drain
+    // in-flight requests; long-lived watch streams would hold the drain open
+    // forever, so a hard deadline forces exit afterwards. One shared signal
+    // feeds every listener (gRPC, drain deadline, metrics); a second signal
+    // during the drain exits at once (`src/shutdown.rs`).
     let drain_secs: u64 = std::env::var("MACP_SHUTDOWN_DRAIN_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
-    let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("shutdown signal received; draining in-flight requests");
-    };
+    let shutdown_signal = ShutdownSignal::install();
+    let shutdown = shutdown_signal.clone().wait();
     let builder = builder.add_service(health_service).add_service(
         pb::macp_runtime_service_server::MacpRuntimeServiceServer::new(svc)
             .max_decoding_message_size(max_payload_bytes + ENVELOPE_OVERHEAD_BYTES),
@@ -550,6 +553,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // previously write-only with no export surface at all.
     if let Ok(metrics_addr) = std::env::var("MACP_METRICS_ADDR") {
         let metrics_runtime = runtime.clone();
+        let metrics_shutdown = shutdown_signal.clone();
         tokio::spawn(async move {
             let listener = match tokio::net::TcpListener::bind(&metrics_addr).await {
                 Ok(l) => l,
@@ -559,8 +563,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             tracing::info!(%metrics_addr, "metrics endpoint listening (GET /metrics)");
+            let stop = metrics_shutdown.wait();
+            tokio::pin!(stop);
             loop {
-                let Ok((mut sock, _peer)) = listener.accept().await else {
+                // On shutdown stop accepting and drop the listener, closing
+                // the port; responses already being written finish on their
+                // own tasks.
+                let accepted = tokio::select! {
+                    _ = &mut stop => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((mut sock, _peer)) = accepted else {
                     continue;
                 };
                 let rt = metrics_runtime.clone();
@@ -592,6 +605,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = sock.write_all(resp.as_bytes()).await;
                 });
             }
+            drop(listener);
+            tracing::info!(%metrics_addr, "metrics endpoint closed");
         });
     }
 
@@ -599,7 +614,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // drained; the timer arm is the hard deadline for connections that never
     // close (watch streams).
     let deadline = async {
-        let _ = tokio::signal::ctrl_c().await;
+        shutdown_signal.wait().await;
         tokio::time::sleep(std::time::Duration::from_secs(drain_secs)).await;
     };
     tokio::select! {

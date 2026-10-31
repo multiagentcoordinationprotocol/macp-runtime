@@ -1538,3 +1538,19 @@
 - **Alternatives:** `## 0.12.0` now (guesses release-plz's answer; wrong if the next release is 0.11.1).
 - **Blast radius if wrong:** Low; a heading rename. If a breaking change already sits on main, the embedder-contract gate asks for `## <next>` regardless of this section.
 - **Status:** UNCONFIRMED
+
+## P1b: the "second signal exits immediately" behaviour did not exist before; it is new
+- **Plan:** `plans/http-listener.md` (P1b)
+- **Assumed:** The plan says a second signal during the drain exits immediately, "current ctrl_c behaviour at `:602` preserved". The pre-P1b code did not do that: once `tokio::signal::ctrl_c()` is first polled, Tokio replaces the default SIGINT disposition for the life of the process, so a second ctrl-c was swallowed and the runtime waited out the full drain. SIGTERM was not handled at all (default disposition: immediate kill, no drain, no snapshot).
+- **Chose:** implement the plan's intent as new behaviour: `src/shutdown.rs` exits with `128 + signo` (130 SIGINT, 143 SIGTERM) on the second signal, skipping the final snapshot (accepted history is already durable). Pinned by `tests/shutdown_binary.rs::second_signal_during_drain_exits_immediately`.
+- **Alternatives:** swallow the second signal as before (operators then need SIGKILL to abort a long drain).
+- **Blast radius if wrong:** Low; only affects an operator who signals twice.
+- **Status:** UNCONFIRMED
+
+## P1b: `ShutdownSignal` is binary-private and installed where the old ctrl_c await was
+- **Plan:** `plans/http-listener.md` (P1b)
+- **Assumed:** Nothing outside the binary needs the signal (P4's HTTP listener also lives in the binary's startup path).
+- **Chose:** `src/shutdown.rs`, declared `mod shutdown;` from `src/main.rs` (not `lib.rs`), so no public API and no semver-checks surface. It is installed just before `serve_with_shutdown`, as the old `ctrl_c()` was first polled there, so a signal during startup (recovery, replay) keeps the default disposition (immediate exit), as before. On Unix both handlers register synchronously in `install()`. The Prometheus listener breaks its accept loop and drops the socket on the signal; responses already being written finish on their own tasks.
+- **Alternatives:** a public `macp_runtime::shutdown` module (P4 could then live in the library; revisit in P4 if it does).
+- **Blast radius if wrong:** Low; moving the module into `lib.rs` later is additive.
+- **Status:** UNCONFIRMED

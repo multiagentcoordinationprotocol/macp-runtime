@@ -252,7 +252,7 @@ ship first.
 - **Docs:** listed in Files. Commit `fix(stream)!:` so release-plz notes the wire change.
 
 ### P1b — Shared shutdown on SIGINT or SIGTERM (`fix(shutdown)`)
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergence: the old code did NOT exit on a second ctrl-c (tokio took over SIGINT), so the 130/143 second-signal exit is new; SIGTERM was unhandled (no drain, no final snapshot); module is binary-private `src/shutdown.rs`)
 - **Risk:** simple
 - **Delivers:** a `ShutdownSignal` (`tokio::sync::watch`) fed by `ctrl_c` **or SIGTERM** (`tokio::signal::unix`,
   `cfg(unix)`), replacing the two independent `ctrl_c()` awaits (`src/main.rs:501`, `:602`). The gRPC
