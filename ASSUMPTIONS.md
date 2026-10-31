@@ -1204,3 +1204,67 @@
 - **Alternatives:** None that avoid the break.
 - **Blast radius if wrong:** None. The bump is forced.
 - **Status:** CONFIRMED (2026-10-30)
+
+## otel-spans: OTEL_EXPORTER_OTLP_CERTIFICATE implemented by the runtime
+- **Plan:** `plans/otel-spans.md` (OQ6; P1)
+- **Assumed:** The extra code is wanted. otlp 0.32 does not honour `OTEL_EXPORTER_OTLP_CERTIFICATE`, and a private-CA collector is common.
+- **Chose:** `telemetry::init::export_config` reads `OTEL_EXPORTER_OTLP_{TRACES_,METRICS_}CERTIFICATE` (signal-specific first). When set, that CA is the **only** trust anchor (`ClientTlsConfig::ca_certificate`, no `with_enabled_roots()`), matching the OTel spec's "the trusted certificate" and avoiding tonic's eager `NativeCertsNotFound` on a host without a native store (decided by the coordinator after the P1 verification). Native roots are used only when no certificate variable is set. An unreadable file logs an error and leaves telemetry inactive. Client-certificate variables stay unsupported and documented.
+- **Alternatives:** Document the variable as unsupported and drop the code.
+- **Blast radius if wrong:** Low. The variable is opt-in, and removing it deletes one branch and one test.
+- **Status:** UNCONFIRMED
+
+## otel-spans: the runtime resolves the OTLP endpoint and passes it with with_endpoint
+- **Plan:** `plans/otel-spans.md` (P1, Approach "Activation": "Do not call `.with_endpoint()`")
+- **Assumed:** The plan's concern was a programmatic *default* overriding the signal-specific variable.
+- **Chose:** `export_config` resolves each signal's endpoint with the exporter's own precedence (signal-specific variable, then the generic one, no default) and passes it to `.with_endpoint()`. Precedence is unchanged, an empty variable never reaches the exporter (the exporter would take it and fail with `InvalidUri`), the https decision uses the same value, and the TLS test can inject the env instead of mutating the process environment.
+- **Alternatives:** Let the exporter read the variables itself, as the plan says. Then an empty signal-specific variable shadows a valid generic one, and the TLS test needs process-env mutation.
+- **Blast radius if wrong:** Low. It is one call in `build_tracer_provider`.
+- **Status:** UNCONFIRMED
+
+## otel-spans: no `macp_runtime::telemetry=off` directive on the fmt EnvFilter
+- **Plan:** `plans/otel-spans.md` (Design summary, "Subscriber layout": adding the directive "is harmless and documents intent")
+- **Assumed:** The directive is not harmless. `EnvFilter` directives match by target prefix, so it also silenced the events of `macp_runtime::telemetry::init` (the "OpenTelemetry enabled" notice and the shutdown warnings). The binary test caught this.
+- **Chose:** The exclusion is the `filter_fn(|m| m.target() != TARGET)` alone, which is exact-match and wins over any `RUST_LOG`. Pinned by `log_lines_are_unchanged_even_when_rust_log_names_the_telemetry_target`.
+- **Alternatives:** Keep the directive and log those events with an explicit `target: "macp_runtime"`.
+- **Blast radius if wrong:** None for output. The filter_fn already does the exclusion.
+- **Status:** UNCONFIRMED
+
+## otel-spans: telemetry::init installs the fmt-only subscriber itself when inactive
+- **Plan:** `plans/otel-spans.md` (P1, Files: `init(env_filter)` "returns `None` when inactive, and the caller then installs" the fmt subscriber)
+- **Assumed:** `EnvFilter` is consumed by `init`, and a misconfiguration must be logged through an installed subscriber.
+- **Chose:** `init` installs exactly `tracing_subscriber::fmt().with_env_filter(env_filter).init()` on both the inactive and the misconfigured path, then returns `Ok(None)` or `Err(msg)` for `main` to log at `error!`. The feature-off arm of `main.rs` is literally unchanged.
+- **Alternatives:** Hand the filter back to the caller in the `None`/`Err` cases (a different signature).
+- **Blast radius if wrong:** None. The installed subscriber is identical.
+- **Status:** UNCONFIRMED
+
+## otel-spans: otel layer also sets with_target(false) and an INFO max-level hint
+- **Plan:** `plans/otel-spans.md` (Design summary, "Subscriber layout": `with_threads(false)`, `with_location(false)`, `with_tracked_inactivity(false)`)
+- **Assumed:** tracing-opentelemetry 0.33 adds a `target` attribute to every span by default, which is not a semconv attribute.
+- **Chose:** Also `with_target(false)`. The otel filter admits spans of target `macp_runtime::telemetry` at INFO or above and carries `with_max_level_hint(INFO)`, and the fmt filter's `filter_fn` carries a TRACE hint, so the global max level stays what the `EnvFilter` alone gives (a hint-less `filter_fn` would make it TRACE).
+- **Alternatives:** Keep the default `target` attribute.
+- **Blast radius if wrong:** Low. It removes one attribute from spans; P3's attribute tests are the place to revisit.
+- **Status:** UNCONFIRMED
+
+## otel-spans: misconfiguration error goes to stdout, not stderr
+- **Plan:** `plans/otel-spans.md` (P1 acceptance: "stderr carries one error line naming the variable")
+- **Assumed:** The plan says both "logs one `error!`" and "stderr". `tracing`'s fmt writer is stdout, as for every other runtime log line.
+- **Chose:** One `tracing::error!`. `wrong_protocol_logs_one_error_and_the_runtime_still_serves` asserts exactly one ERROR line naming the variable in the combined stdout+stderr, as `tests/policies_dry_run.rs` does.
+- **Alternatives:** `eprintln!` as well (two lines), or switch the fmt writer to stderr (changes all log output).
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED
+
+## otel-spans: OTEL_RESOURCE_ATTRIBUTES may override service.version
+- **Plan:** `plans/otel-spans.md` (P1, Approach "Resource")
+- **Assumed:** An operator who sets `service.version` in `OTEL_RESOURCE_ATTRIBUTES` (a deployment version, say) means it.
+- **Chose:** `service.version=<crate version>` is laid down first, so `OTEL_RESOURCE_ATTRIBUTES` can replace it, as it can `service.name`. `OTEL_SERVICE_NAME` is applied last. `OTEL_RESOURCE_ATTRIBUTES` is parsed with a copy of the SDK's own `EnvResourceDetector` algorithm so `resource(env)` stays a pure function of the injected env.
+- **Alternatives:** Pin `service.version` to the crate version whatever the env says.
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED
+
+## otel-spans: the P1 TLS test drives the exporter in-process, not the binary
+- **Plan:** `plans/otel-spans.md` (P1 acceptance, "TLS")
+- **Assumed:** P1 creates no runtime spans, so the binary has nothing to export to the fake collector.
+- **Chose:** `https_collector_is_reached_only_with_the_configured_ca` runs the exact `export_config` -> `build_tracer_provider` path `init` takes, with an injected env, and exports one test-made span: received with `OTEL_EXPORTER_OTLP_CERTIFICATE`, handshake failure and nothing received without it. P6's end-to-end export can repeat it through the binary once spans exist.
+- **Alternatives:** Add a startup span to the binary just for the test (a MACP-span-shaped thing P1 must not create).
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED

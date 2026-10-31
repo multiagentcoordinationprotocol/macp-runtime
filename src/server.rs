@@ -60,6 +60,14 @@ impl MacpServer {
         self
     }
 
+    /// The OpenTelemetry switch, read from the runtime (no constructor
+    /// parameter of its own). The span sites that read it arrive with the
+    /// SERVER and `process` spans; until then only tests do.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn telemetry(&self) -> &crate::telemetry::Telemetry {
+        self.runtime.telemetry()
+    }
+
     /// Install an external ingress policy engine (OPA/Cedar/custom). All
     /// session starts, session-scoped sends, and session reads are then
     /// additionally gated on it (fail closed).
@@ -2323,6 +2331,23 @@ mod tests {
         let runtime = Arc::new(Runtime::new(storage, registry, log_store));
         let server = MacpServer::new(runtime.clone(), security);
         (server, runtime)
+    }
+
+    #[test]
+    fn server_reads_telemetry_from_its_runtime() {
+        let (server, _) = make_server();
+        assert!(!server.telemetry().is_enabled());
+        #[cfg(feature = "otel")]
+        {
+            let runtime = Runtime::new(
+                Arc::new(crate::storage::MemoryBackend),
+                Arc::new(SessionRegistry::new()),
+                Arc::new(LogStore::new()),
+            )
+            .with_telemetry(crate::telemetry::Telemetry::enabled());
+            let server = MacpServer::new(Arc::new(runtime), SecurityLayer::dev_mode());
+            assert!(server.telemetry().is_enabled());
+        }
     }
 
     fn send_req(sender: &str, env: Envelope) -> Request<SendRequest> {

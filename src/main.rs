@@ -9,6 +9,7 @@ use macp_runtime::server::MacpServer;
 use macp_runtime::storage::{
     cleanup_temp_files, migrate_if_needed, FileBackend, MemoryBackend, StorageBackend,
 };
+use macp_runtime::telemetry::Telemetry;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -191,42 +192,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
+    // `otel` builds: telemetry is active only with an OTLP endpoint variable
+    // set (see `macp_runtime::telemetry`). Inactive, `init` installs exactly
+    // the feature-off subscriber below. A misconfiguration is logged and
+    // leaves telemetry off; it never aborts startup.
     #[cfg(feature = "otel")]
-    let tracer_provider = {
-        use opentelemetry::trace::TracerProvider as _;
-        use opentelemetry_otlp::WithExportConfig;
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
-
-        let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-            .unwrap_or_else(|_| "http://localhost:4317".into());
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .with_endpoint(&otlp_endpoint)
-            .build()
-            .expect("failed to build OTLP span exporter");
-        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-            .with_batch_exporter(exporter)
-            .build();
-        let tracer = provider.tracer("macp-runtime");
-        let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(tracing_subscriber::fmt::layer())
-            .with(otel_layer)
-            .init();
-        tracing::info!(
-            "OpenTelemetry tracing enabled (endpoint: {})",
-            otlp_endpoint
-        );
-        provider
+    let telemetry_guard = match macp_runtime::telemetry::init::init(env_filter) {
+        Ok(guard) => guard,
+        Err(e) => {
+            tracing::error!("{e}");
+            None
+        }
     };
 
     #[cfg(not(feature = "otel"))]
     {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
+    #[cfg(not(feature = "otel"))]
+    macp_runtime::telemetry::warn_if_configured_without_feature(&|k: &str| std::env::var(k).ok());
 
     // Validate environment configuration early
     let config_errors = validate_env_config();
@@ -342,6 +326,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         recovery_replay_mismatches = report.replay_mismatches;
     }
 
+    #[cfg(feature = "otel")]
+    let telemetry = telemetry_guard
+        .as_ref()
+        .map(macp_runtime::telemetry::init::Guard::telemetry)
+        .unwrap_or_else(Telemetry::disabled);
+    #[cfg(not(feature = "otel"))]
+    let telemetry = Telemetry::disabled();
     let runtime = Arc::new(
         Runtime::with_registries(
             Arc::clone(&storage),
@@ -350,7 +341,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mode_registry,
             policy_registry,
         )
-        .with_receipt_config(receipt_config),
+        .with_receipt_config(receipt_config)
+        .with_telemetry(telemetry),
     );
     if recovery_replay_mismatches > 0 {
         tracing::warn!(
@@ -604,11 +596,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     tracing::info!("state persisted, goodbye");
 
-    // Flush and shut down the OTLP batch span processor before exiting so
-    // buffered spans (including shutdown-path spans) are exported.
+    // Flush and shut down the OTLP providers before exiting so buffered
+    // spans are exported; bounded, so a dead collector cannot hold the exit.
     #[cfg(feature = "otel")]
-    if let Err(e) = tracer_provider.shutdown() {
-        tracing::warn!(error = %e, "failed to shut down OpenTelemetry tracer provider");
+    if let Some(guard) = telemetry_guard {
+        guard.shutdown().await;
     }
 
     Ok(())

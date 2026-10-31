@@ -133,4 +133,11 @@ PR strategy: one PR from feat/otel-spans, one commit per phase (like #264). Ever
 Risk tiers: P0 simple; P1-P6 complex; P7 simple. Each phase is implemented by a fresh Opus executor subagent, to keep the main thread lean, and verified by a separate fresh Opus verifier.
 
 - 2026-10-31 P0 DONE. PASS in round 1 (Opus verifier, simple phase gated alone because P1 is complex). Files: ci.yml (SPEC_REV 0f77753, check_dir tests/otel, otel test step), spec-drift.yml (watches schemas/otel), tests/otel/{macp-semconv.json,SOURCE.md}, tests/support/otel_semconv.rs, tests/otel_semconv.rs (6 tests), the three SOURCE.md files, docs/testing.md, DECISIONS.md (re-pin entry). Tests: otel_semconv 6/6, --features otel 314/314, fmt and clippy clean on both builds. Next: P1.
+- 2026-10-31 P1 DONE. PASS in round 2 (Opus verifier, complex phase gated alone).
+  - Round 1: PASS with gaps: shutdown not actually bounded (tokio's blocking pool joins on drop), no failure-path binary tests, private CA failing on hosts without native roots, a vacuous wrong-protocol assertion, endpoint userinfo in logs, no test constructor for an active Telemetry.
+  - Round 2: all closed.
+  - Files: Cargo.toml/.lock, src/{lib,main,runtime,server}.rs, src/telemetry/{mod,init}.rs, tests/otel_bootstrap.rs, tests/support/fake_collector.rs, tests/golden/policies_dry_run.txt, docs/deployment.md, ASSUMPTIONS.md.
+  - Tests: workspace 1100, otel 343, fmt and clippy clean on both builds.
+  - Carry to P3: re-assert the wrong-protocol test's "collector receives nothing" with real spans, and add a meter provider to active_for_tests.
+  - Next: P2.
 

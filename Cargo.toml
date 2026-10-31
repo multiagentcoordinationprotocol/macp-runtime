@@ -75,7 +75,15 @@ sha2 = "0.11"
 default = []
 rocksdb-backend = ["macp-storage/rocksdb-backend"]
 redis-backend = ["macp-storage/redis-backend"]
-otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:tower-http",
+    "dep:http",
+    "dep:tower",
+]
 # gRPC server reflection for dev/debug tooling (e.g. grpcurl, grpcui). Never
 # enabled in the published Docker image or a default `cargo build` -- see
 # docs/deployment.md's "gRPC reflection" note under Monitoring.
@@ -110,11 +118,23 @@ opentelemetry = { version = "0.32", optional = true }
 opentelemetry_sdk = { version = "0.32", optional = true }
 # 0.32 defaults switched to HTTP transport (http-proto + reqwest-blocking-client)
 # plus metrics/logs; disable them and select the gRPC/tonic trace path explicitly.
+# `metrics` feeds the semconv instruments; `tls-ring` + `tls-roots` let an
+# `https://` endpoint verify against the platform's native roots. `tls-roots`
+# only compiles that support in: `src/telemetry/init.rs` still has to ask for
+# the roots with `ClientTlsConfig::with_enabled_roots()`.
 opentelemetry-otlp = { version = "0.32", default-features = false, features = [
     "grpc-tonic",
     "trace",
+    "metrics",
+    "tls-ring",
+    "tls-roots",
 ], optional = true }
 tracing-opentelemetry = { version = "0.33", optional = true }
+# The gRPC SERVER span layer (`otel` only). The root crate has no other direct
+# `tower` dependency; `util` provides `option_layer`.
+tower-http = { version = "0.6", features = ["trace"], optional = true }
+http = { version = "1", optional = true }
+tower = { version = "0.5", features = ["util"], optional = true }
 tonic-reflection = { version = "0.14", optional = true }
 macp-proto = { workspace = true }
 
@@ -124,6 +144,17 @@ tempfile = { workspace = true }
 # fixture through it, against this runtime and against its in-process target.
 macp-conform = { workspace = true }
 criterion = "0.8"
+# `otel` tests: the in-memory span exporter (`testing`), the OTLP collector
+# service stubs for the fake collector in `tests/support/fake_collector.rs`,
+# and a throwaway CA for the OTLP TLS test.
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["testing"] }
+tracing-opentelemetry = "0.33"
+opentelemetry-proto = { version = "0.32", default-features = false, features = [
+    "gen-tonic",
+    "trace",
+] }
+rcgen = "0.13"
 
 [[bench]]
 name = "replay_bench"

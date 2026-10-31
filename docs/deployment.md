@@ -14,6 +14,15 @@ Before exposing the runtime to production traffic, ensure these four items are c
 
 4. **Bind address** -- Set `MACP_BIND_ADDR` to the desired listen address. The default `127.0.0.1:50051` only accepts local connections.
 
+## Upgrading an `otel` build (OpenTelemetry bootstrap)
+
+This affects only binaries built with `--features otel`; the default build and the published image are unchanged.
+
+1. **No more default export to `localhost:4317`.** An `otel` build used to export traces to `http://localhost:4317` whenever `OTEL_EXPORTER_OTLP_ENDPOINT` was unset. It now exports nothing until an endpoint variable is set. Set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` to keep the old behaviour.
+2. **Signal-specific endpoints are honoured.** `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` used to be overridden by the programmatic endpoint; it now wins over the generic variable, and setting it alone turns telemetry on.
+3. **`service.name` is `macp-runtime`** (was `unknown_service`) unless `OTEL_SERVICE_NAME` or `OTEL_RESOURCE_ATTRIBUTES` names one.
+4. **`RUST_LOG` no longer filters telemetry**, and a non-`grpc` `OTEL_EXPORTER_OTLP_PROTOCOL` now logs an error and turns telemetry off instead of exporting with the wrong protocol. See [OpenTelemetry](#opentelemetry).
+
 ## Upgrading to 0.11.0
 
 0.11.0 adds decision receipts (RFC-MACP-0013 §13). Nothing changes for a deployment that sets none of the receipt variables: it serves unsigned receipts with issuer `runtime:macp-runtime`, and no message, replay or recovery path behaves differently.
@@ -320,6 +329,34 @@ Two consequences worth knowing:
 
 - **Point it at a clean `git archive` export of the spec commit CI reads, never at a sibling working tree.** CI checks the spec repo out at `SPEC_REV` (`.github/workflows/ci.yml`), so a sibling checkout that is dirty, or ahead of or behind that pin, produces parity failures that do not exist in CI -- and it can move under you mid-session. Export first: `git -C <spec-repo> archive <sha> schemas/ | tar -x -C <tmpdir>`, then point the variable at `<tmpdir>/schemas/json/policy`.
 - **A set-but-missing directory panics by design.** Setting the variable asserts the canonical schemas are available, so the test refuses to skip silently. Unset it to fall back to a sibling checkout, or to skip the parity check entirely when no checkout exists.
+
+### OpenTelemetry
+
+These variables take effect **only in a binary built with the `otel` Cargo feature** (`cargo build --features otel`). The published Docker image and a default `cargo build` do not include it; such a binary logs one warning at startup when an endpoint variable below is set, and otherwise ignores every `OTEL_*` variable.
+
+Telemetry is **off unless an endpoint is configured**. It turns on when at least one of `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` is set to a non-empty value and `OTEL_SDK_DISABLED` is not `true`. With telemetry off the runtime installs no exporter and no propagator, opens no connection, and logs exactly what a default build logs. A telemetry misconfiguration never stops the runtime: it logs one `ERROR` line naming the variable and runs with telemetry off.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | -- (off) | OTLP/gRPC collector for traces and metrics, `http://host:4317` or `https://host:4317`. There is no built-in default endpoint |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | -- | Traces only; overrides the generic endpoint for traces. Setting only this exports traces and no metrics |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | -- | Metrics only; overrides the generic endpoint for metrics |
+| `OTEL_EXPORTER_OTLP_HEADERS` | -- | Extra gRPC metadata for the collector, `key1=value1,key2=value2` (`_TRACES_`/`_METRICS_` variants too) |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Only `grpc` is supported (also `_TRACES_`/`_METRICS_`). Any other value logs an error and leaves telemetry off |
+| `OTEL_EXPORTER_OTLP_CERTIFICATE` | -- | PEM file of the CA to trust for an `https://` endpoint. When set it is the **only** trust anchor (the platform's native roots are not consulted, so it works on a host without a root store); `_TRACES_`/`_METRICS_` variants override it per signal. Read by the runtime itself, because the OTLP exporter does not honour it. An unreadable file logs an error and leaves telemetry off |
+| `OTEL_SERVICE_NAME` | `macp-runtime` | `service.name` resource attribute; beats a `service.name` in `OTEL_RESOURCE_ATTRIBUTES` |
+| `OTEL_RESOURCE_ATTRIBUTES` | -- | Extra resource attributes, `key1=value1,key2=value2`. `service.version` defaults to the runtime version |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | Trace sampler, read by the OpenTelemetry SDK (`always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off`, `parentbased_traceidratio`) |
+| `OTEL_METRIC_EXPORT_INTERVAL` | `60000` | Metric export interval in milliseconds |
+| `OTEL_SDK_DISABLED` | `false` | `true` (any case) turns telemetry off even with an endpoint set |
+
+Notes:
+
+- **TLS.** An `https://` endpoint is verified against `OTEL_EXPORTER_OTLP_CERTIFICATE` alone when it is set, and otherwise against the platform's native root store (the published image installs `ca-certificates`; a host with no root store needs the certificate variable). Client certificates (`OTEL_EXPORTER_OTLP_CLIENT_KEY`, `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE`) are **not supported**.
+- **Propagation.** With telemetry on, the only propagator installed is W3C trace context (`traceparent`/`tracestate`, carried in gRPC metadata per RFC-MACP-0006 §2.1). No baggage propagator is installed, and trace context never enters an Envelope or accepted history.
+- **What is exported today.** This release installs the pipeline (resource, propagator, exporter, sampler); the MACP spans and the `macp.*` metric instruments of `macp-semconv/0.1` build on it. Until the metric instruments land, a metrics endpoint turns telemetry on but exports nothing.
+- **Logs are unchanged.** `RUST_LOG` governs logging only: it can neither silence telemetry spans nor add them to log lines, and no log event (including any `reason` text) is exported as telemetry.
+- **An unreachable collector is not fatal.** Exports fail in the background, the OpenTelemetry SDK's own warnings reach the log subject to `RUST_LOG`, and shutdown waits at most 5 seconds for the final flush. That 5-second cap comes **after** the `MACP_SHUTDOWN_DRAIN_SECS` drain (and the final session snapshot), so the worst-case exit time with telemetry on is the drain deadline plus 5 seconds.
 
 ### Governance policy files
 

@@ -318,7 +318,15 @@ and with the feature on.
 - **Docs:** `tests/otel/SOURCE.md`. `docs/testing.md` gets one line saying the features job now tests `otel`.
 
 ### P1 — Telemetry bootstrap: activation, resource, propagator, exporter, subscriber layout
-- **Status:** TODO
+- **Status:** DONE (2026-10-31). Divergences, each recorded in ASSUMPTIONS.md:
+  - The endpoint is resolved in code, using the exporter's precedence, and passed to `with_endpoint`.
+  - No `macp_runtime::telemetry=off` directive. EnvFilter matches by prefix and would silence `telemetry::init`, so the exact `filter_fn` does the exclusion alone.
+  - `init` installs the fallback subscriber.
+  - A configured `OTEL_EXPORTER_OTLP_CERTIFICATE` is the only trust anchor; native roots are used only without it.
+  - Shutdown runs on a detached `std::thread`, bounded at 5s.
+  - The endpoint userinfo is redacted in errors.
+  - The test hooks are `active_for_tests` and `Guard::from_tracer_provider`, both `#[doc(hidden)]`.
+- **Risk:** complex
 - **Delivers:**
   - Correct, opt-in OTel initialization, including the fixes to the four defects listed in Context.
   - No MACP spans yet. The pipeline is ready and inert unless configured.

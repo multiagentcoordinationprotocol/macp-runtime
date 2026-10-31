@@ -116,6 +116,9 @@ pub struct Runtime {
     audit: AuditConfig,
     clock: Arc<dyn Clock>,
     receipts: Arc<crate::receipts::ReceiptIssuer>,
+    /// OpenTelemetry switch (inert unless `with_telemetry` installs an
+    /// active one). Never part of session state or history.
+    telemetry: crate::telemetry::Telemetry,
 }
 
 /// A `WhatIfReplay` result: the library report, plus each replay event's
@@ -301,7 +304,22 @@ impl Runtime {
             receipts: Arc::new(crate::receipts::ReceiptIssuer::new(
                 crate::receipts::ReceiptConfig::default(),
             )),
+            telemetry: crate::telemetry::Telemetry::disabled(),
         }
+    }
+
+    /// Replace the OpenTelemetry switch (default:
+    /// [`Telemetry::disabled`](crate::telemetry::Telemetry::disabled)). An
+    /// active value only records spans and instruments; it never changes
+    /// acceptance, history or replay.
+    pub fn with_telemetry(mut self, telemetry: crate::telemetry::Telemetry) -> Self {
+        self.telemetry = telemetry;
+        self
+    }
+
+    /// The OpenTelemetry switch, read by the span sites (and `MacpServer`).
+    pub(crate) fn telemetry(&self) -> &crate::telemetry::Telemetry {
+        &self.telemetry
     }
 
     /// Replace the acceptance clock (default: [`SystemClock`]). Every
