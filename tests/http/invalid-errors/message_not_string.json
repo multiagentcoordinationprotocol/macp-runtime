@@ -1,0 +1,10 @@
+{
+  "_invalid_because": "`message` MUST be a string (message `type`)",
+  "error": {
+    "code": "SESSION_NOT_FOUND",
+    "message": 7,
+    "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+    "message_id": "",
+    "details": ""
+  }
+}

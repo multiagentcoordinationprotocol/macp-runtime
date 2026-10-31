@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://macp.dev/schemas/macp-http-error.schema.json",
+  "title": "MACP HTTP Error Body",
+  "description": "Body of a request-level error in the HTTP binding (RFC-MACP-0006 §4.5), and the data of a fatal `event: error` server-sent event (§4.3): an object whose `error` member is the canonical JSON form (RFC-MACP-0001 §10) of MACPError. The `error` subschema matches schemas/json/macp-error.schema.json, tightened to require an UPPER_SNAKE_CASE code (registries/error-codes.md). Unrecognized members are allowed at both levels, because receivers MUST ignore them (RFC-MACP-0001 §10.6).",
+  "type": "object",
+  "required": ["error"],
+  "properties": {
+    "error": {
+      "type": "object",
+      "required": ["code"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$",
+          "description": "Error code from registries/error-codes.md. The HTTP status of the response is that code's HTTP Status column."
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable message. Text may vary across implementations."
+        },
+        "session_id": {
+          "type": "string",
+          "description": "Session the error relates to, or \"\"."
+        },
+        "message_id": {
+          "type": "string",
+          "description": "Message the error relates to, or \"\"."
+        },
+        "details": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "description": "MACPError.details as base64 (RFC-MACP-0001 §10.3). For HISTORY_UNAVAILABLE on a subscribe resume it encodes the UTF-8 JSON text {\"lowest_available_sequence\": N} (RFC-MACP-0006 §3.2)."
+        }
+      }
+    }
+  }
+}

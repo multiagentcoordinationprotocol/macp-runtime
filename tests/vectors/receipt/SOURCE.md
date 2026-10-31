@@ -8,7 +8,7 @@ copied, byte-identical, point-in-time, from:
 multiagentcoordinationprotocol/schemas/conformance/receipt/
 ```
 
-in the spec repo, commit `0f77753a24e9fc4b9b8e7abddac8a4b5c5145494`, on
+in the spec repo, commit `99f3cfa090b4bfb72b3063ca0134ec661436c3ef`, on
 2026-10-31. That commit must stay equal to `SPEC_REV` in
 `.github/workflows/ci.yml`.
 

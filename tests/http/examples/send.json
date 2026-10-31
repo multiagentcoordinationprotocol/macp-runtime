@@ -1,0 +1,192 @@
+{
+  "$comment": "Informative example for RFC-MACP-0006 §4 (HTTP binding): Send. Every per-envelope decision is a 200 with the Ack in the body (§4.4); only a body that is not a SendRequest is a request-level error (§4.5). make json-validate validates every `envelope` object in this file against macp-envelope.schema.json, and every error body against macp-http-error.schema.json.",
+  "base": "https://runtime.example.com/api",
+  "exchanges": [
+    {
+      "title": "Send a SessionStart; it is accepted",
+      "request": {
+        "method": "POST",
+        "url": "https://runtime.example.com/api/macp/v1/Send",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSJ9.example.signature",
+          "Content-Type": "application/json",
+          "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        },
+        "body": {
+          "envelope": {
+            "macp_version": "1.0",
+            "mode": "macp.mode.decision.v1",
+            "message_type": "SessionStart",
+            "message_id": "01HV0Q2A9G4Z0FQ9C3Z9VZP8W1",
+            "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+            "sender": "agent://orchestrator",
+            "timestamp": "2026-03-01T20:24:01Z",
+            "payload": {
+              "intent": "Select a vendor for OCR pipeline",
+              "participants": [
+                "agent://orchestrator",
+                "agent://security",
+                "agent://finance"
+              ],
+              "mode_version": "1.0.0",
+              "configuration_version": "runtime-2026.03.01",
+              "policy_version": "org-procurement-2026.02",
+              "ttl_ms": 900000,
+              "context_id": "ctx:procurement:ocr-pipeline-2026Q1"
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "ack": {
+            "ok": true,
+            "duplicate": false,
+            "message_id": "01HV0Q2A9G4Z0FQ9C3Z9VZP8W1",
+            "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+            "accepted_at_unix_ms": 1772396641020,
+            "session_state": "SESSION_STATE_OPEN"
+          }
+        }
+      }
+    },
+    {
+      "title": "The client timed out and retries with the same message_id (§4.8); the runtime reports a duplicate",
+      "request": {
+        "method": "POST",
+        "url": "https://runtime.example.com/api/macp/v1/Send",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSJ9.example.signature",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "envelope": {
+            "macp_version": "1.0",
+            "mode": "macp.mode.decision.v1",
+            "message_type": "SessionStart",
+            "message_id": "01HV0Q2A9G4Z0FQ9C3Z9VZP8W1",
+            "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+            "sender": "agent://orchestrator",
+            "timestamp": "2026-03-01T20:24:01Z",
+            "payload": {
+              "intent": "Select a vendor for OCR pipeline",
+              "participants": [
+                "agent://orchestrator",
+                "agent://security",
+                "agent://finance"
+              ],
+              "mode_version": "1.0.0",
+              "configuration_version": "runtime-2026.03.01",
+              "policy_version": "org-procurement-2026.02",
+              "ttl_ms": 900000,
+              "context_id": "ctx:procurement:ocr-pipeline-2026Q1"
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "ack": {
+            "ok": true,
+            "duplicate": true,
+            "message_id": "01HV0Q2A9G4Z0FQ9C3Z9VZP8W1",
+            "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+            "accepted_at_unix_ms": 1772396641020,
+            "session_state": "SESSION_STATE_OPEN"
+          }
+        }
+      }
+    },
+    {
+      "title": "A Proposal from a sender that is not a participant is rejected in band: still a 200",
+      "request": {
+        "method": "POST",
+        "url": "https://runtime.example.com/api/macp/v1/Send",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSJ9.other.signature",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "envelope": {
+            "macp_version": "1.0",
+            "mode": "macp.mode.decision.v1",
+            "message_type": "Proposal",
+            "message_id": "01HV0Q2C4D7E9F1G3H5J7K9M1N",
+            "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+            "sender": "agent://marketing",
+            "timestamp": "2026-03-01T20:24:05Z",
+            "payload": {
+              "proposal_id": "p-2",
+              "option": "vendor-c",
+              "rationale": "Lowest list price",
+              "supporting_data": ""
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "ack": {
+            "ok": false,
+            "duplicate": false,
+            "message_id": "01HV0Q2C4D7E9F1G3H5J7K9M1N",
+            "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+            "accepted_at_unix_ms": 0,
+            "session_state": "SESSION_STATE_OPEN",
+            "error": {
+              "code": "FORBIDDEN",
+              "message": "sender is not a participant of this session",
+              "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+              "message_id": "01HV0Q2C4D7E9F1G3H5J7K9M1N",
+              "details": ""
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "A bare Envelope is not a SendRequest: request-level 400 INVALID_REQUEST",
+      "request": {
+        "method": "POST",
+        "url": "https://runtime.example.com/api/macp/v1/Send",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSJ9.example.signature",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "macp_version": "1.0",
+          "message_type": "Signal",
+          "message_id": "01HV0Q1Y8J1J9Q3C2A6JH0ZP3K"
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "Content-Type": "application/json",
+          "MACP-Error-Code": "INVALID_REQUEST"
+        },
+        "body": {
+          "error": {
+            "code": "INVALID_REQUEST",
+            "message": "request body is not a SendRequest: no envelope member",
+            "session_id": "",
+            "message_id": "",
+            "details": ""
+          }
+        }
+      }
+    }
+  ]
+}

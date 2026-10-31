@@ -1,0 +1,12 @@
+{
+  "_invalid_because": "`details` MUST be a base64 string, not the decoded JSON object (details `type`)",
+  "error": {
+    "code": "SESSION_NOT_FOUND",
+    "message": "session not found",
+    "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+    "message_id": "",
+    "details": {
+      "lowest_available_sequence": 41
+    }
+  }
+}

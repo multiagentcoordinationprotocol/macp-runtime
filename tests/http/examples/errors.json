@@ -1,0 +1,177 @@
+{
+  "$comment": "Informative example for RFC-MACP-0006 §4.5 (HTTP binding, request-level errors): the registry's HTTP status, an {\"error\": <MACPError>} body and a MACP-Error-Code header; and the transport statuses outside the registry, which carry no MACPError body. make json-validate validates every error body in this file against macp-http-error.schema.json.",
+  "base": "https://runtime.example.com/api",
+  "exchanges": [
+    {
+      "title": "GetSession succeeds",
+      "request": {
+        "method": "POST",
+        "url": "https://runtime.example.com/api/macp/v1/GetSession",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSJ9.example.signature",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "metadata": {
+            "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+            "mode": "macp.mode.decision.v1",
+            "state": "SESSION_STATE_OPEN",
+            "started_at_unix_ms": 1772396641020,
+            "expires_at_unix_ms": 1772397541020,
+            "mode_version": "1.0.0",
+            "configuration_version": "runtime-2026.03.01",
+            "policy_version": "org-procurement-2026.02",
+            "participants": [
+              "agent://orchestrator",
+              "agent://security",
+              "agent://finance"
+            ],
+            "participant_activity": [
+              {
+                "participant_id": "agent://orchestrator",
+                "last_message_at_unix_ms": 1772396641020,
+                "message_count": 1
+              }
+            ],
+            "initiator": "agent://orchestrator",
+            "context_id": "ctx:procurement:ocr-pipeline-2026Q1",
+            "extension_keys": []
+          }
+        }
+      }
+    },
+    {
+      "title": "GetSession for an unknown session: 404 with SESSION_NOT_FOUND (a request-level error, unlike a bare 404)",
+      "request": {
+        "method": "POST",
+        "url": "https://runtime.example.com/api/macp/v1/GetSession",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSJ9.example.signature",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "session_id": "01HV0Q9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z"
+        }
+      },
+      "response": {
+        "status": 404,
+        "headers": {
+          "Content-Type": "application/json",
+          "MACP-Error-Code": "SESSION_NOT_FOUND"
+        },
+        "body": {
+          "error": {
+            "code": "SESSION_NOT_FOUND",
+            "message": "session not found",
+            "session_id": "01HV0Q9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z",
+            "message_id": "",
+            "details": ""
+          }
+        }
+      }
+    },
+    {
+      "title": "No credentials: 401 UNAUTHENTICATED with WWW-Authenticate: Bearer",
+      "request": {
+        "method": "POST",
+        "url": "https://runtime.example.com/api/macp/v1/ListSessions",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "page_size": 50,
+          "page_token": ""
+        }
+      },
+      "response": {
+        "status": 401,
+        "headers": {
+          "Content-Type": "application/json",
+          "WWW-Authenticate": "Bearer",
+          "MACP-Error-Code": "UNAUTHENTICATED"
+        },
+        "body": {
+          "error": {
+            "code": "UNAUTHENTICATED",
+            "message": "missing bearer token",
+            "session_id": "",
+            "message_id": "",
+            "details": ""
+          }
+        }
+      }
+    },
+    {
+      "title": "ListSessions with a page_token the runtime cannot decode: 400 INVALID_REQUEST (RFC-MACP-0006 §3.8)",
+      "request": {
+        "method": "POST",
+        "url": "https://runtime.example.com/api/macp/v1/ListSessions",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSJ9.example.signature",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "page_size": 50,
+          "page_token": "not-a-token-this-runtime-issued"
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "Content-Type": "application/json",
+          "MACP-Error-Code": "INVALID_REQUEST"
+        },
+        "body": {
+          "error": {
+            "code": "INVALID_REQUEST",
+            "message": "page_token cannot be decoded",
+            "session_id": "",
+            "message_id": "",
+            "details": ""
+          }
+        }
+      }
+    },
+    {
+      "title": "A path that names no RPC: a transport 404 with no MACPError body",
+      "request": {
+        "method": "POST",
+        "url": "https://runtime.example.com/api/macp/v1/GetSessions",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSJ9.example.signature",
+          "Content-Type": "application/json"
+        },
+        "body": {}
+      },
+      "response": {
+        "status": 404,
+        "headers": {}
+      }
+    },
+    {
+      "title": "A wrong Content-Type: a transport 415 with no MACPError body",
+      "request": {
+        "method": "POST",
+        "url": "https://runtime.example.com/api/macp/v1/Send",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSJ9.example.signature",
+          "Content-Type": "application/macp-envelope+json"
+        },
+        "body": {}
+      },
+      "response": {
+        "status": 415,
+        "headers": {}
+      }
+    }
+  ]
+}

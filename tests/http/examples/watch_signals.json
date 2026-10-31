@@ -1,0 +1,96 @@
+{
+  "$comment": "Informative example for RFC-MACP-0006 §4.3 and §4.4 (HTTP binding): a Signal submitted with Send, and observed on the WatchSignals event stream as WatchSignalsResponse, with sender_authenticated beside the Envelope. Watch streams carry no `id:` field. make json-validate validates every `envelope` object in this file against macp-envelope.schema.json.",
+  "base": "https://runtime.example.com/api",
+  "exchanges": [
+    {
+      "title": "An observer opens WatchSignals (the request message has no fields, so the body is {})",
+      "request": {
+        "method": "POST",
+        "url": "https://runtime.example.com/api/macp/v1/WatchSignals",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSJ9.observer.signature",
+          "Content-Type": "application/json",
+          "Accept": "text/event-stream"
+        },
+        "body": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-store"
+        },
+        "events": [
+          {
+            "data": {
+              "envelope": {
+                "macp_version": "1.0",
+                "mode": "",
+                "message_type": "Signal",
+                "message_id": "01HV0Q1Y8J1J9Q3C2A6JH0ZP3K",
+                "session_id": "",
+                "sender": "agent://telemetry.observer",
+                "timestamp": "2026-03-01T20:24:00Z",
+                "payload": {
+                  "signal_type": "observation.latency",
+                  "data": "AAECAwQ=",
+                  "confidence": 0.92,
+                  "correlation_session_id": ""
+                }
+              },
+              "sender_authenticated": true
+            }
+          },
+          {
+            "comment": "keepalive"
+          }
+        ],
+        "raw": "data: {\"envelope\":{\"macp_version\":\"1.0\",\"mode\":\"\",\"message_type\":\"Signal\",\"message_id\":\"01HV0Q1Y8J1J9Q3C2A6JH0ZP3K\",\"session_id\":\"\",\"sender\":\"agent://telemetry.observer\",\"timestamp\":\"2026-03-01T20:24:00Z\",\"payload\":{\"signal_type\":\"observation.latency\",\"data\":\"AAECAwQ=\",\"confidence\":0.92,\"correlation_session_id\":\"\"}},\"sender_authenticated\":true}\n\n: keepalive\n\n"
+      }
+    },
+    {
+      "title": "The Signal itself was submitted with Send, as an ambient Envelope",
+      "request": {
+        "method": "POST",
+        "url": "https://runtime.example.com/api/macp/v1/Send",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSJ9.telemetry.signature",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "envelope": {
+            "macp_version": "1.0",
+            "mode": "",
+            "message_type": "Signal",
+            "message_id": "01HV0Q1Y8J1J9Q3C2A6JH0ZP3K",
+            "session_id": "",
+            "sender": "agent://telemetry.observer",
+            "timestamp": "2026-03-01T20:24:00Z",
+            "payload": {
+              "signal_type": "observation.latency",
+              "data": "AAECAwQ=",
+              "confidence": 0.92,
+              "correlation_session_id": ""
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "ack": {
+            "ok": true,
+            "duplicate": false,
+            "message_id": "01HV0Q1Y8J1J9Q3C2A6JH0ZP3K",
+            "session_id": "",
+            "accepted_at_unix_ms": 1772396640010,
+            "session_state": "SESSION_STATE_UNSPECIFIED"
+          }
+        }
+      }
+    }
+  ]
+}

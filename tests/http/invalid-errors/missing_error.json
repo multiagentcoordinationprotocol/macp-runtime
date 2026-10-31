@@ -1,0 +1,3 @@
+{
+  "_invalid_because": "the body MUST carry an `error` member (root `required`)"
+}

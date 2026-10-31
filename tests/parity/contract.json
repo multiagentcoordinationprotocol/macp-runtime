@@ -69,7 +69,8 @@
         "INVALID_REQUEST",
         "STREAM_LAGGED",
         "AGENT_NOT_FOUND",
-        "HISTORY_UNAVAILABLE"
+        "HISTORY_UNAVAILABLE",
+        "RECEIPT_UNAVAILABLE"
       ],
       "deprecated": [
         "UNAUTHORIZED"

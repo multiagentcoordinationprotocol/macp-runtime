@@ -186,7 +186,7 @@ carries every gRPC wire change, P2 none (proven by a characterization snapshot c
 ship first.
 
 ### P0 — Spec re-pin to `99f3cfa`, vendor the HTTP artifacts
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; also `spec-drift.yml` :324/:348 and a step-5 checklist entry; upstream `invalid-http-errors/README.md` not vendored, as for conformance)
 - **Risk:** simple
 - **Delivers:** `SPEC_REV` = `99f3cfa090b4bfb72b3063ca0134ec661436c3ef`; the four `examples/http/*.json`, the HTTP
   error schema and its negative fixtures vendored byte-identical and drift-checked; parity contract re-vendored.
@@ -221,7 +221,7 @@ ship first.
 - **Docs:** `tests/http/SOURCE.md`; `docs/testing.md` one line.
 
 ### P1 — gRPC: compacted resume is `HISTORY_UNAVAILABLE` (RFC-0006 §3.2)
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; integration test asserts base N=5 from real compaction, the N=41 byte check is a unit test; `docs/API.md` also updated)
 - **Risk:** simple
 - **Delivers:** a `StreamSession` subscribe whose `after_sequence` is below the compacted base ends the stream with
   gRPC `FAILED_PRECONDITION`, `macp-error-code: HISTORY_UNAVAILABLE`, `macp-error-details-bin` =
