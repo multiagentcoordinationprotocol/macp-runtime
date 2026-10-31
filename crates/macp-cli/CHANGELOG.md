@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-cli-v0.10.1...macp-cli-v0.11.1) - 2026-10-31
+
+### Added
+
+- *(receipts)* issue and serve decision receipts (RFC-MACP-0013 §13) ([#264](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/264))
+
+### Other
+
+- release v0.11.0 ([#262](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/262))
+
 ## [0.11.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-cli-v0.10.1...macp-cli-v0.11.0) - 2026-10-30
 
 ### Added

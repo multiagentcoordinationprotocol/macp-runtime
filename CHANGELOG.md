@@ -6,6 +6,21 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.11.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.10.1...macp-runtime-v0.11.1) - 2026-10-31
+
+### Added
+
+- *(receipts)* issue and serve decision receipts (RFC-MACP-0013 §13) ([#264](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/264))
+
+### Fixed
+
+- *(release)* skip release-plz semver baseline for macp-cli ([#265](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/265))
+
+### Other
+
+- release v0.11.0 ([#262](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/262))
+- *(deployment)* [**breaking**] upgrading to 0.11.0 for operators ([#266](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/266))
+
 ## [0.11.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.10.1...macp-runtime-v0.11.0) - 2026-10-30
 
 ### Added
