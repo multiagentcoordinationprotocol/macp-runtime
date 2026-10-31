@@ -1,0 +1,7 @@
+kind: stream_frame
+encoded_hex: 124e0a09464f5242494444454e124163616c6c6572206973206e6f742061206465636c61726564207061727469636970616e74206f72206f6273657276657220666f7220746869732073657373696f6e
+error.code: FORBIDDEN
+error.message: caller is not a declared participant or observer for this session
+error.session_id: 
+error.message_id: 
+error.details: 

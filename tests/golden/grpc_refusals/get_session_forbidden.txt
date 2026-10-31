@@ -1,0 +1,5 @@
+kind: status
+code: 7 (PermissionDenied)
+message: FORBIDDEN: session access denied
+metadata macp-error-code: FORBIDDEN
+details_hex: 

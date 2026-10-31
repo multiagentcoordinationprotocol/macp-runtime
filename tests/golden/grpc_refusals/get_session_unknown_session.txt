@@ -1,0 +1,5 @@
+kind: status
+code: 5 (NotFound)
+message: Session '99999999-9999-4999-8999-999999999999' not found
+metadata macp-error-code: SESSION_NOT_FOUND
+details_hex: 

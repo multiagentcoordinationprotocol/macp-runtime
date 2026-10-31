@@ -1,0 +1,5 @@
+kind: status
+code: 8 (ResourceExhausted)
+message: StreamSession receiver fell behind by 44 envelopes
+metadata macp-error-code: STREAM_LAGGED
+details_hex: 

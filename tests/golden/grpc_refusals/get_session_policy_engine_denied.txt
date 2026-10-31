@@ -1,0 +1,5 @@
+kind: status
+code: 7 (PermissionDenied)
+message: policy engine denied session access: embargoed by the snapshot engine
+metadata macp-error-code: FORBIDDEN
+details_hex: 

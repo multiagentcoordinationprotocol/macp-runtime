@@ -1,0 +1,7 @@
+kind: stream_frame
+encoded_hex: 12520a09464f5242494444454e1245706f6c69637920656e67696e652064656e6965642073657373696f6e206163636573733a20656d626172676f65642062792074686520736e617073686f7420656e67696e65
+error.code: FORBIDDEN
+error.message: policy engine denied session access: embargoed by the snapshot engine
+error.session_id: 
+error.message_id: 
+error.details: 

@@ -1,0 +1,5 @@
+kind: status
+code: 3 (InvalidArgument)
+message: SendRequest must contain an envelope
+metadata macp-error-code: INVALID_ENVELOPE
+details_hex: 
