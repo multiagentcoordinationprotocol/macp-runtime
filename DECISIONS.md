@@ -959,3 +959,9 @@ Analysis: fresh Opus, checked against RFC-MACP-0013 1.4.2-draft §13 (spec 50ae6
   - The authorization rule itself is identical to GetSession's.
   - Reopen if session ids ever become guessable.
 - **Same review, fixed:** the path traversal. A wire id now reaches storage only as one plain path component (`macp_storage::storage::is_storage_safe_session_id`), checked both in `Runtime::session_for_read` and in every keyed `FileBackend` operation. A stored snapshot whose id differs from the request (a file-system alias) is unknown, and the receipt is built from `session.session_id`. FileBackend's own check is narrower (empty, `.`, `..`, `/`, NUL), so legacy ids holding `\` still recover.
+
+## 2026-10-31 -- SPEC_REV re-pinned to 0f77753 for the OTel semconv (plans/otel-spans.md P0)
+- **Context:** the R1 entry above left `SPEC_REV` at 6bb4426, because the policy forbids re-pinning without a failure.
+- **Decision: re-pin, decided by Opus.** R2 needs `schemas/otel/macp-semconv.json`, which first appears in 0f77753, the direct child of 6bb4426. A missing input is a failure in the policy's sense. 0f77753 changes nothing else this repo vendors: the diff over `schemas/conformance`, `schemas/parity` and `schemas/json/policy` is empty.
+- **Not spec main (99f3cfa+):** it would also bring the parity-contract change (`RECEIPT_UNAVAILABLE` permanent) and the HTTP fixtures, which belong to R4.
+- `spec-drift.yml` now watches `schemas/otel` as well.
