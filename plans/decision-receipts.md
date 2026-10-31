@@ -550,7 +550,7 @@ and nothing is releasable until the RPCs are real. `/implement` may decide other
   - **Live check** (run by the spec session through the hosted control plane, because the runtime is private-network only and its container has no download tools):
     - GetReceiptKeys returned exactly kid hosted-1, OKP/Ed25519, x `UNjCEbTPCE_UGjfDmZ_0ls3XC1oCFnDCD_CQ9AaIlZk`, with no `d`.
     - The 4 newest resolved runs' receipts carry issuer `runtime:macp-hosted` and verify as **attested** (integrity match, attestations ["valid"]) with the TS SDK verifier, which is held to the same spec vectors as `macp verify`.
-    - Older runs returned NOT_FOUND. The hosted volume holds 5 sessions, all replayed by 0.11, with no deletions since 2026-10-29; the missing runs are being checked against the volume's 2026-10-26 creation.
+    - Older runs returned NOT_FOUND. The hosted volume holds 5 sessions, all replayed by 0.11, with no deletions since 2026-10-29; all 16 missing runs predate the volume (created 2026-10-26 19:34 UTC; the newest missing run is from 19:30:46), so they lived on the pre-volume ephemeral disk. Nothing was lost in the redeploy.
   - **Divergence:** the verifier was the TS SDK rather than `macp verify`.
 - **human-run:** no. Session standing rules allow Railway changes, and no human-held credential is
   involved.
