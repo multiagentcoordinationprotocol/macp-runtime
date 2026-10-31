@@ -1530,3 +1530,11 @@
 - **Alternatives:** Keep the break and document it in MIGRATING.md (forces a minor bump for an otel-only auto-trait loss).
 - **Blast radius if wrong:** Low. At worst a caller that catches a panic raised inside the SDK during a recording keeps using metric handles whose SDK-side aggregation state the SDK itself guards.
 - **Status:** CONFIRMED (2026-10-31). `src/telemetry/instruments.rs:40-41`; pin `src/metrics.rs:684`.
+
+## MIGRATING.md heading for the unreleased gRPC compacted-resume change
+- **Plan:** `plans/http-listener.md` (P1)
+- **Assumed:** P1 names `MIGRATING.md` but not a heading, and the next version is computed by release-plz. `scripts/embedder_contract.py` only looks for a `## <version>` heading when `cargo semver-checks` reports an embeddable-crate API break; P1 changes no public signature (`require_allow` keeps its signature, `MacpError` is untouched).
+- **Chose:** a `## The release after 0.11.0 — gRPC compacted resume, spec re-pin` section, mirroring `docs/deployment.md`'s existing "Upgrading to the release after 0.11.0" heading. The release PR renames it to the computed version.
+- **Alternatives:** `## 0.12.0` now (guesses release-plz's answer; wrong if the next release is 0.11.1).
+- **Blast radius if wrong:** Low; a heading rename. If a breaking change already sits on main, the embedder-contract gate asks for `## <next>` regardless of this section.
+- **Status:** UNCONFIRMED

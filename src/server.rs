@@ -678,14 +678,14 @@ impl MacpServer {
             .get_session_envelopes_after(session_id, after_sequence)
             .await
             .map_err(|base| {
-                // The requested `after_sequence` cannot be served; the
-                // subscriber re-subscribes with a later one on the same stream.
-                StreamFailure::Inline {
-                    code: MacpError::InvalidEnvelope.error_code(),
-                    message: format!(
-                        "session history before ordinal {base} was compacted; \
-                         resume with after_sequence >= {base} or re-read state via GetSession"
-                    ),
+                // RFC-MACP-0006 §3.2: the requested `after_sequence` cannot be
+                // served, which the gRPC binding reports as a terminal
+                // FAILED_PRECONDITION / HISTORY_UNAVAILABLE carrying the lowest
+                // ordinal still available. The subscriber resumes on a new
+                // stream with `after_sequence >= base`.
+                StreamFailure::Terminal {
+                    status: Self::history_unavailable_status(base),
+                    err: MacpError::HistoryUnavailable,
                 }
             })?;
 
@@ -977,6 +977,34 @@ impl MacpServer {
         Self::coded_status_ref(&err, msg)
     }
 
+    /// RFC-MACP-0006 §3.2: a `StreamSession` resume below the compacted base.
+    /// gRPC `FAILED_PRECONDITION` with `macp-error-code: HISTORY_UNAVAILABLE`
+    /// and `macp-error-details-bin` = the UTF-8 JSON text
+    /// `{"lowest_available_sequence":N}` (compact, as in the spec's
+    /// examples). A server-local helper rather than a field on
+    /// `MacpError::HistoryUnavailable`, a unit variant of a published enum.
+    ///
+    /// The message keeps the sentence clients already match on
+    /// (`session history before ordinal {N} was compacted; …`).
+    fn history_unavailable_status(lowest_available_sequence: u64) -> Status {
+        let mut status = Self::coded_status_ref(
+            &MacpError::HistoryUnavailable,
+            format!(
+                "session history before ordinal {lowest_available_sequence} was compacted; \
+                 resume with after_sequence >= {lowest_available_sequence} or re-read state via GetSession"
+            ),
+        );
+        let details = serde_json::to_vec(&serde_json::json!({
+            "lowest_available_sequence": lowest_available_sequence,
+        }))
+        .expect("a one-field JSON object always serializes");
+        status.metadata_mut().insert_bin(
+            "macp-error-details-bin",
+            tonic::metadata::MetadataValue::from_bytes(&details),
+        );
+        status
+    }
+
     /// [`Self::coded_status`] without consuming the error.
     fn coded_status_ref(err: &MacpError, msg: impl Into<String>) -> Status {
         let code = tonic::Code::from_i32(err.transport_status().grpc_code());
@@ -1127,7 +1155,8 @@ enum StreamFailure {
         message_id: String,
     },
     /// A per-frame refusal with no `MacpError` (a subscribe frame's read
-    /// gate, an unservable `after_sequence`): inline, stream stays open.
+    /// gate): inline, stream stays open. An unservable `after_sequence` is
+    /// `Terminal` (RFC-MACP-0006 §3.2), not this.
     Inline {
         code: &'static str,
         message: String,
@@ -3659,6 +3688,198 @@ mod tests {
         assert_eq!(replay[0].message_id, "m3");
     }
 
+    /// Replace `sid`'s log with a checkpoint that discarded `base` accepted
+    /// ordinals followed by the last accepted entry, which therefore takes
+    /// ordinal `base + 1` -- the shape terminal compaction leaves behind.
+    async fn compact_log_to_base(runtime: &Runtime, sid: &str, base: u64) {
+        let log = runtime.log_store.get_log(sid).await.unwrap();
+        let mut checkpoint = log[0].clone();
+        checkpoint.entry_kind = crate::log_store::EntryKind::Checkpoint;
+        checkpoint.message_type = "Checkpoint".into();
+        checkpoint.compacted_incoming_ordinals = base;
+        let last = log
+            .iter()
+            .rev()
+            .find(|e| e.entry_kind == crate::log_store::EntryKind::Incoming)
+            .unwrap()
+            .clone();
+        runtime
+            .log_store
+            .replace_session_log(sid, vec![checkpoint, last])
+            .await;
+    }
+
+    async fn compacted_session(server: &MacpServer, runtime: &Runtime, base: u64) -> String {
+        let sid = new_sid();
+        let initiator = "agent://orchestrator";
+        let peer = "agent://fraud";
+        start_session(server, initiator, &sid, vec![initiator.into(), peer.into()]).await;
+        send_proposal(server, peer, &sid, "m2", "p1").await;
+        compact_log_to_base(runtime, &sid, base).await;
+        sid
+    }
+
+    /// RFC-MACP-0006 §3.2: a resume below the compacted base ends the stream
+    /// with FAILED_PRECONDITION / HISTORY_UNAVAILABLE, details =
+    /// `{"lowest_available_sequence":N}` byte-equal to the spec example.
+    #[tokio::test]
+    async fn subscribe_below_compacted_base_is_terminal_history_unavailable() {
+        use base64::Engine as _;
+        let (server, runtime) = make_server();
+        let sid = compacted_session(&server, &runtime, 41).await;
+
+        let mut bound = None;
+        let mut events = None;
+        let failure = server
+            .process_stream_request(
+                &stream_identity("agent://fraud"),
+                subscribe_frame(&sid, 7),
+                &mut bound,
+                &mut events,
+                &tracing::Span::none(),
+            )
+            .await
+            .unwrap_err();
+        let StreamFailure::Terminal { status, err } = failure else {
+            panic!("a compacted resume must end the stream, not answer inline");
+        };
+        assert!(matches!(err, MacpError::HistoryUnavailable));
+        assert_coded(
+            &status,
+            "HISTORY_UNAVAILABLE",
+            tonic::Code::FailedPrecondition,
+        );
+        assert_eq!(status.code() as i32, 9);
+        let details = status
+            .metadata()
+            .get_bin("macp-error-details-bin")
+            .expect("details must be present")
+            .to_bytes()
+            .unwrap();
+        assert_eq!(&details[..], br#"{"lowest_available_sequence":41}"#);
+        // The spec's worked example (examples/http/stream_session_subscribe.json).
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.encode(&details),
+            "eyJsb3dlc3RfYXZhaWxhYmxlX3NlcXVlbmNlIjo0MX0="
+        );
+        // The sentence macp-control-plane matches on is kept.
+        assert!(
+            status
+                .message()
+                .contains("session history before ordinal 41 was compacted;"),
+            "{}",
+            status.message()
+        );
+    }
+
+    /// The same refusal through the full stream: the client sees the status
+    /// as the stream's terminal error, after no frames.
+    #[tokio::test]
+    async fn compacted_resume_ends_the_grpc_stream() {
+        use tokio_stream::{iter, StreamExt};
+        let (server, runtime) = make_server();
+        let sid = compacted_session(&server, &runtime, 41).await;
+        let mut stream = server.build_stream_session_stream(
+            stream_identity("agent://fraud"),
+            iter(vec![Ok(subscribe_frame(&sid, 7))]),
+            tracing::Span::none(),
+        );
+        let status = stream.next().await.unwrap().unwrap_err();
+        assert_coded(
+            &status,
+            "HISTORY_UNAVAILABLE",
+            tonic::Code::FailedPrecondition,
+        );
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn subscribe_at_or_above_compacted_base_still_replays() {
+        let (server, runtime) = make_server();
+        let sid = compacted_session(&server, &runtime, 41).await;
+        for (after, expected) in [(41u64, vec!["m2"]), (42, vec![])] {
+            let mut bound = None;
+            let mut events = None;
+            let replay = server
+                .process_stream_request(
+                    &stream_identity("agent://fraud"),
+                    subscribe_frame(&sid, after),
+                    &mut bound,
+                    &mut events,
+                    &tracing::Span::none(),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("after_sequence {after} >= base must replay"));
+            let ids: Vec<&str> = replay.iter().map(|e| e.message_id.as_str()).collect();
+            assert_eq!(ids, expected, "after_sequence {after}");
+            assert!(events.is_some());
+        }
+    }
+
+    /// Regression: only the compacted resume became terminal. A forbidden
+    /// subscriber is still an inline frame and the stream stays open.
+    #[tokio::test]
+    async fn subscribe_forbidden_is_still_an_inline_frame() {
+        use tokio_stream::StreamExt;
+        let (server, _) = make_server();
+        let sid = new_sid();
+        start_session(
+            &server,
+            "agent://orchestrator",
+            &sid,
+            vec!["agent://orchestrator".into(), "agent://fraud".into()],
+        )
+        .await;
+
+        let mut bound = None;
+        let mut events = None;
+        let failure = server
+            .process_stream_request(
+                &stream_identity("agent://outsider"),
+                subscribe_frame(&sid, 0),
+                &mut bound,
+                &mut events,
+                &tracing::Span::none(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                failure,
+                StreamFailure::Inline {
+                    code: "FORBIDDEN",
+                    ..
+                }
+            ),
+            "forbidden subscribe must stay inline"
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(Ok(subscribe_frame(&sid, 0))).await.unwrap();
+        let inbound = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let mut stream = server.build_stream_session_stream(
+            stream_identity("agent://outsider"),
+            inbound,
+            tracing::Span::none(),
+        );
+        let frame = stream.next().await.unwrap().unwrap();
+        match frame.response.unwrap() {
+            crate::pb::stream_session_response::Response::Error(e) => {
+                assert_eq!(e.code, "FORBIDDEN")
+            }
+            other => panic!("expected an inline error frame, got {other:?}"),
+        }
+        // The stream is still open: nothing more arrives while the inbound
+        // side is alive.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+                .await
+                .is_err(),
+            "a forbidden subscribe must not end the stream"
+        );
+        drop(tx);
+    }
+
     #[tokio::test]
     async fn subscribe_unknown_session_returns_not_found() {
         let (server, _) = make_server();
@@ -3996,6 +4217,11 @@ mod tests {
             .await
             .expect_err("embargoed read must be denied");
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            err.metadata().get("macp-error-code").unwrap(),
+            "FORBIDDEN",
+            "a policy-engine read denial must be coded like every other Status"
+        );
     }
 
     /// E3 transport-parity: the ingress engine gates the STREAM path too — a
