@@ -7,7 +7,8 @@
 //! `process` spans, an anchor, links and transition spans). The durable
 //! artifacts and their replay must not differ by a byte: the anchor and
 //! everything else trace-related stays out of the log, the snapshot and the
-//! session state.
+//! session state. The one extra file in the active run is the anchor's own
+//! side record, `anchor.json` (P5), which replay never reads.
 
 #![cfg(feature = "otel")]
 
@@ -327,9 +328,40 @@ async fn check_equivalence(compact: bool) {
     assert_eq!(off.trace_anchor_count(), 0);
 
     let (off_dir, on_dir) = (session_dir(off_dir.path()), session_dir(on_dir.path()));
-    // Same files, and nothing trace-related among them.
-    assert_eq!(files(&off_dir), files(&on_dir));
-    for name in files(&on_dir) {
+    // The only extra artifact is the anchor record (P5), written off the
+    // SessionStart path: wait for it. It holds exactly the anchor, the
+    // SessionStart `process` span's context.
+    let anchor_file = on_dir.join("anchor.json");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !anchor_file.exists() {
+        assert!(std::time::Instant::now() < deadline, "no anchor.json");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let start_span = exported
+        .iter()
+        .find(|s| {
+            s.name.starts_with("process")
+                && s.attributes.iter().any(|kv| {
+                    kv.key.as_str() == "macp.message.type" && kv.value.as_str() == "SessionStart"
+                })
+        })
+        .expect("the SessionStart process span");
+    let cx = &start_span.span_context;
+    assert_eq!(
+        std::fs::read_to_string(&anchor_file).unwrap(),
+        format!(
+            r#"{{"v":1,"traceparent":"00-{}-{}-{:02x}"}}"#,
+            cx.trace_id(),
+            cx.span_id(),
+            cx.trace_flags().to_u8()
+        )
+    );
+    let mut with_anchor = files(&off_dir);
+    with_anchor.push("anchor.json".into());
+    with_anchor.sort();
+    assert_eq!(with_anchor, files(&on_dir));
+    // Nothing else is trace-related.
+    for name in files(&on_dir).into_iter().filter(|n| n != "anchor.json") {
         assert!(
             !name.contains("trace") && !name.contains("anchor"),
             "{name}"

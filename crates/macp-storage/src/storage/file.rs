@@ -36,6 +36,13 @@ impl FileBackend {
         self.session_dir(session_id).join("receipt.json")
     }
 
+    /// The trace anchor, a sibling of `session.json`: inside the session
+    /// directory, so `delete_session` removes it with the session in every
+    /// version, and `list_session_ids` (directories only) never sees it.
+    fn anchor_file(&self, session_id: &str) -> PathBuf {
+        self.session_dir(session_id).join("anchor.json")
+    }
+
     /// Refuse an id that could resolve outside `sessions/` (an absolute path
     /// replaces the base directory). Narrower than
     /// [`super::is_storage_safe_session_id`], so a legacy directory name with
@@ -198,6 +205,23 @@ impl StorageBackend for FileBackend {
 
     fn receipts_durable(&self) -> bool {
         self.hard_links
+    }
+
+    /// `atomic_write` into the existing session directory. It never creates
+    /// the directory, so a write racing the session's deletion fails instead
+    /// of resurrecting a session directory.
+    async fn store_trace_anchor(&self, session_id: &str, anchor: &[u8]) -> io::Result<()> {
+        Self::check(session_id)?;
+        Self::atomic_write(&self.anchor_file(session_id), anchor).await
+    }
+
+    async fn load_trace_anchor(&self, session_id: &str) -> io::Result<Option<Vec<u8>>> {
+        Self::check(session_id)?;
+        match tfs::read(self.anchor_file(session_id)).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     async fn delete_session(&self, session_id: &str) -> io::Result<()> {
@@ -589,6 +613,8 @@ mod tests {
             refused(backend.load_log(id).await.map(|_| ()));
             refused(backend.delete_session(id).await);
             refused(backend.create_session_storage(id).await);
+            refused(backend.store_trace_anchor(id, b"{}").await);
+            refused(backend.load_trace_anchor(id).await.map(|_| ()));
         }
         assert!(outside.path().exists(), "delete_session must not escape");
     }
@@ -604,6 +630,89 @@ mod tests {
         assert_eq!(backend.list_session_ids().await.unwrap(), [id]);
         assert!(backend.load_log(id).await.unwrap().is_empty());
         backend.delete_session(id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_trace_anchor_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileBackend::new(dir.path().to_path_buf()).unwrap();
+        crate::storage::anchor_contract::store_load_delete(&backend, "a1", true).await;
+    }
+
+    /// The anchor is `sessions/<id>/anchor.json`, and a write after the
+    /// session's deletion (a GC racing the spawned write) fails rather than
+    /// recreating the session directory.
+    #[tokio::test]
+    async fn file_trace_anchor_layout_and_no_resurrection() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileBackend::new(dir.path().to_path_buf()).unwrap();
+        backend.create_session_storage("a1").await.unwrap();
+        backend.save_session(&sample_session("a1")).await.unwrap();
+        backend.store_trace_anchor("a1", b"anchor").await.unwrap();
+        let session_dir = dir.path().join("sessions").join("a1");
+        assert_eq!(
+            std::fs::read(session_dir.join("anchor.json")).unwrap(),
+            b"anchor"
+        );
+        assert!(!session_dir.join("anchor.json.tmp").exists());
+        backend.delete_session("a1").await.unwrap();
+        assert!(backend.store_trace_anchor("a1", b"anchor").await.is_err());
+        assert!(!session_dir.exists(), "no resurrected session directory");
+        assert!(backend.list_session_ids().await.unwrap().is_empty());
+    }
+
+    /// Rollback to 0.11.0: this backend's read surface is byte-identical to
+    /// the published `macp-storage` 0.11.0 one (it ignores `anchor.json`),
+    /// so a directory holding anchors reads exactly as one without them:
+    /// same ids, same sessions, same logs, same receipts.
+    #[tokio::test]
+    async fn file_anchor_is_invisible_to_the_pre_anchor_read_surface() {
+        async fn surface(
+            backend: &FileBackend,
+        ) -> (Vec<String>, Vec<String>, Vec<usize>, Vec<Option<Vec<u8>>>) {
+            let mut ids = backend.list_session_ids().await.unwrap();
+            ids.sort();
+            let mut sessions: Vec<String> = backend
+                .load_all_sessions()
+                .await
+                .unwrap()
+                .iter()
+                .map(|s| {
+                    serde_json::to_string(&crate::registry::PersistedSession::from(s)).unwrap()
+                })
+                .collect();
+            sessions.sort();
+            let mut logs = Vec::new();
+            let mut receipts = Vec::new();
+            for id in &ids {
+                logs.push(backend.load_log(id).await.unwrap().len());
+                receipts.push(backend.load_receipt(id).await.unwrap());
+            }
+            (ids, sessions, logs, receipts)
+        }
+        let (plain, anchored) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let plain_b = FileBackend::new(plain.path().to_path_buf()).unwrap();
+        let anchored_b = FileBackend::new(anchored.path().to_path_buf()).unwrap();
+        for b in [&plain_b, &anchored_b] {
+            for id in ["s1", "s2"] {
+                b.create_session_storage(id).await.unwrap();
+                b.save_session(&sample_session(id)).await.unwrap();
+                b.append_log_entry(id, &sample_entry("m1")).await.unwrap();
+            }
+            b.store_receipt_if_absent("s1", b"receipt").await.unwrap();
+        }
+        anchored_b
+            .store_trace_anchor("s1", b"anchor-1")
+            .await
+            .unwrap();
+        anchored_b
+            .store_trace_anchor("s2", b"anchor-2")
+            .await
+            .unwrap();
+        assert_eq!(surface(&plain_b).await, surface(&anchored_b).await);
+        // A pre-anchor delete (the whole directory) leaves no orphan.
+        anchored_b.delete_session("s1").await.unwrap();
+        assert!(!anchored.path().join("sessions/s1").exists());
     }
 
     #[tokio::test]

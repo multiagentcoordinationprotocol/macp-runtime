@@ -1435,3 +1435,50 @@
 - **Alternatives:** Make `seen_message_ids` serialization sorted and compaction use the runtime clock (a behaviour change to persisted bytes; out of P4's scope).
 - **Blast radius if wrong:** Low for telemetry; the two nondeterminisms are worth a follow-up.
 - **Status:** UNCONFIRMED
+
+## otel-spans: the 0.11 rollback test is a same-crate read-surface test, not a renamed `macp-storage =0.11.0` dev-dependency
+- **Plan:** `plans/otel-spans.md` (P5 acceptance: `tests/otel_anchor_rollback.rs` with `macp_storage_011 = { package = "macp-storage", version = "=0.11.0" }`)
+- **Assumed:** The renamed dev-dependency cannot land: the `deps-isolation` job's "Internal crate versions are in lockstep" step selects every dependency whose package name is a workspace member and requires `req == "^<workspace version>"`, so a `=0.11.0` requirement on `macp-storage` fails CI. The workspace is also still at 0.11.0, so the path crate and the registry crate would share name and version. The plan's own fallback (a CI worktree of tag `macp-storage-v0.11.0` running a fixture binary; the tag exists) needs a new CI step and a throwaway example binary, which is more than P5's storage scope.
+- **Chose:** Verified that `crates/macp-storage/src/storage/{file,rocksdb,redis_backend,mod,memory}.rs` at HEAD (before P5) are byte-identical to the published `macp-storage-0.11.0` sources in `~/.cargo/registry`. Tests `file_anchor_is_invisible_to_the_pre_anchor_read_surface` and `rocksdb_anchor_is_invisible_to_the_pre_anchor_read_surface` (macp-storage) assert that `list_session_ids`, `load_all_sessions`, `load_log` and `load_receipt` (whose code is unchanged from 0.11.0) return the same for a store with anchors as one without, and that the RocksDB DB still has exactly the three 0.11 column families. `rocksdb_sweep_removes_only_orphaned_anchors` simulates 0.11's `delete_session` (session, logs, `{id}` receipt key only).
+- **Not done:** The plan's CI-worktree fallback was **not** implemented. It needs a new `ci.yml` step, a `git worktree` of tag `macp-storage-v0.11.0`, and a throwaway example binary written into that old checkout. That is CI plumbing outside P5's storage and runtime scope, and the evidence it adds over the byte-identity check is marginal while the read methods stay unchanged.
+- **Alternatives:** The plan's CI-worktree fallback against tag `macp-storage-v0.11.0`, or exempting renamed dev-deps in the lockstep jq filter.
+- **Blast radius if wrong:** Low. A later edit to the unchanged read methods would stop them matching 0.11, and nothing would flag it.
+- **Status:** UNCONFIRMED
+
+## otel-spans: the Redis anchor expiry uses the maximum session TTL, not the session's own `ttl_ms`
+- **Plan:** `plans/otel-spans.md` (P5 rollback, Redis: `SET .. EX <disk_retention_secs + ttl_ms/1000 + 3600>`)
+- **Assumed:** The plan's trait signature `store_trace_anchor(&self, session_id, anchor)` carries no `ttl_ms`. Getting the session's own TTL would mean either a new trait parameter or a session read inside the spawned write, and that read can race the best-effort snapshot written after the commit point.
+- **Chose:** `RedisBackend::with_disk_retention_secs(secs)` (additive builder, wired in `main.rs`). The expiry is `retention + MAX_TTL_MS/1000 (86,400) + 3,600` seconds when retention > 0, and there is no expiry at 0. This is never shorter than the plan's formula, because `ttl_ms <= MAX_TTL_MS`.
+- **Alternatives:** Add `ttl_ms` to the trait method, or read the session key.
+- **Blast radius if wrong:** Low. An orphan can live up to about a day longer, at ~100 bytes.
+- **Status:** UNCONFIRMED
+
+## otel-spans: `observe_transition` became async and loads the anchor lazily
+- **Plan:** `plans/otel-spans.md` (P5: `trace_anchor(sid)` loads on a cache miss; P4 made `observe_transition` synchronous)
+- **Assumed:** After a restart, the `expire` root (and every other transition) must link to the stored anchor, and the plan only describes the lazy load inside `trace_anchor`. `observe_transition` read the in-memory cache synchronously.
+- **Chose:** `observe_transition` is now `async`. Before it builds the span, it calls the new private `Runtime::resident_anchor`, which serves the cache or else does one `load_trace_anchor` and caches the result. That read happens only when telemetry is active, at most once per resident session, and under the session mutex. It takes no registry lock, because a transitioning session is resident by construction. The 8 call sites add `.await`, and the inventory pin is unchanged.
+- **Alternatives:** Pre-warm the cache in `recover_sessions` (the plan says no eager loads), or keep the function synchronous and drop post-restart links on transition spans.
+- **Blast radius if wrong:** Low. It adds one small storage read per session per process on the first transition or envelope after a restart.
+- **Status:** UNCONFIRMED
+
+## otel-spans: anchor load errors and corrupt records are cached as negative entries; a SessionStart `put` wins over a racing load
+- **Plan:** `plans/otel-spans.md` (P5: cache the load result "including `None`"; a corrupt record decodes to `None`)
+- **Assumed:** The plan does not say what to do with a storage *error* on load, or with a load racing the SessionStart capture.
+- **Chose:** An `Err` from `load_trace_anchor` is logged at debug and cached as `None`, the same as a missing or corrupt record. That keeps the storage-read bound, at the cost that a transient error loses that session's links for its residency. `AnchorCache::put_loaded` uses `entry().or_insert`, so a load that started before the capture cannot overwrite the anchor. `AnchorCache` now maps to `Option<SpanContext>`, and `trace_anchor_count` counts negative entries too.
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED
+
+## otel-spans: anchor ids are refused unless storage-safe on RocksDB/Redis; `FileBackend` uses its narrower `check`
+- **Plan:** `plans/otel-spans.md` (P5 contract test: "path-like id refused")
+- **Chose:** RocksDB and Redis `store_trace_anchor`/`load_trace_anchor` refuse ids that fail `is_storage_safe_session_id`, since a NUL-bearing id could collide with `{id}\0anchor`. `FileBackend` uses `Self::check`, as the plan says. The startup orphan sweep runs only when `!MACP_MEMORY_ONLY && MACP_SESSION_DISK_RETENTION_SECS > 0`, in a spawned task, logging at info only when it removed something.
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED
+
+## otel-spans: the orphan sweep vs. a concurrent SessionStart is resolved by write ordering
+- **Plan:** `plans/otel-spans.md` (P5: the startup sweep "runs once at startup, after recovery and off the serving path"; the anchor write is spawned "after the commit point")
+- **Assumed:** The plan did not consider that the sweep runs concurrently with serving. The anchor write was spawned before the best-effort `save_session` snapshot, so on RocksDB a sweep could see a fresh anchor key whose session was not yet in the sessions CF, and delete a live anchor. (P5 verifier finding.)
+- **Chose:** Ordering. `capture_anchor` still caches the anchor at the commit point under the session mutex, and now returns the encoded record. `persist_anchor` spawns the store only after `save_session` returns `Ok`. A stored anchor therefore always has a stored session, and the sweep's live sessions-CF check for any anchor key it sees finds that session. If the snapshot fails, no anchor record is written (it would only be an orphan); the in-memory anchor still links. Tested by `the_anchor_is_stored_only_after_the_session_snapshot`, which checks the write order through a recording backend. The RocksDB sweep also runs in `spawn_blocking` and writes its deletes in batches of 1,000 (`rocksdb_sweep_deletes_in_batches`).
+- **Alternatives:** A grace period on young anchors (needs a timestamp in the opaque record or the key), or awaiting the sweep before the server binds (adds O(receipts CF) to startup, which the plan rejected).
+- **Residual:** A SessionStart that *reuses the id* of a session GC'd by a pre-anchor binary, landing between the sweep's check and its batched delete, could lose its new anchor. The cost is span links only.
+- **Blast radius if wrong:** Low.
+- **Status:** UNCONFIRMED

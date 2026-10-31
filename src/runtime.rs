@@ -372,8 +372,10 @@ impl Runtime {
     ///
     /// `resolving_type` is the `message_type` that resolved the session; the
     /// commitment hash is recorded only when it is `Commitment` in a
-    /// standards-track mode. Synchronous: it holds no lock across an await.
-    fn observe_transition(
+    /// standards-track mode. Its only await is the anchor lookup, which
+    /// reads storage at most once per resident session (after a restart)
+    /// and only when telemetry is active; it holds no std lock across it.
+    async fn observe_transition(
         &self,
         op: crate::telemetry::transition::TransitionOp,
         session: &Session,
@@ -406,6 +408,10 @@ impl Runtime {
         if !self.telemetry.is_enabled() {
             return;
         }
+        // Before the span, so the lookup is not inside its duration. The
+        // session is resident: every transition is of a registry session.
+        #[cfg(feature = "otel")]
+        let anchor = self.resident_anchor(&session.session_id).await;
         let commitment_hash = (op == TransitionOp::Resolve
             && resolving_type == Some("Commitment")
             && macp_modes::mode::standard_mode_names().contains(&session.mode.as_str()))
@@ -420,7 +426,7 @@ impl Runtime {
             commitment_hash.as_deref(),
         );
         #[cfg(feature = "otel")]
-        if let Some(anchor) = self.anchors.get(&session.session_id) {
+        if let Some(anchor) = anchor {
             use tracing_opentelemetry::OpenTelemetrySpanExt;
             span.add_link(anchor);
         }
@@ -429,24 +435,77 @@ impl Runtime {
 
     /// Record the current `process` span as `session_id`'s anchor. Called
     /// right after the SessionStart commit point, under the session mutex,
-    /// so every later message of the session sees it. A no-op when telemetry
-    /// is inactive or the current span is not a `process` span.
+    /// so every later message of the session sees it. Returns the durable
+    /// record for [`Self::persist_anchor`], or `None` when telemetry is
+    /// inactive, the current span is not a `process` span, or its context
+    /// is invalid.
     #[cfg(feature = "otel")]
-    fn capture_anchor(&self, session_id: &str) {
+    fn capture_anchor(&self, session_id: &str) -> Option<Vec<u8>> {
         use opentelemetry::trace::TraceContextExt;
         use tracing_opentelemetry::OpenTelemetrySpanExt;
         if !self.telemetry.is_enabled() {
-            return;
+            return None;
         }
         let span = tracing::Span::current();
         let is_process = span.metadata().is_some_and(|m| {
             m.target() == crate::telemetry::TARGET
                 && m.name() == crate::telemetry::process::OPERATION
         });
-        if is_process {
-            let cx = span.context().span().span_context().clone();
-            self.anchors.put(session_id, cx);
+        if !is_process {
+            return None;
         }
+        let cx = span.context().span().span_context().clone();
+        self.anchors
+            .put(session_id, cx.clone())
+            .then(|| crate::telemetry::anchor::encode(&cx))
+    }
+
+    /// Persist a captured anchor record off the SessionStart path: the start
+    /// never awaits the write, and a failure only costs post-restart links.
+    /// The log append is the durability guarantee; this record is
+    /// best-effort.
+    ///
+    /// Called only after the session snapshot is stored, so a stored anchor
+    /// always has a stored session: the startup orphan sweep (which deletes
+    /// anchors whose session is absent) can never delete a live session's
+    /// anchor written while it runs.
+    #[cfg(feature = "otel")]
+    fn persist_anchor(&self, session_id: &str, record: Vec<u8>) {
+        let storage = Arc::clone(&self.storage);
+        let session_id = session_id.to_owned();
+        tokio::spawn(async move {
+            if let Err(e) = storage.store_trace_anchor(&session_id, &record).await {
+                tracing::debug!(session_id = %session_id, error = %e, "trace anchor not persisted");
+            }
+        });
+    }
+
+    /// The anchor of a session known to be resident: the cached entry, or
+    /// on a miss (after a restart) the stored record, cached either way. A
+    /// missing, unreadable or corrupt record is a cached `None` (no link),
+    /// so a session without one costs one storage read, not one per
+    /// envelope. Bounded because only resident sessions reach here and
+    /// their entries leave with them.
+    #[cfg(feature = "otel")]
+    async fn resident_anchor(&self, session_id: &str) -> Option<opentelemetry::trace::SpanContext> {
+        if let Some(cached) = self.anchors.lookup(session_id) {
+            return cached;
+        }
+        let loaded = match self.storage.load_trace_anchor(session_id).await {
+            Ok(Some(bytes)) => {
+                let cx = crate::telemetry::anchor::decode(&bytes);
+                if cx.is_none() {
+                    tracing::debug!(session_id, "ignoring an unreadable trace anchor");
+                }
+                cx
+            }
+            Ok(None) => None,
+            Err(e) => {
+                tracing::debug!(session_id, error = %e, "trace anchor not loaded");
+                None
+            }
+        };
+        self.anchors.put_loaded(session_id, loaded)
     }
 
     /// The anchor of `session_id`, for linking a `process` span (including a
@@ -463,7 +522,7 @@ impl Runtime {
             return None;
         }
         self.registry.get_shared(session_id).await?;
-        self.anchors.get(session_id)
+        self.resident_anchor(session_id).await
     }
 
     /// The number of session anchors held in memory (tests and diagnostics).
@@ -760,7 +819,8 @@ impl Runtime {
                 session,
                 now,
                 None,
-            );
+            )
+            .await;
             tracing::info!(session_id, "session expired via TTL");
             let _ = self
                 .session_lifecycle_bus
@@ -969,7 +1029,7 @@ impl Runtime {
         // anchor (outside state and history). Under the session mutex, so any
         // later message's link sees it.
         #[cfg(feature = "otel")]
-        self.capture_anchor(&env.session_id);
+        let anchor_record = self.capture_anchor(&env.session_id);
 
         // 2. Update in-memory caches
         self.log_store.create_session_log(&env.session_id).await;
@@ -984,12 +1044,23 @@ impl Runtime {
         // durable SessionStart, so the "failed" session resurrected on
         // restart, and a same-id client retry appended a SECOND SessionStart
         // that made the log unreplayable.
-        if let Err(err) = self.storage.save_session(&session_guard).await {
-            tracing::warn!(
-                session_id = %session_guard.session_id,
-                error = %err,
-                "failed to persist session snapshot at SessionStart (recoverable via replay)"
-            );
+        match self.storage.save_session(&session_guard).await {
+            Ok(()) => {
+                // After the snapshot, never before (see `persist_anchor`).
+                #[cfg(feature = "otel")]
+                if let Some(record) = anchor_record {
+                    self.persist_anchor(&env.session_id, record);
+                }
+            }
+            Err(err) => {
+                // No snapshot, so no anchor record either: it would be an
+                // orphan to the sweep. The in-memory anchor still links.
+                tracing::warn!(
+                    session_id = %session_guard.session_id,
+                    error = %err,
+                    "failed to persist session snapshot at SessionStart (recoverable via replay)"
+                );
+            }
         }
         self.metrics.record_session_start(mode_name);
         tracing::info!(
@@ -1163,7 +1234,8 @@ impl Runtime {
                 session,
                 syn.timestamp_unix_ms,
                 Some(&syn.message_type),
-            );
+            )
+            .await;
         }
 
         tracing::info!(
@@ -1325,7 +1397,8 @@ impl Runtime {
                 session,
                 now_ms,
                 Some(&env.message_type),
-            );
+            )
+            .await;
             tracing::info!(session_id = %env.session_id, mode = %session.mode, "session resolved");
             let _ = self
                 .session_lifecycle_bus
@@ -1603,7 +1676,8 @@ impl Runtime {
             session,
             now_ms,
             None,
-        );
+        )
+        .await;
         tracing::info!(session_id, reason, "session cancelled");
         let _ = self
             .session_lifecycle_bus
@@ -1665,7 +1739,8 @@ impl Runtime {
             session,
             now_ms,
             None,
-        );
+        )
+        .await;
         tracing::info!(session_id, reason, "session suspended");
         let _ = self
             .session_lifecycle_bus
@@ -1766,7 +1841,8 @@ impl Runtime {
                     session,
                     now_ms,
                     None,
-                );
+                )
+                .await;
                 tracing::info!(session_id, reason, "session resumed");
                 let _ = self
                     .session_lifecycle_bus
@@ -1805,7 +1881,8 @@ impl Runtime {
                     session,
                     now_ms,
                     None,
-                );
+                )
+                .await;
                 let _ = self
                     .session_lifecycle_bus
                     .send(SessionLifecycleEvent::Expired {
@@ -1975,7 +2052,8 @@ impl Runtime {
                 &session,
                 now,
                 None,
-            );
+            )
+            .await;
             self.save_session_to_storage(&session).await;
             if !self.maybe_compact_log(&session_id, &session).await {
                 self.force_insert_checkpoint(&session_id, &session).await;
@@ -4583,7 +4661,8 @@ mod tests {
                 ("ext.multi_round.v1", "Commitment", false),
                 ("ext.custom.v1", "Commitment", false),
             ] {
-                rt.observe_transition(TransitionOp::Resolve, &resolved(mode), 0, Some(resolving));
+                rt.observe_transition(TransitionOp::Resolve, &resolved(mode), 0, Some(resolving))
+                    .await;
                 let spans = traced.transitions();
                 let span = spans.last().expect("a resolve span");
                 assert_eq!(
@@ -4595,7 +4674,8 @@ mod tests {
             // A non-resolve transition never carries one.
             let mut cancelled = resolved("macp.mode.decision.v1");
             cancelled.state = SessionState::Cancelled;
-            rt.observe_transition(TransitionOp::Cancel, &cancelled, 0, Some("Commitment"));
+            rt.observe_transition(TransitionOp::Cancel, &cancelled, 0, Some("Commitment"))
+                .await;
             assert_eq!(hash_of(traced.transitions().last().unwrap()), None);
         }
 

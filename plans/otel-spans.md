@@ -863,7 +863,13 @@ and with the feature on.
     debug spans.
 
 ### P5 — Durable anchor across restart
-- **Status:** TODO
+- **Status:** DONE (2026-10-31). Divergences, each recorded in ASSUMPTIONS.md:
+  - There is no renamed `macp-storage =0.11.0` dev-dependency for the rollback test, because it would break the deps-isolation lockstep check. Instead, the pre-P5 storage sources were confirmed byte-identical to published 0.11.0, and tests simulate 0.11 deletes. The CI-worktree fallback was not done.
+  - Redis EX is disk retention + `MAX_TTL_MS` + 1h, because the trait doesn't carry the session's ttl_ms. It is never shorter than the planned formula.
+  - `observe_transition` is async so it can lazy-load the anchor after a restart.
+  - The stored anchor is written only after `save_session` succeeds, which closes a race between the startup sweep and a new SessionStart.
+  - The RocksDB sweep runs in `spawn_blocking` and deletes in batches of 1,000. `RocksDbBackend.db` is now a private `Arc<DB>`.
+  - The sweep runs only when disk retention is above 0 and storage is not memory-only.
 - **Delivers:** the anchor survives a restart. After recovery, later spans and the `expire` root still link to the
   pre-restart SessionStart span.
 - **Depends on:** P4. It is independently droppable: without it, links simply stop after a restart.

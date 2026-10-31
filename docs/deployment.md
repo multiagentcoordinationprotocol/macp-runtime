@@ -385,6 +385,30 @@ What that acknowledgement guarantees differs by backend:
 | `rocksdb` | yes | yes | log appends sync the WAL before ack; session snapshots are async (recovered via replay) |
 | `redis` | yes (Redis process survives) | **no** | RPUSH acks in Redis memory; no WAIT/AOF barrier. Cache-tier / single-writer only — the runtime logs a warning at startup |
 
+**Trace anchor** (`otel` feature with telemetry active only): each session's
+anchor (the SessionStart span context, `{"v":1,"traceparent":"00-…"}`) is a
+best-effort side record outside session state, the log and checkpoints. It is
+written once per session off the SessionStart path, never awaited by the ack,
+and loaded lazily after a restart so later spans keep linking to the
+pre-restart SessionStart. A crash right after a SessionStart can lose it; the
+session itself is unaffected and its later spans simply have no link. A
+missing or unreadable anchor means no link, never an error.
+
+| Backend | Where | Survives restart | Removed by disk GC |
+|---|---|---|---|
+| `file` | `sessions/<id>/anchor.json` | yes | yes (the session directory) |
+| `rocksdb` | `receipts` column family, key `<id>\0anchor` (no new column family) | yes | yes |
+| `redis` | `<prefix>:anchor:<id>`; with `MACP_SESSION_DISK_RETENTION_SECS > 0` it expires after retention + 24 h + 1 h | yes | yes |
+| memory (`MACP_MEMORY_ONLY=1`) | the runtime's memory only | no | n/a |
+
+Rolling back to a binary that predates anchors keeps all three backends
+working: the old binary ignores `anchor.json` and the extra RocksDB/Redis key.
+Its disk GC does not delete the RocksDB/Redis anchor key, though. Redis
+expires such a key by itself (its expiry is set whenever retention > 0), and
+on RocksDB the next start of a newer binary with
+`MACP_SESSION_DISK_RETENTION_SECS > 0` sweeps those orphans once, after
+recovery, off the serving path.
+
 All backends skip individually corrupt log entries on load (with a warning)
 rather than failing the whole session; `MACP_STRICT_RECOVERY=1` makes
 recovery-level errors fatal.

@@ -11,6 +11,8 @@
 
 #![cfg(feature = "otel")]
 
+#[path = "support/counting_backend.rs"]
+mod counting_backend;
 #[path = "support/otel_semconv.rs"]
 mod otel_semconv;
 
@@ -831,7 +833,10 @@ async fn later_process_spans_link_the_anchor_exactly_once() {
 // cache and get no link. One real session proves the cache is live.
 #[tokio::test]
 async fn rejected_envelopes_with_arbitrary_session_ids_never_grow_the_anchor_cache() {
-    let h = Harness::start().await;
+    // Counts storage anchor loads (P5): a non-resident id never reaches
+    // storage either.
+    let counting = counting_backend::Counting::new(Arc::new(macp_runtime::storage::MemoryBackend));
+    let h = Harness::with_storage(counting.clone()).await;
     h.open_decision(&sid(1)).await;
     assert_eq!(h.runtime.trace_anchor_count(), 1);
 
@@ -863,6 +868,7 @@ async fn rejected_envelopes_with_arbitrary_session_ids_never_grow_the_anchor_cac
         .collect();
     assert_eq!(rejected.len(), 10_000);
     assert!(rejected.iter().all(|s| s.links.is_empty()));
+    assert_eq!(counting.loads(), 0, "no storage read for a non-resident id");
 }
 
 // Anchors leave with their session: memory eviction, disk GC, and any other

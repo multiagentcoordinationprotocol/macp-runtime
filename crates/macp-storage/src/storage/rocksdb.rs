@@ -4,15 +4,33 @@ use macp_core::session::Session;
 use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, WriteBatchWithTransaction, DB};
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 use super::{ReceiptWrite, StorageBackend};
 
 const CF_SESSIONS: &str = "sessions";
 const CF_LOGS: &str = "logs";
+/// Decision receipts under `{session_id}`, and trace anchors under
+/// `{session_id}\x00anchor` (no column family of its own: a binary that
+/// predates anchors cannot open a DB holding an unknown CF, so a new CF
+/// would make rollback fail).
+///
+/// INVARIANT: this CF is accessed by point operations only (`get_cf`,
+/// `put_cf`, `delete_cf`), except `sweep_orphan_anchors_blocking`, which knows
+/// the anchor key layout. A binary that predates anchors therefore never
+/// sees an anchor key. Any new iterator over this CF must handle the
+/// `\x00anchor` keys; `receipts_cf_is_point_ops_only` pins this.
 const CF_RECEIPTS: &str = "receipts";
 
+/// The suffix of a trace-anchor key in [`CF_RECEIPTS`]. Session ids never
+/// hold NUL (`is_storage_safe_session_id`), so it cannot collide with a
+/// receipt key.
+const ANCHOR_SUFFIX: &[u8] = b"\x00anchor";
+
 pub struct RocksDbBackend {
-    db: DB,
+    /// Shared so a long scan can run on the blocking pool
+    /// (`sweep_orphan_trace_anchors`).
+    db: Arc<DB>,
     /// Serializes `store_receipt_if_absent`'s get-then-put, so first writer
     /// wins by this backend's own guarantee (RocksDB is single-process).
     receipt_lock: tokio::sync::Mutex<()>,
@@ -32,7 +50,7 @@ impl RocksDbBackend {
             .map_err(io::Error::other)?;
 
         Ok(Self {
-            db,
+            db: Arc::new(db),
             receipt_lock: tokio::sync::Mutex::new(()),
         })
     }
@@ -45,6 +63,13 @@ impl RocksDbBackend {
     /// Prefix for iterating all log entries of a session: `{session_id}\x00`
     fn log_prefix(session_id: &str) -> Vec<u8> {
         format!("{session_id}\x00").into_bytes()
+    }
+
+    /// The trace-anchor key of `session_id` in [`CF_RECEIPTS`].
+    fn anchor_key(session_id: &str) -> Vec<u8> {
+        let mut key = session_id.as_bytes().to_vec();
+        key.extend_from_slice(ANCHOR_SUFFIX);
+        key
     }
 
     /// Find the next sequence number for a session's log entries.
@@ -153,6 +178,7 @@ impl StorageBackend for RocksDbBackend {
             .cf_handle(CF_RECEIPTS)
             .ok_or_else(|| io::Error::other("missing receipts CF"))?;
         batch.delete_cf(&receipts_cf, session_id.as_bytes());
+        batch.delete_cf(&receipts_cf, Self::anchor_key(session_id));
 
         // Delete all log entries with this session's prefix
         let prefix = Self::log_prefix(session_id);
@@ -199,6 +225,39 @@ impl StorageBackend for RocksDbBackend {
 
     fn receipts_durable(&self) -> bool {
         true
+    }
+
+    async fn store_trace_anchor(&self, session_id: &str, anchor: &[u8]) -> io::Result<()> {
+        super::check_anchor_session_id(session_id)?;
+        let cf = self
+            .db
+            .cf_handle(CF_RECEIPTS)
+            .ok_or_else(|| io::Error::other("missing receipts CF"))?;
+        self.db
+            .put_cf(&cf, Self::anchor_key(session_id), anchor)
+            .map_err(io::Error::other)
+    }
+
+    async fn load_trace_anchor(&self, session_id: &str) -> io::Result<Option<Vec<u8>>> {
+        super::check_anchor_session_id(session_id)?;
+        let cf = self
+            .db
+            .cf_handle(CF_RECEIPTS)
+            .ok_or_else(|| io::Error::other("missing receipts CF"))?;
+        self.db
+            .get_cf(&cf, Self::anchor_key(session_id))
+            .map_err(io::Error::other)
+    }
+
+    /// A pre-anchor binary's `delete_session` deletes only the `{id}`
+    /// receipt key, leaving `{id}\x00anchor` behind. The scan is synchronous
+    /// RocksDB work proportional to the receipts CF, so it runs on the
+    /// blocking pool, never on an async worker.
+    async fn sweep_orphan_trace_anchors(&self) -> io::Result<usize> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || sweep_orphan_anchors_blocking(&db))
+            .await
+            .map_err(io::Error::other)?
     }
 
     async fn list_session_ids(&self) -> io::Result<Vec<String>> {
@@ -298,6 +357,47 @@ impl StorageBackend for RocksDbBackend {
 
         self.db.write(batch).map_err(io::Error::other)
     }
+}
+
+/// Deletes per `WriteBatch` in [`sweep_orphan_anchors_blocking`].
+const SWEEP_BATCH: usize = 1_000;
+
+/// Scan the receipts CF and delete every anchor key whose session is absent
+/// from the sessions CF, in batches of [`SWEEP_BATCH`]; receipt keys are
+/// skipped untouched. Safe against a concurrent SessionStart: the runtime
+/// stores a session's anchor only after its snapshot, so an anchor key the
+/// scan sees always has its session visible to the check that follows.
+fn sweep_orphan_anchors_blocking(db: &DB) -> io::Result<usize> {
+    let receipts_cf = db
+        .cf_handle(CF_RECEIPTS)
+        .ok_or_else(|| io::Error::other("missing receipts CF"))?;
+    let sessions_cf = db
+        .cf_handle(CF_SESSIONS)
+        .ok_or_else(|| io::Error::other("missing sessions CF"))?;
+    let mut batch = WriteBatchWithTransaction::<false>::default();
+    let mut orphans = 0usize;
+    for item in db.iterator_cf(&receipts_cf, IteratorMode::Start) {
+        let (key, _) = item.map_err(io::Error::other)?;
+        let Some(session_id) = key.strip_suffix(ANCHOR_SUFFIX) else {
+            continue;
+        };
+        if db
+            .get_pinned_cf(&sessions_cf, session_id)
+            .map_err(io::Error::other)?
+            .is_none()
+        {
+            batch.delete_cf(&receipts_cf, &key);
+            orphans += 1;
+            if batch.len() >= SWEEP_BATCH {
+                db.write(std::mem::take(&mut batch))
+                    .map_err(io::Error::other)?;
+            }
+        }
+    }
+    if !batch.is_empty() {
+        db.write(batch).map_err(io::Error::other)?;
+    }
+    Ok(orphans)
 }
 
 #[cfg(test)]
@@ -503,5 +603,216 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let backend = std::sync::Arc::new(RocksDbBackend::open(dir.path()).unwrap());
         crate::storage::receipt_contract::one_winner_under_concurrency(backend, "r1").await;
+    }
+
+    #[tokio::test]
+    async fn rocksdb_trace_anchor_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = RocksDbBackend::open(dir.path()).unwrap();
+        crate::storage::anchor_contract::store_load_delete(&backend, "a1", true).await;
+    }
+
+    /// The anchor shares the receipts CF but never the receipt's key, in
+    /// either direction.
+    #[tokio::test]
+    async fn rocksdb_anchor_and_receipt_keys_are_independent() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = RocksDbBackend::open(dir.path()).unwrap();
+        backend.save_session(&sample_session("s1")).await.unwrap();
+        backend.store_trace_anchor("s1", b"anchor").await.unwrap();
+        assert_eq!(backend.load_receipt("s1").await.unwrap(), None);
+        assert_eq!(
+            backend
+                .store_receipt_if_absent("s1", b"receipt")
+                .await
+                .unwrap(),
+            ReceiptWrite::Stored
+        );
+        assert_eq!(
+            backend.load_trace_anchor("s1").await.unwrap().as_deref(),
+            Some(&b"anchor"[..])
+        );
+        assert_eq!(
+            backend.load_receipt("s1").await.unwrap().as_deref(),
+            Some(&b"receipt"[..])
+        );
+        // A receipt first, then an anchor: still independent.
+        backend.save_session(&sample_session("s2")).await.unwrap();
+        backend.store_receipt_if_absent("s2", b"r2").await.unwrap();
+        assert_eq!(backend.load_trace_anchor("s2").await.unwrap(), None);
+        backend.store_trace_anchor("s2", b"a2").await.unwrap();
+        assert_eq!(
+            backend.load_receipt("s2").await.unwrap().as_deref(),
+            Some(&b"r2"[..])
+        );
+        // Deleting a session removes both of its keys and nothing else.
+        backend.delete_session("s1").await.unwrap();
+        assert_eq!(backend.load_trace_anchor("s1").await.unwrap(), None);
+        assert_eq!(backend.load_receipt("s1").await.unwrap(), None);
+        assert!(backend.load_trace_anchor("s2").await.unwrap().is_some());
+        assert!(backend.load_receipt("s2").await.unwrap().is_some());
+    }
+
+    /// What a pre-anchor (0.11.0) `delete_session` does: the session, its
+    /// log and its `{id}` receipt key, never `{id}\x00anchor`.
+    fn pre_anchor_delete(backend: &RocksDbBackend, session_id: &str) {
+        let mut batch = WriteBatchWithTransaction::<false>::default();
+        batch.delete_cf(
+            &backend.db.cf_handle(CF_SESSIONS).unwrap(),
+            session_id.as_bytes(),
+        );
+        batch.delete_cf(
+            &backend.db.cf_handle(CF_RECEIPTS).unwrap(),
+            session_id.as_bytes(),
+        );
+        let logs = backend.db.cf_handle(CF_LOGS).unwrap();
+        let prefix = RocksDbBackend::log_prefix(session_id);
+        for item in backend.db.prefix_iterator_cf(&logs, &prefix) {
+            let (key, _) = item.unwrap();
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            batch.delete_cf(&logs, &key);
+        }
+        backend.db.write(batch).unwrap();
+    }
+
+    /// Orphans left by a pre-anchor GC are swept: only anchor keys whose
+    /// session is gone, never a receipt key and never a live session's
+    /// anchor. A second sweep finds nothing; nothing anchor-shaped remains.
+    #[tokio::test]
+    async fn rocksdb_sweep_removes_only_orphaned_anchors() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = RocksDbBackend::open(dir.path()).unwrap();
+        for id in ["gone1", "gone2", "live"] {
+            backend.save_session(&sample_session(id)).await.unwrap();
+            backend
+                .append_log_entry(id, &sample_entry("m1"))
+                .await
+                .unwrap();
+            backend.store_trace_anchor(id, b"anchor").await.unwrap();
+        }
+        // A receipt whose session is gone (not an anchor: left alone).
+        backend
+            .store_receipt_if_absent("receipt-only", b"r")
+            .await
+            .unwrap();
+        pre_anchor_delete(&backend, "gone1");
+        pre_anchor_delete(&backend, "gone2");
+        assert!(backend.load_trace_anchor("gone1").await.unwrap().is_some());
+
+        assert_eq!(backend.sweep_orphan_trace_anchors().await.unwrap(), 2);
+        assert_eq!(backend.load_trace_anchor("gone1").await.unwrap(), None);
+        assert_eq!(backend.load_trace_anchor("gone2").await.unwrap(), None);
+        assert!(backend.load_trace_anchor("live").await.unwrap().is_some());
+        assert!(backend
+            .load_receipt("receipt-only")
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(backend.sweep_orphan_trace_anchors().await.unwrap(), 0);
+
+        let cf = backend.db.cf_handle(CF_RECEIPTS).unwrap();
+        let anchors: Vec<Vec<u8>> = backend
+            .db
+            .iterator_cf(&cf, IteratorMode::Start)
+            .map(|item| item.unwrap().0.to_vec())
+            .filter(|k| k.ends_with(ANCHOR_SUFFIX))
+            .collect();
+        assert_eq!(anchors, vec![RocksDbBackend::anchor_key("live")]);
+    }
+
+    /// Rollback to 0.11.0: this backend's read surface is byte-identical to
+    /// the published `macp-storage` 0.11.0 one, and an anchor key changes
+    /// none of it. The DB opens with the same three CFs.
+    #[tokio::test]
+    async fn rocksdb_anchor_is_invisible_to_the_pre_anchor_read_surface() {
+        async fn surface(b: &RocksDbBackend) -> (Vec<String>, usize, Vec<Option<Vec<u8>>>) {
+            let mut ids = b.list_session_ids().await.unwrap();
+            ids.sort();
+            let sessions = b.load_all_sessions().await.unwrap().len();
+            let mut receipts = Vec::new();
+            for id in &ids {
+                receipts.push(b.load_receipt(id).await.unwrap());
+            }
+            (ids, sessions, receipts)
+        }
+        let (plain, anchored) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        {
+            let plain_b = RocksDbBackend::open(plain.path()).unwrap();
+            let anchored_b = RocksDbBackend::open(anchored.path()).unwrap();
+            for b in [&plain_b, &anchored_b] {
+                for id in ["s1", "s2"] {
+                    b.save_session(&sample_session(id)).await.unwrap();
+                }
+                b.store_receipt_if_absent("s1", b"receipt").await.unwrap();
+            }
+            anchored_b.store_trace_anchor("s1", b"a1").await.unwrap();
+            anchored_b.store_trace_anchor("s2", b"a2").await.unwrap();
+            assert_eq!(surface(&plain_b).await, surface(&anchored_b).await);
+        }
+        let mut cfs = DB::list_cf(&Options::default(), anchored.path()).unwrap();
+        cfs.sort();
+        assert_eq!(cfs, ["default", CF_LOGS, CF_RECEIPTS, CF_SESSIONS]);
+    }
+
+    /// The receipts CF is point-ops only outside `sweep_orphan_anchors_blocking`
+    /// (see [`CF_RECEIPTS`]): a new iterator over it must handle anchor keys.
+    #[test]
+    fn receipts_cf_is_point_ops_only() {
+        let source = include_str!("rocksdb.rs");
+        let code = &source[..source
+            .find("#[cfg(test)]\nmod tests")
+            .expect("the test module")];
+        let start = code
+            .find("fn sweep_orphan_anchors_blocking(")
+            .expect("the sweep");
+        let end = start + code[start..].find("\n}\n").expect("the sweep's end");
+        let outside = format!("{}{}", &code[..start], &code[end..]);
+        // Every function that takes a receipts-CF handle does point
+        // operations only, whatever it names the handle.
+        let mut receipt_fns = 0;
+        for body in outside.split(" fn ").skip(1) {
+            let Some(at) = body.find("cf_handle(CF_RECEIPTS)") else {
+                continue;
+            };
+            receipt_fns += 1;
+            // The handle's binding: `let <name> = self.db.cf_handle(..)`.
+            let binding = body[..at].rsplit("let ").next().unwrap_or_default();
+            let name: String = binding
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            assert!(!name.is_empty(), "receipts-CF handle binding");
+            for line in body.lines().filter(|l| l.contains("iterator")) {
+                assert!(
+                    !line.contains(&format!("&{name}")),
+                    "an iterator over the receipts CF outside the sweep: {line}"
+                );
+            }
+        }
+        // delete_session, load_receipt, store_receipt_if_absent,
+        // store_trace_anchor, load_trace_anchor.
+        assert_eq!(receipt_fns, 5, "receipts-CF functions");
+    }
+
+    /// More orphans than one batch: every one is deleted, across batches.
+    #[tokio::test]
+    async fn rocksdb_sweep_deletes_in_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = RocksDbBackend::open(dir.path()).unwrap();
+        let n = SWEEP_BATCH * 2 + 500;
+        for i in 0..n {
+            backend
+                .store_trace_anchor(&format!("gone-{i}"), b"a")
+                .await
+                .unwrap();
+        }
+        backend.save_session(&sample_session("live")).await.unwrap();
+        backend.store_trace_anchor("live", b"a").await.unwrap();
+        assert_eq!(backend.sweep_orphan_trace_anchors().await.unwrap(), n);
+        assert_eq!(backend.sweep_orphan_trace_anchors().await.unwrap(), 0);
+        assert!(backend.load_trace_anchor("live").await.unwrap().is_some());
+        assert_eq!(backend.load_trace_anchor("gone-0").await.unwrap(), None);
     }
 }

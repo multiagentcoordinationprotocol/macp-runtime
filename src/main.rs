@@ -244,6 +244,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         PathBuf::from(std::env::var("MACP_DATA_DIR").unwrap_or_else(|_| ".macp-data".into()));
     let strict_recovery = std::env::var("MACP_STRICT_RECOVERY").ok().as_deref() == Some("1");
 
+    // Opt-in durable-data retention: 0 (default) keeps history forever.
+    // Read before the backend is built: Redis expires trace-anchor keys
+    // only when sessions are garbage-collected.
+    let disk_retention_secs: u64 = std::env::var("MACP_SESSION_DISK_RETENTION_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
     let backend_name = std::env::var("MACP_STORAGE_BACKEND").unwrap_or_else(|_| "file".into());
     let storage: Arc<dyn StorageBackend> = if memory_only {
         Arc::new(MemoryBackend)
@@ -265,7 +273,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "redis" => {
                 let url = std::env::var("MACP_REDIS_URL")
                     .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-                Arc::new(macp_runtime::storage::RedisBackend::connect(&url, "macp").await?)
+                Arc::new(
+                    macp_runtime::storage::RedisBackend::connect(&url, "macp")
+                        .await?
+                        .with_disk_retention_secs(disk_retention_secs),
+                )
             }
             other => {
                 return Err(format!(
@@ -324,6 +336,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
         recovery_replay_mismatches = report.replay_mismatches;
+    }
+
+    // Trace anchors orphaned by a binary that predates them (its disk GC
+    // deleted sessions but not their anchors): swept once, after recovery
+    // and off the serving path. Only when sessions are ever GC'd, since
+    // nothing is orphaned otherwise. Backends that cannot orphan one do
+    // nothing.
+    if !memory_only && disk_retention_secs > 0 {
+        let sweep_storage = Arc::clone(&storage);
+        tokio::spawn(async move {
+            match sweep_storage.sweep_orphan_trace_anchors().await {
+                Ok(0) => {}
+                Ok(count) => tracing::info!(count, "removed orphaned trace anchors"),
+                Err(e) => tracing::warn!(error = %e, "trace-anchor orphan sweep failed"),
+            }
+        });
     }
 
     #[cfg(feature = "otel")]
@@ -491,11 +519,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3600);
-    // Opt-in durable-data retention: 0 (default) keeps history forever.
-    let disk_retention_secs: u64 = std::env::var("MACP_SESSION_DISK_RETENTION_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
     let cleanup_runtime = runtime.clone();
     let cleanup_handle = tokio::spawn(async move {
         let mut interval =

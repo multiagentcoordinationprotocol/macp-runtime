@@ -158,4 +158,10 @@ Risk tiers: P0 simple; P1-P6 complex; P7 simple. Each phase is implemented by a 
   - Files: src/telemetry/{anchor,transition,instruments,mod,process}.rs, src/{metrics,runtime,server}.rs, tests/{otel_transitions,otel_replay_equivalence,otel_process}.rs, docs/{deployment,embedding}.md, ASSUMPTIONS.md.
   - Tests: workspace 1122, otel 408.
   - Next: P5.
+- 2026-10-31 P5 DONE. PASS in round 1 (Opus verifier, complex phase gated alone).
+  - Before commit, applied the verifier's minor notes: anchor stored only after the session snapshot (closes the sweep race); RocksDB sweep moved to spawn_blocking with batches of 1,000; new failing-anchor-storage test (messages accepted, spans unlinked, nothing rolled back); ASSUMPTIONS entries completed.
+  - Files: crates/macp-storage/src/storage/{mod,file,rocksdb,redis_backend,memory}.rs, src/{runtime,main}.rs, src/telemetry/anchor.rs, tests/{otel_anchor_restart,otel_replay_equivalence,otel_transitions}.rs, tests/support/counting_backend.rs, docs/deployment.md, ASSUMPTIONS.md.
+  - Tests: workspace 1126, otel 417, macp-storage rocksdb 67, rocksdb+redis against a live temporary redis 74 (executor run).
+  - Semver: additive (3 defaulted trait methods, 1 builder).
+  - Next: P6.
 

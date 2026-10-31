@@ -9,6 +9,9 @@ use super::{ReceiptWrite, StorageBackend};
 pub struct RedisBackend {
     conn: redis::aio::MultiplexedConnection,
     prefix: String,
+    /// `MACP_SESSION_DISK_RETENTION_SECS`: when non-zero, trace-anchor keys
+    /// get an expiry (see [`Self::anchor_expiry_secs`]).
+    disk_retention_secs: u64,
 }
 
 impl RedisBackend {
@@ -32,7 +35,36 @@ impl RedisBackend {
         Ok(Self {
             conn,
             prefix: prefix.into(),
+            disk_retention_secs: 0,
         })
+    }
+
+    /// Tell the backend the runtime's disk retention
+    /// (`MACP_SESSION_DISK_RETENTION_SECS`). With retention > 0 sessions are
+    /// garbage-collected, and a binary that predates trace anchors deletes
+    /// a session without its anchor key; the key is therefore written with
+    /// an expiry, so such an orphan expires by itself. With 0 (the default)
+    /// nothing is ever collected, and the key has no expiry.
+    pub fn with_disk_retention_secs(mut self, secs: u64) -> Self {
+        self.disk_retention_secs = secs;
+        self
+    }
+
+    /// The expiry of a trace-anchor key, or `None` for no expiry: the disk
+    /// retention, plus the longest TTL a session may bind
+    /// (`macp_core::session::MAX_TTL_MS`), plus one hour of slack. It never
+    /// bounds a live session's lifetime, only how long an orphan survives;
+    /// a session suspended past the slack loses only its span links.
+    fn anchor_expiry_secs(&self) -> Option<u64> {
+        (self.disk_retention_secs > 0).then(|| {
+            self.disk_retention_secs
+                .saturating_add((macp_core::session::MAX_TTL_MS / 1000) as u64)
+                .saturating_add(3600)
+        })
+    }
+
+    fn anchor_key(&self, session_id: &str) -> String {
+        format!("{}:anchor:{}", self.prefix, session_id)
     }
 
     fn session_key(&self, session_id: &str) -> String {
@@ -104,6 +136,7 @@ impl StorageBackend for RedisBackend {
             .del(self.session_key(session_id))
             .del(self.log_key(session_id))
             .del(self.receipt_key(session_id))
+            .del(self.anchor_key(session_id))
             .srem(self.index_key(), session_id)
             .exec_async(&mut conn)
             .await
@@ -141,6 +174,25 @@ impl StorageBackend for RedisBackend {
 
     fn receipts_durable(&self) -> bool {
         true
+    }
+
+    async fn store_trace_anchor(&self, session_id: &str, anchor: &[u8]) -> io::Result<()> {
+        super::check_anchor_session_id(session_id)?;
+        let mut conn = self.conn.clone();
+        let key = self.anchor_key(session_id);
+        match self.anchor_expiry_secs() {
+            Some(secs) => conn.set_ex::<_, _, ()>(key, anchor, secs).await,
+            None => conn.set::<_, _, ()>(key, anchor).await,
+        }
+        .map_err(io::Error::other)
+    }
+
+    async fn load_trace_anchor(&self, session_id: &str) -> io::Result<Option<Vec<u8>>> {
+        super::check_anchor_session_id(session_id)?;
+        let mut conn = self.conn.clone();
+        conn.get(self.anchor_key(session_id))
+            .await
+            .map_err(io::Error::other)
     }
 
     async fn list_session_ids(&self) -> io::Result<Vec<String>> {
@@ -266,6 +318,7 @@ mod tests {
                 .del(backend.session_key(id))
                 .del(backend.log_key(id))
                 .del(backend.receipt_key(id))
+                .del(backend.anchor_key(id))
                 .exec_async(&mut conn)
                 .await;
         }
@@ -364,6 +417,53 @@ mod tests {
         };
         let backend = std::sync::Arc::new(backend);
         crate::storage::receipt_contract::one_winner_under_concurrency(backend.clone(), "r1").await;
+        cleanup(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn redis_trace_anchor_contract() {
+        let Some(backend) = make_backend().await else {
+            eprintln!("skipping redis test: MACP_TEST_REDIS_URL not set");
+            return;
+        };
+        crate::storage::anchor_contract::store_load_delete(&backend, "a1", true).await;
+        cleanup(&backend).await;
+    }
+
+    /// The anchor key expires only when sessions are garbage-collected
+    /// (disk retention > 0): `TTL` is -1 (no expiry) with retention 0, and
+    /// retention + the longest session TTL + 1 h otherwise.
+    #[tokio::test]
+    async fn redis_anchor_key_expires_only_with_disk_retention() {
+        let Some(backend) = make_backend().await else {
+            eprintln!("skipping redis test: MACP_TEST_REDIS_URL not set");
+            return;
+        };
+        let ttl_of = |backend: &RedisBackend, id: &str| {
+            let key = backend.anchor_key(id);
+            let mut conn = backend.conn.clone();
+            async move {
+                redis::cmd("TTL")
+                    .arg(key)
+                    .query_async::<i64>(&mut conn)
+                    .await
+                    .unwrap()
+            }
+        };
+        backend.create_session_storage("keep").await.unwrap();
+        backend.store_trace_anchor("keep", b"a").await.unwrap();
+        assert_eq!(
+            ttl_of(&backend, "keep").await,
+            -1,
+            "no expiry at retention 0"
+        );
+
+        let backend = backend.with_disk_retention_secs(600);
+        backend.create_session_storage("gc").await.unwrap();
+        backend.store_trace_anchor("gc", b"a").await.unwrap();
+        let expected = 600 + 86_400 + 3_600;
+        let ttl = ttl_of(&backend, "gc").await;
+        assert!(ttl > expected - 60 && ttl <= expected, "ttl {ttl}");
         cleanup(&backend).await;
     }
 }
