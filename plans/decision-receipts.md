@@ -546,7 +546,12 @@ and nothing is releasable until the RPCs are real. `/implement` may decide other
   - The CLI README.
 
 ### P6 — Hosted key and live verification (post-release)
-- **Status:** TODO
+- **Status:** DONE (2026-10-31). The hosted runtime (Railway macp-scenario-runner/macp-runtime) runs ghcr `:0.11` with `MACP_RECEIPT_SIGNING_KEY` (Ed25519, set from a local file that was then deleted, never printed), `MACP_RECEIPT_SIGNING_KID=hosted-1` and `MACP_RUNTIME_ID=macp-hosted`. The startup log reads `decision receipts are signed kid="hosted-1" issuer="runtime:macp-hosted"`.
+  - **Live check** (run by the spec session through the hosted control plane, because the runtime is private-network only and its container has no download tools):
+    - GetReceiptKeys returned exactly kid hosted-1, OKP/Ed25519, x `UNjCEbTPCE_UGjfDmZ_0ls3XC1oCFnDCD_CQ9AaIlZk`, with no `d`.
+    - The 4 newest resolved runs' receipts carry issuer `runtime:macp-hosted` and verify as **attested** (integrity match, attestations ["valid"]) with the TS SDK verifier, which is held to the same spec vectors as `macp verify`.
+    - Older runs returned NOT_FOUND. The hosted volume holds 5 sessions, all replayed by 0.11, with no deletions since 2026-10-29; the missing runs are being checked against the volume's 2026-10-26 creation.
+  - **Divergence:** the verifier was the TS SDK rather than `macp verify`.
 - **human-run:** no. Session standing rules allow Railway changes, and no human-held credential is
   involved.
 - **BLOCKED-ON:** the 0.11.0 release, which needs the user's explicit approval in-session.
