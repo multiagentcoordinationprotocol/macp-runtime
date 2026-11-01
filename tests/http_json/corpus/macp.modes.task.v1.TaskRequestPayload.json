@@ -1,0 +1,20 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "deadline_unix_ms": 9007199254740993,
+        "input": "AAECAwQ=",
+        "instructions": "instructions-✓",
+        "requested_assignee": "requested_assignee-✓",
+        "task_id": "task_id-✓",
+        "title": "title-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.modes.task.v1.TaskRequestPayload"
+}

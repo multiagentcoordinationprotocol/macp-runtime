@@ -1,0 +1,19 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "message": "message-✓",
+        "partial_output": "AAECAwQ=",
+        "progress": 0.25,
+        "status": "status-✓",
+        "task_id": "task_id-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.modes.task.v1.TaskUpdatePayload"
+}

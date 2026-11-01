@@ -1,0 +1,79 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "candidate": {
+          "resolution": "AAECAwQ=",
+          "resolved_by_history_index": 18446744073709551615,
+          "resolved_by_message_id": "resolved_by_message_id-✓",
+          "resolved_by_message_type": "resolved_by_message_type-✓",
+          "state": "SESSION_STATE_CANCELLED"
+        },
+        "candidate_policy_id": "candidate_policy_id-✓",
+        "denials": [
+          {
+            "details": "AAECAwQ=",
+            "history_index": 18446744073709551615,
+            "message_id": "message_id-✓"
+          },
+          {
+            "details": "AAECAwQ=",
+            "history_index": 18446744073709551615,
+            "message_id": "message_id-✓"
+          }
+        ],
+        "entries": [
+          {
+            "candidate": {
+              "details": "AAECAwQ=",
+              "error_code": "error_code-✓",
+              "kind": "KIND_NO_SESSION",
+              "state": "SESSION_STATE_CANCELLED"
+            },
+            "history_index": 18446744073709551615,
+            "message_id": "message_id-✓",
+            "message_type": "message_type-✓",
+            "recorded": {
+              "details": "AAECAwQ=",
+              "error_code": "error_code-✓",
+              "kind": "KIND_NO_SESSION",
+              "state": "SESSION_STATE_CANCELLED"
+            }
+          },
+          {
+            "candidate": {
+              "details": "AAECAwQ=",
+              "error_code": "error_code-✓",
+              "kind": "KIND_NO_SESSION",
+              "state": "SESSION_STATE_CANCELLED"
+            },
+            "history_index": 18446744073709551615,
+            "message_id": "message_id-✓",
+            "message_type": "message_type-✓",
+            "recorded": {
+              "details": "AAECAwQ=",
+              "error_code": "error_code-✓",
+              "kind": "KIND_NO_SESSION",
+              "state": "SESSION_STATE_CANCELLED"
+            }
+          }
+        ],
+        "first_divergence": 18446744073709551615,
+        "recorded": {
+          "resolution": "AAECAwQ=",
+          "resolved_by_history_index": 18446744073709551615,
+          "resolved_by_message_id": "resolved_by_message_id-✓",
+          "resolved_by_message_type": "resolved_by_message_type-✓",
+          "state": "SESSION_STATE_CANCELLED"
+        },
+        "recorded_policy_id": "recorded_policy_id-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.WhatIfReplayResponse"
+}

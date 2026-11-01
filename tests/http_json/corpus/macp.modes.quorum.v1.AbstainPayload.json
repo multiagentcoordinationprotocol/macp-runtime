@@ -1,0 +1,16 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "reason": "reason-✓",
+        "request_id": "request_id-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.modes.quorum.v1.AbstainPayload"
+}

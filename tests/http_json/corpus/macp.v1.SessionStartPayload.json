@@ -1,0 +1,39 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "configuration_version": "configuration_version-✓",
+        "context_id": "context_id-✓",
+        "extensions": {
+          "k1": "AAECAwQ=",
+          "k2": "AAECAwQ="
+        },
+        "intent": "intent-✓",
+        "max_suspend_ms": 9007199254740993,
+        "mode_version": "mode_version-✓",
+        "participants": [
+          "participants-✓",
+          "participants-✓"
+        ],
+        "policy_version": "policy_version-✓",
+        "roots": [
+          {
+            "name": "name-✓",
+            "uri": "uri-✓"
+          },
+          {
+            "name": "name-✓",
+            "uri": "uri-✓"
+          }
+        ],
+        "ttl_ms": 9007199254740993
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.SessionStartPayload"
+}

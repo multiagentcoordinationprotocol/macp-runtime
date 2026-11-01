@@ -88,6 +88,19 @@ otel = [
 # enabled in the published Docker image or a default `cargo build` -- see
 # docs/deployment.md's "gRPC reflection" note under Monitoring.
 reflection = ["dep:tonic-reflection"]
+# The HTTP/JSON binding (RFC-MACP-0006 §4) and its canonical JSON codec
+# (RFC-MACP-0001 §10), compiled into `src/http/`. Off by default; at runtime
+# the listener starts only when `MACP_HTTP_BIND_ADDR` is set. The hyper/rustls
+# dependencies are used by the listener itself and are declared here once.
+http-listener = [
+    "dep:prost-reflect",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
+    "dep:tokio-rustls",
+    "dep:http",
+    "dep:bytes",
+]
 
 [dependencies]
 macp-pb = { workspace = true }
@@ -136,6 +149,17 @@ tower-http = { version = "0.6", features = ["trace"], optional = true }
 http = { version = "1", optional = true }
 tower = { version = "0.5", features = ["util"], optional = true }
 tonic-reflection = { version = "0.14", optional = true }
+# `http-listener` only. prost-reflect supplies descriptors, `DynamicMessage`
+# and generic wire decoding; the JSON mapping itself is in-house
+# (`src/http/json/`), so its `serde` feature stays off. The 0.16 line depends
+# on prost 0.14, the workspace prost -- `cargo tree -d` shows one prost.
+prost-reflect = { version = "0.16", default-features = false, optional = true }
+# Versions match what tonic already pulls into Cargo.lock.
+hyper = { version = "1.8", features = ["server", "http1", "http2"], optional = true }
+hyper-util = { version = "0.1.20", features = ["server", "server-auto", "server-graceful", "service", "tokio", "http1", "http2"], optional = true }
+http-body-util = { version = "0.1.3", optional = true }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
+bytes = { version = "1.11", optional = true }
 macp-proto = { workspace = true }
 
 [dev-dependencies]

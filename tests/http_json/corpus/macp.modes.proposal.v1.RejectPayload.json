@@ -1,0 +1,17 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "proposal_id": "proposal_id-✓",
+        "reason": "reason-✓",
+        "terminal": true
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.modes.proposal.v1.RejectPayload"
+}

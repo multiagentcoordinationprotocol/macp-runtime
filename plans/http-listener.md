@@ -326,7 +326,7 @@ ship first.
 - **Docs:** none (internal); doc comments on the seams.
 
 ### P3 — Canonical JSON codec (RFC-0001 §10)
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; prost-reflect 0.16.5; divergences: deps-isolation checks *direct* deps since hyper/tokio-rustls arrive via tonic; timestamps emit ms only when non-zero (matches vendored examples, §10.11 allows); `decode_request` uses a raw-text JSON scanner so integer fields are judged on the number text (§10.9, `arbitrary_precision` rejected: feature unification); `chrono` added to the codec allowlist; P5 MUST route bodies through `decode_request`/`decode_message_text`, never the `Value` entry points)
 - **Risk:** complex
 - **Delivers:** `src/http/json/` behind `http-listener`: `decode_request(method, &[u8]) -> DynamicMessage`,
   `encode_response(&DynamicMessage) -> Vec<u8>`, `envelope_from_json`, `envelope_to_json`, and

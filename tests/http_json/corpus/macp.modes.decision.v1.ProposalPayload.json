@@ -1,0 +1,18 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "option": "option-✓",
+        "proposal_id": "proposal_id-✓",
+        "rationale": "rationale-✓",
+        "supporting_data": "AAECAwQ="
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.modes.decision.v1.ProposalPayload"
+}

@@ -1,0 +1,16 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "cancelled_by": "cancelled_by-✓",
+        "reason": "reason-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.SessionCancelPayload"
+}

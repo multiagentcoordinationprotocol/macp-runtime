@@ -1,0 +1,22 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "details": "AAECAwQ=",
+        "proposal_id": "proposal_id-✓",
+        "summary": "summary-✓",
+        "tags": [
+          "tags-✓",
+          "tags-✓"
+        ],
+        "title": "title-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.modes.proposal.v1.ProposalPayload"
+}

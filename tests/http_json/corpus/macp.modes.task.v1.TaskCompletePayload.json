@@ -1,0 +1,18 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "assignee": "assignee-✓",
+        "output": "AAECAwQ=",
+        "summary": "summary-✓",
+        "task_id": "task_id-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.modes.task.v1.TaskCompletePayload"
+}

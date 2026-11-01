@@ -1,0 +1,43 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "descriptors": [
+          {
+            "description": "description-✓",
+            "mode": "mode-✓",
+            "policy_id": "policy_id-✓",
+            "registered_at_unix_ms": 9007199254740993,
+            "rules": {
+              "voting": {
+                "algorithm": "majority",
+                "threshold": 0.5
+              }
+            },
+            "schema_version": 7
+          },
+          {
+            "description": "description-✓",
+            "mode": "mode-✓",
+            "policy_id": "policy_id-✓",
+            "registered_at_unix_ms": 9007199254740993,
+            "rules": {
+              "voting": {
+                "algorithm": "majority",
+                "threshold": 0.5
+              }
+            },
+            "schema_version": 7
+          }
+        ],
+        "observed_at_unix_ms": 9007199254740993
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.WatchPoliciesResponse"
+}

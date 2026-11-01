@@ -1,0 +1,18 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "change": {
+          "observed_at_unix_ms": 9007199254740993,
+          "registry": "registry-✓"
+        }
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.WatchModeRegistryResponse"
+}

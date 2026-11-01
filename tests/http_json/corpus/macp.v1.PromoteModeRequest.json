@@ -1,0 +1,16 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "mode": "mode-✓",
+        "promoted_mode_name": "promoted_mode_name-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.PromoteModeRequest"
+}

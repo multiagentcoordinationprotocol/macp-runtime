@@ -50,6 +50,11 @@ pub use macp_policy as policy;
 pub use macp_storage::{log_store, registry, storage};
 
 pub mod extensions;
+// The HTTP/JSON binding (RFC-MACP-0006 §4) and its canonical JSON codec
+// (RFC-MACP-0001 §10). Public only so its module docs are published; its
+// items are crate-internal or `#[doc(hidden)]`.
+#[cfg(feature = "http-listener")]
+pub mod http;
 // Crate-private: the ListSessions page-token codec is a transport detail of
 // `server.rs`, deliberately not part of the published API surface.
 mod pagination;

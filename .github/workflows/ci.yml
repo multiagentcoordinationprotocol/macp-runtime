@@ -331,6 +331,45 @@ jobs:
             fi
           done
 
+      # The HTTP/JSON listener (`http-listener`, plans/http-listener.md P3) is
+      # opt-in and root-crate only. The Seam crates never see its codec or
+      # TLS/HTTP stack, whatever their features; the root crate's default
+      # build has no prost-reflect at all and none of the feature's seven
+      # optional deps as a direct dependency. (hyper, hyper-util and
+      # tokio-rustls are already transitive through tonic's transport, so the
+      # default-build check is on direct edges, depth 1.)
+      - name: http-listener deps stay opt-in and out of the Seam crates
+        # Every match reads a captured variable through a here-string, never
+        # `echo | grep -q`: under pipefail, grep -q exiting on the first match
+        # SIGPIPEs the writer (status 141), which `if` would read as "no match"
+        # and pass a real leak.
+        run: |
+          set -euo pipefail
+          # ctree ARGS...: the cargo tree output with "(*)"/"(proc-macro)" notes stripped.
+          ctree() { local out; out=$(cargo tree "$@") || return 1; printf '%s\n' "$out" | sed 's/ ([^)]*)//'; }
+          for crate in macp-core macp-modes macp-pb macp-policy; do
+            deps=$(ctree -p "$crate" --edges normal --all-features)
+            if grep -qE "(prost-reflect|hyper-util|tokio-rustls) v" <<<"$deps"; then
+              echo "::error::$crate pulled an http-listener dependency"; exit 1
+            fi
+          done
+          deps=$(ctree -p macp-runtime --edges normal)
+          if grep -qE "prost-reflect v" <<<"$deps"; then
+            echo "::error::macp-runtime's default build pulled prost-reflect"; exit 1
+          fi
+          direct=$(ctree -p macp-runtime --edges normal --depth 1)
+          echo "$direct"
+          if grep -qE "^[├└]── (prost-reflect|hyper|hyper-util|http-body-util|tokio-rustls|http|bytes) v" <<<"$direct"; then
+            echo "::error::macp-runtime's default build has a direct http-listener dependency"; exit 1
+          fi
+          # ...and the feature does turn them on (the check above is not vacuous).
+          on=$(ctree -p macp-runtime --edges normal --depth 1 --features http-listener)
+          for dep in prost-reflect hyper hyper-util http-body-util tokio-rustls http bytes; do
+            if ! grep -qE "^[├└]── $dep v" <<<"$on"; then
+              echo "::error::http-listener no longer enables $dep"; exit 1
+            fi
+          done
+
       # Every workspace crate must publish at one lockstep version. Package
       # versions are structurally pinned via `version.workspace = true`, but the
       # `version` literals in `[workspace.dependencies]` for the internal crates
@@ -503,6 +542,22 @@ jobs:
 
       - name: Test reflection feature (descriptor set + service build)
         run: cargo test -p macp-runtime --features reflection --test reflection
+
+      # The HTTP/JSON listener and its canonical JSON codec
+      # (plans/http-listener.md), opt-in and non-default on the root crate:
+      # alone, and together with otel as the published image builds it.
+      - name: Clippy (http-listener feature)
+        run: |
+          cargo clippy -p macp-runtime --features http-listener --all-targets -- -D warnings
+          cargo clippy -p macp-runtime --features otel,http-listener --all-targets -- -D warnings
+
+      - name: Test http-listener feature
+        run: cargo test -p macp-runtime --features http-listener
+
+      - name: Rustdoc (http-listener feature, deny warnings)
+        run: cargo doc -p macp-runtime --no-deps --features http-listener
+        env:
+          RUSTDOCFLAGS: "-D warnings"
 
       # Both backends enabled together must also build at the root crate —
       # feature unification across the workspace is not covered by the

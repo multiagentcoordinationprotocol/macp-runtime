@@ -1,0 +1,18 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "accepted_by": "accepted_by-✓",
+        "handoff_id": "handoff_id-✓",
+        "implicit": true,
+        "reason": "reason-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.modes.handoff.v1.HandoffAcceptPayload"
+}

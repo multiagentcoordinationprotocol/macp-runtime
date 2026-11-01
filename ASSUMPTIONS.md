@@ -1573,3 +1573,55 @@
   - `SecurityLayer::with_rate_limits` (new, public, additive in `macp-auth`) lets the unit test set both buckets without process env; `cargo semver-checks` vs 0.11.0 reports no update required.
 - **Blast radius if wrong:** Low; all `pub(crate)` except the additive `LogStore::get_incoming_after_with_high_water` and `with_rate_limits`.
 - **Status:** UNCONFIRMED
+
+## P3: duplicate JSON object keys resolve to the last occurrence
+- **Plan:** `plans/http-listener.md` (P3 Edge cases: "duplicate JSON keys (serde_json keeps the last; document)")
+- **Assumed:** RFC-MACP-0001 §10 is silent on duplicate members; RFC 8259 §4 leaves the behaviour to the implementation.
+- **Chose:** the last value wins, as `serde_json` does: request bodies go through the codec's number-text-preserving parser (`decode::parse_json`, `BTreeMap` objects, `insert` overwrites), and the `serde_json::Value` entry points inherit `serde_json`'s own rule; documented in `src/http/json/mod.rs`, pinned by `tests/http_json.rs` `failure_paths` and the unit test `request_bodies_keep_number_text_end_to_end`. No rejection.
+- **Alternatives:** a custom parser that refuses duplicates with `INVALID_REQUEST` (stricter, but stock proto3 JSON parsers differ here too).
+- **Blast radius if wrong:** Low; a client relying on either behaviour is already non-portable.
+- **Status:** UNCONFIRMED
+
+## P3: integer fields are judged on the JSON number text (codec-local parser)
+- **Plan:** `plans/http-listener.md` (P3 Approach, numbers; RFC-MACP-0001 §10.9 "MUST NOT silently round")
+- **Assumed:** `serde_json` without `arbitrary_precision` holds any non-integer-literal number (`1e3`, `1000.0`, `1.00000000000000001`) as an `f64`, so integrality cannot be judged from a `serde_json::Value`. `arbitrary_precision` is not an option: Cargo feature unification would turn it on for every `serde_json` user in the build (policy registry rules, storage, conformance), changing `Number` behaviour well outside the codec.
+- **Chose:** `decode_request` parses the body with a small RFC 8259 parser in `src/http/json/decode.rs` (`parse_json`) that keeps every number token as text (strings are delegated to `serde_json::from_str::<String>` once delimited, depth capped at 128). Integer fields parse that text exactly (`parse_decimal_integer`), so `1.00000000000000001`, `9007199254740992.5` and the quoted forms are refused, while `1e3`, `"1e3"`, `1000.0` decode to 1000 and any in-range integer is exact above 2^53 in every notation. The `serde_json::Value` entry points (`decode_message`, `envelope_from_json`, `canonical_payload_bytes`) cannot see text, so for them an `f64` is accepted only when integral and `|v| < 2^53` (strict: 2^53 itself may be a rounded 2^53+1). No other module changes.
+- **Alternatives:** `serde_json/arbitrary_precision` (crate-wide blast radius, above); a `RawValue` walk (needs the `raw_value` feature, same unification concern, smaller).
+- **Blast radius if wrong:** Low; the parser is pinned against `serde_json` as an oracle on structure, escapes and malformed input by `request_bodies_keep_number_text_end_to_end`.
+- **Status:** UNCONFIRMED
+
+## P3: the codec uses `chrono`, an existing root dependency
+- **Plan:** `plans/http-listener.md` (P3, isolation of `src/http/json/`)
+- **Chose:** RFC 3339 `timestamp` parsing/formatting (§10.11(1)) uses `chrono`, already a non-optional `macp-runtime` dependency, so the `http-listener` feature adds no time crate. The isolation grep test bans transport/server items only; `chrono`, `serde_json`, `base64`, `prost` and `prost-reflect` are the codec's allowed imports (listed in the test's comment).
+- **Blast radius if wrong:** None.
+- **Status:** UNCONFIRMED
+
+## P3: spec ambiguities resolved in the codec
+- **Plan:** `plans/http-listener.md` (P3)
+- **Assumed / Chose:**
+  - **Error classification.** A failure in the Envelope's two transforms (`timestamp`, `payload`/`payload_b64`, including a wrong type *inside* a JSON payload, bad base64, no schema, both/neither forms) is `JsonError::InvalidEnvelope` carrying the Envelope's `session_id`/`message_id`, for P5 to report in band; any other wrong type (an Envelope's own `mode: 1`, a request field) is `InvalidRequest` (request-level 400). The plan names only the payload cases; the timestamp is put with them as an Envelope-level decision.
+  - **`timestamp_unix_ms` as a JSON key** is an unrecognized member (ignored, §10.6): §10.1/§10.11 rename the field to `timestamp`, the only JSON name it has.
+  - **Unknown enum name in a map value** drops the entry, like a repeated element (§10.4 names only singular and repeated fields).
+  - **Non-string map keys** (none in MACP today) order numerically in the canonical bytes; §10.13(5) speaks of "the key's UTF-8 bytes", which only string keys have on the wire.
+  - **Envelope `timestamp` output** is RFC 3339 UTC `Z` with milliseconds only when non-zero (`chrono` `AutoSi`: `20:24:01Z`, `20:24:01.020Z`), matching the vendored examples byte-for-byte; the plan said "with ms". A value outside years 0000-9999 (RFC 3339 cannot write it) is clamped to that range on output, so it is the one lossy case.
+  - **`rules`**: a string that parses as a JSON object and the inlined object both become compact `serde_json` text (sorted keys), so they decode to the same descriptor; a string that is not a JSON object is kept verbatim (the registry judges it) and emitted as the string form. Any other JSON type is `InvalidRequest`.
+  - **A decoded field without presence at its default is not stored**, so a JSON-decoded `DynamicMessage` equals the same message decoded from protobuf (`-0.0` is stored: §10.13(2)).
+  - **A second member of the same oneof** is `InvalidRequest`, as in proto3 JSON.
+  - **Payload selection** maps any `macp.mode.<id>.v1` to `macp.modes.<id>.v1` (so `macp.mode.multi_round.v1` also resolves) and refuses `mode`/`message_type` values that are not single identifiers, so no crafted name reaches outside the table.
+- **Blast radius if wrong:** Low; each is a local rule in `src/http/json/` pinned by a unit test.
+- **Status:** UNCONFIRMED
+
+## P3: deps-isolation checks direct edges for the default build
+- **Plan:** `plans/http-listener.md` (P3 Files, `deps-isolation`: "not in `cargo tree -p macp-runtime -e normal` with default features")
+- **Assumed:** `hyper`, `hyper-util`, `http-body-util` and `tokio-rustls` are already in the default build transitively through tonic's `transport` + `tls-ring` (verified with `cargo tree`), so the plan's whole-tree check cannot pass.
+- **Chose:** the Seam crates (`macp-core`, `macp-modes`, `macp-pb`, `macp-policy`, all features) must contain none of `prost-reflect`/`hyper-util`/`tokio-rustls`; `macp-runtime` default must contain no `prost-reflect` anywhere and none of the feature's seven deps as a **direct** (depth 1) dependency; and the feature must still enable all seven (non-vacuous).
+- **Alternatives:** drop the root-crate check entirely.
+- **Blast radius if wrong:** None at runtime; a CI-check shape.
+- **Status:** UNCONFIRMED
+
+## P3: conformance-fixture envelopes are derived at test time, not copied into the corpus
+- **Plan:** `plans/http-listener.md` (P3 acceptance: corpus = "the vendored examples, the conformance fixtures' envelopes, and one maximal and one all-defaults value per message type")
+- **Assumed:** copying the fixtures' envelopes into `tests/http_json/corpus/` would duplicate the vendored, drift-checked `tests/conformance/` (and the HTTP examples in `tests/http/examples/`) with no drift check.
+- **Chose:** `tests/http_json/corpus/` holds one file per message type (every request/response type of the service, every payload, `Envelope`, `MACPError`): maximal, all-defaults, and one case per extra oneof member, regenerated only with `MACP_REGEN_GOLDEN=1`. The vendored examples and the conformance envelopes (payload bytes from `macp_conform::encode::encode_payload`, sent as `payload_b64`) are read in place by their own fixpoint tests; the latter also assert the output side picks a JSON payload that converts back to the same bytes.
+- **Blast radius if wrong:** Low; test layout only.
+- **Status:** UNCONFIRMED

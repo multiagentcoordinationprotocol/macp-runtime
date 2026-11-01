@@ -1,0 +1,61 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "manifest": {
+          "agent_id": "agent_id-✓",
+          "description": "description-✓",
+          "input_content_types": [
+            "input_content_types-✓",
+            "input_content_types-✓"
+          ],
+          "metadata": {
+            "k1": "metadata-✓",
+            "k2": "metadata-✓"
+          },
+          "output_content_types": [
+            "output_content_types-✓",
+            "output_content_types-✓"
+          ],
+          "supported_modes": [
+            "supported_modes-✓",
+            "supported_modes-✓"
+          ],
+          "title": "title-✓",
+          "transport_endpoints": [
+            {
+              "content_types": [
+                "content_types-✓",
+                "content_types-✓"
+              ],
+              "metadata": {
+                "k1": "metadata-✓",
+                "k2": "metadata-✓"
+              },
+              "transport": "transport-✓",
+              "uri": "uri-✓"
+            },
+            {
+              "content_types": [
+                "content_types-✓",
+                "content_types-✓"
+              ],
+              "metadata": {
+                "k1": "metadata-✓",
+                "k2": "metadata-✓"
+              },
+              "transport": "transport-✓",
+              "uri": "uri-✓"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.GetManifestResponse"
+}

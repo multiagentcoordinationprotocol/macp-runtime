@@ -1,0 +1,19 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "code": "code-✓",
+        "details": "AAECAwQ=",
+        "message": "message-✓",
+        "message_id": "message_id-✓",
+        "session_id": "session_id-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.MACPError"
+}

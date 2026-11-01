@@ -1,0 +1,24 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "roots": [
+          {
+            "name": "name-✓",
+            "uri": "uri-✓"
+          },
+          {
+            "name": "name-✓",
+            "uri": "uri-✓"
+          }
+        ]
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.ListRootsResponse"
+}

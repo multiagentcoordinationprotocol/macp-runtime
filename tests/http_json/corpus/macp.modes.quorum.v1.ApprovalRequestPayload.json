@@ -1,0 +1,19 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "action": "action-✓",
+        "details": "AAECAwQ=",
+        "request_id": "request_id-✓",
+        "required_approvals": 7,
+        "summary": "summary-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.modes.quorum.v1.ApprovalRequestPayload"
+}
