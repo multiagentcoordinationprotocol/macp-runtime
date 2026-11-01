@@ -55,7 +55,7 @@ jobs:
           ref: ${{ env.TAG }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
@@ -78,7 +78,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/macp" crates/macp-cli/README.md LICENSE* "$name"/
           tar -czf "$name.tar.gz" "$name"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macp-${{ matrix.target }}
           path: macp-${{ inputs.version }}-${{ matrix.target }}.tar.gz
@@ -91,7 +91,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: macp-*
           merge-multiple: true
