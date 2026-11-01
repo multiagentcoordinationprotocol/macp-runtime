@@ -1,0 +1,13 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {}
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.WatchSignalsRequest"
+}

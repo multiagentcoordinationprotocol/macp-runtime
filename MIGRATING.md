@@ -14,7 +14,7 @@ Every release that may break an embeddable crate has an entry here, under a
 introduces a breaking API change must add it, and a release PR with a breaking
 bump fails without it. Patch releases have no entry.
 
-## 0.12.0 — gRPC compacted resume, spec re-pin, SIGTERM drain
+## 0.12.0 — gRPC compacted resume, spec re-pin, SIGTERM drain, HTTP/JSON binding
 
 ### gRPC wire (`macp-runtime` server)
 
@@ -28,6 +28,12 @@ bump fails without it. Patch releases have no entry.
   the details are built by the server.
 - `macp_runtime::policy_engine::require_allow` stamps `macp-error-code:
   FORBIDDEN` on the `PERMISSION_DENIED` it returns. The gRPC code is unchanged.
+- `WatchPolicies` now **requires a credential**, like `ListPolicies` and
+  `GetPolicy`, whose descriptors it streams (#274). An unauthenticated call is
+  refused with `UNAUTHENTICATED` before the stream opens; it previously
+  streamed the full policy registry to anyone. Send the same `authorization`
+  header you send to `ListPolicies`. `WatchModeRegistry` and `WatchRoots` stay
+  open, like `ListModes`/`ListRoots`.
 
 ### `macp-runtime` binary: SIGTERM drains
 
@@ -41,6 +47,30 @@ bump fails without it. Patch releases have no entry.
   `MACP_METRICS_ADDR` port closes as soon as the first signal arrives. No
   library API changed; the shutdown signal is private to the binary
   (`src/shutdown.rs`). See [docs/deployment.md](docs/deployment.md#graceful-shutdown).
+
+### `macp-runtime`: HTTP/JSON binding (`http-listener` feature, opt-in)
+
+- New non-default Cargo feature `http-listener` on the root `macp-runtime`
+  crate: the RFC-MACP-0006 §4 HTTP/JSON binding, a second listener over the
+  same `MacpServer`. The embeddable crates (`macp-core`, `macp-modes`,
+  `macp-policy`, `macp-pb`) gain no dependency and no API; a default build of
+  `macp-runtime` is unchanged.
+- At runtime the listener starts only when `MACP_HTTP_BIND_ADDR` is set.
+  Unset, it opens no socket and `GetManifest` is byte-identical to a build
+  without the feature. A binary **without** the feature now refuses to start
+  when `MACP_HTTP_BIND_ADDR` is set, instead of ignoring it.
+- Published images after 0.11.0 are built with `otel,http-listener` (the
+  `Dockerfile` default changed from empty to `otel,http-listener`; pass
+  `--build-arg CARGO_FEATURES=` for the plain binary) and `EXPOSE 8080`.
+- `macp_runtime::http` is public so its documentation is published; its
+  items are not a stable library API (`MacpServer::with_http_endpoint` is
+  `#[doc(hidden)]`). For SDKs the wire contract is the binding itself:
+  [docs/API.md](docs/API.md#httpjson-binding). Operators: the variables,
+  TLS and reverse-proxy notes are in
+  [docs/deployment.md](docs/deployment.md#httpjson-listener).
+- `macp-conform` gains an `http` feature and `--transport http`, which drives
+  the conformance fixtures through the HTTP binding
+  ([crates/macp-conform/README.md](crates/macp-conform/README.md)).
 
 ### Fixtures and vectors
 

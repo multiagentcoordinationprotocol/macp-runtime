@@ -1,0 +1,19 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "assignee": "assignee-✓",
+        "error_code": "error_code-✓",
+        "reason": "reason-✓",
+        "retryable": true,
+        "task_id": "task_id-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.modes.task.v1.TaskFailPayload"
+}

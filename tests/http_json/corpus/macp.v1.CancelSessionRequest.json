@@ -1,0 +1,16 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "reason": "reason-✓",
+        "session_id": "session_id-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.CancelSessionRequest"
+}

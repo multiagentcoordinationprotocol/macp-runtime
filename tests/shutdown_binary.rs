@@ -18,8 +18,7 @@
 #![cfg(unix)]
 
 use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use macp_runtime::pb::{Envelope, SendRequest, SendResponse, SessionStartPayload};
@@ -30,60 +29,9 @@ use tonic::transport::Channel;
 
 const SID: &str = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f";
 
-/// Kills the child if a test panics before it exits.
-struct Child(std::process::Child);
-impl Drop for Child {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-impl Child {
-    fn signal(&self, sig: &str) {
-        let status = Command::new("kill")
-            .args([&format!("-{sig}"), &self.0.id().to_string()])
-            .status()
-            .expect("run kill");
-        assert!(status.success(), "kill -{sig} failed");
-    }
-
-    fn alive(&mut self) -> bool {
-        self.0.try_wait().unwrap().is_none()
-    }
-
-    /// Wait (bounded) for exit; `None` if still running after `limit`.
-    fn wait_exit(&mut self, limit: Duration) -> Option<ExitStatus> {
-        let deadline = Instant::now() + limit;
-        while Instant::now() < deadline {
-            if let Some(status) = self.0.try_wait().unwrap() {
-                return Some(status);
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        None
-    }
-
-    /// Combined stdout + stderr. Call after the process exited.
-    fn output(&mut self) -> String {
-        let mut out = String::new();
-        if let Some(mut s) = self.0.stdout.take() {
-            s.read_to_string(&mut out).ok();
-        }
-        if let Some(mut s) = self.0.stderr.take() {
-            s.read_to_string(&mut out).ok();
-        }
-        out
-    }
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
+#[path = "support/binary_child.rs"]
+mod binary_child;
+use binary_child::{addr_in_use, field, free_port, Child, SPAWN_ATTEMPTS};
 
 struct Runtime {
     child: Child,
@@ -94,34 +42,53 @@ struct Runtime {
 
 /// Spawn the binary in dev mode with a scrubbed environment, the metrics
 /// endpoint on, and the given drain deadline; return once both gRPC (health
-/// SERVING) and the metrics port answer.
+/// SERVING) and the metrics port answer. The metrics endpoint binds port 0
+/// and its address is read from its log line; the gRPC port is probed, and a
+/// probe that loses the race (`AddrInUse`) is respawned with a fresh port, at
+/// most `SPAWN_ATTEMPTS` times.
 async fn start(drain_secs: u64) -> Runtime {
-    let scratch = tempfile::tempdir().unwrap();
-    let grpc = format!("127.0.0.1:{}", free_port());
-    let metrics = format!("127.0.0.1:{}", free_port());
-    let mut command = Command::new(env!("CARGO_BIN_EXE_macp-runtime"));
-    command.env_clear();
-    if let Ok(path) = std::env::var("PATH") {
-        command.env("PATH", path);
+    for attempt in 1..=SPAWN_ATTEMPTS {
+        let scratch = tempfile::tempdir().unwrap();
+        let grpc = format!("127.0.0.1:{}", free_port());
+        let mut command = Command::new(env!("CARGO_BIN_EXE_macp-runtime"));
+        command.env_clear();
+        if let Ok(path) = std::env::var("PATH") {
+            command.env("PATH", path);
+        }
+        command
+            .current_dir(scratch.path())
+            .env("MACP_ALLOW_INSECURE", "1")
+            .env("MACP_MEMORY_ONLY", "1")
+            .env("MACP_BIND_ADDR", &grpc)
+            .env("MACP_METRICS_ADDR", "127.0.0.1:0")
+            .env("MACP_SHUTDOWN_DRAIN_SECS", drain_secs.to_string())
+            .env("RUST_LOG", "info");
+        let mut child = Child::spawn(&mut command);
+        let metrics = match child.wait_line("metrics endpoint listening", Duration::from_secs(30)) {
+            Ok(line) => field(&line, "metrics_addr").expect("metrics_addr= in the line"),
+            Err(out) => {
+                assert!(
+                    addr_in_use(&out) && attempt < SPAWN_ATTEMPTS,
+                    "runtime exited before ready; output:\n{out}"
+                );
+                continue;
+            }
+        };
+        let mut rt = Runtime {
+            child,
+            grpc,
+            metrics,
+            _scratch: scratch,
+        };
+        match wait_ready(&mut rt).await {
+            Ok(()) => return rt,
+            Err(out) => assert!(
+                addr_in_use(&out) && attempt < SPAWN_ATTEMPTS,
+                "runtime exited before ready; output:\n{out}"
+            ),
+        }
     }
-    command
-        .current_dir(scratch.path())
-        .env("MACP_ALLOW_INSECURE", "1")
-        .env("MACP_MEMORY_ONLY", "1")
-        .env("MACP_BIND_ADDR", &grpc)
-        .env("MACP_METRICS_ADDR", &metrics)
-        .env("MACP_SHUTDOWN_DRAIN_SECS", drain_secs.to_string())
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut rt = Runtime {
-        child: Child(command.spawn().expect("spawn macp-runtime")),
-        grpc,
-        metrics,
-        _scratch: scratch,
-    };
-    wait_ready(&mut rt).await;
-    rt
+    unreachable!("the last attempt panics")
 }
 
 /// One `GET /metrics`; true on a 200 response.
@@ -148,7 +115,8 @@ fn refuses(addr: &str) -> bool {
         .is_err()
 }
 
-async fn wait_ready(rt: &mut Runtime) {
+/// `Err(output)` if the child exits first.
+async fn wait_ready(rt: &mut Runtime) -> Result<(), String> {
     use tonic_health::pb::health_check_response::ServingStatus;
     use tonic_health::pb::health_client::HealthClient;
     use tonic_health::pb::HealthCheckRequest;
@@ -156,10 +124,7 @@ async fn wait_ready(rt: &mut Runtime) {
     let mut grpc_ok = false;
     while Instant::now() < deadline {
         if !rt.child.alive() {
-            panic!(
-                "runtime exited before ready; output:\n{}",
-                rt.child.output()
-            );
+            return Err(rt.child.output());
         }
         if !grpc_ok {
             if let Ok(channel) = connect(&rt.grpc).await {
@@ -171,13 +136,12 @@ async fn wait_ready(rt: &mut Runtime) {
                 );
             }
         }
-        if grpc_ok && metrics_answers(&rt.metrics) {
-            return;
+        if grpc_ok && metrics_answers(&rt.metrics) && rt.child.alive() {
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let _ = rt.child.0.kill();
-    let _ = rt.child.0.wait();
+    rt.child.kill();
     panic!("runtime never became ready; output:\n{}", rt.child.output());
 }
 

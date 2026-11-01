@@ -1,0 +1,18 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "handoff_id": "handoff_id-✓",
+        "reason": "reason-✓",
+        "scope": "scope-✓",
+        "target_participant": "target_participant-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.modes.handoff.v1.HandoffOfferPayload"
+}

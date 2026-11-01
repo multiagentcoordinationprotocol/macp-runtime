@@ -1,0 +1,71 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "capabilities": {
+          "cancellation": {
+            "cancel_session": true
+          },
+          "decision_receipt": {
+            "get_decision_receipt": true,
+            "signed": true
+          },
+          "experimental": {
+            "features": {
+              "k1": "features-✓",
+              "k2": "features-✓"
+            }
+          },
+          "manifest": {
+            "get_manifest": true
+          },
+          "mode_registry": {
+            "list_changed": true,
+            "list_modes": true
+          },
+          "policy_registry": {
+            "list_changed": true,
+            "list_policies": true,
+            "register_policy": true,
+            "rule_extensions": [
+              "rule_extensions-✓",
+              "rule_extensions-✓"
+            ],
+            "what_if_replay": true
+          },
+          "progress": {
+            "progress": true
+          },
+          "roots": {
+            "list_changed": true,
+            "list_roots": true
+          },
+          "sessions": {
+            "list_sessions": true,
+            "stream": true,
+            "watch_sessions": true
+          }
+        },
+        "instructions": "instructions-✓",
+        "runtime_info": {
+          "description": "description-✓",
+          "name": "name-✓",
+          "title": "title-✓",
+          "version": "version-✓",
+          "website_url": "website_url-✓"
+        },
+        "selected_protocol_version": "selected_protocol_version-✓",
+        "supported_modes": [
+          "supported_modes-✓",
+          "supported_modes-✓"
+        ]
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.InitializeResponse"
+}

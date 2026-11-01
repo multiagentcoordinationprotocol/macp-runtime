@@ -1,0 +1,17 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "content_type": "content_type-✓",
+        "context": "AAECAwQ=",
+        "handoff_id": "handoff_id-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.modes.handoff.v1.HandoffContextPayload"
+}

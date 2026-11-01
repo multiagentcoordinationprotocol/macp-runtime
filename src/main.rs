@@ -121,6 +121,26 @@ fn validate_env_config() -> Vec<String> {
         errors.push(e);
     }
 
+    // The HTTP/JSON listener (RFC-MACP-0006 §4): validated only when
+    // MACP_HTTP_BIND_ADDR is set (non-empty); unset, nothing is read.
+    #[cfg(feature = "http-listener")]
+    if let Err(http_errors) =
+        macp_runtime::http::HttpConfig::from_env(&|k: &str| std::env::var(k).ok())
+    {
+        errors.extend(http_errors);
+    }
+    // Never a silent no-op: a binary without the listener refuses a
+    // configuration that asks for one.
+    #[cfg(not(feature = "http-listener"))]
+    if std::env::var_os("MACP_HTTP_BIND_ADDR").is_some_and(|v| !v.is_empty()) {
+        errors.push(
+            "MACP_HTTP_BIND_ADDR is set, but this macp-runtime binary was built without the \
+             `http-listener` Cargo feature; rebuild with `--features http-listener` (or use an \
+             image built with it), or unset MACP_HTTP_BIND_ADDR"
+                .into(),
+        );
+    }
+
     // Validate non-negative integer environment variable
     if let Ok(val) = std::env::var("MACP_CHECKPOINT_INTERVAL") {
         if val.parse::<u64>().is_err() {
@@ -504,6 +524,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(10);
     let shutdown_signal = ShutdownSignal::install();
     let shutdown = shutdown_signal.clone().wait();
+    // The HTTP listener (`http-listener` feature), bound now so a bind
+    // failure is fatal before anything serves. Unset MACP_HTTP_BIND_ADDR:
+    // no socket, no task, no log line.
+    #[cfg(feature = "http-listener")]
+    let http_listener =
+        match macp_runtime::http::HttpConfig::from_env(&|k: &str| std::env::var(k).ok()) {
+            Ok(Some(config)) => {
+                // RFC-MACP-0006 §4.11: advertised by both bindings' GetManifest
+                // and the well-known document, so set before either clone.
+                if let Some(base) = &config.public_url {
+                    svc = svc.with_http_endpoint(base.clone());
+                }
+                Some(macp_runtime::http::HttpListener::bind(&config, svc.clone()).await?)
+            }
+            Ok(None) => None,
+            // Already reported by validate_env_config; unreachable in practice.
+            Err(errors) => return Err(errors.join("; ").into()),
+        };
     let builder = builder.add_service(health_service).add_service(
         pb::macp_runtime_service_server::MacpRuntimeServiceServer::new(svc)
             .max_decoding_message_size(max_payload_bytes + ENVELOPE_OVERHEAD_BYTES),
@@ -511,6 +549,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "reflection")]
     let builder = builder.add_service(reflection_service);
     let server_future = builder.serve_with_shutdown(addr, shutdown);
+    // Both listeners drain together: the combined future resolves once gRPC
+    // and HTTP have each closed every connection. Inline, not spawned, so a
+    // disabled listener adds no task.
+    #[cfg(feature = "http-listener")]
+    let server_future = {
+        let http_shutdown = shutdown_signal.clone().wait();
+        async move {
+            let http = async move {
+                if let Some(listener) = http_listener {
+                    listener.serve(http_shutdown).await;
+                }
+            };
+            tokio::pin!(server_future, http);
+            // A gRPC failure (e.g. its bind) must surface at once, not wait
+            // behind an HTTP listener that only stops on shutdown.
+            tokio::select! {
+                grpc = &mut server_future => {
+                    grpc?;
+                    http.await;
+                    Ok(())
+                }
+                () = &mut http => server_future.await,
+            }
+        }
+    };
 
     // Background maintenance task: expire TTL-exceeded sessions, emit synthetic
     // envelopes whose deadline has passed, and evict stale ones.
@@ -562,7 +625,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
             };
-            tracing::info!(%metrics_addr, "metrics endpoint listening (GET /metrics)");
+            // The bound address: the configured one, unless its port is 0.
+            let bound = listener
+                .local_addr()
+                .map(|a| a.to_string())
+                .unwrap_or_else(|_| metrics_addr.clone());
+            tracing::info!(metrics_addr = %bound, "metrics endpoint listening (GET /metrics)");
             let stop = metrics_shutdown.wait();
             tokio::pin!(stop);
             loop {

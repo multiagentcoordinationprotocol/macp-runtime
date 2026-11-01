@@ -67,6 +67,20 @@ cargo run
 
 See the [Deployment Guide](deployment.md) for the full environment variable reference.
 
+### Adding the HTTP/JSON listener
+
+The runtime can also serve every RPC as HTTP/JSON with server-sent events (RFC-MACP-0006 §4), for clients that cannot speak gRPC, such as a browser. The listener is compiled in with the `http-listener` Cargo feature and started by `MACP_HTTP_BIND_ADDR`, beside the gRPC port, never instead of it:
+
+```bash
+MACP_ALLOW_INSECURE=1 MACP_HTTP_BIND_ADDR=127.0.0.1:8080 cargo run --features http-listener
+
+# in another terminal: GetManifest needs no credential
+curl -sS -X POST http://127.0.0.1:8080/macp/v1/GetManifest \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+Images published after `0.11.0` include the feature: add `-p 8080:8080 -e MACP_HTTP_BIND_ADDR=0.0.0.0:8080` to the `docker run` above. Without `MACP_HTTP_BIND_ADDR` nothing changes. The listener uses the same TLS files and the same `MACP_ALLOW_INSECURE` rule as gRPC. A full session over curl is in [Examples](examples.md#httpjson-binding-curl), and the binding itself in [API: HTTP/JSON binding](API.md#httpjson-binding).
+
 ## Your first session
 
 With the runtime listening on `127.0.0.1:50051` (either way above), three agents open a Decision Mode session, propose, evaluate, vote, and commit a binding outcome. This is the same script as the protocol's [quickstart](https://github.com/multiagentcoordinationprotocol/multiagentcoordinationprotocol/blob/main/docs/quickstart.md), whose CI runs it against the `0.9.0` image.

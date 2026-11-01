@@ -1,0 +1,15 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "policy_id": "policy_id-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.UnregisterPolicyRequest"
+}

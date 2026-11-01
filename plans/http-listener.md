@@ -326,7 +326,7 @@ ship first.
 - **Docs:** none (internal); doc comments on the seams.
 
 ### P3 — Canonical JSON codec (RFC-0001 §10)
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; prost-reflect 0.16.5; divergences: deps-isolation checks *direct* deps since hyper/tokio-rustls arrive via tonic; timestamps emit ms only when non-zero (matches vendored examples, §10.11 allows); `decode_request` uses a raw-text JSON scanner so integer fields are judged on the number text (§10.9, `arbitrary_precision` rejected: feature unification); `chrono` added to the codec allowlist; P5 MUST route bodies through `decode_request`/`decode_message_text`, never the `Value` entry points)
 - **Risk:** complex
 - **Delivers:** `src/http/json/` behind `http-listener`: `decode_request(method, &[u8]) -> DynamicMessage`,
   `encode_response(&DynamicMessage) -> Vec<u8>`, `envelope_from_json`, `envelope_to_json`, and
@@ -412,7 +412,7 @@ ship first.
 - **Docs:** module docs citing §10 subsections.
 
 ### P4 — Listener skeleton: config, TLS, gating, shutdown, transport statuses
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergences: hyper-util `server-auto` dropped — TLS routes by ALPN (`h2` ⇒ HTTP/2, else HTTP/1.1) and plaintext sniffs the h2 preface under a 10 s deadline, because auto's sniff had no deadline and let a silent socket pin a connection permit; listener binds inline before gRPC serves (bind failure aborts startup) rather than spawning after `:510`; feature-off refusal is tested in the default-feature run; PEM loading via `rustls-pki-types` (tonic `Identity` yields no rustls config); the 501 placeholder reads the capped body, so **P5 must authenticate from headers before reading the body** (§4.4). Accepted risk: an h2 client that answers PINGs but never sends a request holds a permit (hyper has no h2 idle timeout; equivalent to an h1 client re-requesting every 9 s); the sniff/TLS phases are not shutdown-cancellable but are bounded at 10 s each, under the drain deadline)
 - **Risk:** complex
 - **Delivers:** `src/http/server.rs` serving HTTP/1.1 and HTTP/2 (ALPN on TLS) with every route answering a
   placeholder, the transport statuses of §4.1/§4.2/§4.5 (404 unknown method or path, 405 + `Allow: POST`, 415
@@ -457,7 +457,7 @@ ship first.
 - **Docs:** deferred to P11 (env table drafted here in code comments).
 
 ### P5 — Unary RPCs through `MacpServer`; error mapping; `Send` two layers
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergences: request timeout is `500 INTERNAL_ERROR` with a §4.5 body (P4's 503 replaced); streaming RPCs answer 501 with no body until P6; any failure inside the `envelope` member is an in-band `INVALID_ENVELOPE` Ack per §4.4's exhaustive "not a SendRequest" list, `{"envelope":null}` stays 400 per §10.10; the `table == METHODS` pin runs in CI under `otel,http-listener`; binary tests bind HTTP/metrics on `:0` and read the bound address (TOCTOU port race), gRPC keeps a probed port with an AddrInUse respawn backstop; the metrics startup log now prints the bound address)
 - **Risk:** complex
 - **Delivers:** every non-streaming RPC at `POST …/macp/v1/{Method}` with JSON in/out, request-level errors per
   §4.5, `Send` per §4.4.
@@ -517,7 +517,7 @@ ship first.
 - **Docs:** P11.
 
 ### P6 — SSE streams with resume
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergences: the runtime sends lifecycle `Resolved` before publishing the Commitment (`runtime.rs:1463` vs `:1476`), so the stream records the last ordinal at `Resolved` and closes once it has delivered it — equivalent to "close after the Commitment" and order-safe; resume opens at min(after_sequence, high water) then drops `<= after_sequence`, retrying at after_sequence below the compacted base; `WatchPolicies`/`WatchModeRegistry`/`WatchRoots` mirror gRPC's per-RPC auth (no token) — `WatchPolicies` bypassing `ListPolicies`' auth is pre-existing, filed as #274; streams end when drain starts, without `event: error`, so clients resume)
 - **Risk:** complex
 - **Delivers:** `WatchModeRegistry`, `WatchRoots`, `WatchSignals`, `WatchSessions`, `WatchPolicies` and
   `StreamSession` (subscribe only) as `text/event-stream` per §4.3.
@@ -572,7 +572,7 @@ ship first.
 - **Docs:** P11.
 
 ### P7 — CORS and preflight
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergences: with an allowlist configured `Vary: Origin` goes on every actual response, not only listed ones (Fetch CORS/HTTP-cache guidance; verifier R1); config origins normalise a trailing slash and the default port; every `OPTIONS` is answered before routing and auth)
 - **Risk:** simple
 - **Delivers:** §4.10 exactly.
 - **Depends on:** P4 (may land any time after).
@@ -592,7 +592,7 @@ ship first.
 - **Docs:** P11.
 
 ### P8 — Discovery: `transport_endpoints` and `/.well-known/macp.json`
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergences: other methods on the well-known path ⇒ 405 `Allow: GET, HEAD` (spec silent); the path gets normal CORS handling; the entry carries `"metadata": {}` per §10.10)
 - **Risk:** simple
 - **Delivers:** when `MACP_HTTP_PUBLIC_URL` is set, `GetManifest` (both bindings) adds
   `{transport: "macp.transport.http.v1", uri: <base>, content_types: ["application/json"]}`; `GET`/`HEAD
@@ -611,7 +611,7 @@ ship first.
 - **Docs:** P11.
 
 ### P9 — Observability for HTTP
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergences: `http.route` excludes the public prefix; non-standard methods record `_OTHER` and span name `HTTP`; `error.type` = status code on a 5xx and `url.scheme` on the metric (semconv, bounded); `url.path` deliberately omitted (unbounded client input, S-c); the debug event is emitted in every build but never reaches the OTel layer; hyper's own 400/431 get no span)
 - **Risk:** simple
 - **Delivers:** under `otel`: one SERVER span per HTTP request named `POST /macp/v1/{Method}` (or `POST` for an
   unknown route, so cardinality is bounded), parent extracted from `traceparent`/`tracestate` through the global
@@ -635,7 +635,7 @@ ship first.
 - **Docs:** P11.
 
 ### P10 — Conformance over HTTP (`macp-conform --transport http`)
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergences: client is hyper + tokio-rustls (ring), not reqwest — reqwest feature unification with macp-auth broke its JWKS client in workspace test builds; deps-isolation's existing macp-conform check widened to `hyper|tokio-rustls`; HTTP/1.1 only; the in-process test also runs GrpcTarget and asserts identical per-fixture outcomes; a coded non-200 `Send` is a rejection only for 400/401/413 (§4.4); macp-cli enables the `http` feature so `macp conform --transport http` works; the gRPC readiness loop in conform-cli now fails when the port never opens)
 - **Risk:** complex
 - **Delivers:** an `HttpTarget` in `macp-conform` (new non-default feature `http`), CLI flag `--transport
   grpc|http` (default `grpc`; URL schemes keep their current meaning, `client.rs:17-28`), a CI step running the full
@@ -672,7 +672,7 @@ ship first.
   path, covered by P3/P5 tests instead).
 
 ### P11 — Docs, examples, image, release notes
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergences: CLAUDE.md is gitignored/untracked, so its edits are local only and the CI env-doc check covers docs/deployment.md; the image check is a shell smoke test in docker-build (no-HTTP: only 50051 listening; HTTP: GetManifest 200), not tests/http_binary.rs against the image; deploy/docker-compose.yml left at 0.10.0)
 - **Risk:** simple
 - **Delivers:** operator and SDK-facing documentation; the image built with the feature.
 - **Depends on:** P4-P10.

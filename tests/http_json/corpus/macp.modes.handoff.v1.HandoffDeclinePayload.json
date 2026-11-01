@@ -1,0 +1,17 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "declined_by": "declined_by-✓",
+        "handoff_id": "handoff_id-✓",
+        "reason": "reason-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.modes.handoff.v1.HandoffDeclinePayload"
+}

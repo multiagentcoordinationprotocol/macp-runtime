@@ -1,0 +1,19 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "details": "AAECAwQ=",
+        "proposal_id": "proposal_id-✓",
+        "summary": "summary-✓",
+        "supersedes_proposal_id": "supersedes_proposal_id-✓",
+        "title": "title-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.modes.proposal.v1.CounterProposalPayload"
+}

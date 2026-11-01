@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "MACP conformance runner: drives the spec's conformance fixtures and commitment-hash vectors against an implementation (in-process or over gRPC) and reports the conformance level it reaches."
+description = "MACP conformance runner: drives the spec's conformance fixtures and commitment-hash vectors against an implementation (in-process, over gRPC or over HTTP) and reports the conformance level it reaches."
 readme = "README.md"
 keywords = ["macp", "conformance", "multi-agent", "protocol", "testing"]
 categories = ["development-tools::testing"]
@@ -25,6 +25,20 @@ grpc = [
     "dep:tokio-stream",
     "dep:macp-proto",
     "dep:tonic-prost-build",
+]
+# The HTTP/JSON target (`HttpTarget`, RFC-MACP-0006 §4) and the CLI's
+# `--transport http`. Off by default, like `grpc`: the default build carries
+# no HTTP client. HTTP/1.1 only (the binding's MUST), on hyper's client
+# connection, with rustls on the ring provider and the WebPKI roots, as the
+# gRPC target uses.
+http = [
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
+    "dep:tokio-rustls",
+    "dep:webpki-roots",
+    "dep:base64",
+    "dep:tokio",
 ]
 
 [dependencies]
@@ -45,6 +59,18 @@ tonic = { workspace = true, optional = true, features = ["tls-webpki-roots"] }
 tonic-prost = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tokio-stream = { workspace = true, optional = true }
+# http feature only. Not reqwest: any reqwest TLS feature here would unify
+# into macp-auth's reqwest in workspace test builds (the root crate
+# dev-depends on this feature), where `rustls-no-provider` panics macp-auth's
+# JWKS client and `rustls` (aws-lc-rs) gives rustls a second provider, which
+# tonic's provider-less `ServerConfig::builder()` refuses. These four are
+# already in the lock with these features (tonic, the root's http-listener).
+hyper = { version = "1.8", optional = true, features = ["client", "http1"] }
+hyper-util = { version = "0.1.20", optional = true, features = ["tokio"] }
+http-body-util = { version = "0.1.3", optional = true }
+tokio-rustls = { version = "0.26.4", optional = true, default-features = false, features = ["ring", "tls12"] }
+webpki-roots = { version = "1", optional = true }
+base64 = { workspace = true, optional = true }
 # Provides DEP_MACP_PROTO_PROTO_DIR to build.rs for the client stubs.
 macp-proto = { workspace = true, optional = true }
 

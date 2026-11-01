@@ -281,34 +281,46 @@ mod otel {
         F: FnOnce(String) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        let scratch = tempfile::tempdir().unwrap();
-        let addr = format!("127.0.0.1:{}", free_port());
-        let mut command = runtime_command();
-        command
-            .current_dir(scratch.path())
-            .env("MACP_ALLOW_INSECURE", "1")
-            .env("MACP_MEMORY_ONLY", "1")
-            .env("MACP_BIND_ADDR", &addr)
-            .env("RUST_LOG", "info")
-            .env("OTEL_BSP_SCHEDULE_DELAY", "100")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        for (k, v) in extra {
-            command.env(k, v);
+        // The probed gRPC port can be taken by another test before the child
+        // binds it (a TOCTOU race): a child that exits with `AddrInUse` is
+        // respawned on a fresh port, at most three times.
+        let mut after = Some(after);
+        for attempt in 1..=3 {
+            let scratch = tempfile::tempdir().unwrap();
+            let addr = format!("127.0.0.1:{}", free_port());
+            let mut command = runtime_command();
+            command
+                .current_dir(scratch.path())
+                .env("MACP_ALLOW_INSECURE", "1")
+                .env("MACP_MEMORY_ONLY", "1")
+                .env("MACP_BIND_ADDR", &addr)
+                .env("RUST_LOG", "info")
+                .env("OTEL_BSP_SCHEDULE_DELAY", "100")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            for (k, v) in extra {
+                command.env(k, v);
+            }
+            let mut child = Child(command.spawn().expect("spawn macp-runtime"));
+            let serving = wait_serving(&mut child.0, &addr).await;
+            if serving.is_ok() {
+                (after.take().expect("runs once"))(addr.clone()).await;
+            }
+            let _ = child.0.kill();
+            let _ = child.0.wait();
+            let (stdout, stderr) = read_all(&mut child.0);
+            let output = normalize(&format!("{stdout}{stderr}"));
+            if let Err(reason) = serving {
+                if attempt < 3
+                    && (output.contains("AddrInUse") || output.contains("Address already in use"))
+                {
+                    continue;
+                }
+                panic!("{reason}; output:\n{output}");
+            }
+            return output;
         }
-        let mut child = Child(command.spawn().expect("spawn macp-runtime"));
-        let serving = wait_serving(&mut child.0, &addr).await;
-        if serving.is_ok() {
-            after(addr.clone()).await;
-        }
-        let _ = child.0.kill();
-        let _ = child.0.wait();
-        let (stdout, stderr) = read_all(&mut child.0);
-        let output = normalize(&format!("{stdout}{stderr}"));
-        if let Err(reason) = serving {
-            panic!("{reason}; output:\n{output}");
-        }
-        output
+        unreachable!("the last attempt returns or panics")
     }
 
     /// `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` with an endpoint: the

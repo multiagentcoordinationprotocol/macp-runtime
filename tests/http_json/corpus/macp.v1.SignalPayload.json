@@ -1,0 +1,18 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "confidence": 0.25,
+        "correlation_session_id": "correlation_session_id-✓",
+        "data": "AAECAwQ=",
+        "signal_type": "signal_type-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.SignalPayload"
+}

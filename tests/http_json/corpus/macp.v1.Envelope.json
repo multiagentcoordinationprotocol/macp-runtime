@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "macp_version": "1.0",
+        "message_id": "01HV0Q2D2E4F6G8H0J2K4M6N8P",
+        "message_type": "Vote",
+        "mode": "macp.mode.decision.v1",
+        "payload": {
+          "proposal_id": "p-1",
+          "reason": "Within budget ✓",
+          "vote": "APPROVE"
+        },
+        "sender": "agent://finance",
+        "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+        "timestamp": "2026-03-01T20:25:10.250Z"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {
+        "payload_b64": ""
+      }
+    }
+  ],
+  "type": "macp.v1.Envelope"
+}

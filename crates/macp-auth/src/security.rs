@@ -143,6 +143,25 @@ impl SecurityLayer {
         self
     }
 
+    /// Test support, hidden from docs and not a supported API: it may change
+    /// or go away in any release.
+    ///
+    /// Configure the static bearer tokens exactly as `MACP_AUTH_TOKENS_JSON`
+    /// does in [`Self::from_env`] (the same JSON, the same resolver chain, so
+    /// [`Self::has_configured_auth`] becomes true), without touching process
+    /// env. Rate limits and payload limit are kept.
+    #[doc(hidden)]
+    pub fn with_static_tokens(mut self, json: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let identities = Self::parse_identities(json)?;
+        self.auth_chain = Some(Arc::new(crate::auth::AuthResolverChain::new(vec![
+            Box::new(crate::auth::resolvers::StaticBearerResolver::new(
+                identities.clone(),
+            )),
+        ])));
+        self.identities = Arc::new(identities);
+        Ok(self)
+    }
+
     /// Dev-mode authenticate: accepts any bearer token as a FULLY-PRIVILEGED
     /// identity (can start sessions, can manage the mode registry).
     ///

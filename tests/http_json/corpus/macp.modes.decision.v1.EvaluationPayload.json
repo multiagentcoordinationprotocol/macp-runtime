@@ -1,0 +1,18 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "confidence": 0.25,
+        "proposal_id": "proposal_id-✓",
+        "reason": "reason-✓",
+        "recommendation": "recommendation-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.modes.decision.v1.EvaluationPayload"
+}

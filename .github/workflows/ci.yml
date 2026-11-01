@@ -163,6 +163,13 @@ jobs:
       - name: Run clippy (macp-conform, grpc feature)
         run: cargo clippy -p macp-conform --features grpc --all-targets -- -D warnings
 
+      # ...nor its HTTP target (`http`, plans/http-listener.md P10), alone and
+      # with the CLI that selects it (`--transport http`).
+      - name: Run clippy (macp-conform, http feature)
+        run: |
+          cargo clippy -p macp-conform --features http --all-targets -- -D warnings
+          cargo clippy -p macp-conform --features grpc,http --all-targets -- -D warnings
+
   docs:
     name: Rustdoc
     runs-on: ubuntu-latest
@@ -191,6 +198,21 @@ jobs:
         run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
+
+      - name: Every MACP_HTTP_* variable is documented
+        # The names are read from src/http/config.rs, the only reader.
+        # CLAUDE.md is gitignored (local-only), so only the operator doc is
+        # checked here.
+        run: |
+          vars=$(grep -ohE 'MACP_HTTP_[A-Z_]+' src/http/config.rs | sort -u)
+          test -n "$vars" || { echo "::error::no MACP_HTTP_* variable found in src/http/config.rs"; exit 1; }
+          missing=0
+          for v in $vars; do
+            if ! grep -qF "\`$v\`" docs/deployment.md; then
+              echo "::error file=docs/deployment.md::$v (src/http/config.rs) is not documented in docs/deployment.md"; missing=1
+            fi
+          done
+          exit "$missing"
 
   test:
     name: Test
@@ -312,13 +334,14 @@ jobs:
           done
 
       # The conformance library's in-process path must carry no transport.
-      # Only tonic is checked: tokio already arrives through macp-modes and
+      # tonic (the `grpc` feature) and hyper/tokio-rustls (the `http`
+      # feature) are checked: tokio already arrives through macp-modes and
       # macp-policy (tokio::sync::broadcast), so "no tokio" cannot hold here.
       - name: macp-conform without grpc has no transport
         run: |
           deps=$(cargo tree -p macp-conform --edges normal)
           echo "$deps"
-          if echo "$deps" | sed 's/ ([^)]*)//' | grep -qiE "tonic|macp-storage|macp-auth|macp-runtime|reqwest|rocksdb|redis"; then
+          if echo "$deps" | sed 's/ ([^)]*)//' | grep -qiE "tonic|hyper|tokio-rustls|macp-storage|macp-auth|macp-runtime|reqwest|rocksdb|redis"; then
             echo "::error::macp-conform (default features) pulled a forbidden dependency"; exit 1
           fi
 
@@ -328,6 +351,47 @@ jobs:
             deps=$(cargo tree -p "$crate" --edges normal)
             if echo "$deps" | sed 's/ ([^)]*)//' | grep -qiE "jsonwebtoken|reqwest"; then
               echo "::error::$crate pulled an auth-only dependency"; exit 1
+            fi
+          done
+
+      # The HTTP/JSON listener (`http-listener`, plans/http-listener.md P3) is
+      # opt-in and root-crate only. The Seam crates never see its codec or
+      # TLS/HTTP stack, whatever their features; the root crate's default
+      # build has no prost-reflect at all and none of the feature's seven
+      # optional deps as a direct dependency. (hyper, hyper-util and
+      # tokio-rustls are already transitive through tonic's transport, so the
+      # default-build check is on direct edges, depth 1.)
+      - name: http-listener deps stay opt-in and out of the Seam crates
+        # Every match reads a captured variable through a here-string, never
+        # `echo | grep -q`: under pipefail, grep -q exiting on the first match
+        # SIGPIPEs the writer (status 141), which `if` would read as "no match"
+        # and pass a real leak.
+        run: |
+          set -euo pipefail
+          # ctree ARGS...: the cargo tree output with "(*)"/"(proc-macro)" notes stripped,
+          # uncoloured (CI sets CARGO_TERM_COLOR=always, and the escape codes
+          # around the tree glyphs would defeat the anchored patterns below).
+          ctree() { local out; out=$(cargo tree --color never "$@") || return 1; printf '%s\n' "$out" | sed 's/ ([^)]*)//'; }
+          for crate in macp-core macp-modes macp-pb macp-policy; do
+            deps=$(ctree -p "$crate" --edges normal --all-features)
+            if grep -qE "(prost-reflect|hyper-util|tokio-rustls) v" <<<"$deps"; then
+              echo "::error::$crate pulled an http-listener dependency"; exit 1
+            fi
+          done
+          deps=$(ctree -p macp-runtime --edges normal)
+          if grep -qE "prost-reflect v" <<<"$deps"; then
+            echo "::error::macp-runtime's default build pulled prost-reflect"; exit 1
+          fi
+          direct=$(ctree -p macp-runtime --edges normal --depth 1)
+          echo "$direct"
+          if grep -qE "^[├└]── (prost-reflect|hyper|hyper-util|http-body-util|tokio-rustls|http|bytes) v" <<<"$direct"; then
+            echo "::error::macp-runtime's default build has a direct http-listener dependency"; exit 1
+          fi
+          # ...and the feature does turn them on (the check above is not vacuous).
+          on=$(ctree -p macp-runtime --edges normal --depth 1 --features http-listener)
+          for dep in prost-reflect hyper hyper-util http-body-util tokio-rustls http bytes; do
+            if ! grep -qE "^[├└]── $dep v" <<<"$on"; then
+              echo "::error::http-listener no longer enables $dep"; exit 1
             fi
           done
 
@@ -503,6 +567,32 @@ jobs:
 
       - name: Test reflection feature (descriptor set + service build)
         run: cargo test -p macp-runtime --features reflection --test reflection
+
+      # The HTTP/JSON listener and its canonical JSON codec
+      # (plans/http-listener.md), opt-in and non-default on the root crate:
+      # alone, and together with otel as the published image builds it.
+      - name: Clippy (http-listener feature)
+        run: |
+          cargo clippy -p macp-runtime --features http-listener --all-targets -- -D warnings
+          cargo clippy -p macp-runtime --features otel,http-listener --all-targets -- -D warnings
+
+      - name: Test http-listener feature
+        run: cargo test -p macp-runtime --features http-listener
+
+      # The HTTP dispatch table is pinned to telemetry::grpc::METHODS by a
+      # test that exists only with both features; the lib's http:: tests
+      # are cheap (the filter also matches telemetry::http::), so run them all
+      # under the combination, together with the HTTP SERVER span and
+      # request-duration tests (tests/otel_http.rs, which needs both too).
+      - name: Test http-listener with otel (dispatch table, HTTP telemetry)
+        run: |
+          cargo test -p macp-runtime --features otel,http-listener --lib http::
+          cargo test -p macp-runtime --features otel,http-listener --test otel_http
+
+      - name: Rustdoc (http-listener feature, deny warnings)
+        run: cargo doc -p macp-runtime --no-deps --features http-listener
+        env:
+          RUSTDOCFLAGS: "-D warnings"
 
       # Both backends enabled together must also build at the root crate —
       # feature unification across the workspace is not covered by the
@@ -797,6 +887,10 @@ jobs:
   #   2. A server built from this checkout, with `--hash-vectors in-process`
   #      (same release by construction) and `--strict`: must claim
   #      Standard modes + multi_round.
+  #   3. The same, over the HTTP binding (`--transport http`, RFC-MACP-0006
+  #      §4; plans/http-listener.md P10): the runtime built with
+  #      `http-listener`, the CLI with `http`. Same claim. Local build only
+  #      until a published image carries the feature (then add an image step).
   conform-cli:
     name: macp-conform CLI (GHCR image, gRPC)
     runs-on: ubuntu-latest
@@ -832,8 +926,13 @@ jobs:
 
       - name: Build macp-conform and the runtime
         run: |
-          cargo build -p macp-conform --features grpc --bin macp-conform
-          cargo build --bin macp-runtime
+          cargo build -p macp-conform --features grpc,http --bin macp-conform
+          cargo build --bin macp-runtime --features http-listener
+
+      - name: Run the HTTP curl examples of docs/examples.md
+        # Every marked curl block in the "HTTP/JSON binding (curl)" section,
+        # against the binary just built (plans/http-listener.md P11).
+        run: scripts/check-http-examples.sh
 
       - name: Start the runtime image
         run: |
@@ -859,10 +958,12 @@ jobs:
         run: |
           MACP_ALLOW_INSECURE=1 MACP_MEMORY_ONLY=1 MACP_BIND_ADDR=127.0.0.1:50052 \
             ./target/debug/macp-runtime > macp-local.log 2>&1 &
+          ready=
           for _ in $(seq 1 60); do
-            if (exec 3<>/dev/tcp/127.0.0.1/50052) 2>/dev/null; then break; fi
+            if (exec 3<>/dev/tcp/127.0.0.1/50052) 2>/dev/null; then ready=1; break; fi
             sleep 1
           done
+          test -n "$ready" || { cat macp-local.log; echo "::error::local runtime did not open port 50052"; exit 1; }
           ./target/debug/macp-conform \
             --target grpc://127.0.0.1:50052 \
             --fixtures spec-repo/schemas/conformance \
@@ -875,11 +976,40 @@ jobs:
             echo "::error::unexpected claim: $claim"; exit 1
           }
 
+      - name: Run macp-conform over HTTP, hash vectors in-process (this checkout)
+        run: |
+          # gRPC on 50053 (unused here), HTTP on 8080. Readiness is the HTTP
+          # port answering a real RPC (GetManifest, unauthenticated), polled
+          # with a deadline instead of a fixed sleep.
+          MACP_ALLOW_INSECURE=1 MACP_MEMORY_ONLY=1 MACP_BIND_ADDR=127.0.0.1:50053 \
+            MACP_HTTP_BIND_ADDR=127.0.0.1:8080 \
+            ./target/debug/macp-runtime > macp-local-http.log 2>&1 &
+          ready=
+          for _ in $(seq 1 60); do
+            if curl -fsS --max-time 5 -o /dev/null -X POST -H 'Content-Type: application/json' -d '{}' \
+                 http://127.0.0.1:8080/macp/v1/GetManifest; then ready=1; break; fi
+            sleep 1
+          done
+          test -n "$ready" || { cat macp-local-http.log; echo "::error::HTTP listener did not answer on 8080"; exit 1; }
+          ./target/debug/macp-conform \
+            --transport http \
+            --target http://127.0.0.1:8080 \
+            --fixtures spec-repo/schemas/conformance \
+            --level standard --multi-round --strict \
+            --hash-vectors in-process \
+            --report macp-conform-report-http.json
+          claim=$(jq -r .claim macp-conform-report-http.json)
+          echo "claim (HTTP): $claim" >> "$GITHUB_STEP_SUMMARY"
+          test "$claim" = "Standard modes + multi_round, Server profile (hash vectors in-process)" || {
+            echo "::error::unexpected claim over HTTP: $claim"; exit 1
+          }
+
       - name: Runtime logs
         if: failure()
         run: |
           docker logs macp
           cat macp-local.log || true
+          cat macp-local-http.log || true
 
       - name: Upload report
         if: always()
@@ -909,11 +1039,56 @@ jobs:
         with:
           context: .
           push: false
+          load: true
+          tags: macp-runtime:ci
           # Same features as the published image (docker.yml).
           build-args: |
-            CARGO_FEATURES=otel
+            CARGO_FEATURES=otel,http-listener
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Image without MACP_HTTP_* opens only the gRPC port
+        # The image includes http-listener; with no MACP_HTTP_* set it must
+        # behave as before: one listening socket (50051), no HTTP log line.
+        run: |
+          docker run -d --name plain -e MACP_ALLOW_INSECURE=1 -e MACP_MEMORY_ONLY=1 macp-runtime:ci
+          listening() {
+            # Local ports in LISTEN state (0A), from the container's netns.
+            docker exec plain cat /proc/net/tcp /proc/net/tcp6 2>/dev/null \
+              | awk '$4 == "0A" { split($2, a, ":"); print a[2] }' | sort -u
+          }
+          for _ in $(seq 1 60); do
+            if listening | grep -qx C383; then break; fi
+            sleep 1
+          done
+          ports=$(listening | tr '\n' ' ')
+          echo "listening (hex): $ports"
+          test "$ports" = "C383 " || { docker logs plain; echo "::error::expected only 50051 (C383), got: $ports"; exit 1; }
+          if docker logs plain 2>&1 | grep -q 'HTTP listener'; then
+            docker logs plain; echo "::error::HTTP listener started without MACP_HTTP_BIND_ADDR"; exit 1
+          fi
+
+      - name: Image with MACP_HTTP_BIND_ADDR answers GetManifest over HTTP
+        run: |
+          docker run -d --name http -p 8080:8080 \
+            -e MACP_ALLOW_INSECURE=1 -e MACP_MEMORY_ONLY=1 -e MACP_HTTP_BIND_ADDR=0.0.0.0:8080 \
+            macp-runtime:ci
+          code=
+          for _ in $(seq 1 60); do
+            code=$(curl -sS --max-time 5 -o manifest.json -w '%{http_code}' -X POST \
+              -H 'Content-Type: application/json' -d '{}' \
+              http://127.0.0.1:8080/macp/v1/GetManifest || true)
+            if [ "$code" = 200 ]; then break; fi
+            sleep 1
+          done
+          test "$code" = 200 || { docker logs http; echo "::error::GetManifest over HTTP answered '$code', expected 200"; exit 1; }
+          jq -e '.manifest' manifest.json > /dev/null
+
+      - name: Container logs
+        if: failure()
+        run: |
+          docker logs plain || true
+          docker logs http || true
 
   ci-pass:
     name: All Checks Passed
@@ -934,5 +1109,5 @@ jobs:
           echo "  - security audit (blocking)"
           echo "  - feature-gated code (rocksdb, redis, otel)"
           echo "  - tier-1 + tier-2 integration suites"
-          echo "  - docker image build"
-          echo "  - macp-conform CLI against the published image"
+          echo "  - docker image build (+ HTTP listener off/on smoke)"
+          echo "  - macp-conform CLI against the published image (+ HTTP curl examples)"

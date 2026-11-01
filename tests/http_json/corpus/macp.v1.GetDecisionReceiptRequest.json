@@ -1,0 +1,15 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "session_id": "session_id-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.GetDecisionReceiptRequest"
+}

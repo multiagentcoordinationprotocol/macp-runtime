@@ -19,7 +19,7 @@ path = "src/main.rs"
 [dependencies]
 macp-core = { workspace = true, features = ["receipts"] }
 macp-pb = { workspace = true }
-macp-conform = { workspace = true, features = ["grpc"] }
+macp-conform = { workspace = true, features = ["grpc", "http"] }
 macp-runtime = { workspace = true }
 prost = { workspace = true }
 serde = { workspace = true }

@@ -1,0 +1,15 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "agent_id": "agent_id-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.GetManifestRequest"
+}

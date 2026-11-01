@@ -18,12 +18,14 @@
 //! Unix-only.
 #![cfg(all(feature = "otel", unix))]
 
+#[path = "support/binary_child.rs"]
+mod binary_child;
 #[path = "support/fake_collector.rs"]
 mod fake_collector;
 
-use std::io::{ErrorKind, Read};
+use std::io::ErrorKind;
 use std::net::TcpListener;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -46,53 +48,13 @@ const METRICS: [&str; 4] = [
     "macp.session.duration",
 ];
 
-/// Kills the child if a test panics before stopping it.
-struct Child(std::process::Child);
-impl Drop for Child {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
+use binary_child::{addr_in_use, free_port, Child, SPAWN_ATTEMPTS};
 
-impl Child {
-    /// Send SIGINT and wait (bounded) for the process to exit. Returns the
-    /// exit status, or `None` if it did not exit within `limit`.
-    fn interrupt_and_wait(&mut self, limit: Duration) -> Option<ExitStatus> {
-        let status = Command::new("kill")
-            .args(["-INT", &self.0.id().to_string()])
-            .status()
-            .expect("run kill");
-        assert!(status.success(), "kill -INT failed");
-        let deadline = Instant::now() + limit;
-        while Instant::now() < deadline {
-            if let Some(status) = self.0.try_wait().unwrap() {
-                return Some(status);
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        None
-    }
-
-    /// Combined stdout + stderr. Call after the process exited.
-    fn output(&mut self) -> String {
-        let mut out = String::new();
-        if let Some(mut s) = self.0.stdout.take() {
-            s.read_to_string(&mut out).ok();
-        }
-        if let Some(mut s) = self.0.stderr.take() {
-            s.read_to_string(&mut out).ok();
-        }
-        out
-    }
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// Send SIGINT and wait (bounded) for the process to exit. Returns the exit
+/// status, or `None` if it did not exit within `limit`.
+fn interrupt_and_wait(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
+    child.signal("INT");
+    child.wait_exit(limit)
 }
 
 /// Spawn the binary in dev mode with a scrubbed environment (no `OTEL_*` or
@@ -109,29 +71,43 @@ fn spawn_runtime(scratch: &std::path::Path, addr: &str, extra: &[(&str, String)]
         .env("MACP_MEMORY_ONLY", "1")
         .env("MACP_BIND_ADDR", addr)
         .env("MACP_SHUTDOWN_DRAIN_SECS", "1")
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .env("RUST_LOG", "info");
     for (k, v) in extra {
         command.env(k, v);
     }
-    Child(command.spawn().expect("spawn macp-runtime"))
+    Child::spawn(&mut command)
+}
+
+/// Spawn on a probed gRPC port and wait for SERVING: a probe that lost the
+/// race to another test (`AddrInUse`) is respawned with a fresh port, at most
+/// `SPAWN_ATTEMPTS` times. Returns the child and its gRPC address.
+async fn start_runtime(scratch: &std::path::Path, extra: &[(&str, String)]) -> (Child, String) {
+    for attempt in 1..=SPAWN_ATTEMPTS {
+        let addr = format!("127.0.0.1:{}", free_port());
+        let mut child = spawn_runtime(scratch, &addr, extra);
+        match wait_serving(&mut child, &addr).await {
+            Ok(()) => return (child, addr),
+            Err(out) => assert!(
+                addr_in_use(&out) && attempt < SPAWN_ATTEMPTS,
+                "runtime exited before SERVING; output:\n{out}"
+            ),
+        }
+    }
+    unreachable!("the last attempt panics")
 }
 
 /// Poll `grpc.health.v1` every 10 ms until SERVING, for at most 30 s. Every
 /// connect and call is individually bounded. If the child exits first, or the
-/// deadline passes, panic at once with the reason and the child's output.
-async fn wait_serving(child: &mut Child, addr: &str) {
+/// deadline passes, panic at once with the reason and the child's output,
+/// except that an exit returns `Err(output)` for `start_runtime` to judge.
+async fn wait_serving(child: &mut Child, addr: &str) -> Result<(), String> {
     use tonic_health::pb::health_check_response::ServingStatus;
     use tonic_health::pb::health_client::HealthClient;
     use tonic_health::pb::HealthCheckRequest;
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            panic!(
-                "runtime exited with {status} before SERVING; output:\n{}",
-                child.output()
-            );
+        if !child.alive() {
+            return Err(child.output());
         }
         if let Ok(channel) = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
             .unwrap()
@@ -146,15 +122,14 @@ async fn wait_serving(child: &mut Child, addr: &str) {
                 })
                 .await
             {
-                if resp.into_inner().status == ServingStatus::Serving as i32 {
-                    return;
+                if resp.into_inner().status == ServingStatus::Serving as i32 && child.alive() {
+                    return Ok(());
                 }
             }
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let _ = child.0.kill();
-    let _ = child.0.wait();
+    child.kill();
     panic!(
         "runtime never reported SERVING within 30 s; output:\n{}",
         child.output()
@@ -250,17 +225,15 @@ async fn eventually(timeout: Duration, mut ready: impl FnMut() -> bool) -> bool 
 async fn resource_spans_and_metrics_reach_the_collector() {
     let collector = FakeCollector::start().await;
     let scratch = tempfile::tempdir().unwrap();
-    let addr = format!("127.0.0.1:{}", free_port());
-    let mut child = spawn_runtime(
+    let (mut child, addr) = start_runtime(
         scratch.path(),
-        &addr,
         &[
             ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint()),
             ("OTEL_METRIC_EXPORT_INTERVAL", "500".to_string()),
             ("OTEL_BSP_SCHEDULE_DELAY", "100".to_string()),
         ],
-    );
-    wait_serving(&mut child, &addr).await;
+    )
+    .await;
     drive_session(&addr, true).await;
 
     let spans_arrived = eventually(Duration::from_secs(10), || {
@@ -312,7 +285,7 @@ async fn resource_spans_and_metrics_reach_the_collector() {
         );
     }
 
-    let status = child.interrupt_and_wait(Duration::from_secs(10));
+    let status = interrupt_and_wait(&mut child, Duration::from_secs(10));
     assert!(status.is_some(), "runtime did not exit on SIGINT");
 }
 
@@ -344,7 +317,11 @@ impl PortWatch {
     /// Bind `addr`, or print a skip notice and return `None` if the address
     /// is taken or unavailable on this host (e.g. no IPv6 loopback).
     fn bind(addr: &'static str) -> Option<Self> {
-        let listener = match TcpListener::bind(addr) {
+        let bound = {
+            let _guard = binary_child::socket_guard();
+            TcpListener::bind(addr)
+        };
+        let listener = match bound {
             Ok(l) => l,
             Err(e) if unbindable(&e) => {
                 eprintln!(
@@ -416,11 +393,9 @@ async fn no_otel_vars_dials_nothing_on_the_default_otlp_ports() {
     }
 
     let scratch = tempfile::tempdir().unwrap();
-    let addr = format!("127.0.0.1:{}", free_port());
-    let mut child = spawn_runtime(scratch.path(), &addr, &[]);
-    wait_serving(&mut child, &addr).await;
+    let (mut child, addr) = start_runtime(scratch.path(), &[]).await;
     drive_session(&addr, true).await;
-    let status = child.interrupt_and_wait(Duration::from_secs(10));
+    let status = interrupt_and_wait(&mut child, Duration::from_secs(10));
     assert!(status.is_some(), "runtime did not exit on SIGINT");
     let output = child.output();
 
@@ -446,17 +421,15 @@ async fn no_otel_vars_dials_nothing_on_the_default_otlp_ports() {
 async fn sigint_flushes_pending_spans_within_the_bound() {
     let collector = FakeCollector::start().await;
     let scratch = tempfile::tempdir().unwrap();
-    let addr = format!("127.0.0.1:{}", free_port());
-    let mut child = spawn_runtime(
+    let (mut child, addr) = start_runtime(
         scratch.path(),
-        &addr,
         &[
             ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint()),
             ("OTEL_BSP_SCHEDULE_DELAY", "60000".to_string()),
             ("OTEL_METRIC_EXPORT_INTERVAL", "60000".to_string()),
         ],
-    );
-    wait_serving(&mut child, &addr).await;
+    )
+    .await;
     drive_session(&addr, false).await;
     // Give an (incorrectly) eager exporter a chance to show itself.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -466,7 +439,7 @@ async fn sigint_flushes_pending_spans_within_the_bound() {
     );
 
     let signalled = Instant::now();
-    let status = child.interrupt_and_wait(Duration::from_secs(10));
+    let status = interrupt_and_wait(&mut child, Duration::from_secs(10));
     let exited_after = signalled.elapsed();
     let output = child.output();
     assert!(

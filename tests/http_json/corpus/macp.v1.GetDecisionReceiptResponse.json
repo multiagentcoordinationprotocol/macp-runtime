@@ -1,0 +1,15 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "receipt_json": "receipt_json-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.GetDecisionReceiptResponse"
+}

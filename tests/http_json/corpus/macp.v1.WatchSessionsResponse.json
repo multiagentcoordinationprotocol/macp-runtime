@@ -1,0 +1,50 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "event": {
+          "event_type": "EVENT_TYPE_CANCELLED",
+          "observed_at_unix_ms": 9007199254740993,
+          "session": {
+            "configuration_version": "configuration_version-✓",
+            "context_id": "context_id-✓",
+            "expires_at_unix_ms": 9007199254740993,
+            "extension_keys": [
+              "extension_keys-✓",
+              "extension_keys-✓"
+            ],
+            "initiator": "initiator-✓",
+            "mode": "mode-✓",
+            "mode_version": "mode_version-✓",
+            "participant_activity": [
+              {
+                "last_message_at_unix_ms": 9007199254740993,
+                "message_count": 7,
+                "participant_id": "participant_id-✓"
+              },
+              {
+                "last_message_at_unix_ms": 9007199254740993,
+                "message_count": 7,
+                "participant_id": "participant_id-✓"
+              }
+            ],
+            "participants": [
+              "participants-✓",
+              "participants-✓"
+            ],
+            "policy_version": "policy_version-✓",
+            "session_id": "session_id-✓",
+            "started_at_unix_ms": 9007199254740993,
+            "state": "SESSION_STATE_CANCELLED"
+          }
+        }
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.WatchSessionsResponse"
+}

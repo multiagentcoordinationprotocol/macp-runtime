@@ -1545,7 +1545,7 @@
 - **Chose:** implement the plan's intent as new behaviour: `src/shutdown.rs` exits with `128 + signo` (130 SIGINT, 143 SIGTERM) on the second signal, skipping the final snapshot (accepted history is already durable). Pinned by `tests/shutdown_binary.rs::second_signal_during_drain_exits_immediately`.
 - **Alternatives:** swallow the second signal as before (operators then need SIGKILL to abort a long drain).
 - **Blast radius if wrong:** Low; only affects an operator who signals twice.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-10-31). `src/shutdown.rs:42` exits `128 + signo` on the second signal; the plan's intent, with conventional exit codes, and SIGTERM now drains as orchestrators expect.
 
 ## P1b: `ShutdownSignal` is binary-private and installed where the old ctrl_c await was
 - **Plan:** `plans/http-listener.md` (P1b)
@@ -1553,7 +1553,7 @@
 - **Chose:** `src/shutdown.rs`, declared `mod shutdown;` from `src/main.rs` (not `lib.rs`), so no public API and no semver-checks surface. It is installed just before `serve_with_shutdown`, as the old `ctrl_c()` was first polled there, so a signal during startup (recovery, replay) keeps the default disposition (immediate exit), as before. On Unix both handlers register synchronously in `install()`. The Prometheus listener breaks its accept loop and drops the socket on the signal; responses already being written finish on their own tasks.
 - **Alternatives:** a public `macp_runtime::shutdown` module (P4 could then live in the library; revisit in P4 if it does).
 - **Blast radius if wrong:** Low; moving the module into `lib.rs` later is additive.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-10-31). `mod shutdown;` at `src/main.rs:18`, not in `lib.rs`; P4 did not need it public, and promoting it later is additive.
 
 ## P2: live ordinal = high_water + 1 is exact only for an after_sequence the client could have learned
 - **Plan:** `plans/http-listener.md` (P2 Approach: "the first live envelope not deduped is `high_water + 1`, regardless of `after_sequence`")
@@ -1561,7 +1561,7 @@
 - **Chose:** keep the existing dedup exactly (zero gRPC change, as the phase requires) and document the bound on `SubscriptionCursor`. P6 (SSE) may additionally drop any cursor item with `ordinal <= after_sequence`.
 - **Alternatives:** return message-id -> ordinal for the last bus-capacity ordinals under the same guard and skip every buffered envelope found there (exact for any `after_sequence`, but changes gRPC delivery in that race).
 - **Blast radius if wrong:** Low; a guessing client may see one mislabeled SSE `id:` in a race window.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-10-31). Bound documented on `SubscriptionCursor` (`src/server.rs:1439`); the SSE side applies the mitigation (`src/http/sse.rs:56-62`: open at `min(after, high water)`, drop `<= after`), so only a guessed gRPC `after_sequence` can hit it.
 
 ## P2: seam shapes that differ slightly from the plan text
 - **Plan:** `plans/http-listener.md` (P2 items 1-2)
@@ -1572,4 +1572,167 @@
   - The existing server test module drives `process_stream_request(.., &mut events, ..)` with `let mut events = None`; the parameter is now `&mut Option<SubscriptionCursor>`, so those tests compile and pass unchanged.
   - `SecurityLayer::with_rate_limits` (new, public, additive in `macp-auth`) lets the unit test set both buckets without process env; `cargo semver-checks` vs 0.11.0 reports no update required.
 - **Blast radius if wrong:** Low; all `pub(crate)` except the additive `LogStore::get_incoming_after_with_high_water` and `with_rate_limits`.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-10-31). `with_rate_limits` is `#[doc(hidden)]` (`crates/macp-auth/src/security.rs:135`); `get_incoming_after_with_high_water` (`crates/macp-storage/src/log_store.rs:127`) is an additive sibling of the existing `LogStore` reads.
+
+## P3: duplicate JSON object keys resolve to the last occurrence
+- **Plan:** `plans/http-listener.md` (P3 Edge cases: "duplicate JSON keys (serde_json keeps the last; document)")
+- **Assumed:** RFC-MACP-0001 §10 is silent on duplicate members; RFC 8259 §4 leaves the behaviour to the implementation.
+- **Chose:** the last value wins, as `serde_json` does: request bodies go through the codec's number-text-preserving parser (`decode::parse_json`, `BTreeMap` objects, `insert` overwrites), and the `serde_json::Value` entry points inherit `serde_json`'s own rule; documented in `src/http/json/mod.rs`, pinned by `tests/http_json.rs` `failure_paths` and the unit test `request_bodies_keep_number_text_end_to_end`. No rejection.
+- **Alternatives:** a custom parser that refuses duplicates with `INVALID_REQUEST` (stricter, but stock proto3 JSON parsers differ here too).
+- **Blast radius if wrong:** Low; a client relying on either behaviour is already non-portable.
+- **Status:** CHANGED (2026-11-01, decided by the user on Fable's analysis): a duplicate object key at any depth is now a parse error, so the request is refused `400 INVALID_REQUEST` (`src/http/json/decode.rs`, the object loop of the text parser), matching every upstream protojson parser and closing a first-key/last-key parser differential with JSON-reading proxies. The string form of policy `rules` keeps serde_json's behaviour (judged by the policy registry).
+
+## P3: integer fields are judged on the JSON number text (codec-local parser)
+- **Plan:** `plans/http-listener.md` (P3 Approach, numbers; RFC-MACP-0001 §10.9 "MUST NOT silently round")
+- **Assumed:** `serde_json` without `arbitrary_precision` holds any non-integer-literal number (`1e3`, `1000.0`, `1.00000000000000001`) as an `f64`, so integrality cannot be judged from a `serde_json::Value`. `arbitrary_precision` is not an option: Cargo feature unification would turn it on for every `serde_json` user in the build (policy registry rules, storage, conformance), changing `Number` behaviour well outside the codec.
+- **Chose:** `decode_request` parses the body with a small RFC 8259 parser in `src/http/json/decode.rs` (`parse_json`) that keeps every number token as text (strings are delegated to `serde_json::from_str::<String>` once delimited, depth capped at 128). Integer fields parse that text exactly (`parse_decimal_integer`), so `1.00000000000000001`, `9007199254740992.5` and the quoted forms are refused, while `1e3`, `"1e3"`, `1000.0` decode to 1000 and any in-range integer is exact above 2^53 in every notation. The `serde_json::Value` entry points (`decode_message`, `envelope_from_json`, `canonical_payload_bytes`) cannot see text, so for them an `f64` is accepted only when integral and `|v| < 2^53` (strict: 2^53 itself may be a rounded 2^53+1). No other module changes.
+- **Alternatives:** `serde_json/arbitrary_precision` (crate-wide blast radius, above); a `RawValue` walk (needs the `raw_value` feature, same unification concern, smaller).
+- **Blast radius if wrong:** Low; the parser is pinned against `serde_json` as an oracle on structure, escapes and malformed input by `request_bodies_keep_number_text_end_to_end`.
+- **Status:** CONFIRMED (2026-10-31). RFC-MACP-0001 §10.8 makes the base mapping proto3 JSON, which accepts exponent notation for integers, and §10.9 forbids silent rounding; the text-preserving parser (`src/http/json/decode.rs`, depth cap at `:79`) is the only way to satisfy both without crate-wide `arbitrary_precision`.
+
+## P3: the codec uses `chrono`, an existing root dependency
+- **Plan:** `plans/http-listener.md` (P3, isolation of `src/http/json/`)
+- **Chose:** RFC 3339 `timestamp` parsing/formatting (§10.11(1)) uses `chrono`, already a non-optional `macp-runtime` dependency, so the `http-listener` feature adds no time crate. The isolation grep test bans transport/server items only; `chrono`, `serde_json`, `base64`, `prost` and `prost-reflect` are the codec's allowed imports (listed in the test's comment).
+- **Blast radius if wrong:** None.
+- **Status:** CONFIRMED (2026-10-31)
+
+## P3: spec ambiguities resolved in the codec
+- **Plan:** `plans/http-listener.md` (P3)
+- **Assumed / Chose:**
+  - **Error classification.** A failure in the Envelope's two transforms (`timestamp`, `payload`/`payload_b64`, including a wrong type *inside* a JSON payload, bad base64, no schema, both/neither forms) is `JsonError::InvalidEnvelope` carrying the Envelope's `session_id`/`message_id`, for P5 to report in band; a wrong type in a request field outside any Envelope is `InvalidRequest` (request-level 400). The plan names only the payload cases; the timestamp is put with them as an Envelope-level decision. **Revised in P5** (spec-decided, RFC-MACP-0006 §4.4): every failure inside an Envelope value, its own fields included (`mode: 1`, a non-object Envelope), is `InvalidEnvelope`.
+  - **`timestamp_unix_ms` as a JSON key** is an unrecognized member (ignored, §10.6): §10.1/§10.11 rename the field to `timestamp`, the only JSON name it has.
+  - **Unknown enum name in a map value** drops the entry, like a repeated element (§10.4 names only singular and repeated fields).
+  - **Non-string map keys** (none in MACP today) order numerically in the canonical bytes; §10.13(5) speaks of "the key's UTF-8 bytes", which only string keys have on the wire.
+  - **Envelope `timestamp` output** is RFC 3339 UTC `Z` with milliseconds only when non-zero (`chrono` `AutoSi`: `20:24:01Z`, `20:24:01.020Z`), matching the vendored examples byte-for-byte; the plan said "with ms". A value outside years 0000-9999 (RFC 3339 cannot write it) is clamped to that range on output, so it is the one lossy case.
+  - **`rules`**: a string that parses as a JSON object and the inlined object both become compact `serde_json` text (sorted keys), so they decode to the same descriptor; a string that is not a JSON object is kept verbatim (the registry judges it) and emitted as the string form. Any other JSON type is `InvalidRequest`.
+  - **A decoded field without presence at its default is not stored**, so a JSON-decoded `DynamicMessage` equals the same message decoded from protobuf (`-0.0` is stored: §10.13(2)).
+  - **A second member of the same oneof** is `InvalidRequest`, as in proto3 JSON.
+  - **Payload selection** maps any `macp.mode.<id>.v1` to `macp.modes.<id>.v1` (so `macp.mode.multi_round.v1` also resolves) and refuses `mode`/`message_type` values that are not single identifiers, so no crafted name reaches outside the table.
+- **Blast radius if wrong:** Low; each is a local rule in `src/http/json/` pinned by a unit test.
+- **Status:** CONFIRMED (2026-10-31). Error classification is spec-decided since P5 (RFC-MACP-0006 §4.4); `timestamp_unix_ms` ignored is §10.1/§10.6; timestamp output (`src/http/json/encode.rs:198`, `AutoSi`) is within §10.11(1); `rules` emits the object as §10.11(3) requires; MACP has no enum-valued and no non-string-keyed map today (`core.proto` maps are `string`/`bytes` only), so those two rules are moot until one is added.
+
+## P3: deps-isolation checks direct edges for the default build
+- **Plan:** `plans/http-listener.md` (P3 Files, `deps-isolation`: "not in `cargo tree -p macp-runtime -e normal` with default features")
+- **Assumed:** `hyper`, `hyper-util`, `http-body-util` and `tokio-rustls` are already in the default build transitively through tonic's `transport` + `tls-ring` (verified with `cargo tree`), so the plan's whole-tree check cannot pass.
+- **Chose:** the Seam crates (`macp-core`, `macp-modes`, `macp-pb`, `macp-policy`, all features) must contain none of `prost-reflect`/`hyper-util`/`tokio-rustls`; `macp-runtime` default must contain no `prost-reflect` anywhere and none of the feature's seven deps as a **direct** (depth 1) dependency; and the feature must still enable all seven (non-vacuous).
+- **Alternatives:** drop the root-crate check entirely.
+- **Blast radius if wrong:** None at runtime; a CI-check shape.
+- **Status:** CONFIRMED (2026-10-31)
+
+## P3: conformance-fixture envelopes are derived at test time, not copied into the corpus
+- **Plan:** `plans/http-listener.md` (P3 acceptance: corpus = "the vendored examples, the conformance fixtures' envelopes, and one maximal and one all-defaults value per message type")
+- **Assumed:** copying the fixtures' envelopes into `tests/http_json/corpus/` would duplicate the vendored, drift-checked `tests/conformance/` (and the HTTP examples in `tests/http/examples/`) with no drift check.
+- **Chose:** `tests/http_json/corpus/` holds one file per message type (every request/response type of the service, every payload, `Envelope`, `MACPError`): maximal, all-defaults, and one case per extra oneof member, regenerated only with `MACP_REGEN_GOLDEN=1`. The vendored examples and the conformance envelopes (payload bytes from `macp_conform::encode::encode_payload`, sent as `payload_b64`) are read in place by their own fixpoint tests; the latter also assert the output side picks a JSON payload that converts back to the same bytes.
+- **Blast radius if wrong:** Low; test layout only.
+- **Status:** CONFIRMED (2026-10-31)
+
+## P4: listener skeleton choices the plan left open
+- **Plan:** `plans/http-listener.md` (P4)
+- **Assumed / Chose:**
+  - **Request timeout answer.** `MACP_REQUEST_TIMEOUT_SECS` expiring before the response head is `500 INTERNAL_ERROR` "request timed out" with a §4.5 body and `MACP-Error-Code` (revised in P5 from P4's bodiless `503`, to the plan's answer: RFC-MACP-0006 is silent on timeouts, no registry code names a deadline, and §4.5 reserves bodiless answers for its four transport statuses). A `Send` may have been applied; §4.8's same-`message_id` retry is safe. The timeout bounds the response head (body collection included), exactly like tonic's; an SSE body (P6) flows after the head, outside it.
+  - **P5 placeholder reads the body.** Superseded by P5: authenticated rows authenticate from headers before the body is read; over the cap is `413 PAYLOAD_TOO_LARGE` with the §4.5 body; the remaining placeholder is the streaming rows' `501` (see the P5 entry).
+  - **Empty `MACP_HTTP_BIND_ADDR` = unset**, in both builds (no listener, no feature-off refusal). Other `MACP_HTTP_*` variables are not read or judged while it is unset (zero impact).
+  - **Reused variables** (`MACP_REQUEST_TIMEOUT_SECS`, `MACP_MAX_CONCURRENT_STREAMS`, `MACP_MAX_PAYLOAD_BYTES`, TLS paths, `MACP_ALLOW_INSECURE`) are parsed exactly as `main.rs` parses them for gRPC (same defaults, lenient fallback), so the two listeners never disagree; only one PEM path set is "no TLS", as on gRPC.
+  - **Bind collision** = same port with the same IP or either side unspecified; port 0 never collides. Not checked against `MACP_METRICS_ADDR` (a clash fails the bind, which is fatal).
+  - **`MACP_HTTP_PUBLIC_URL`**: userinfo and empty path segments are refused besides the listed rules; scheme compared case-insensitively. **`MACP_HTTP_CORS_ORIGINS`**: scheme/host lowercased and de-duplicated; an empty entry (`a,,b`, trailing comma) is refused; a blank value is the empty list.
+  - **HTTP/2 values the plan named without numbers**: `max_pending_accept_reset_streams = 20` and `max_send_buf_size = 400 KiB` (hyper's defaults, set explicitly).
+  - **Placeholders**: `OPTIONS` on any path and any method on `/.well-known/macp.json` answer `404` until P7/P8.
+  - **TLS PEM loading** is separate from `main.rs`'s (tonic's `Identity::from_pem` yields no rustls config to reuse): `rustls-pki-types` `PemObject`, via `tokio_rustls::rustls`.
+  - **Wiring order**: the listener binds before gRPC serves (plan: "spawn after `:510`"), so a bind failure aborts startup; it runs inline in `main`'s combined serve future (no task when off), and a gRPC serve error returns at once instead of waiting behind HTTP.
+  - **Feature-off refusal test** runs in the default-feature run (`cfg(not(feature = "http-listener"))`): `CARGO_BIN_EXE_macp-runtime` is built with the test run's features, so a feature-on run cannot spawn a feature-off binary.
+  - **Pre-request deadlines (verifier G1).** hyper-util's auto builder sniffs the protocol with no deadline, so it is not used: TLS routes by ALPN (`h2` ⇒ HTTP/2 only, anything else, including no ALPN, ⇒ HTTP/1.1 only, since HTTP/2 over TLS requires ALPN, RFC 9113 §3.2); plaintext sniffs the first bytes against the preface under a 10 s deadline, and the same deadline bounds the preface after an `h2` TLS handshake (hyper's h2 handshake has none). After the preface, HTTP/2 is bounded only by keep-alive PINGs (30 s + 20 s, so up to 50 s); HTTP/1.1 by the 10 s head-read timeout, which also covers idle keep-alive. The deadlines are not configurable; tests shorten them in process (`#[cfg(test)]`), with no env knob.
+  - **"No extra socket"** is checked with `lsof`, falling back to `/proc/<pid>/{fd,net/tcp*}` on Linux without it.
+- **Blast radius if wrong:** Low; local to `src/http/{config,server,tls}.rs`, each pinned by a unit or binary test.
+- **Status:** CONFIRMED (2026-11-01). The **Request timeout answer** sub-bullet dropped a tier on Fable's analysis and was settled by Opus: the registry's `permanent` column is entry stability, not retry semantics, and `INTERNAL_ERROR`'s description already says clients SHOULD retry (§4.8); no transient code exists and a 504 would change the registered status. Every other sub-bullet CONFIRMED (2026-10-31): the P5 placeholder is superseded; empty `MACP_HTTP_BIND_ADDR` = unset (`src/http/config.rs:69`) is the compose `${VAR:-}` convention; config refusals are the conservative direction; HTTP/2 values (`src/http/server.rs:207-210`) and deadlines are internal and a knob can be added later.
+
+## P5: unary dispatch choices the plan left open
+- **Plan:** `plans/http-listener.md` (P5)
+- **Assumed / Chose:**
+  - **Streaming placeholder.** The six streaming rows (`StreamSession`, `Watch*`) answer `501` with no body until P6, before authentication and before the body is read, so a client can tell "not yet" from the §4.1 `404` an unknown method gets.
+  - **Double authentication.** `dispatch` authenticates from headers before the body (§4.4) for every row whose gRPC handler authenticates, then the handler authenticates again from the same metadata. The pre-check charges no bucket. Which rows are open (`Initialize`, `GetManifest`, `ListModes`, `ListRoots`, `ListExtModes`, `GetReceiptKeys`) is pinned by a test against gRPC's own answer to an empty unauthenticated request.
+  - **`SecurityLayer::with_static_tokens`** (`#[doc(hidden)]`, additive; semver-checks clean) installs a static-token chain in process, so the integration tests need no process env and run in parallel.
+  - **Inside the `envelope` member is in band.** (Spec-decided, not an assumption; recorded for the P5 reversal.) RFC-MACP-0006 §4.4's "not a `SendRequest`" is exactly: not JSON, not an object, or no `envelope` member; anything wrong inside the member (`"mode": 1`, `{"envelope": 5}`, a bad payload type) is a `200` Ack `INVALID_ENVELOPE`, ids copied when they are JSON strings. `{"envelope": null}` is `400`: null is absent (RFC-MACP-0001 §10.10). Unknown top-level members are ignored (§10.6), never a 400.
+  - **Uncoded statuses** (none expected) fall back by gRPC code: `UNAUTHENTICATED`, `PERMISSION_DENIED`→`FORBIDDEN`, `INVALID_ARGUMENT`→`INVALID_REQUEST`, else `INTERNAL_ERROR`; a code string not in the registry falls back the same way.
+  - **Table = `telemetry::grpc::METHODS`** is asserted only under `--features otel,http-listener` (the list exists only with `otel`); the descriptor equality runs in every feature build.
+  - **Example replay adaptations** (`tests/http_unary.rs`): example tokens are mapped onto dot-free configured tokens (the static resolver leaves dotted tokens to JWT); the examples' fixed March 2026 Envelope timestamps are re-stamped with the present (the TTL runs from the SessionStart timestamp, RFC-MACP-0003 §2); `org-procurement-2026.02` is pre-registered. Two divergences from the informative examples, identical on gRPC: a rejected Ack carries `session_state: SESSION_STATE_UNSPECIFIED` (`make_error_ack`), and `participant_activity` does not count the SessionStart (`step::commit` credits only later messages).
+  - **Golden parity of mutating RPCs** runs on twin objects (one created per binding) whose ids are renamed (substring, since ids appear inside refusal messages) before comparing canonical JSON with `*_unix_ms`/`timestamp` zeroed; refusals compare code, details and `session_id`.
+- **Blast radius if wrong:** Low; local to `src/http/{dispatch,errors,metadata}.rs` and tests.
+- **Status:** CONFIRMED (2026-10-31). The `501` streaming placeholder is gone (P6 implemented the rows); the open rows are inherited from the gRPC handlers (`src/http/dispatch.rs`), not decided by the binding; in-band Envelope errors are RFC-MACP-0006 §4.4; the rest is internal or test-only.
+
+## P6: SSE stream choices the plan left open
+- **Plan:** `plans/http-listener.md` (P6)
+- **Assumed / Chose:**
+  - **Shutdown ends streams at the drain signal**, with no `event: error`: a lost connection by §4.3, so the client resumes with `Last-Event-ID`. Waiting for the drain deadline would hold every idle watch stream open until it and gain nothing; an error event would tell the client the failure is fatal when it is not.
+  - **"Normal close after the Commitment" = after the resolved session's last ordinal.** The runtime sends the `Resolved` lifecycle event before it publishes the Commitment to the bus, so the stream reads the final high water on `Resolved` and closes once it has delivered it. Equivalent to the plan's wording and race-safe (unit test, 200 rounds with the bus held until after `Resolved`).
+  - **Resume opens at `min(after, high water)`** and drops ordinals `<= after`. Dropping alone (the plan's mitigation) would still number later live envelopes from the high water, mislabelling ids when `after` is above it; an open floor below a compaction base retries at `after`.
+  - **Auth rows mirror gRPC**: `WatchModeRegistry` and `WatchRoots` take no credential (their gRPC handlers read none, like `ListModes`/`ListRoots`); `WatchSignals`, `WatchSessions`, `WatchPolicies` (since #274) and `StreamSession` do. Pinned against gRPC's answer to an unauthenticated call.
+  - **Accept**: a missing header admits the stream; a present but empty header, or one whose most specific matching range has `q=0`, is `406` (empty body, no code), checked before authentication. A malformed q-value ignores that range.
+  - **Keepalive knob** is `HttpListener::with_sse_keepalive` (`#[doc(hidden)]`, additive, semver-checks clean); no env variable.
+  - **Lag test** runs over HTTP/2 with a 2 KiB stream window so a non-reading client exerts back-pressure; the flood uses Votes by 20 extra declared voters (Decision admits only Votes once voting starts).
+  - **Error-event JSON** is the canonical encoder's sorted-key output; the examples' key order differs and is compared as parsed JSON.
+- **Blast radius if wrong:** Low; local to `src/http/{sse,dispatch,server,errors}.rs` and tests.
+- **Status:** CONFIRMED (2026-10-31). Shutdown and normal-close semantics follow RFC-MACP-0006 §4.3 (a close without `event: error` is a resumable lost connection); `406` is §4.3's MUST; `WatchModeRegistry`/`WatchRoots` unauthenticated mirrors their gRPC handlers (`src/http/dispatch.rs:142-143`); the keepalive knob is `#[doc(hidden)]`.
+
+## P7: CORS choices the plan left open
+- **Plan:** `plans/http-listener.md` (P7)
+- **Assumed / Chose:**
+  - **Every `OPTIONS` is a preflight on every path**, answered `204` before routing and authentication; `Access-Control-Request-Method` is not required. A listed origin gets exactly the five plan headers (no `Expose-Headers` on a preflight); anything else gets `204` with no `Access-Control-*` at all. Before P7 `OPTIONS` was a placeholder `404`.
+  - **Default ports are normalised as well as trailing slashes** (config and request alike): `https://a:443` ≡ `https://a`, because a browser serializes an origin without its default port, so a configured `:443` would otherwise never match. P4's config test refused `https://a/`; it is now accepted as `https://a` (the plan's edge case), `https://a//` and any other path are still refused.
+  - **Origin matching**: one `Origin` header, `http(s)` with a host, no userinfo or path; `null`, malformed, several headers or none are unlisted. The echoed `Allow-Origin` is the request's value verbatim.
+  - **`Vary: Origin` on every actual response once an allowlist is configured** (CHANGED after the P7 verify: originally listed origins only, per the plan's wording), appended to any existing `Vary`. Fetch's "CORS protocol and HTTP caches" guidance: a shared cache filled by an unlisted caller must not serve a listed origin a copy without `Allow-Origin` (the well-known document has no `Cache-Control`). Unlisted responses still carry no `Access-Control-*` header; an unlisted preflight carries no header at all; an empty allowlist adds no `Vary`.
+  - **The well-known document uses the same allowlist** (§4.10 has no public-document exception); responses outside `handle` (hyper's own 400/431) carry no CORS headers.
+- **Blast radius if wrong:** Low; local to `src/http/{cors,config,server}.rs`, pinned by unit and in-process tests.
+- **Status:** CONFIRMED (2026-10-31). The unlisted-preflight `204` with no headers is RFC-MACP-0006 §4.10; default-port normalisation only loosens config; `Vary: Origin` (`src/http/cors.rs:22`) is Fetch cache guidance and removable later without a client break.
+
+## P8: discovery choices the plan left open
+- **Plan:** `plans/http-listener.md` (P8)
+- **Assumed / Chose:**
+  - **Well-known methods**: `GET` and `HEAD` only; any other method is `405` with `Allow: GET, HEAD` and no body (RFC 9110 practice; neither RFC-0005 §7.1 nor RFC-0006 §4.11 names one, and §4.1's `405 Allow: POST` governs `{base}/macp/v1/` paths only). `HEAD` sends the GET head with `Content-Length` of the GET body. `OPTIONS` there is a CORS preflight like everywhere (P7).
+  - **No request timeout and no auth** on the well-known path: it is `GetManifest` with an empty `agent_id`, which gRPC serves unauthenticated.
+  - **`MacpServer::with_http_endpoint`** is `#[doc(hidden)] pub`, compiled only with `http-listener` (integration tests need it); the field is private, so semver-checks stays clean. Without `MACP_HTTP_BIND_ADDR` the public URL is never read, so no entry.
+  - **`input_content_types`/`output_content_types` unchanged** (`application/macp-envelope+proto`) even with the listener on: §4.11 asks only for the transport entry, and §4.2 forbids `application/macp-envelope+json` as an HTTP body label.
+  - **Canonical JSON emits `"metadata": {}`** in the entry (the codec's default-emission rule); the document is byte-equal to the canonical JSON of gRPC's manifest.
+- **Blast radius if wrong:** Low; local to `src/http/discovery.rs`, `src/server.rs` `get_manifest`, `src/main.rs`.
+- **Status:** CONFIRMED (2026-10-31). `405` with `Allow: GET, HEAD` (`src/http/discovery.rs:37`) can be loosened later; no auth matches gRPC's unauthenticated `GetManifest`; content types unchanged per RFC-MACP-0006 §4.2/§4.11.
+
+## P9: HTTP observability choices the plan left open
+- **Plan:** `plans/http-listener.md` (P9)
+- **Assumed / Chose:**
+  - **`http.route` is the unprefixed RPC path** (`/macp/v1/Send`) even when the request came in under the `MACP_HTTP_PUBLIC_URL` prefix, and `/.well-known/macp.json` for discovery; absent for a transport `404` and for every `OPTIONS` (answered before routing). A `405`/`415`/`401` on a matched RPC path still carries the route (the path matched; only the request was refused). Keeps one route value per RPC whichever proxy shape is in front.
+  - **Method normalization:** the nine RFC 9110 methods by name, anything else `_OTHER` and span-named `HTTP` (OTel HTTP semconv), so neither span names nor metric labels grow with client input. `http.request.method_original` is not recorded (it would carry a client-controlled string).
+  - **ERROR has no description; `error.type` is the status code on a 5xx** (CHANGED after the P9 verify, on the span and the metric point, per HTTP semconv "conditionally required"; bounded to 500..=599). The metric also carries `url.scheme` (semconv required; two values). `url.path` stays off the span on purpose: the raw path is unbounded client input (S-c), and `http.route` carries the matched RPC. A timeout `500` produced inside `handle` is an ERROR; hyper's own `400`/`431` (outside `handle`) get no span at all.
+  - **Duration ends at the end of the response body** (OTel: "until the full response is sent"), so an SSE stream's point records the stream's lifetime, same moment the span ends. Boundaries are the semconv's advisory set (`HTTP_REQUEST_DURATION_BOUNDARIES`, 5 ms-10 s), set explicitly as the Envelope histogram's are; the vendored `macp-semconv.json` defines no HTTP group, so the pin is the upstream OTel HTTP semconv (name `http.server.request.duration`, unit `s`), not the vendored file.
+  - **The `debug` event is emitted in every build** (not only without `otel`): fields `method` (normalized), `rpc` (the routed method name or empty) and `status`. Its target is `macp_runtime::http::server`, never `telemetry::TARGET`, so it never reaches the OpenTelemetry layer.
+  - **`MacpServer::telemetry`** went from private to `pub(crate)` (no public API change).
+  - **SSE span end time** is the span's last exit (tracing-opentelemetry), i.e. the last body poll; for a client that vanishes this is the last keepalive poll, not the moment hyper drops the body.
+- **Blast radius if wrong:** Low; local to `src/telemetry/{http,instruments}.rs` and `src/http/server.rs` `handle`, pinned by `tests/otel_http.rs`. Attribute/metric names are OTel-standard; changing the route shape later is a dashboard-visible change.
+- **Status:** CONFIRMED (2026-11-01). The **`http.route` is the unprefixed RPC path** sub-bullet was decided by the user on Fable's analysis: the listener strips the prefix itself and serves both paths, so the unprefixed template keeps one series per RPC. Every other sub-bullet CONFIRMED (2026-10-31): method normalization, `error.type`, `url.scheme`, the metric name/unit and bucket boundaries are OTel HTTP semconv; the `debug` event, `pub(crate)` visibility and the SSE span end are internal.
+
+## P10: conformance-over-HTTP choices the plan left open
+- **Plan:** `plans/http-listener.md` (P10)
+- **Assumed / Chose:**
+  - **hyper's client connection + tokio-rustls (ring), not reqwest** (DIVERGES from the plan, which names reqwest). Any reqwest TLS feature on `macp-conform` unifies into macp-auth's reqwest in workspace test builds, because the root crate dev-depends on `macp-conform/http`: `rustls-no-provider` makes macp-auth's JWKS `Client::new()` panic (seen: 5 `jwt_bearer` tests failed under `cargo test --workspace`), and `rustls` compiles aws-lc-rs and gives rustls two providers, which makes tonic's provider-less `ServerConfig::builder()` panic. hyper 1.8 (`client`, `http1`), hyper-util (`tokio`), http-body-util and tokio-rustls (`ring`, `tls12`) are already in the lock with those features, so `Cargo.lock` gains only `macp-conform`'s edges and no new crate. The TLS config is ring + WebPKI roots (the gRPC target's trust store), ALPN `http/1.1`. Unary RPCs reuse one keep-alive connection; each subscribe stream gets its own. HTTP/1.1 only (the binding's MUST); HTTP/2 is not exercised by an HTTP run. The `deps-isolation` "macp-conform without grpc has no transport" step's pattern gained `hyper|tokio-rustls` (the existing step, not a new one), since its `reqwest` guard no longer covers this feature.
+  - **History-payload re-encoding is a hand table** (`payload_fields` in `crates/macp-conform/src/http.rs`) of every payload message the fixtures use plus `SessionStartPayload` and `CommitmentPayload`, encoded with `prost::encoding::encode_varint` in field order with proto3 defaults omitted (map entries key-sorted), rather than JSON → generated prost structs. Either is "via the generated types" in spirit; the table is shorter and independent of the runtime codec. A JSON `payload` for any other `(mode, message_type)` is a target error, not a guess.
+  - **`event: error` `SESSION_NOT_OPEN` ends history successfully** (a cancelled/expired session, §4.3); any other `event: error`, and a non-fatal inline `StreamSessionResponse.error`, is a target error (the gRPC target treats the inline error the same way). A subscribe Envelope event without `id:` is a target error.
+  - **A coded non-200 `Send` is `Submission::Rejected { code }`**, mirroring the gRPC target's coded-status rule; an uncoded (transport) status is a target error.
+  - **`--transport http` without the `http` feature is a usage error (status 2)**; the CLI still requires `grpc`. CI builds the CLI with `grpc,http`.
+  - **The in-repo test also runs `GrpcTarget` in process** against the same `MacpServer`, so "every fixture the gRPC path passes" is asserted per fixture (outcome maps equal), not just by claim. The root dev-dependency therefore enables `macp-conform` `grpc` and `http`; dev-only, so `cargo tree -p macp-runtime --edges normal` is unchanged (and reqwest there is still macp-auth's, `json` feature only).
+  - **The Ack-flip hook is a per-listener `#[cfg(test)]` field** (`State::broken_ack_mapping`, set by `HttpListener::with_broken_ack_mapping`) rather than a global flag, so parallel unit tests cannot see it; it rewrites the `200` `Send` body after dispatch (inverts `ack.ok`, drops `ack.error`). The negative test is `src/http/conformance_tests.rs` with an unbroken control run.
+  - **`integration_tests/Cargo.lock` needed no change**: it records `macp-runtime`'s normal deps only, and `macp-conform` is a dev-dependency (regenerated and `--locked`-checked anyway).
+  - **CI's gRPC local step readiness loop now fails when the port never opens** (it used to `break` or fall through to the run); the HTTP step polls a real `GetManifest` with curl under the same 60 s deadline. The job keeps its name (`macp-conform CLI (GHCR image, gRPC)`) so no required-check name changes.
+- **Blast radius if wrong:** Low; tool crate and CI only. The runtime change is `#[cfg(test)]`-only.
+- **Status:** CONFIRMED (2026-10-31). hyper + tokio-rustls in `macp-conform` adds no crate to the lock and avoids the reqwest TLS-feature unification that broke `jwt_bearer`; the rest is test, CLI-tool and CI shape.
+
+## P11: docs, image and curl-script choices the plan left open
+- **Plan:** `plans/http-listener.md` (P11)
+- **Assumed / Chose:**
+  - **The docs are the source of the curl examples; the script executes them.** `scripts/check-http-examples.sh` extracts every fenced `bash` block in `docs/examples.md`'s "HTTP/JSON binding (curl)" section that is preceded by a `<!-- check-http-example ... -->` marker (`status=`, `expect=`, `stream`, `setup`) and runs them in order in one shell, with `curl` shadowed by a function adding `--max-time`, `-D <file>` (status) and an output copy. A curl block in the section without a marker fails the script, so a new example cannot go unchecked. Rejected: generating the docs from the script (two sources to keep in sync, or a generator step contributors forget).
+  - **Ports:** both listeners bind `127.0.0.1:0`; the HTTP port is read from the `HTTP listener bound ... addr=` startup log line (it logs `local_addr()`), then readiness is a polled `GetManifest` under a 30 s deadline. Dev-mode auth is forced by unsetting `MACP_AUTH_*`/TLS/`MACP_HTTP_PUBLIC_URL`/`MACP_HTTP_CORS_ORIGINS` for the child. The setup block generates the session id with `python3` (`uuidgen` is not on every runner).
+  - **CI placement:** the script runs in `conform-cli` right after that job builds `macp-runtime --features http-listener` (no extra build).
+  - **Image check is a shell smoke test, not `tests/http_binary.rs` against the image.** The binary test spawns `CARGO_BIN_EXE_macp-runtime`, not a container. `docker-build` now `load`s the image (`macp-runtime:ci`) and asserts: without `MACP_HTTP_*` the container's only LISTEN socket (read from `/proc/net/tcp{,6}` via `docker exec`, since the slim image has no `ss`) is 50051 and no `HTTP listener` log line appears; with `MACP_HTTP_BIND_ADDR=0.0.0.0:8080`, `-p 8080:8080` and `MACP_ALLOW_INSECURE=1`, a polled `POST /macp/v1/GetManifest` answers `200` with a `manifest` member. Byte-identical `GetManifest` stays pinned by the binary test, not re-checked against the image.
+  - **`Dockerfile` default is now `otel,http-listener`** (plan: "Dockerfile default"), and the image `EXPOSE`s `50051 8080` (8080 is documentation only; nothing listens there unless `MACP_HTTP_BIND_ADDR` is set). `--build-arg CARGO_FEATURES=` still builds the plain binary; `docs/deployment.md`'s "build without the feature" instructions were updated accordingly.
+  - **`deploy/docker-compose.yml` is unchanged:** it pins runtime image `0.10.0`, which has no listener and silently ignores `MACP_HTTP_*` (the feature-off refusal is new on this branch, `src/main.rs`), so adding the port there now would expose a port nothing listens on. Revisit when `deploy/` moves to a release after 0.11.0.
+  - **Docs name `:latest` for the HTTP docker example**, because no released image includes the feature yet (same "after `0.11.0`" wording as the otel docs, ASSUMPTIONS "docs say images published after 0.11.0 include otel").
+  - **Operator upgrade notes** go under the existing `docs/deployment.md` "Upgrading to the release after 0.11.0" heading (items 10 and 11: the listener and the `WatchPolicies` credential), and the embedder-facing note under MIGRATING's existing `## 0.12.0` heading (title extended; `embedder_contract.py`'s heading regex still matches).
+- **Blast radius if wrong:** Low; docs, CI and the image build argument. The image change is inert without `MACP_HTTP_BIND_ADDR`, pinned by the `docker-build` smoke test.
+- **Status:** CONFIRMED (2026-11-01) for the **`Dockerfile` default is now `otel,http-listener`** sub-bullet, which dropped a tier on Fable's analysis (settled by Opus): `EXPOSE` is metadata, `CARGO_FEATURES` is a build-arg, the listener is dormant without `MACP_HTTP_BIND_ADDR` (CI-checked), and hyper/rustls were already in the binary. **`deploy/docker-compose.yml` is unchanged**: Deferred (2026-10-31). Trigger: `deploy/` moving its pinned runtime image to a release that includes the listener. Every other sub-bullet CONFIRMED (2026-10-31).

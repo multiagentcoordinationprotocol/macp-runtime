@@ -1356,7 +1356,11 @@ name = "macp-conform"
 version = "0.11.0"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "flate2",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "macp-core",
  "macp-modes",
  "macp-pb",
@@ -1368,11 +1372,13 @@ dependencies = [
  "sha2",
  "tar",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
  "uuid",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1439,10 +1445,14 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64 0.23.1",
+ "bytes",
  "chrono",
  "criterion",
  "futures-core",
  "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "macp-auth",
  "macp-conform",
  "macp-core",
@@ -1456,6 +1466,7 @@ dependencies = [
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "prost",
+ "prost-reflect",
  "prost-types",
  "rcgen",
  "serde",
@@ -1463,6 +1474,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tonic",
  "tonic-health",
@@ -1945,6 +1957,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "prost-reflect"
+version = "0.16.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01b80ea363c31af2de2b92e3c07ed1156628f7838c4afb4df75ee78a37fedbd1"
+dependencies = [
+ "prost",
+ "prost-types",
 ]
 
 [[package]]

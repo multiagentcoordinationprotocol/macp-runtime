@@ -1,0 +1,16 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "reason": "reason-✓",
+        "suspended_by": "suspended_by-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.SessionSuspendPayload"
+}

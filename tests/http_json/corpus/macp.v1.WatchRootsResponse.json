@@ -1,0 +1,17 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "change": {
+          "observed_at_unix_ms": 9007199254740993
+        }
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.WatchRootsResponse"
+}

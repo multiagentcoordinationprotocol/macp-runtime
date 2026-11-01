@@ -1,0 +1,17 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "proposal_id": "proposal_id-✓",
+        "reason": "reason-✓",
+        "severity": "severity-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.modes.decision.v1.ObjectionPayload"
+}

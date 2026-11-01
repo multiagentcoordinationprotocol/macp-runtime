@@ -1,0 +1,15 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "jwks_json": "jwks_json-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.GetReceiptKeysResponse"
+}

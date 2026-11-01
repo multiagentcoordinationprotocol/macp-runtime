@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "action": "action-✓",
+        "authority_scope": "authority_scope-✓",
+        "commitment_id": "commitment_id-✓",
+        "configuration_version": "configuration_version-✓",
+        "mode_version": "mode_version-✓",
+        "outcome_positive": true,
+        "policy_version": "policy_version-✓",
+        "reason": "reason-✓",
+        "supersedes": {
+          "commitment_hash": "commitment_hash-✓",
+          "session_id": "session_id-✓"
+        }
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.CommitmentPayload"
+}

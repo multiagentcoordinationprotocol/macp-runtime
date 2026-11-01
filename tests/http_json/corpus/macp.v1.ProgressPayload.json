@@ -1,0 +1,19 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "message": "message-✓",
+        "progress": 0.25,
+        "progress_token": "progress_token-✓",
+        "target_message_id": "target_message_id-✓",
+        "total": 0.25
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.ProgressPayload"
+}

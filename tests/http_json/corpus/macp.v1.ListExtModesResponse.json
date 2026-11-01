@@ -1,0 +1,56 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "modes": [
+          {
+            "description": "description-✓",
+            "determinism_class": "determinism_class-✓",
+            "message_types": [
+              "message_types-✓",
+              "message_types-✓"
+            ],
+            "mode": "mode-✓",
+            "mode_version": "mode_version-✓",
+            "participant_model": "participant_model-✓",
+            "schema_uris": {
+              "k1": "schema_uris-✓",
+              "k2": "schema_uris-✓"
+            },
+            "terminal_message_types": [
+              "terminal_message_types-✓",
+              "terminal_message_types-✓"
+            ],
+            "title": "title-✓"
+          },
+          {
+            "description": "description-✓",
+            "determinism_class": "determinism_class-✓",
+            "message_types": [
+              "message_types-✓",
+              "message_types-✓"
+            ],
+            "mode": "mode-✓",
+            "mode_version": "mode_version-✓",
+            "participant_model": "participant_model-✓",
+            "schema_uris": {
+              "k1": "schema_uris-✓",
+              "k2": "schema_uris-✓"
+            },
+            "terminal_message_types": [
+              "terminal_message_types-✓",
+              "terminal_message_types-✓"
+            ],
+            "title": "title-✓"
+          }
+        ]
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.ListExtModesResponse"
+}

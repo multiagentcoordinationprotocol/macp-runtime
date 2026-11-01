@@ -45,6 +45,11 @@ pub struct MacpServer {
     /// authentication, before kernel acceptance; deny-on-error. See
     /// `crate::policy_engine`.
     policy_engine: Option<Arc<dyn crate::policy_engine::PolicyEngine>>,
+    /// The HTTP binding's `{base}` (RFC-MACP-0006 §4.11), advertised in
+    /// `GetManifest.transport_endpoints` on both bindings. `None` (the
+    /// default, and always without `MACP_HTTP_PUBLIC_URL`) leaves the
+    /// manifest byte-identical to a runtime without the HTTP listener.
+    http_endpoint: Option<String>,
 }
 
 impl MacpServer {
@@ -54,7 +59,36 @@ impl MacpServer {
             security,
             policies_read_only: false,
             policy_engine: None,
+            http_endpoint: None,
         }
+    }
+
+    /// Advertise the HTTP binding at `base` (`MACP_HTTP_PUBLIC_URL`: no
+    /// trailing slash, no `/macp/v1/` suffix) in `GetManifest`, as the
+    /// `macp.transport.http.v1` entry of RFC-MACP-0006 §4.11. Called before
+    /// the server is cloned for the two listeners, so both bindings (and the
+    /// well-known document) serve the same manifest. Not a stable API.
+    #[cfg(feature = "http-listener")]
+    #[doc(hidden)]
+    pub fn with_http_endpoint(mut self, base: impl Into<String>) -> Self {
+        self.http_endpoint = Some(base.into());
+        self
+    }
+
+    /// The `transport_endpoints` of the runtime's own manifest: the HTTP
+    /// binding's entry when a public URL is configured, else none (RFC-MACP-0005
+    /// §6 makes the field optional; the gRPC binding has no public URL to
+    /// advertise).
+    fn transport_endpoints(&self) -> Vec<crate::pb::TransportEndpoint> {
+        self.http_endpoint
+            .iter()
+            .map(|base| crate::pb::TransportEndpoint {
+                transport: "macp.transport.http.v1".into(),
+                uri: base.clone(),
+                content_types: vec!["application/json".into()],
+                metadata: HashMap::new(),
+            })
+            .collect()
     }
 
     pub fn with_read_only_policies(mut self) -> Self {
@@ -64,7 +98,7 @@ impl MacpServer {
 
     /// The OpenTelemetry switch, read from the runtime (no constructor
     /// parameter of its own).
-    fn telemetry(&self) -> &crate::telemetry::Telemetry {
+    pub(crate) fn telemetry(&self) -> &crate::telemetry::Telemetry {
         self.runtime.telemetry()
     }
 
@@ -349,6 +383,54 @@ impl MacpServer {
         .instrument(process.span().clone())
         .await;
         self.finish_send(process, &env, result).await
+    }
+
+    /// The HTTP binding's `Send` (RFC-MACP-0006 §4.4), after the request
+    /// layer: `identity` was authenticated from the request headers before
+    /// the body was read, and `env` is the decoded Envelope. Every decision
+    /// from here on is in band, exactly as on gRPC.
+    #[cfg(feature = "http-listener")]
+    pub(crate) async fn send_from_http(&self, identity: &AuthIdentity, env: Envelope) -> Ack {
+        let process = ProcessSpan::start(
+            self.telemetry(),
+            &env,
+            self.runtime.envelope_labels(&env.mode, &env.message_type),
+            None,
+        );
+        self.send_authenticated(identity, env, process).await
+    }
+
+    /// The in-band Ack for an Envelope the HTTP binding could not convert
+    /// from JSON (its payload or timestamp, RFC-MACP-0001 §10.11/§10.12):
+    /// `INVALID_ENVELOPE` with the Envelope's identifiers, shaped exactly like
+    /// every other error Ack ([`Self::make_error_ack`]), with the codec's
+    /// reason as the message.
+    #[cfg(feature = "http-listener")]
+    pub(crate) fn invalid_envelope_ack(session_id: &str, message_id: &str, reason: &str) -> Ack {
+        let stub = Envelope {
+            session_id: session_id.to_string(),
+            message_id: message_id.to_string(),
+            ..Envelope::default()
+        };
+        let mut ack = Self::make_error_ack(&MacpError::InvalidEnvelope, &stub);
+        if let Some(error) = ack.error.as_mut() {
+            error.message = format!("{}: {reason}", error.message);
+        }
+        ack
+    }
+
+    /// The runtime this server serves (the HTTP binding's SSE streams read
+    /// session state and the lifecycle bus from it).
+    #[cfg(feature = "http-listener")]
+    pub(crate) fn runtime(&self) -> &Arc<Runtime> {
+        &self.runtime
+    }
+
+    /// The shared security layer (authentication, buckets, limits); the HTTP
+    /// binding authenticates request headers with it before reading a body.
+    #[cfg(feature = "http-listener")]
+    pub(crate) fn security(&self) -> &SecurityLayer {
+        &self.security
     }
 
     /// The tail every send takes, accepted or refused: link the anchor,
@@ -1452,7 +1534,7 @@ impl SubscriptionCursor {
 
     /// [`Self::next`] without waiting: `Ok(None)` when nothing is buffered
     /// (or the channel closed).
-    fn try_next(&mut self) -> Result<Option<(u64, Envelope)>, StreamLagged> {
+    pub(crate) fn try_next(&mut self) -> Result<Option<(u64, Envelope)>, StreamLagged> {
         use tokio::sync::broadcast::error::TryRecvError;
         if let Some(item) = self.replay.pop_front() {
             return Ok(Some(item));
@@ -1904,8 +1986,7 @@ impl MacpRuntimeService for MacpServer {
                 input_content_types: vec!["application/macp-envelope+proto".into()],
                 output_content_types: vec!["application/macp-envelope+proto".into()],
                 metadata: HashMap::new(),
-                // Empty: unary-first profile has no dedicated transport endpoints.
-                transport_endpoints: vec![],
+                transport_endpoints: self.transport_endpoints(),
             }),
         }))
     }
@@ -2601,8 +2682,15 @@ impl MacpRuntimeService for MacpServer {
 
     async fn watch_policies(
         &self,
-        _request: Request<WatchPoliciesRequest>,
+        request: Request<WatchPoliciesRequest>,
     ) -> Result<Response<Self::WatchPoliciesStream>, Status> {
+        // Same credential as `ListPolicies`/`GetPolicy`: the stream carries
+        // the full descriptors those RPCs guard (#274).
+        let _identity = self
+            .security
+            .authenticate_metadata(request.metadata())
+            .await
+            .map_err(Self::status_from_error)?;
         let mut rx = self.runtime.subscribe_policy_changes();
         let runtime = Arc::clone(&self.runtime);
         let stream = async_stream::try_stream! {
@@ -4897,6 +4985,19 @@ mod tests {
             page_token: String::new(),
         });
         let err = server.list_sessions(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn watch_policies_requires_authentication() {
+        let (server, _runtime) = make_server();
+        let err = match server
+            .watch_policies(Request::new(WatchPoliciesRequest {}))
+            .await
+        {
+            Ok(_) => panic!("unauthenticated WatchPolicies must be refused"),
+            Err(err) => err,
+        };
         assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err:?}");
     }
 

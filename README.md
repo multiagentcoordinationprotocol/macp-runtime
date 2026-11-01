@@ -24,6 +24,14 @@ action from consumers rather than just reading:
   is breaking for external callers that did, and makes every subsequent field
   addition additive. See
   [Mode-state records are sealed](docs/modes.md#mode-state-records-are-sealed).
+- **An opt-in HTTP/JSON binding (0.12.0).** A binary built with the
+  `http-listener` Cargo feature (images published after 0.11.0 include it)
+  serves every RPC as HTTP/JSON with server-sent events (RFC-MACP-0006 §4)
+  when `MACP_HTTP_BIND_ADDR` is set; unset, nothing changes. In the same
+  release a gRPC `StreamSession` resume below the compacted base ends the
+  stream with `HISTORY_UNAVAILABLE`, and `WatchPolicies` requires a
+  credential. See [HTTP/JSON binding](docs/API.md#httpjson-binding) and
+  [`MIGRATING.md`](MIGRATING.md).
 - **Governance policies are validated at registration time.** Rules the
   canonical RFC-MACP-0012 schemas forbid are now refused when the policy is
   registered or preloaded, so a policy file an older runtime accepted can refuse
@@ -98,6 +106,20 @@ and the individual mode RFCs.
   - Passive subscribe (RFC-MACP-0006-A1): a `subscribe_session_id` + `after_sequence` frame replays accepted history and then delivers live envelopes; allowed for declared participants, the initiator, or observer identities
 - `WatchSignals` broadcasts ambient Signal envelopes to all subscribers in real time; Signals never enter session history. Each response's `sender_authenticated` is `true` only under configured auth (JWT/static bearer) -- dev-mode Signals are marked `false`
 
+### HTTP/JSON binding (opt-in)
+
+With the `http-listener` feature and `MACP_HTTP_BIND_ADDR` set, the same RPCs
+are served on a second port as `POST {prefix}/macp/v1/{Method}` with canonical
+JSON bodies (RFC-MACP-0001 §10). `Send` always answers `200` with the Ack for a
+per-Envelope decision; other refusals map to the registry's HTTP status with
+`{"error": ...}` and a `MACP-Error-Code` header. `StreamSession` (passive
+subscribe, `Last-Event-ID` resume) and the `Watch*` RPCs are server-sent event
+streams. `GET /.well-known/macp.json` serves the manifest, and CORS is closed
+unless `MACP_HTTP_CORS_ORIGINS` lists origins. Same TLS files, auth, rate
+limits and payload limit as gRPC. See [API](docs/API.md#httpjson-binding),
+[Deployment](docs/deployment.md#httpjson-listener) and the curl walkthrough in
+[Examples](docs/examples.md#httpjson-binding-curl).
+
 ### Session lifecycle observability
 
 `ListSessions` enumerates current session metadata in bounded pages (`page_size`
@@ -141,6 +163,7 @@ Unless `MACP_MEMORY_ONLY=1` is set, the runtime persists session and log snapsho
 | `MACP_TLS_KEY_PATH` | PEM private key for TLS | unset |
 | `MACP_POLICIES_DIR` | directory of governance policy JSON files preloaded at startup; a file that fails validation aborts startup, and the wire registry becomes read-only | unset |
 | `MACP_POLICIES_DRY_RUN` | validate `MACP_POLICIES_DIR` and exit `0`/`1` without starting the server, when set to `1` | unset |
+| `MACP_HTTP_BIND_ADDR` | HTTP/JSON listener address (`http-listener` feature); unset = no HTTP listener. The other `MACP_HTTP_*` variables are in [Deployment](docs/deployment.md#httpjson-listener) | unset |
 
 ### Authentication and authorization
 
@@ -241,6 +264,8 @@ cargo run
 
 With no auth tokens configured, clients authenticate by sending their
 sender identity as a bearer token (e.g. `Authorization: Bearer agent://alice`).
+Add `MACP_HTTP_BIND_ADDR=127.0.0.1:8080` and `--features http-listener` to
+`cargo run` to serve HTTP/JSON on port 8080 as well.
 
 ### Running the example clients
 
@@ -307,6 +332,7 @@ development aids for exercising a local server, not a supported SDK.
 Client Request
        |
   [Transport/gRPC] -- macp-runtime: src/server.rs
+       |             (+ opt-in HTTP/JSON + SSE: src/http/, same handlers)
        |
   [Auth Chain]    -- macp-auth  (JWT → static → dev fallback)
        |
@@ -346,6 +372,7 @@ runtime/
 ├── src/                    # macp-runtime crate: kernel + gRPC server + binary
 │   ├── main.rs             # server startup, TLS, persistence, auth wiring
 │   ├── server.rs           # gRPC adapter (24 RPCs) and envelope validation
+│   ├── http/               # HTTP/JSON binding, `http-listener` feature (RFC-MACP-0006 §4)
 │   ├── runtime.rs          # coordination kernel, mode dispatch, lifecycle bus
 │   ├── replay.rs           # session rebuild from append-only log
 │   ├── stream_bus.rs       # per-session broadcast channels

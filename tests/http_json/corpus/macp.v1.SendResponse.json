@@ -1,0 +1,29 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "ack": {
+          "accepted_at_unix_ms": 9007199254740993,
+          "duplicate": true,
+          "error": {
+            "code": "code-✓",
+            "details": "AAECAwQ=",
+            "message": "message-✓",
+            "message_id": "message_id-✓",
+            "session_id": "session_id-✓"
+          },
+          "message_id": "message_id-✓",
+          "ok": true,
+          "session_id": "session_id-✓",
+          "session_state": "SESSION_STATE_CANCELLED"
+        }
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.SendResponse"
+}

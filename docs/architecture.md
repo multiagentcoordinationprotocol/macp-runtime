@@ -10,11 +10,20 @@ The runtime is organized into seven layers, each with a clear responsibility bou
 
 ```
 Agents (external)
-  |
-  v  gRPC (tonic)
+  |                                  |
+  v  gRPC (tonic)                    v  HTTP/JSON + SSE (hyper; opt-in,
+  |                                  |  `http-listener` feature)
+  |                    +-----------------------------------------+
+  |                    |  HTTP adapter (src/http/)               |
+  |                    |    routing, canonical JSON codec,       |
+  |                    |    auth before body, SSE, CORS,         |
+  |                    |    well-known discovery                 |
+  |                    +-----------------------------------------+
+  |                                  |  same MacpServer handlers
+  v                                  v
 +-----------------------------------------------------------+
 |  Transport Layer (src/server.rs)                          |
-|    24 RPC handlers, envelope validation, sender            |
+|    RPC handlers, envelope validation, sender               |
 |    derivation, rate limiting                               |
 +-----------------------------------------------------------+
   |
@@ -67,6 +76,8 @@ Agents (external)
 > types, the `PolicyEvaluator` trait) and the generated protobuf message types
 > live in the transport-free `macp-core` and `macp-pb` crates, which the layers
 > above build on. See `CLAUDE.md` → "Workspace crates" for the full crate map.
+
+The **HTTP adapter** (`src/http/`, compiled only with the `http-listener` feature, started only when `MACP_HTTP_BIND_ADDR` is set) is the RFC-MACP-0006 §4 binding. It owns its own listener (HTTP/1.1 and HTTP/2, TLS with ALPN), decodes each request body with the canonical JSON codec (`src/http/json/`, which imports no transport crate), builds a `tonic::Request` carrying only the `authorization`, `traceparent` and `tracestate` headers, and calls the **same** `MacpServer` handler gRPC calls, so both bindings share one `SecurityLayer`, one set of rate buckets and one kernel. Streaming RPCs become server-sent events over the same subscription cursor gRPC's `StreamSession` uses. See [API: HTTP/JSON binding](API.md#httpjson-binding).
 
 The **transport layer** terminates gRPC connections, delegates authentication to the auth layer, validates envelope structure, overrides the sender field with the authenticated identity, and enforces per-sender rate limits. It never touches session state directly.
 
@@ -233,6 +244,11 @@ src/
   metrics.rs           -- Atomic per-mode counters
   mode_registry.rs     -- Mode lookup, extension lifecycle
   replay.rs            -- Session rebuild from logs, checkpoint fast path
+  http/                -- HTTP/JSON binding (`http-listener` feature): config.rs
+                          (MACP_HTTP_*), server.rs (listener, routing), tls.rs,
+                          dispatch.rs (RPC table), errors.rs, metadata.rs, sse.rs,
+                          cors.rs, discovery.rs, json/ (canonical JSON codec)
+  telemetry/http.rs    -- HTTP SERVER span + http.server.request.duration (otel)
   auth/
     mod.rs             -- Public exports for chain, resolver, resolvers
     chain.rs           -- AuthResolverChain: walks resolvers in order

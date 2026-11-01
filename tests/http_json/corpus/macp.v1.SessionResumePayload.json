@@ -1,0 +1,17 @@
+{
+  "cases": [
+    {
+      "name": "maximal",
+      "value": {
+        "banked_ms": 9007199254740993,
+        "reason": "reason-✓",
+        "resumed_by": "resumed_by-✓"
+      }
+    },
+    {
+      "name": "defaults",
+      "value": {}
+    }
+  ],
+  "type": "macp.v1.SessionResumePayload"
+}
