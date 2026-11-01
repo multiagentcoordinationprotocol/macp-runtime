@@ -63,6 +63,101 @@ const PROPOSAL_ACCEPTANCE_CRITERIA: [&str; 3] = ["all_parties", "counterparty", 
 /// (`properties.abstention.properties.interpretation.enum`).
 const QUORUM_ABSTENTION_INTERPRETATIONS: [&str; 3] = ["neutral", "implicit_reject", "ignored"];
 
+/// Every unit-enum position of every standards-track rule schema, as
+/// `(mode, dotted path under rules)`: the positions whose canonical schema
+/// node is `"type": "string"` with an `enum`. The closed-key trees in
+/// `macp_core::policy::keys` mark these as plain leaves, so the shape pre-pass
+/// ([`PolicyRegistry::rule_shape_violation`]) reads this table to require a
+/// JSON string there. Without it, serde admits the externally tagged map form
+/// of a Rust unit enum (`{"hold": null}` for `critical_objection_action`),
+/// which the schema refuses. Pinned to the canonical schemas by
+/// `unit_enum_positions_match_the_canonical_schemas`.
+const UNIT_ENUM_POSITIONS: [(&str, &str); 11] = [
+    ("macp.mode.decision.v1", "voting.algorithm"),
+    ("macp.mode.decision.v1", "voting.quorum.type"),
+    (
+        "macp.mode.decision.v1",
+        "objection_handling.critical_objection_action",
+    ),
+    ("macp.mode.decision.v1", "commitment.authority"),
+    ("macp.mode.proposal.v1", "acceptance.criterion"),
+    ("macp.mode.proposal.v1", "commitment.authority"),
+    ("macp.mode.task.v1", "commitment.authority"),
+    ("macp.mode.handoff.v1", "commitment.authority"),
+    ("macp.mode.quorum.v1", "threshold.type"),
+    ("macp.mode.quorum.v1", "abstention.interpretation"),
+    ("macp.mode.quorum.v1", "commitment.authority"),
+];
+
+/// The value at `path` under `rules`, if present. Every intermediate segment
+/// that is present must be a JSON object: a present value of the wrong shape
+/// is an error, never read as absent (issue #263).
+fn present_at<'a>(
+    rules: &'a serde_json::Value,
+    path: &[&str],
+) -> Result<Option<&'a serde_json::Value>, String> {
+    let mut node = rules;
+    for (i, segment) in path.iter().enumerate() {
+        let Some(map) = node.as_object() else {
+            return Err(format!(
+                "INVALID_POLICY_DEFINITION: rules.{} must be a JSON object, not {}",
+                path[..i].join("."),
+                json_kind(node)
+            ));
+        };
+        match map.get(*segment) {
+            Some(child) => node = child,
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(node))
+}
+
+/// [`present_at`], requiring a present value to be a JSON object.
+fn present_object<'a>(
+    rules: &'a serde_json::Value,
+    path: &[&str],
+) -> Result<Option<&'a serde_json::Map<String, serde_json::Value>>, String> {
+    present_at(rules, path)?
+        .map(|v| {
+            v.as_object().ok_or_else(|| {
+                format!(
+                    "INVALID_POLICY_DEFINITION: rules.{} must be a JSON object, not {}",
+                    path.join("."),
+                    json_kind(v)
+                )
+            })
+        })
+        .transpose()
+}
+
+/// [`present_at`], requiring a present value to be a JSON number.
+fn present_number(rules: &serde_json::Value, path: &[&str]) -> Result<Option<f64>, String> {
+    present_at(rules, path)?
+        .map(|v| {
+            v.as_f64().ok_or_else(|| {
+                format!(
+                    "INVALID_POLICY_DEFINITION: rules.{} must be a number, not {}",
+                    path.join("."),
+                    json_kind(v)
+                )
+            })
+        })
+        .transpose()
+}
+
+/// The JSON type name of `value`, for shape-error messages.
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
 /// The Decision-mode value domains that the evaluator re-checks at commitment
 /// time, mirroring `schemas/json/policy/decision-rules.schema.json`:
 ///
@@ -460,6 +555,12 @@ impl PolicyRegistry {
         // Closed objects (RFC-MACP-0012 §4) before the typed parse, so a
         // misspelled key is reported by path rather than silently defaulted.
         self.validate_rule_keys(&definition.mode, &definition.rules)?;
+        // Closed objects are objects and unit enums are strings, before serde
+        // sees them: serde reads an array positionally into a struct and a
+        // single-key map as an externally tagged enum (issue #263).
+        if let Some(violation) = Self::rule_shape_violation(&definition.mode, &definition.rules) {
+            return Err(format!("INVALID_POLICY_DEFINITION: {violation}"));
+        }
         if reserved_namespace {
             Self::validate_reserved_namespace(definition)?;
         }
@@ -503,6 +604,90 @@ impl PolicyRegistry {
             })?;
         }
         Ok(())
+    }
+
+    /// The JSON-type half of RFC-MACP-0012 §4's closed objects, driven by the
+    /// same closed-key trees as [`Self::validate_rule_keys`]: a present value
+    /// at a closed struct position (or the open `voting.weights` map) must be a
+    /// JSON object, and one at a [`UNIT_ENUM_POSITIONS`] position must be a
+    /// JSON string. The key walk only descends into objects, and serde happily
+    /// deserializes a struct from a positional array (`"threshold": ["n_of_m",
+    /// 0]`) and a unit enum from its externally tagged map form (`{"hold":
+    /// null}`), so without this both shapes slipped past every check. Keys no
+    /// schema defines are not reported here — that is the key walk's job.
+    /// `None` for extension modes, whose rules are opaque.
+    fn rule_shape_violation(mode: &str, rules: &serde_json::Value) -> Option<String> {
+        let shapes = rule_keys::rule_shape_for_mode(mode)?;
+        let enums: Vec<&str> = UNIT_ENUM_POSITIONS
+            .iter()
+            .filter(|(m, _)| mode == "*" || *m == mode)
+            .map(|(_, path)| *path)
+            .collect();
+        Self::walk_rule_shapes(rules, &shapes, "", &enums)
+    }
+
+    fn walk_rule_shapes(
+        value: &serde_json::Value,
+        shapes: &[rule_keys::RuleShape],
+        path: &str,
+        enums: &[&str],
+    ) -> Option<String> {
+        use rule_keys::RuleShape;
+        let shown = if path.is_empty() {
+            "rules".to_string()
+        } else {
+            format!("rules.{path}")
+        };
+        // An object position only when every candidate shape agrees (the
+        // wildcard's union never mixes a leaf and an object at one path today,
+        // and a leaf candidate leaves the typing to that mode's serde parse).
+        let object_position =
+            !shapes.is_empty() && shapes.iter().all(|s| !matches!(s, RuleShape::Leaf));
+        if !object_position {
+            if enums.contains(&path) && !value.is_string() {
+                return Some(format!(
+                    "{shown} must be a string (a value of the schema's enum), not {}",
+                    json_kind(value)
+                ));
+            }
+            return None;
+        }
+        let Some(map) = value.as_object() else {
+            return Some(format!(
+                "{shown} must be a JSON object, not {}",
+                json_kind(value)
+            ));
+        };
+        let closed: Vec<&[(&str, RuleShape)]> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                RuleShape::Closed(keys) => Some(*keys),
+                _ => None,
+            })
+            .collect();
+        // Sorted for a deterministic first violation regardless of map order.
+        let mut keys: Vec<&String> = map.keys().collect();
+        keys.sort();
+        for key in keys {
+            let children: Vec<RuleShape> = closed
+                .iter()
+                .flat_map(|keys| keys.iter())
+                .filter(|(k, _)| k == key)
+                .map(|(_, s)| *s)
+                .collect();
+            if children.is_empty() {
+                continue; // annotation, vendor extension, or undefined key
+            }
+            let child_path = if path.is_empty() {
+                key.clone()
+            } else {
+                format!("{path}.{key}")
+            };
+            if let Some(v) = Self::walk_rule_shapes(&map[key], &children, &child_path, enums) {
+                return Some(v);
+            }
+        }
+        None
     }
 
     /// Enforce the reserved `policy.std.` namespace (RFC-MACP-0012 §2.2).
@@ -662,12 +847,12 @@ impl PolicyRegistry {
                 // policy. This check belongs inside the Decision mode guard —
                 // hoisted out, it would police a `voting.weights` map in rules
                 // registered for a mode whose schema does not govern it.
-                if rules
-                    .get("voting")
-                    .and_then(|v| v.get("weights"))
-                    .and_then(|w| w.as_object())
-                    .is_some_and(|w| w.is_empty())
-                {
+                //
+                // A *present* non-object is an error, never "absent" (issue
+                // #263); the shape pre-pass already refuses it, and this keeps
+                // the check sound on its own.
+                let weights = present_object(rules, &["voting", "weights"])?;
+                if weights.is_some_and(|w| w.is_empty()) {
                     return Err(
                         "INVALID_POLICY_DEFINITION: voting.weights must be non-empty when supplied"
                             .into(),
@@ -718,10 +903,10 @@ impl PolicyRegistry {
                 // the right discriminator. An omitted value still resolves to
                 // `EffectiveThreshold::Inert`, where the ApprovalRequest's own
                 // `required_approvals` stands.
-                if rules
-                    .get("threshold")
-                    .and_then(|t| t.get("value"))
-                    .and_then(|v| v.as_f64())
+                //
+                // A *present* value of the wrong JSON type is an error, never
+                // "absent" (issue #263).
+                if present_number(rules, &["threshold", "value"])?
                     .is_some_and(|v| v.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater))
                 {
                     return Err(format!(
@@ -766,6 +951,9 @@ impl PolicyRegistry {
         // All modes: `commitment.authority` enum, and designated_roles
         // required when authority is designated_role. An off-enum authority is
         // silently read as `initiator_only` by `check_commitment_authority`.
+        // For a standards-track mode a present non-object `commitment` never
+        // reaches here (the shape pre-pass refuses it); an extension mode's
+        // rules are opaque, so its non-object `commitment` is left alone.
         if let Some(commitment) = rules.get("commitment") {
             if let Ok(cr) = serde_json::from_value::<CommitmentRules>(commitment.clone()) {
                 if !COMMITMENT_AUTHORITIES.contains(&cr.authority.as_str()) {
@@ -2028,9 +2216,12 @@ mod tests {
 
         // A shape error (not just a value error) is caught too: `threshold` is
         // silently dropped by `DecisionPolicyRules`, so only the quorum schema
-        // sees this one.
+        // sees this one. The shape pre-pass (issue #263) now names it first.
         let err = refuse(wildcard(serde_json::json!({ "threshold": "majority" })));
-        assert!(err.contains("macp.mode.quorum.v1"), "error: {err}");
+        assert!(
+            err.contains("rules.threshold must be a JSON object, not a string"),
+            "error: {err}"
+        );
 
         // Decision-shaped wildcards, including the built-in `policy.default`
         // rules, still register: every other mode's struct ignores the fields
@@ -2799,6 +2990,306 @@ mod tests {
             "only {checked} fixtures found under {}",
             tests.display()
         );
+    }
+
+    // ── Issue #263: JSON-type shape of closed objects and unit enums ─────
+
+    /// `{"a": {"b": leaf}}` for `"a.b"`.
+    fn nest(path: &str, leaf: serde_json::Value) -> serde_json::Value {
+        path.rsplit('.')
+            .fold(leaf, |inner, key| serde_json::json!({ key: inner }))
+    }
+
+    /// Every non-root object position (closed struct or open map) of `shape`.
+    fn object_positions(shape: macp_core::policy::keys::RuleShape, path: &str) -> Vec<String> {
+        use macp_core::policy::keys::RuleShape;
+        let mut out = Vec::new();
+        if !path.is_empty() && !matches!(shape, RuleShape::Leaf) {
+            out.push(path.to_string());
+        }
+        if let RuleShape::Closed(keys) = shape {
+            for (k, child) in keys {
+                let child_path = if path.is_empty() {
+                    k.to_string()
+                } else {
+                    format!("{path}.{k}")
+                };
+                out.extend(object_positions(*child, &child_path));
+            }
+        }
+        out
+    }
+
+    /// One fully-populated, schema-valid rules document per standards mode,
+    /// every closed position an object and every enum position a string.
+    fn canonical_shapes() -> Vec<(&'static str, serde_json::Value)> {
+        use serde_json::json;
+        vec![
+            (
+                "macp.mode.decision.v1",
+                json!({
+                    "_note": "annotated",
+                    "voting": {
+                        "algorithm": "weighted",
+                        "threshold": 0.6,
+                        "quorum": {"type": "count", "value": 2},
+                        "weights": {"agent://a": 1.0, "agent://b": 2}
+                    },
+                    "objection_handling": {
+                        "critical_objection_action": "hold",
+                        "critical_severity_vetoes": true,
+                        "veto_threshold": 1
+                    },
+                    "evaluation": {"minimum_confidence": 0.5, "required_before_voting": true},
+                    "commitment": {
+                        "authority": "designated_role",
+                        "designated_roles": ["lead"],
+                        "require_vote_quorum": true,
+                        "allow_decline_over_approval": false
+                    }
+                }),
+            ),
+            (
+                "macp.mode.proposal.v1",
+                json!({
+                    "acceptance": {"criterion": "counterparty"},
+                    "counter_proposal": {"max_rounds": 3},
+                    "rejection": {"terminal_on_any_reject": true},
+                    "commitment": {"authority": "any_participant", "designated_roles": []}
+                }),
+            ),
+            (
+                "macp.mode.task.v1",
+                json!({
+                    "assignment": {"allow_reassignment_on_reject": true},
+                    "completion": {"require_output": true},
+                    "commitment": {"authority": "initiator_only"}
+                }),
+            ),
+            (
+                "macp.mode.handoff.v1",
+                json!({
+                    "acceptance": {"implicit_accept_timeout_ms": 5000},
+                    "commitment": {"authority": "initiator_only"}
+                }),
+            ),
+            (
+                "macp.mode.quorum.v1",
+                json!({
+                    "threshold": {"type": "percentage", "value": 60},
+                    "abstention": {"counts_toward_quorum": true, "interpretation": "implicit_reject"},
+                    "commitment": {"authority": "initiator_only", "$c": "annotated"}
+                }),
+            ),
+        ]
+    }
+
+    #[test]
+    fn issue_263_repro_shapes_are_refused() {
+        let err = refuse(quorum_policy(
+            serde_json::json!({"threshold": ["n_of_m", 0]}),
+        ));
+        assert!(
+            err.contains("rules.threshold must be a JSON object, not an array"),
+            "{err}"
+        );
+        let err = refuse(decision_policy(serde_json::json!({
+            "objection_handling": {"critical_objection_action": {"hold": null}}
+        })));
+        assert!(
+            err.contains("rules.objection_handling.critical_objection_action must be a string"),
+            "{err}"
+        );
+        // Same refusals through the wildcard, which binds both modes.
+        for rules in [
+            serde_json::json!({"threshold": ["n_of_m", 0]}),
+            serde_json::json!({"objection_handling": {"critical_objection_action": {"hold": null}}}),
+        ] {
+            refuse(policy_for("*", rules));
+        }
+    }
+
+    #[test]
+    fn every_closed_position_refuses_a_non_object() {
+        use macp_core::policy::keys::STANDARDS_TRACK_RULE_SHAPES;
+        let bad = [
+            serde_json::json!([]),
+            serde_json::json!(["n_of_m", 2]),
+            serde_json::json!("x"),
+            serde_json::json!(5),
+            serde_json::json!(true),
+            serde_json::Value::Null,
+        ];
+        let mut checked = 0;
+        for (mode, shape) in STANDARDS_TRACK_RULE_SHAPES {
+            let positions = object_positions(shape, "");
+            assert!(!positions.is_empty(), "{mode} has no object positions");
+            for path in positions {
+                for value in &bad {
+                    for target in [mode, "*"] {
+                        let err = refuse(policy_for(target, nest(&path, value.clone())));
+                        assert!(
+                            err.contains(&format!("rules.{path} must be a JSON object, not ")),
+                            "{target} {path} = {value}: {err}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        // decision 6 (voting, quorum, weights, objection_handling,
+        // evaluation, commitment) + 4 + 3 + 2 + 3 positions.
+        assert_eq!(checked, (6 + 4 + 3 + 2 + 3) * bad.len() * 2);
+    }
+
+    #[test]
+    fn every_unit_enum_position_refuses_a_non_string() {
+        let bad = [
+            serde_json::json!({"hold": null}),
+            serde_json::json!({"majority": []}),
+            serde_json::json!(["deny"]),
+            serde_json::json!(1),
+            serde_json::json!(false),
+            serde_json::Value::Null,
+        ];
+        for (mode, path) in UNIT_ENUM_POSITIONS {
+            for value in &bad {
+                for target in [mode, "*"] {
+                    let err = refuse(policy_for(target, nest(path, value.clone())));
+                    assert!(
+                        err.contains(&format!("rules.{path} must be a string")),
+                        "{target} {path} = {value}: {err}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_present_value_of_the_wrong_shape_is_never_read_as_absent() {
+        use serde_json::json;
+        for (mode, rules, path) in [
+            ("macp.mode.quorum.v1", json!({"threshold": 5}), "threshold"),
+            ("macp.mode.decision.v1", json!({"voting": []}), "voting"),
+            (
+                "macp.mode.decision.v1",
+                json!({"voting": {"weights": []}}),
+                "voting.weights",
+            ),
+            (
+                "macp.mode.task.v1",
+                json!({"commitment": "x"}),
+                "commitment",
+            ),
+        ] {
+            let err = refuse(policy_for(mode, rules));
+            assert!(
+                err.contains(&format!("rules.{path} must be a JSON object")),
+                "{err}"
+            );
+        }
+        // The raw-JSON presence helpers on their own: absent is `None`, a
+        // present value of the wrong type is an error.
+        let rules = json!({"threshold": {"value": "0"}, "voting": [1]});
+        assert_eq!(present_number(&rules, &["missing", "value"]), Ok(None));
+        assert_eq!(
+            present_number(&json!({"threshold": {}}), &["threshold", "value"]),
+            Ok(None)
+        );
+        assert_eq!(
+            present_number(&json!({"threshold": {"value": 2}}), &["threshold", "value"]),
+            Ok(Some(2.0))
+        );
+        assert!(present_number(&rules, &["threshold", "value"])
+            .unwrap_err()
+            .contains("rules.threshold.value must be a number, not a string"));
+        assert!(present_object(&rules, &["voting", "weights"])
+            .unwrap_err()
+            .contains("rules.voting must be a JSON object, not an array"));
+        assert!(
+            present_object(&json!({"voting": {"weights": 1}}), &["voting", "weights"])
+                .unwrap_err()
+                .contains("rules.voting.weights must be a JSON object, not a number")
+        );
+    }
+
+    #[test]
+    fn every_canonical_shape_still_registers() {
+        for (mode, rules) in canonical_shapes() {
+            accept(policy_for(mode, rules.clone()));
+            // An empty object at every closed position is still the
+            // all-defaults shape, not a type error.
+            let mut empty = serde_json::Map::new();
+            for key in rules.as_object().unwrap().keys() {
+                empty.insert(key.clone(), serde_json::json!({}));
+            }
+            accept(policy_for(mode, serde_json::Value::Object(empty)));
+        }
+        // The wildcard is closed over the union of the five shapes.
+        accept(policy_for(
+            "*",
+            serde_json::json!({
+                "voting": {"algorithm": "majority", "threshold": 0.5, "quorum": {"type": "percentage", "value": 50}},
+                "objection_handling": {"critical_objection_action": "deny"},
+                "threshold": {"type": "n_of_m", "value": 2},
+                "abstention": {"interpretation": "neutral"},
+                "acceptance": {"criterion": "all_parties", "implicit_accept_timeout_ms": 1000},
+                "commitment": {"authority": "initiator_only"}
+            }),
+        ));
+        // Extension modes stay opaque: the repro shapes are theirs to define.
+        for rules in [
+            serde_json::json!({"threshold": ["n_of_m", 0]}),
+            serde_json::json!({"objection_handling": {"critical_objection_action": {"hold": null}}}),
+        ] {
+            accept(policy_for("ext.multi_round.v1", rules));
+        }
+    }
+
+    /// [`UNIT_ENUM_POSITIONS`] against the canonical schemas: exactly the
+    /// positions whose schema node is a `string` with an `enum` — the same
+    /// parity discipline as [`closed_key_sets_match_the_canonical_schemas`].
+    #[test]
+    fn unit_enum_positions_match_the_canonical_schemas() {
+        use macp_core::policy::keys::STANDARDS_TRACK_RULE_SHAPES;
+        let Some(dir) = canonical_schema_dir() else {
+            println!(
+                "SKIP unit_enum_positions_match_the_canonical_schemas: no canonical schema directory"
+            );
+            return;
+        };
+        fn collect(node: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+            if node["type"] == "string" && node.get("enum").is_some() {
+                out.push(path.to_string());
+            }
+            if let Some(props) = node.get("properties").and_then(|p| p.as_object()) {
+                for (k, child) in props {
+                    let child_path = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
+                    collect(child, &child_path, out);
+                }
+            }
+        }
+        for (mode, _) in STANDARDS_TRACK_RULE_SHAPES {
+            let file = format!(
+                "{}-rules.schema.json",
+                mode.trim_start_matches("macp.mode.")
+                    .trim_end_matches(".v1")
+            );
+            let mut theirs = Vec::new();
+            collect(&schema(&dir, &file), "", &mut theirs);
+            theirs.sort();
+            let mut ours: Vec<String> = UNIT_ENUM_POSITIONS
+                .iter()
+                .filter(|(m, _)| *m == mode)
+                .map(|(_, p)| p.to_string())
+                .collect();
+            ours.sort();
+            assert_eq!(ours, theirs, "{file}: unit-enum positions have drifted");
+        }
     }
 
     #[test]
