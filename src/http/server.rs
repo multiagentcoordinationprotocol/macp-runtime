@@ -26,7 +26,11 @@
 //!   `MACP_HTTP_PUBLIC_URL`, and also `/macp/v1/{Method}`, so a proxy that
 //!   strips the prefix and one that does not both work. The method set is the
 //!   service descriptor's (the descriptor pool of [`super::json`]), so it
-//!   tracks the proto with no list to maintain here.
+//!   tracks the proto with no list to maintain here. `/.well-known/macp.json`
+//!   is served at the origin root whatever the prefix (`discovery`),
+//!   and every `OPTIONS` is a CORS preflight answered before routing
+//!   (`cors`, whose headers also go on every other response to a
+//!   listed origin).
 //! - **Request timeout.** `MACP_REQUEST_TIMEOUT_SECS` bounds producing the
 //!   response *head* of an RPC, body collection included (the deadline starts
 //!   when the request head is complete, so a body trickled in slowly times
@@ -65,7 +69,7 @@ use tokio_rustls::TlsAcceptor;
 
 use super::config::HttpConfig;
 use super::errors::{empty, RequestError};
-use super::{dispatch, tls};
+use super::{cors, discovery, dispatch, tls};
 use crate::server::MacpServer;
 
 /// Every response body of the listener. Unsync so a streaming body (SSE) can
@@ -99,6 +103,8 @@ const RPC_PATH: &str = "/macp/v1/";
 /// Per-listener state shared by every connection.
 pub(crate) struct State {
     prefix: String,
+    /// `MACP_HTTP_CORS_ORIGINS`, canonical (see [`super::cors`]).
+    cors_origins: Vec<String>,
     max_body_bytes: usize,
     request_timeout: Duration,
     /// The same server gRPC serves (shared runtime, security layer and rate
@@ -114,12 +120,14 @@ pub(crate) struct State {
 
 impl State {
     pub(crate) fn from_config(config: &HttpConfig, server: MacpServer) -> Self {
-        Self::new(
+        let mut state = Self::new(
             config.prefix.clone(),
             config.max_body_bytes,
             config.request_timeout,
             server,
-        )
+        );
+        state.cors_origins = config.cors_origins.clone();
+        state
     }
 
     fn new(
@@ -130,6 +138,7 @@ impl State {
     ) -> Self {
         Self {
             prefix,
+            cors_origins: Vec::new(),
             max_body_bytes,
             request_timeout,
             server,
@@ -599,20 +608,39 @@ pub(crate) fn unquote(raw: &str) -> String {
     }
 }
 
-/// Answer one request.
+/// Answer one request: CORS (RFC-MACP-0006 §4.10) around [`route_request`].
+/// Every `OPTIONS` is a preflight, answered `204` before routing and
+/// authentication; every other response to a listed origin, whatever its
+/// status and including an SSE stream, carries the actual-response headers,
+/// and with an allowlist configured every actual response carries
+/// `Vary: Origin`.
 pub(crate) async fn handle<B>(state: &State, req: Request<B>) -> Response<Body>
 where
     B: HttpBody<Data = Bytes>,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    // CORS preflight belongs to P7 (RFC-MACP-0006 §4.10); until then OPTIONS
-    // is answered like an unserved path.
+    let origin = cors::allowed_origin(&state.cors_origins, req.headers());
     if req.method() == Method::OPTIONS {
-        return empty(StatusCode::NOT_FOUND);
+        return cors::preflight(origin);
     }
+    let mut resp = route_request(state, req).await;
+    if !state.cors_origins.is_empty() {
+        cors::vary_origin(&mut resp);
+    }
+    if let Some(origin) = origin {
+        cors::decorate(&mut resp, origin);
+    }
+    resp
+}
+
+/// Answer one non-`OPTIONS` request.
+async fn route_request<B>(state: &State, req: Request<B>) -> Response<Body>
+where
+    B: HttpBody<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
     match route(req.uri().path(), &state.prefix) {
-        // Discovery belongs to P8 (RFC-MACP-0005 §7.1); placeholder until then.
-        Route::WellKnown => empty(StatusCode::NOT_FOUND),
+        Route::WellKnown => discovery::well_known(&state.server, req.method()).await,
         Route::NotFound => empty(StatusCode::NOT_FOUND),
         Route::Rpc(_) if req.method() != Method::POST => {
             let mut resp = empty(StatusCode::METHOD_NOT_ALLOWED);
@@ -834,13 +862,91 @@ mod tests {
         let (s, _, _) = status_of(req(Method::POST, "/api/macp/v1/ListModes", json, "{}")).await;
         assert_eq!(s, StatusCode::OK);
         // A streaming RPC authenticates like a unary one (no Accept header
-        // admits the stream); CORS and discovery until P7/P8.
+        // admits the stream).
         let (s, _, _) = status_of(req(Method::POST, "/macp/v1/WatchSignals", json, "{}")).await;
         assert_eq!(s, StatusCode::UNAUTHORIZED);
-        let (s, _, _) = status_of(req(Method::OPTIONS, "/macp/v1/Send", None, "")).await;
-        assert_eq!(s, StatusCode::NOT_FOUND);
-        let (s, _, _) = status_of(req(Method::GET, "/.well-known/macp.json", None, "")).await;
-        assert_eq!(s, StatusCode::NOT_FOUND);
+        // OPTIONS is a preflight on every path (§4.10); the well-known
+        // manifest is served at the origin root whatever the prefix (§4.11).
+        let (s, h, _) = status_of(req(Method::OPTIONS, "/macp/v1/Send", None, "")).await;
+        assert_eq!(s, StatusCode::NO_CONTENT);
+        assert!(h.is_empty(), "{h:?}");
+        let (s, h, b) = status_of(req(Method::GET, "/.well-known/macp.json", None, "")).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(h[CONTENT_TYPE], "application/macp-manifest+json");
+        assert!(!b.is_empty());
+    }
+
+    /// CORS wraps every response of `handle` (§4.10): preflights on any
+    /// path, and the actual-response headers on transport statuses,
+    /// request-level errors and the well-known document alike.
+    #[tokio::test]
+    async fn cors_wraps_every_response() {
+        let st = State {
+            cors_origins: vec!["https://app.example".into()],
+            ..state("/api")
+        };
+        let with_origin = |method: Method, path: &str, origin: Option<&str>| {
+            let mut r = req(method, path, Some("application/json"), "{}");
+            if let Some(o) = origin {
+                r.headers_mut()
+                    .insert(http::header::ORIGIN, HeaderValue::from_str(o).unwrap());
+            }
+            r
+        };
+        let allow = |h: &http::HeaderMap| {
+            h.keys()
+                .filter(|k| k.as_str().starts_with("access-control-allow-"))
+                .count()
+        };
+        // Preflight: listed ⇒ the §4.10 headers on any path; unlisted,
+        // `null` or no Origin ⇒ 204 with none.
+        for path in ["/macp/v1/Send", "/api/macp/v1/StreamSession", "/nowhere"] {
+            let resp = handle(
+                &st,
+                with_origin(Method::OPTIONS, path, Some("https://app.example")),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT, "{path}");
+            assert_eq!(resp.headers()["access-control-allow-methods"], "POST");
+            for origin in [Some("https://other.example"), Some("null"), None] {
+                let resp = handle(&st, with_origin(Method::OPTIONS, path, origin)).await;
+                assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+                assert!(
+                    resp.headers().is_empty(),
+                    "{origin:?}: {:?}",
+                    resp.headers()
+                );
+            }
+        }
+        // Actual responses to a listed origin, whatever the status.
+        for (method, path, want) in [
+            (Method::POST, "/macp/v1/Send", 401),
+            (Method::GET, "/macp/v1/Send", 405),
+            (Method::POST, "/nowhere", 404),
+            (Method::POST, "/macp/v1/GetManifest", 200),
+            (Method::GET, "/.well-known/macp.json", 200),
+        ] {
+            let resp = handle(
+                &st,
+                with_origin(method.clone(), path, Some("https://app.example")),
+            )
+            .await;
+            let h = resp.headers();
+            assert_eq!(resp.status().as_u16(), want, "{method} {path}");
+            assert_eq!(h["access-control-allow-origin"], "https://app.example");
+            assert_eq!(h["access-control-expose-headers"], "MACP-Error-Code");
+            assert_eq!(h["vary"], "Origin");
+            assert!(!h.contains_key("access-control-allow-credentials"));
+            // An unlisted origin gets the same response with no CORS header.
+            let resp = handle(
+                &st,
+                with_origin(method.clone(), path, Some("https://other.example")),
+            )
+            .await;
+            assert_eq!(resp.status().as_u16(), want);
+            assert_eq!(allow(resp.headers()), 0);
+            assert!(!resp.headers().contains_key("access-control-expose-headers"));
+        }
     }
 
     #[tokio::test]

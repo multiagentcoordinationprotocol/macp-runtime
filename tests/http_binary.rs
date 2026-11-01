@@ -456,16 +456,31 @@ mod listener {
             assert_eq!(s, want, "{path}");
             assert_eq!(h.get("content-type").unwrap(), "application/json");
         }
-        // CORS (P7) and discovery (P8) placeholders.
-        assert_eq!(
-            plain(&rt, "OPTIONS", "/macp/v1/Send", None, "").await.0,
-            404
+        // CORS (P7): with no allowlist every preflight is 204 with no
+        // Access-Control-* header (RFC-MACP-0006 §4.10).
+        let (s, h, _) = plain(&rt, "OPTIONS", "/macp/v1/Send", None, "").await;
+        assert_eq!(s, 204);
+        assert!(
+            !h.keys().any(|k| k.as_str().starts_with("access-control-")),
+            "{h:?}"
         );
+        // Discovery (P8): `main` wires MACP_HTTP_PUBLIC_URL into the
+        // manifest; the well-known document is at the origin root (§4.11).
+        let (s, h, b) = plain(&rt, "GET", "/.well-known/macp.json", None, "").await;
+        assert_eq!(s, 200);
         assert_eq!(
-            plain(&rt, "GET", "/.well-known/macp.json", None, "")
-                .await
-                .0,
-            404
+            h.get("content-type").unwrap(),
+            "application/macp-manifest+json"
+        );
+        let doc: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(
+            doc["transport_endpoints"],
+            serde_json::json!([{
+                "transport": "macp.transport.http.v1",
+                "uri": "http://localhost/api",
+                "content_types": ["application/json"],
+                "metadata": {}
+            }])
         );
     }
 

@@ -572,7 +572,7 @@ ship first.
 - **Docs:** P11.
 
 ### P7 — CORS and preflight
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergences: with an allowlist configured `Vary: Origin` goes on every actual response, not only listed ones (Fetch CORS/HTTP-cache guidance; verifier R1); config origins normalise a trailing slash and the default port; every `OPTIONS` is answered before routing and auth)
 - **Risk:** simple
 - **Delivers:** §4.10 exactly.
 - **Depends on:** P4 (may land any time after).
@@ -592,7 +592,7 @@ ship first.
 - **Docs:** P11.
 
 ### P8 — Discovery: `transport_endpoints` and `/.well-known/macp.json`
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergences: other methods on the well-known path ⇒ 405 `Allow: GET, HEAD` (spec silent); the path gets normal CORS handling; the entry carries `"metadata": {}` per §10.10)
 - **Risk:** simple
 - **Delivers:** when `MACP_HTTP_PUBLIC_URL` is set, `GetManifest` (both bindings) adds
   `{transport: "macp.transport.http.v1", uri: <base>, content_types: ["application/json"]}`; `GET`/`HEAD

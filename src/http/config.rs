@@ -10,7 +10,7 @@
 //! |----------|---------|---------|
 //! | `MACP_HTTP_BIND_ADDR` | unset (listener off) | Socket address of the HTTP listener; must not collide with `MACP_BIND_ADDR` |
 //! | `MACP_HTTP_PUBLIC_URL` | unset | The binding's `{base}` (RFC-MACP-0006 §4.1): absolute, no trailing slash, no query or fragment, `https` unless `MACP_ALLOW_INSECURE=1`. Its path is the route prefix |
-//! | `MACP_HTTP_CORS_ORIGINS` | empty (closed) | Comma list of `scheme://host[:port]` origins allowed cross-origin (§4.10); `*` is refused |
+//! | `MACP_HTTP_CORS_ORIGINS` | empty (closed) | Comma list of `scheme://host[:port]` origins allowed cross-origin (§4.10); `*` is refused, a trailing `/` and a default port are dropped |
 //! | `MACP_HTTP_MAX_BODY_BYTES` | `ceil(4/3 · MACP_MAX_PAYLOAD_BYTES) + 65536` | Request body cap (§4.9); a value below that floor is refused |
 //! | `MACP_HTTP_MAX_CONNECTIONS` | `1024` | Concurrent connections the accept loop admits |
 //!
@@ -50,7 +50,8 @@ pub struct HttpConfig {
     pub public_url: Option<String>,
     /// The path of `public_url`: `""` or `/seg[/seg...]`, never ending in `/`.
     pub prefix: String,
-    /// Allowed CORS origins, scheme and host lowercased.
+    /// Allowed CORS origins, canonical (scheme and host lowercased, no
+    /// default port, no trailing slash).
     pub cors_origins: Vec<String>,
     pub max_body_bytes: usize,
     pub max_connections: usize,
@@ -229,7 +230,7 @@ pub fn body_floor(max_payload: u64) -> Option<u64> {
 /// Split `scheme://authority<rest>`; `None` unless the scheme is `http` or
 /// `https` (case-insensitive) and the authority is a non-empty host without
 /// userinfo.
-fn split_origin(raw: &str) -> Option<(String, &str, &str)> {
+pub(super) fn split_origin(raw: &str) -> Option<(String, &str, &str)> {
     let (scheme, after) = raw.split_once("://")?;
     let scheme = scheme.to_ascii_lowercase();
     if scheme != "http" && scheme != "https" {
@@ -294,14 +295,15 @@ fn parse_cors_origins(raw: &str) -> Result<Vec<String>, String> {
         if entry.is_empty() {
             return Err(format!("'{raw}' has an empty entry"));
         }
-        match split_origin(entry) {
-            Some((scheme, authority, "")) => {
-                let origin = format!("{scheme}://{}", authority.to_ascii_lowercase());
+        // A trailing `/` is dropped and a default port normalised away
+        // (RFC-MACP-0006 section 4.10 compares origins, which carry neither).
+        match super::cors::canonical_origin(entry, true) {
+            Some(origin) => {
                 if !out.contains(&origin) {
                     out.push(origin);
                 }
             }
-            _ => {
+            None => {
                 return Err(format!(
                     "'{entry}' is not an origin (expected scheme://host[:port], no path)"
                 ))
@@ -474,6 +476,15 @@ mod tests {
             .cors_origins,
             vec!["https://app.example", "http://localhost:3000"]
         );
+        // Trailing slash and default port are normalised at startup.
+        assert_eq!(
+            ok(&[(
+                "MACP_HTTP_CORS_ORIGINS",
+                "https://app.example/,https://app.example:443,http://h:80,https://h:80"
+            )])
+            .cors_origins,
+            vec!["https://app.example", "http://h", "https://h:80"]
+        );
         assert!(ok(&[("MACP_HTTP_CORS_ORIGINS", " ")])
             .cors_origins
             .is_empty());
@@ -481,7 +492,7 @@ mod tests {
             ("*", "'*' is refused"),
             ("https://a,*", "'*' is refused"),
             ("https://a,,https://b", "empty entry"),
-            ("https://a/", "not an origin"),
+            ("https://a//", "not an origin"),
             ("https://a/path", "not an origin"),
             ("a.example", "not an origin"),
             ("null", "not an origin"),

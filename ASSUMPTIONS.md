@@ -1672,3 +1672,25 @@
   - **Error-event JSON** is the canonical encoder's sorted-key output; the examples' key order differs and is compared as parsed JSON.
 - **Blast radius if wrong:** Low; local to `src/http/{sse,dispatch,server,errors}.rs` and tests.
 - **Status:** UNCONFIRMED
+
+## P7: CORS choices the plan left open
+- **Plan:** `plans/http-listener.md` (P7)
+- **Assumed / Chose:**
+  - **Every `OPTIONS` is a preflight on every path**, answered `204` before routing and authentication; `Access-Control-Request-Method` is not required. A listed origin gets exactly the five plan headers (no `Expose-Headers` on a preflight); anything else gets `204` with no `Access-Control-*` at all. Before P7 `OPTIONS` was a placeholder `404`.
+  - **Default ports are normalised as well as trailing slashes** (config and request alike): `https://a:443` ≡ `https://a`, because a browser serializes an origin without its default port, so a configured `:443` would otherwise never match. P4's config test refused `https://a/`; it is now accepted as `https://a` (the plan's edge case), `https://a//` and any other path are still refused.
+  - **Origin matching**: one `Origin` header, `http(s)` with a host, no userinfo or path; `null`, malformed, several headers or none are unlisted. The echoed `Allow-Origin` is the request's value verbatim.
+  - **`Vary: Origin` on every actual response once an allowlist is configured** (CHANGED after the P7 verify: originally listed origins only, per the plan's wording), appended to any existing `Vary`. Fetch's "CORS protocol and HTTP caches" guidance: a shared cache filled by an unlisted caller must not serve a listed origin a copy without `Allow-Origin` (the well-known document has no `Cache-Control`). Unlisted responses still carry no `Access-Control-*` header; an unlisted preflight carries no header at all; an empty allowlist adds no `Vary`.
+  - **The well-known document uses the same allowlist** (§4.10 has no public-document exception); responses outside `handle` (hyper's own 400/431) carry no CORS headers.
+- **Blast radius if wrong:** Low; local to `src/http/{cors,config,server}.rs`, pinned by unit and in-process tests.
+- **Status:** UNCONFIRMED
+
+## P8: discovery choices the plan left open
+- **Plan:** `plans/http-listener.md` (P8)
+- **Assumed / Chose:**
+  - **Well-known methods**: `GET` and `HEAD` only; any other method is `405` with `Allow: GET, HEAD` and no body (RFC 9110 practice; neither RFC-0005 §7.1 nor RFC-0006 §4.11 names one, and §4.1's `405 Allow: POST` governs `{base}/macp/v1/` paths only). `HEAD` sends the GET head with `Content-Length` of the GET body. `OPTIONS` there is a CORS preflight like everywhere (P7).
+  - **No request timeout and no auth** on the well-known path: it is `GetManifest` with an empty `agent_id`, which gRPC serves unauthenticated.
+  - **`MacpServer::with_http_endpoint`** is `#[doc(hidden)] pub`, compiled only with `http-listener` (integration tests need it); the field is private, so semver-checks stays clean. Without `MACP_HTTP_BIND_ADDR` the public URL is never read, so no entry.
+  - **`input_content_types`/`output_content_types` unchanged** (`application/macp-envelope+proto`) even with the listener on: §4.11 asks only for the transport entry, and §4.2 forbids `application/macp-envelope+json` as an HTTP body label.
+  - **Canonical JSON emits `"metadata": {}`** in the entry (the codec's default-emission rule); the document is byte-equal to the canonical JSON of gRPC's manifest.
+- **Blast radius if wrong:** Low; local to `src/http/discovery.rs`, `src/server.rs` `get_manifest`, `src/main.rs`.
+- **Status:** UNCONFIRMED

@@ -20,9 +20,15 @@
 //! - `sse`: the streaming RPCs as server-sent events (§4.3): `Accept`
 //!   negotiation, `Last-Event-ID` resume, framing, keepalive and how each
 //!   stream ends.
+//! - `cors`: CORS preflight and actual-response headers for browser
+//!   clients (§4.10), allowlist `MACP_HTTP_CORS_ORIGINS`.
+//! - `discovery`: the well-known manifest `/.well-known/macp.json`
+//!   (RFC-MACP-0005 §7.1, §4.11).
 //! - `tls`: the rustls acceptor (ring provider, ALPN `h2`/`http/1.1`).
 
 pub mod config;
+mod cors;
+mod discovery;
 mod dispatch;
 mod errors;
 pub mod json;

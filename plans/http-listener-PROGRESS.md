@@ -69,8 +69,8 @@ mapping #233 = `018e1fc`). `SPEC_REV` moved from `0f77753` to `99f3cfa` in P0 (0
 | P4 listener skeleton | complex | DONE | (this commit) | Opus, 2 rounds: R1 GAPS (idle socket pins permit via un-deadlined auto sniff; quoted content-type params), R2 PASS (accepted risk: PING-answering idle h2 client) | workspace 1148; http-listener 431 (http_binary 9 real-binary) |
 | P5 unary + errors + Send layers | complex | DONE | (this commit) | Opus, 2 rounds: R1 GAPS (bad Envelope → 400 vs §4.4 in-band; METHODS pin dead in CI; free_port TOCTOU flake), R2 PASS | workspace 1150; http-listener 454 ×2; http_binary 10/10 ×3 |
 | P6 SSE + resume | complex | DONE | (this commit) | Opus, 2 rounds: R1 GAPS (race-test hook inert; keepalive knob silent no-op; sender_authenticated=false untested), R2 PASS (mutation-checked race test) | workspace 1150; http-listener 480 ×2; http_sse 16/16 ×5 |
-| P7 CORS | simple | TODO | | | |
-| P8 discovery | simple | TODO | | | |
+| P7 CORS | simple | DONE | (this commit) | Opus, batched with P8, 2 rounds: R1 GAPS (Vary: Origin only on listed responses — shared-cache unsafe; fixed inline), R2 PASS | http-listener 493 |
+| P8 discovery | simple | DONE | (this commit) | Opus, batched with P7, 1 round PASS | http-listener 493; zero-impact manifest unchanged |
 | P9 observability | simple | TODO | | | |
 | P10 macp-conform over HTTP | complex | TODO | | | |
 | P11 docs, image, release notes | simple | TODO | | | |
@@ -82,3 +82,5 @@ Plan review round 1 (REVISE, 17 findings) applied to the plan on 2026-10-31; see
 - PR #269 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/269
 - 2026-10-31 merged #269 (52e05f7) — PR A (P0-P2)
 - 2026-10-31 filed #274 (security: WatchPolicies unauthenticated, pre-existing on gRPC; found by P6 verifier)
+- 2026-10-31 #274 fix committed on feat/http-listener-b (2a568dd); ships with PR B
+- 2026-10-31 #274 fix verified PASS (Opus); docs b06e323; SDK issues filed: macp-sdk-python#206, macp-sdk-typescript#222

@@ -45,6 +45,11 @@ pub struct MacpServer {
     /// authentication, before kernel acceptance; deny-on-error. See
     /// `crate::policy_engine`.
     policy_engine: Option<Arc<dyn crate::policy_engine::PolicyEngine>>,
+    /// The HTTP binding's `{base}` (RFC-MACP-0006 §4.11), advertised in
+    /// `GetManifest.transport_endpoints` on both bindings. `None` (the
+    /// default, and always without `MACP_HTTP_PUBLIC_URL`) leaves the
+    /// manifest byte-identical to a runtime without the HTTP listener.
+    http_endpoint: Option<String>,
 }
 
 impl MacpServer {
@@ -54,7 +59,36 @@ impl MacpServer {
             security,
             policies_read_only: false,
             policy_engine: None,
+            http_endpoint: None,
         }
+    }
+
+    /// Advertise the HTTP binding at `base` (`MACP_HTTP_PUBLIC_URL`: no
+    /// trailing slash, no `/macp/v1/` suffix) in `GetManifest`, as the
+    /// `macp.transport.http.v1` entry of RFC-MACP-0006 §4.11. Called before
+    /// the server is cloned for the two listeners, so both bindings (and the
+    /// well-known document) serve the same manifest. Not a stable API.
+    #[cfg(feature = "http-listener")]
+    #[doc(hidden)]
+    pub fn with_http_endpoint(mut self, base: impl Into<String>) -> Self {
+        self.http_endpoint = Some(base.into());
+        self
+    }
+
+    /// The `transport_endpoints` of the runtime's own manifest: the HTTP
+    /// binding's entry when a public URL is configured, else none (RFC-MACP-0005
+    /// §6 makes the field optional; the gRPC binding has no public URL to
+    /// advertise).
+    fn transport_endpoints(&self) -> Vec<crate::pb::TransportEndpoint> {
+        self.http_endpoint
+            .iter()
+            .map(|base| crate::pb::TransportEndpoint {
+                transport: "macp.transport.http.v1".into(),
+                uri: base.clone(),
+                content_types: vec!["application/json".into()],
+                metadata: HashMap::new(),
+            })
+            .collect()
     }
 
     pub fn with_read_only_policies(mut self) -> Self {
@@ -1952,8 +1986,7 @@ impl MacpRuntimeService for MacpServer {
                 input_content_types: vec!["application/macp-envelope+proto".into()],
                 output_content_types: vec!["application/macp-envelope+proto".into()],
                 metadata: HashMap::new(),
-                // Empty: unary-first profile has no dedicated transport endpoints.
-                transport_endpoints: vec![],
+                transport_endpoints: self.transport_endpoints(),
             }),
         }))
     }

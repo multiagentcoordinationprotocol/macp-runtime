@@ -531,6 +531,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let http_listener =
         match macp_runtime::http::HttpConfig::from_env(&|k: &str| std::env::var(k).ok()) {
             Ok(Some(config)) => {
+                // RFC-MACP-0006 §4.11: advertised by both bindings' GetManifest
+                // and the well-known document, so set before either clone.
+                if let Some(base) = &config.public_url {
+                    svc = svc.with_http_endpoint(base.clone());
+                }
                 Some(macp_runtime::http::HttpListener::bind(&config, svc.clone()).await?)
             }
             Ok(None) => None,
