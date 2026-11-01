@@ -16,14 +16,14 @@ fn test_binary() -> String {
 #[tokio::test]
 async fn tls_handshake_and_rpc_round_trip() {
     // Self-signed cert for localhost (SAN: DNS localhost + IP 127.0.0.1).
-    let rcgen::CertifiedKey { cert, key_pair } =
+    let rcgen::CertifiedKey { cert, signing_key } =
         rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
             .expect("cert generation");
     let dir = tempfile::tempdir().expect("tempdir");
     let cert_path = dir.path().join("server.crt");
     let key_path = dir.path().join("server.key");
     std::fs::write(&cert_path, cert.pem()).unwrap();
-    std::fs::write(&key_path, key_pair.serialize_pem()).unwrap();
+    std::fs::write(&key_path, signing_key.serialize_pem()).unwrap();
 
     let port = find_free_port().expect("free port");
     let bind_addr = format!("127.0.0.1:{port}");

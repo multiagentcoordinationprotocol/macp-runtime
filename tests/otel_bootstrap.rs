@@ -674,7 +674,9 @@ mod otel {
     }
 
     fn test_pki() -> TestPki {
-        use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose};
+        use rcgen::{
+            BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+        };
         let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
         ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca.distinguished_name
@@ -688,7 +690,8 @@ mod otel {
         leaf.distinguished_name
             .push(DnType::CommonName, "fake collector");
         let leaf_key = KeyPair::generate().unwrap();
-        let leaf_cert = leaf.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
+        let ca_issuer = Issuer::from_params(&ca, &ca_key);
+        let leaf_cert = leaf.signed_by(&leaf_key, &ca_issuer).unwrap();
         TestPki {
             ca_pem: ca_cert.pem(),
             leaf_pem: leaf_cert.pem(),
