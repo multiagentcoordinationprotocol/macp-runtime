@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-cli-v0.12.0...macp-cli-v0.12.1) - 2026-11-01
+
+### Other
+
+- *(deploy)* 15s stop grace for the compose runtime ([#277](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/277))
+
 ## [0.12.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-cli-v0.11.0...macp-cli-v0.12.0) - 2026-11-01
 
 ### Added
