@@ -1625,3 +1625,22 @@
 - **Chose:** `tests/http_json/corpus/` holds one file per message type (every request/response type of the service, every payload, `Envelope`, `MACPError`): maximal, all-defaults, and one case per extra oneof member, regenerated only with `MACP_REGEN_GOLDEN=1`. The vendored examples and the conformance envelopes (payload bytes from `macp_conform::encode::encode_payload`, sent as `payload_b64`) are read in place by their own fixpoint tests; the latter also assert the output side picks a JSON payload that converts back to the same bytes.
 - **Blast radius if wrong:** Low; test layout only.
 - **Status:** UNCONFIRMED
+
+## P4: listener skeleton choices the plan left open
+- **Plan:** `plans/http-listener.md` (P4)
+- **Assumed / Chose:**
+  - **Request timeout answer.** `MACP_REQUEST_TIMEOUT_SECS` expiring before the response head is `503` with an empty body: no registry code names a deadline, and §4.5's four transport statuses do not cover it. The timeout bounds the response head (body collection included), exactly like tonic's; an SSE body (P6) flows after the head, outside it. P5 may revisit the status.
+  - **P5 placeholder reads the body.** A valid POST collects the body under `MACP_HTTP_MAX_BODY_BYTES` (Content-Length checked first) and answers `501`; over the cap is `413` with an empty body until P5 adds the §4.5 `PAYLOAD_TOO_LARGE` body. This makes held requests testable (drain, h2 stream bound). P5 must authenticate from headers **before** this read (§4.4).
+  - **Empty `MACP_HTTP_BIND_ADDR` = unset**, in both builds (no listener, no feature-off refusal). Other `MACP_HTTP_*` variables are not read or judged while it is unset (zero impact).
+  - **Reused variables** (`MACP_REQUEST_TIMEOUT_SECS`, `MACP_MAX_CONCURRENT_STREAMS`, `MACP_MAX_PAYLOAD_BYTES`, TLS paths, `MACP_ALLOW_INSECURE`) are parsed exactly as `main.rs` parses them for gRPC (same defaults, lenient fallback), so the two listeners never disagree; only one PEM path set is "no TLS", as on gRPC.
+  - **Bind collision** = same port with the same IP or either side unspecified; port 0 never collides. Not checked against `MACP_METRICS_ADDR` (a clash fails the bind, which is fatal).
+  - **`MACP_HTTP_PUBLIC_URL`**: userinfo and empty path segments are refused besides the listed rules; scheme compared case-insensitively. **`MACP_HTTP_CORS_ORIGINS`**: scheme/host lowercased and de-duplicated; an empty entry (`a,,b`, trailing comma) is refused; a blank value is the empty list.
+  - **HTTP/2 values the plan named without numbers**: `max_pending_accept_reset_streams = 20` and `max_send_buf_size = 400 KiB` (hyper's defaults, set explicitly).
+  - **Placeholders**: `OPTIONS` on any path and any method on `/.well-known/macp.json` answer `404` until P7/P8.
+  - **TLS PEM loading** is separate from `main.rs`'s (tonic's `Identity::from_pem` yields no rustls config to reuse): `rustls-pki-types` `PemObject`, via `tokio_rustls::rustls`.
+  - **Wiring order**: the listener binds before gRPC serves (plan: "spawn after `:510`"), so a bind failure aborts startup; it runs inline in `main`'s combined serve future (no task when off), and a gRPC serve error returns at once instead of waiting behind HTTP.
+  - **Feature-off refusal test** runs in the default-feature run (`cfg(not(feature = "http-listener"))`): `CARGO_BIN_EXE_macp-runtime` is built with the test run's features, so a feature-on run cannot spawn a feature-off binary.
+  - **Pre-request deadlines (verifier G1).** hyper-util's auto builder sniffs the protocol with no deadline, so it is not used: TLS routes by ALPN (`h2` ⇒ HTTP/2 only, anything else, including no ALPN, ⇒ HTTP/1.1 only, since HTTP/2 over TLS requires ALPN, RFC 9113 §3.2); plaintext sniffs the first bytes against the preface under a 10 s deadline, and the same deadline bounds the preface after an `h2` TLS handshake (hyper's h2 handshake has none). After the preface, HTTP/2 is bounded only by keep-alive PINGs (30 s + 20 s, so up to 50 s); HTTP/1.1 by the 10 s head-read timeout, which also covers idle keep-alive. The deadlines are not configurable; tests shorten them in process (`#[cfg(test)]`), with no env knob.
+  - **"No extra socket"** is checked with `lsof`, falling back to `/proc/<pid>/{fd,net/tcp*}` on Linux without it.
+- **Blast radius if wrong:** Low; local to `src/http/{config,server,tls}.rs`, each pinned by a unit or binary test.
+- **Status:** UNCONFIRMED

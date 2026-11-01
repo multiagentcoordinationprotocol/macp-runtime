@@ -412,7 +412,7 @@ ship first.
 - **Docs:** module docs citing §10 subsections.
 
 ### P4 — Listener skeleton: config, TLS, gating, shutdown, transport statuses
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergences: hyper-util `server-auto` dropped — TLS routes by ALPN (`h2` ⇒ HTTP/2, else HTTP/1.1) and plaintext sniffs the h2 preface under a 10 s deadline, because auto's sniff had no deadline and let a silent socket pin a connection permit; listener binds inline before gRPC serves (bind failure aborts startup) rather than spawning after `:510`; feature-off refusal is tested in the default-feature run; PEM loading via `rustls-pki-types` (tonic `Identity` yields no rustls config); the 501 placeholder reads the capped body, so **P5 must authenticate from headers before reading the body** (§4.4). Accepted risk: an h2 client that answers PINGs but never sends a request holds a permit (hyper has no h2 idle timeout; equivalent to an h1 client re-requesting every 9 s); the sniff/TLS phases are not shutdown-cancellable but are bounded at 10 s each, under the drain deadline)
 - **Risk:** complex
 - **Delivers:** `src/http/server.rs` serving HTTP/1.1 and HTTP/2 (ALPN on TLS) with every route answering a
   placeholder, the transport statuses of §4.1/§4.2/§4.5 (404 unknown method or path, 405 + `Allow: POST`, 415

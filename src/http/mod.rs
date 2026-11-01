@@ -9,5 +9,18 @@
 //!
 //! - [`json`]: the canonical JSON mapping of every MACP message
 //!   (RFC-MACP-0001 §10), a transport-free codec.
+//! - [`config`]: `MACP_HTTP_*` startup configuration, validated before
+//!   anything binds.
+//! - [`server`]: the listener (accept loop, HTTP/1.1 + HTTP/2, graceful
+//!   shutdown), routing and the transport statuses of §4.1/§4.2/§4.5.
+//! - `tls`: the rustls acceptor (ring provider, ALPN `h2`/`http/1.1`).
 
+pub mod config;
 pub mod json;
+pub mod server;
+mod tls;
+
+#[doc(hidden)]
+pub use config::HttpConfig;
+#[doc(hidden)]
+pub use server::HttpListener;

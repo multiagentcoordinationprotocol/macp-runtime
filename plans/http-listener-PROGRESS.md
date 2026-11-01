@@ -66,7 +66,7 @@ mapping #233 = `018e1fc`). `SPEC_REV` moved from `0f77753` to `99f3cfa` in P0 (0
 | P1b SIGTERM shared shutdown | simple | DONE | 4cc11f7 | Opus, 1 round, GAPS→fixed inline (MIGRATING section pasted into 0.11.0/0.10.0, stale env-table refs) | workspace 1136 pass; shutdown_binary 4/4 x3 |
 | P2 server seams | complex | DONE | af6c924 + edf68f6 | Opus, 1 round, PASS (G1 doc(hidden), G2 P6 note closed inline; G3 bound-stream ordinal untested, gRPC discards ordinals) | workspace 1146, otel 441, tier1 137; semver-checks clean vs 0.11.0 |
 | P3 canonical JSON codec | complex | DONE | (this commit) | Opus, 2 rounds: R1 GAPS (deps-isolation SIGPIPE false-pass; §10.9 silent rounding; minor), R2 GAPS (ctree swallowed cargo tree failure, fixed inline) | workspace 1146; http-listener 399 (http_json 15, codec 23) |
-| P4 listener skeleton | complex | TODO | | | |
+| P4 listener skeleton | complex | DONE | (this commit) | Opus, 2 rounds: R1 GAPS (idle socket pins permit via un-deadlined auto sniff; quoted content-type params), R2 PASS (accepted risk: PING-answering idle h2 client) | workspace 1148; http-listener 431 (http_binary 9 real-binary) |
 | P5 unary + errors + Send layers | complex | TODO | | | |
 | P6 SSE + resume | complex | TODO | | | |
 | P7 CORS | simple | TODO | | | |
