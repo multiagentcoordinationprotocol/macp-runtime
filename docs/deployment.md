@@ -427,8 +427,8 @@ Two runtimes must never share one data directory or Redis instance.
 `WatchSessions` return metadata for **all** sessions to any authenticated
 identity (RFC-0006 permits this shape). Deployments with confidentiality
 requirements between agent groups should front these RPCs with a proxy or
-restrict which identities may call them. `WatchSignals` requires
-authentication; `ListModes`/`GetManifest`/`WatchModeRegistry`/`WatchRoots`
+restrict which identities may call them. `WatchSignals` and (since 0.12.0,
+#274) `WatchPolicies` require authentication; `ListModes`/`GetManifest`/`WatchModeRegistry`/`WatchRoots`
 are open discovery surfaces by design. `ListSessions` is now paged, and the
 decision not to sign its opaque `page_token` rests on exactly the unfiltered
 property described here -- a forged cursor can only reposition a caller within
