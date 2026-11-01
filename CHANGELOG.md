@@ -6,6 +6,14 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.12.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.12.0...macp-runtime-v0.12.1) - 2026-11-01
+
+### Other
+
+- *(contributing)* point org members at the macp-kb MCP server ([#280](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/280))
+- *(deps)* bump the actions group across 1 directory with 7 updates ([#272](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/272))
+- *(deploy)* 15s stop grace for the compose runtime ([#277](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/277))
+
 ## [0.12.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.11.0...macp-runtime-v0.12.0) - 2026-11-01
 
 ### Added

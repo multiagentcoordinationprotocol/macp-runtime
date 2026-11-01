@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-policy-v0.12.0...macp-policy-v0.12.1) - 2026-11-01
+
+### Fixed
+
+- *(policy)* refuse wrong JSON shapes at closed-object and unit-enum positions ([#279](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/279))
+
 ## [0.10.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-policy-v0.9.0...macp-policy-v0.10.0) - 2026-10-26
 
 ### Added
