@@ -165,8 +165,12 @@ macp-proto = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 # The conformance runner library: tests/conformance_loader.rs drives every
-# fixture through it, against this runtime and against its in-process target.
-macp-conform = { workspace = true }
+# fixture through it, against this runtime and against its in-process target;
+# tests/conformance_http.rs (and the `http-listener` unit test that breaks the
+# Ack mapping on purpose) drive it over both bindings, hence `grpc` + `http`.
+# Dev-only: the runner's HTTP client (hyper's client side) stays out of this
+# crate's normal dependency edges.
+macp-conform = { workspace = true, features = ["grpc", "http"] }
 criterion = "0.8"
 # `otel` tests: the in-memory span exporter (`testing`), the OTLP trace and
 # metrics collector service stubs for the fake collector in `tests/support/fake_collector.rs`,

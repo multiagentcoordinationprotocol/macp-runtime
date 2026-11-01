@@ -118,6 +118,11 @@ pub(crate) struct State {
     /// Set to `true` when the listener starts draining: every open SSE
     /// stream ends at once (see [`super::sse`]).
     shutdown: tokio::sync::watch::Sender<bool>,
+    /// Unit tests only: invert every `Send` Ack's `ok`, a deliberately broken
+    /// HTTP mapping the conformance run must catch (plan P10). Absent from
+    /// the binary and from every integration-test build.
+    #[cfg(test)]
+    broken_ack_mapping: bool,
 }
 
 impl State {
@@ -152,6 +157,8 @@ impl State {
             server,
             sse_keepalive: super::sse::KEEPALIVE_INTERVAL,
             shutdown: tokio::sync::watch::channel(false).0,
+            #[cfg(test)]
+            broken_ack_mapping: false,
         }
     }
 
@@ -274,6 +281,16 @@ impl HttpListener {
         Arc::get_mut(&mut self.state)
             .expect("the listener state is unshared until `serve`")
             .sse_keepalive = interval;
+        self
+    }
+
+    /// Unit tests only: break the `Send` Ack mapping (see
+    /// `State::broken_ack_mapping`).
+    #[cfg(test)]
+    pub(crate) fn with_broken_ack_mapping(mut self) -> Self {
+        Arc::get_mut(&mut self.state)
+            .expect("the listener state is unshared until `serve`")
+            .broken_ack_mapping = true;
         self
     }
 
@@ -731,6 +748,8 @@ where
             empty(StatusCode::UNSUPPORTED_MEDIA_TYPE)
         }
         Route::Rpc(method) => {
+            #[cfg(test)]
+            let flip = state.broken_ack_mapping && method.name() == "Send";
             let serve = dispatch::serve(
                 &state.server,
                 state.max_body_bytes,
@@ -739,6 +758,8 @@ where
                 state.sse_context(),
             );
             match tokio::time::timeout(state.request_timeout, serve).await {
+                #[cfg(test)]
+                Ok(resp) if flip => dispatch::flip_ack(resp).await,
                 Ok(resp) => resp,
                 // No registry code names a deadline; INTERNAL_ERROR with the
                 // §4.5 body (a Send may have been applied: §4.8 retry).

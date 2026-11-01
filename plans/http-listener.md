@@ -635,7 +635,7 @@ ship first.
 - **Docs:** P11.
 
 ### P10 — Conformance over HTTP (`macp-conform --transport http`)
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergences: client is hyper + tokio-rustls (ring), not reqwest — reqwest feature unification with macp-auth broke its JWKS client in workspace test builds; deps-isolation's existing macp-conform check widened to `hyper|tokio-rustls`; HTTP/1.1 only; the in-process test also runs GrpcTarget and asserts identical per-fixture outcomes; a coded non-200 `Send` is a rejection only for 400/401/413 (§4.4); macp-cli enables the `http` feature so `macp conform --transport http` works; the gRPC readiness loop in conform-cli now fails when the port never opens)
 - **Risk:** complex
 - **Delivers:** an `HttpTarget` in `macp-conform` (new non-default feature `http`), CLI flag `--transport
   grpc|http` (default `grpc`; URL schemes keep their current meaning, `client.rs:17-28`), a CI step running the full

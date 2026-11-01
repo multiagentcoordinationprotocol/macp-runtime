@@ -12,7 +12,9 @@
 //! - **Targets** implement [`ConformanceTarget`]. [`InProcessTarget`] runs the
 //!   Embedded profile over `macp_modes::step` and `macp_modes::replay`, with
 //!   no transport. With the `grpc` feature, `GrpcTarget` runs the Server
-//!   profile against any `MACPRuntimeService` endpoint.
+//!   profile against any `MACPRuntimeService` endpoint, and with the `http`
+//!   feature `HttpTarget` runs it over the HTTP/JSON binding
+//!   (RFC-MACP-0006 §4).
 //! - **Levels**: Core, Core + Decision, Standard modes, plus the optional
 //!   multi_round group; each result is reported per [`Level`].
 //!
@@ -27,7 +29,8 @@
 //! # Ok(()) }
 //! ```
 //!
-//! Without the `grpc` feature this crate depends on no transport (no tonic).
+//! Without the `grpc` and `http` features this crate depends on no transport
+//! (no tonic, no HTTP client).
 
 mod bundle;
 pub mod encode;
@@ -44,6 +47,8 @@ pub mod cli;
 pub mod client;
 #[cfg(feature = "grpc")]
 mod grpc;
+#[cfg(feature = "http")]
+mod http;
 
 pub use fixture::{FixtureSet, FixtureSource, LoadError};
 pub use in_process::{state_name, InProcessTarget};
@@ -57,3 +62,5 @@ pub use target::{
 
 #[cfg(feature = "grpc")]
 pub use grpc::GrpcTarget;
+#[cfg(feature = "http")]
+pub use http::HttpTarget;

@@ -163,6 +163,13 @@ jobs:
       - name: Run clippy (macp-conform, grpc feature)
         run: cargo clippy -p macp-conform --features grpc --all-targets -- -D warnings
 
+      # ...nor its HTTP target (`http`, plans/http-listener.md P10), alone and
+      # with the CLI that selects it (`--transport http`).
+      - name: Run clippy (macp-conform, http feature)
+        run: |
+          cargo clippy -p macp-conform --features http --all-targets -- -D warnings
+          cargo clippy -p macp-conform --features grpc,http --all-targets -- -D warnings
+
   docs:
     name: Rustdoc
     runs-on: ubuntu-latest
@@ -312,13 +319,14 @@ jobs:
           done
 
       # The conformance library's in-process path must carry no transport.
-      # Only tonic is checked: tokio already arrives through macp-modes and
+      # tonic (the `grpc` feature) and hyper/tokio-rustls (the `http`
+      # feature) are checked: tokio already arrives through macp-modes and
       # macp-policy (tokio::sync::broadcast), so "no tokio" cannot hold here.
       - name: macp-conform without grpc has no transport
         run: |
           deps=$(cargo tree -p macp-conform --edges normal)
           echo "$deps"
-          if echo "$deps" | sed 's/ ([^)]*)//' | grep -qiE "tonic|macp-storage|macp-auth|macp-runtime|reqwest|rocksdb|redis"; then
+          if echo "$deps" | sed 's/ ([^)]*)//' | grep -qiE "tonic|hyper|tokio-rustls|macp-storage|macp-auth|macp-runtime|reqwest|rocksdb|redis"; then
             echo "::error::macp-conform (default features) pulled a forbidden dependency"; exit 1
           fi
 
@@ -862,6 +870,10 @@ jobs:
   #   2. A server built from this checkout, with `--hash-vectors in-process`
   #      (same release by construction) and `--strict`: must claim
   #      Standard modes + multi_round.
+  #   3. The same, over the HTTP binding (`--transport http`, RFC-MACP-0006
+  #      §4; plans/http-listener.md P10): the runtime built with
+  #      `http-listener`, the CLI with `http`. Same claim. Local build only
+  #      until a published image carries the feature (then add an image step).
   conform-cli:
     name: macp-conform CLI (GHCR image, gRPC)
     runs-on: ubuntu-latest
@@ -897,8 +909,8 @@ jobs:
 
       - name: Build macp-conform and the runtime
         run: |
-          cargo build -p macp-conform --features grpc --bin macp-conform
-          cargo build --bin macp-runtime
+          cargo build -p macp-conform --features grpc,http --bin macp-conform
+          cargo build --bin macp-runtime --features http-listener
 
       - name: Start the runtime image
         run: |
@@ -924,10 +936,12 @@ jobs:
         run: |
           MACP_ALLOW_INSECURE=1 MACP_MEMORY_ONLY=1 MACP_BIND_ADDR=127.0.0.1:50052 \
             ./target/debug/macp-runtime > macp-local.log 2>&1 &
+          ready=
           for _ in $(seq 1 60); do
-            if (exec 3<>/dev/tcp/127.0.0.1/50052) 2>/dev/null; then break; fi
+            if (exec 3<>/dev/tcp/127.0.0.1/50052) 2>/dev/null; then ready=1; break; fi
             sleep 1
           done
+          test -n "$ready" || { cat macp-local.log; echo "::error::local runtime did not open port 50052"; exit 1; }
           ./target/debug/macp-conform \
             --target grpc://127.0.0.1:50052 \
             --fixtures spec-repo/schemas/conformance \
@@ -940,11 +954,40 @@ jobs:
             echo "::error::unexpected claim: $claim"; exit 1
           }
 
+      - name: Run macp-conform over HTTP, hash vectors in-process (this checkout)
+        run: |
+          # gRPC on 50053 (unused here), HTTP on 8080. Readiness is the HTTP
+          # port answering a real RPC (GetManifest, unauthenticated), polled
+          # with a deadline instead of a fixed sleep.
+          MACP_ALLOW_INSECURE=1 MACP_MEMORY_ONLY=1 MACP_BIND_ADDR=127.0.0.1:50053 \
+            MACP_HTTP_BIND_ADDR=127.0.0.1:8080 \
+            ./target/debug/macp-runtime > macp-local-http.log 2>&1 &
+          ready=
+          for _ in $(seq 1 60); do
+            if curl -fsS --max-time 5 -o /dev/null -X POST -H 'Content-Type: application/json' -d '{}' \
+                 http://127.0.0.1:8080/macp/v1/GetManifest; then ready=1; break; fi
+            sleep 1
+          done
+          test -n "$ready" || { cat macp-local-http.log; echo "::error::HTTP listener did not answer on 8080"; exit 1; }
+          ./target/debug/macp-conform \
+            --transport http \
+            --target http://127.0.0.1:8080 \
+            --fixtures spec-repo/schemas/conformance \
+            --level standard --multi-round --strict \
+            --hash-vectors in-process \
+            --report macp-conform-report-http.json
+          claim=$(jq -r .claim macp-conform-report-http.json)
+          echo "claim (HTTP): $claim" >> "$GITHUB_STEP_SUMMARY"
+          test "$claim" = "Standard modes + multi_round, Server profile (hash vectors in-process)" || {
+            echo "::error::unexpected claim over HTTP: $claim"; exit 1
+          }
+
       - name: Runtime logs
         if: failure()
         run: |
           docker logs macp
           cat macp-local.log || true
+          cat macp-local-http.log || true
 
       - name: Upload report
         if: always()

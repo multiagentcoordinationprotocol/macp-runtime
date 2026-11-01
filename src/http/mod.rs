@@ -37,6 +37,9 @@ pub mod server;
 mod sse;
 mod tls;
 
+#[cfg(test)]
+mod conformance_tests;
+
 #[doc(hidden)]
 pub use config::HttpConfig;
 #[doc(hidden)]

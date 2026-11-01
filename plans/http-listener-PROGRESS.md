@@ -72,7 +72,7 @@ mapping #233 = `018e1fc`). `SPEC_REV` moved from `0f77753` to `99f3cfa` in P0 (0
 | P7 CORS | simple | DONE | (this commit) | Opus, batched with P8, 2 rounds: R1 GAPS (Vary: Origin only on listed responses — shared-cache unsafe; fixed inline), R2 PASS | http-listener 493 |
 | P8 discovery | simple | DONE | (this commit) | Opus, batched with P7, 1 round PASS | http-listener 493; zero-impact manifest unchanged |
 | P9 observability | simple | DONE | (this commit) | Opus, 1 round PASS (+ semconv follow-up error.type/url.scheme re-confirmed) | otel+http 584; otel 447; otel_http 7 |
-| P10 macp-conform over HTTP | complex | TODO | | | |
+| P10 conformance over HTTP | complex | DONE | (this commit) | Opus, 2 rounds (R1 GAP: macp-cli advertised --transport http without the feature; closed + non-200 Send leniency + curl timeout) | workspace 1165; conformance_http 1; negative 1; macp-conform 25; local claim Standard+multi_round Server |
 | P11 docs, image, release notes | simple | TODO | | | |
 
 Plan review round 1 (REVISE, 17 findings) applied to the plan on 2026-10-31; see `## Plan review` there. Round 2 (A: rate limits in band, B: SIGTERM moved to P1b in PR A, C: stale P2 item dropped) applied; verdict SOUND after 2 rounds.

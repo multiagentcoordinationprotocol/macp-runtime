@@ -346,6 +346,29 @@ fn request_session_id(request: &DynamicMessage) -> String {
         .unwrap_or_default()
 }
 
+/// Unit tests only: the Ack of a `200` `Send` response with `ok` inverted
+/// (and its `error` dropped), the broken mapping behind
+/// `HttpListener::with_broken_ack_mapping`.
+#[cfg(test)]
+pub(crate) async fn flip_ack(resp: Response<Body>) -> Response<Body> {
+    let (parts, body) = resp.into_parts();
+    let bytes = body
+        .collect()
+        .await
+        .map(|c| c.to_bytes())
+        .unwrap_or_default();
+    let mut value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) if parts.status == StatusCode::OK => v,
+        _ => return Response::from_parts(parts, http_body_util::Full::new(bytes).boxed_unsync()),
+    };
+    let ok = value["ack"]["ok"].as_bool().unwrap_or(false);
+    value["ack"]["ok"] = serde_json::Value::Bool(!ok);
+    if let Some(ack) = value["ack"].as_object_mut() {
+        ack.remove("error");
+    }
+    json_response(StatusCode::OK, value.to_string().into_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
