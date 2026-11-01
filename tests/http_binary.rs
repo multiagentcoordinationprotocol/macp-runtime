@@ -20,70 +20,14 @@
 //! `kill`, so the file is Unix-only.
 #![cfg(unix)]
 
-use std::io::Read;
-use std::net::TcpListener;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use prost::Message;
 
-/// Kills the child if a test panics before it exits.
-struct Child(std::process::Child);
-impl Drop for Child {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-impl Child {
-    fn pid(&self) -> u32 {
-        self.0.id()
-    }
-
-    fn signal(&self, sig: &str) {
-        let status = Command::new("kill")
-            .args([&format!("-{sig}"), &self.0.id().to_string()])
-            .status()
-            .expect("run kill");
-        assert!(status.success(), "kill -{sig} failed");
-    }
-
-    fn alive(&mut self) -> bool {
-        self.0.try_wait().unwrap().is_none()
-    }
-
-    fn wait_exit(&mut self, limit: Duration) -> Option<ExitStatus> {
-        let deadline = Instant::now() + limit;
-        while Instant::now() < deadline {
-            if let Some(status) = self.0.try_wait().unwrap() {
-                return Some(status);
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        None
-    }
-
-    /// Combined stdout + stderr. Call after the process exited.
-    fn output(&mut self) -> String {
-        let mut out = String::new();
-        if let Some(mut s) = self.0.stdout.take() {
-            s.read_to_string(&mut out).ok();
-        }
-        if let Some(mut s) = self.0.stderr.take() {
-            s.read_to_string(&mut out).ok();
-        }
-        out
-    }
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
+#[path = "support/binary_child.rs"]
+mod binary_child;
+use binary_child::{addr_in_use, field, free_port, Child, SPAWN_ATTEMPTS};
 
 /// Spawn the binary with a scrubbed environment, dev-mode defaults
 /// (`MACP_ALLOW_INSECURE=1`, memory only) and `env` applied on top; an entry
@@ -100,9 +44,7 @@ fn spawn(scratch: &std::path::Path, grpc: &str, env: &[(&str, String)]) -> Child
         .env("MACP_MEMORY_ONLY", "1")
         .env("MACP_BIND_ADDR", grpc)
         .env("MACP_SHUTDOWN_DRAIN_SECS", "5")
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .env("RUST_LOG", "info");
     for (k, v) in env {
         if v.is_empty() {
             command.env_remove(k);
@@ -110,7 +52,70 @@ fn spawn(scratch: &std::path::Path, grpc: &str, env: &[(&str, String)]) -> Child
             command.env(k, v);
         }
     }
-    Child(command.spawn().expect("spawn macp-runtime"))
+    Child::spawn(&mut command)
+}
+
+/// A running binary whose listeners are bound: `grpc` (a probed port, held
+/// by the child) and, with `MACP_HTTP_BIND_ADDR=127.0.0.1:0`, the `http`
+/// address read back from its `HTTP listener bound` line.
+struct Launched {
+    child: Child,
+    grpc: String,
+    #[cfg_attr(not(feature = "http-listener"), allow(dead_code))]
+    http: Option<String>,
+}
+
+/// Spawn and wait until the child itself listens on its gRPC port (and has
+/// logged its HTTP address when `with_http`). A gRPC port taken between the
+/// probe and the bind (`AddrInUse`) is retried with a fresh port, at most
+/// `SPAWN_ATTEMPTS` times; any other early exit panics with the output.
+fn launch(scratch: &std::path::Path, env: &[(&str, String)], with_http: bool) -> Launched {
+    let mut env = env.to_vec();
+    if with_http {
+        env.push(("MACP_HTTP_BIND_ADDR", "127.0.0.1:0".to_string()));
+    }
+    for attempt in 1..=SPAWN_ATTEMPTS {
+        let port = free_port();
+        let grpc = format!("127.0.0.1:{port}");
+        let mut child = spawn(scratch, &grpc, &env);
+        let retry = |out: &str| {
+            assert!(
+                addr_in_use(out) && attempt < SPAWN_ATTEMPTS,
+                "runtime exited before ready (attempt {attempt}); output:\n{out}"
+            );
+        };
+        let http = if with_http {
+            match child.wait_line("HTTP listener bound", Duration::from_secs(30)) {
+                Ok(line) => Some(field(&line, "addr").expect("addr= in the bound line")),
+                Err(out) => {
+                    retry(&out);
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let bound = loop {
+            if listening_ports(child.pid()).contains(&port) {
+                break true;
+            }
+            if !child.alive() {
+                break false;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "gRPC port never bound; output:\n{}",
+                child.output()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if bound {
+            return Launched { child, grpc, http };
+        }
+        retry(&child.output());
+    }
+    unreachable!("the last attempt panics")
 }
 
 /// Spawn with `env` and expect a startup refusal: non-zero exit, output
@@ -156,8 +161,7 @@ async fn wait_grpc_serving(child: &mut Child, addr: &str) {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let _ = child.0.kill();
-    let _ = child.0.wait();
+    child.kill();
     panic!(
         "runtime never reported SERVING; output:\n{}",
         child.output()
@@ -236,10 +240,11 @@ async fn zero_impact_without_bind_addr() {
     use macp_runtime::pb::GetManifestRequest;
 
     let scratch = tempfile::tempdir().unwrap();
-    let port = free_port();
-    let grpc = format!("127.0.0.1:{port}");
-    let mut child = spawn(scratch.path(), &grpc, &[]);
+    let Launched {
+        mut child, grpc, ..
+    } = launch(scratch.path(), &[], false);
     wait_grpc_serving(&mut child, &grpc).await;
+    let port: u16 = grpc.rsplit(':').next().unwrap().parse().unwrap();
 
     assert_eq!(listening_ports(child.pid()), vec![port]);
 
@@ -289,7 +294,7 @@ async fn zero_impact_without_bind_addr() {
 #[cfg(not(feature = "http-listener"))]
 #[test]
 fn feature_off_refuses_bind_addr() {
-    let out = expect_refusal(&[("MACP_HTTP_BIND_ADDR", format!("127.0.0.1:{}", free_port()))]);
+    let out = expect_refusal(&[("MACP_HTTP_BIND_ADDR", "127.0.0.1:0".to_string())]);
     assert!(
         out.contains("MACP_HTTP_BIND_ADDR is set") && out.contains("`http-listener`"),
         "{out}"
@@ -319,13 +324,10 @@ mod listener {
     /// (plaintext) or once `ready` succeeds.
     async fn start_plain(env: &[(&str, String)]) -> Http {
         let scratch = tempfile::tempdir().unwrap();
-        let grpc = format!("127.0.0.1:{}", free_port());
-        let http = format!("127.0.0.1:{}", free_port());
-        let mut all = vec![("MACP_HTTP_BIND_ADDR", http.clone())];
-        all.extend_from_slice(env);
+        let Launched { child, http, .. } = launch(scratch.path(), env, true);
         let mut rt = Http {
-            child: spawn(scratch.path(), &grpc, &all),
-            http,
+            child,
+            http: http.unwrap(),
             _scratch: scratch,
         };
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -434,10 +436,16 @@ mod listener {
             assert_eq!(plain(&rt, "POST", path, json, "{}").await.0, 404, "{path}");
         }
 
-        // A valid request reaches the P5 placeholder, with and without the
-        // MACP_HTTP_PUBLIC_URL prefix, and with charset=UTF-8.
-        for path in ["/macp/v1/Send", "/api/macp/v1/GetManifest"] {
-            let (s, _, _) = plain(
+        // A valid request reaches its RPC, with and without the
+        // MACP_HTTP_PUBLIC_URL prefix, and with charset=UTF-8: `Send` with no
+        // credential is refused from the headers, `GetManifest` is open.
+        for (path, want) in [
+            ("/macp/v1/Send", 401),
+            ("/api/macp/v1/Send", 401),
+            ("/macp/v1/GetManifest", 200),
+            ("/api/macp/v1/GetManifest", 200),
+        ] {
+            let (s, h, _) = plain(
                 &rt,
                 "POST",
                 path,
@@ -445,7 +453,8 @@ mod listener {
                 "{}",
             )
             .await;
-            assert_eq!(s, 501, "{path}");
+            assert_eq!(s, want, "{path}");
+            assert_eq!(h.get("content-type").unwrap(), "application/json");
         }
         // CORS (P7) and discovery (P8) placeholders.
         assert_eq!(
@@ -464,7 +473,7 @@ mod listener {
     /// by the HTTP listener's own check.
     #[test]
     fn plaintext_refused_without_allow_insecure() {
-        let http = format!("127.0.0.1:{}", free_port());
+        let http = "127.0.0.1:0".to_string();
         let out = expect_refusal(&[
             ("MACP_ALLOW_INSECURE", String::new()),
             ("MACP_HTTP_BIND_ADDR", http),
@@ -476,7 +485,7 @@ mod listener {
     /// failure is fatal.
     #[test]
     fn bad_env_values_are_refused() {
-        let http = || format!("127.0.0.1:{}", free_port());
+        let http = || "127.0.0.1:0".to_string();
         let cases: Vec<(Vec<(&str, String)>, &str)> = vec![
             (
                 vec![("MACP_HTTP_BIND_ADDR", "not-an-addr".into())],
@@ -570,7 +579,7 @@ mod listener {
         }
 
         // An occupied port: fatal, unlike the metrics endpoint.
-        let taken = TcpListener::bind("127.0.0.1:0").unwrap();
+        let taken = binary_child::bind_listener("127.0.0.1:0");
         let addr = taken.local_addr().unwrap().to_string();
         let out = expect_refusal(&[("MACP_HTTP_BIND_ADDR", addr.clone())]);
         assert!(
@@ -618,17 +627,17 @@ mod listener {
         std::fs::write(&key, ck.key_pair.serialize_pem()).unwrap();
         let cert_der = ck.cert.der().clone();
 
-        let grpc = format!("127.0.0.1:{}", free_port());
-        let http = format!("127.0.0.1:{}", free_port());
-        let mut child = spawn(
+        let Launched {
+            mut child, http, ..
+        } = launch(
             scratch.path(),
-            &grpc,
             &[
-                ("MACP_HTTP_BIND_ADDR", http.clone()),
                 ("MACP_TLS_CERT_PATH", cert.display().to_string()),
                 ("MACP_TLS_KEY_PATH", key.display().to_string()),
             ],
+            true,
         );
+        let http = http.unwrap();
 
         let h1 = tls_connector(cert_der.clone(), &[b"http/1.1"]);
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -660,7 +669,7 @@ mod listener {
         )
         .await
         .unwrap();
-        assert_eq!(s, 501);
+        assert_eq!(s, 200);
 
         // HTTP/2, alone and preferred when both are offered.
         for offer in [&[&b"h2"[..]][..], &[b"http/1.1", b"h2"]] {
@@ -700,14 +709,16 @@ mod listener {
     // ---- shutdown --------------------------------------------------------
 
     /// An HTTP/1.1 request held in flight: its head is sent with
-    /// `Expect: 100-continue`, and the server's `100 Continue` (hyper sends it
-    /// when the handler first reads the body) proves the handler is running
-    /// and waiting for the body.
+    /// `Expect: 100-continue` and a (dev-mode) credential, and the server's
+    /// `100 Continue` (hyper sends it when the handler first reads the body,
+    /// which is after authentication) proves the handler is running and
+    /// waiting for the body.
     async fn hold_request(addr: &str) -> TcpStream {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         stream
             .write_all(
                 b"POST /macp/v1/Send HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+                  Authorization: Bearer agent://held\r\n\
                   Content-Length: 2\r\nExpect: 100-continue\r\n\r\n",
             )
             .await
@@ -764,7 +775,8 @@ mod listener {
 
         held.write_all(b"{}").await.unwrap();
         let head = read_head(&mut held).await;
-        assert!(head.starts_with("HTTP/1.1 501"), "{head}");
+        // `{}` is not a SendRequest (no envelope): a request-level 400.
+        assert!(head.starts_with("HTTP/1.1 400"), "{head}");
 
         let status = rt
             .child
@@ -855,6 +867,8 @@ mod listener {
             (":path", "/macp/v1/Send"),
             (":authority", "x"),
             ("content-type", "application/json"),
+            // Authenticated (dev mode), so each handler goes on to read its body.
+            ("authorization", "Bearer agent://h2"),
         ]);
         // BOUND + 1 streams, none ending: each handler waits for its body.
         for i in 0..=BOUND {

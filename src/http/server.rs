@@ -26,9 +26,17 @@
 //!   service descriptor's (the descriptor pool of [`super::json`]), so it
 //!   tracks the proto with no list to maintain here.
 //! - **Request timeout.** `MACP_REQUEST_TIMEOUT_SECS` bounds producing the
-//!   response *head* of an RPC, body collection included, exactly as tonic's
-//!   timeout bounds a gRPC call; a streaming body (SSE, P6) flows after the
-//!   head and is therefore not subject to it.
+//!   response *head* of an RPC, body collection included (the deadline starts
+//!   when the request head is complete, so a body trickled in slowly times
+//!   out), exactly as tonic's timeout bounds a gRPC call; a streaming body
+//!   (SSE, P6) flows after the head and is therefore not subject to it. On
+//!   expiry the answer is `500 INTERNAL_ERROR` "request timed out" with the
+//!   §4.5 body: no registry code names a deadline, and a `Send` may already
+//!   have been applied, which a retry with the same `message_id` resolves
+//!   (§4.8).
+//! - **RPCs.** `dispatch`: authentication from the headers before
+//!   the body, the body cap, the canonical JSON decode and the `MacpServer`
+//!   handler.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -36,10 +44,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::header::{HeaderValue, ALLOW, CONTENT_LENGTH, CONTENT_TYPE};
+use http::header::{HeaderValue, ALLOW, CONTENT_TYPE};
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::combinators::UnsyncBoxBody;
-use http_body_util::{BodyExt, Empty, Limited};
+#[cfg(test)]
+use http_body_util::{BodyExt, Empty};
 use hyper::body::Body as HttpBody;
 use hyper::server::conn::{http1, http2};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
@@ -53,7 +62,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_rustls::TlsAcceptor;
 
 use super::config::HttpConfig;
-use super::tls;
+use super::errors::{empty, RequestError};
+use super::{dispatch, tls};
+use crate::server::MacpServer;
 
 /// Every response body of the listener. Unsync so a streaming body (P6) can
 /// hold a `!Sync` stream.
@@ -84,19 +95,22 @@ const WELL_KNOWN_PATH: &str = "/.well-known/macp.json";
 const RPC_PATH: &str = "/macp/v1/";
 
 /// Per-listener state shared by every connection.
-#[derive(Debug)]
 pub(crate) struct State {
     prefix: String,
     max_body_bytes: usize,
     request_timeout: Duration,
+    /// The same server gRPC serves (shared runtime, security layer and rate
+    /// buckets).
+    server: MacpServer,
 }
 
 impl State {
-    pub(crate) fn from_config(config: &HttpConfig) -> Self {
+    pub(crate) fn from_config(config: &HttpConfig, server: MacpServer) -> Self {
         Self {
             prefix: config.prefix.clone(),
             max_body_bytes: config.max_body_bytes,
             request_timeout: config.request_timeout,
+            server,
         }
     }
 }
@@ -165,7 +179,9 @@ impl HttpListener {
     /// Load the TLS identity (if any) and bind the socket. Every failure is
     /// fatal at startup: unlike the metrics endpoint, a configured HTTP
     /// listener that cannot serve must not leave a half-started runtime.
-    pub async fn bind(config: &HttpConfig) -> Result<Self, String> {
+    /// `server` is the `MacpServer` the gRPC listener serves (a clone, so
+    /// both share one runtime, security layer and set of rate buckets).
+    pub async fn bind(config: &HttpConfig, server: MacpServer) -> Result<Self, String> {
         let tls = match &config.tls {
             Some(paths) => Some(tls::acceptor(&paths.cert, &paths.key)?),
             None => None,
@@ -190,7 +206,7 @@ impl HttpListener {
                 config.max_concurrent_streams,
                 Timings::PRODUCTION,
             )),
-            state: Arc::new(State::from_config(config)),
+            state: Arc::new(State::from_config(config, server)),
             max_connections: config.max_connections,
         })
     }
@@ -534,12 +550,6 @@ fn unquote(raw: &str) -> String {
     }
 }
 
-fn empty(status: StatusCode) -> Response<Body> {
-    let mut resp = Response::new(Empty::new().boxed_unsync());
-    *resp.status_mut() = status;
-    resp
-}
-
 /// Answer one request.
 pub(crate) async fn handle<B>(state: &State, req: Request<B>) -> Response<Body>
 where
@@ -565,47 +575,14 @@ where
             empty(StatusCode::UNSUPPORTED_MEDIA_TYPE)
         }
         Route::Rpc(method) => {
-            match tokio::time::timeout(state.request_timeout, dispatch(state, method, req)).await {
+            let serve = dispatch::serve(&state.server, state.max_body_bytes, method, req);
+            match tokio::time::timeout(state.request_timeout, serve).await {
                 Ok(resp) => resp,
-                // No registry code names a deadline; a transport status with
-                // no body, like the other statuses outside the registry.
-                Err(_) => empty(StatusCode::SERVICE_UNAVAILABLE),
+                // No registry code names a deadline; INTERNAL_ERROR with the
+                // §4.5 body (a Send may have been applied: §4.8 retry).
+                Err(_) => RequestError::new("INTERNAL_ERROR", "request timed out").into_response(),
             }
         }
-    }
-}
-
-/// Run one RPC; bounded by the request timeout up to the response head.
-///
-/// **Placeholder until P5:** reads the body under the cap and answers `501`.
-/// P5 authenticates from the headers *before* reading the body (RFC-MACP-0006
-/// §4.4), decodes it with the canonical JSON codec and calls `MacpServer`;
-/// the `413` here becomes the §4.5 `PAYLOAD_TOO_LARGE` body. Streaming
-/// methods (`method.is_server_streaming()`, P6) return their head from here
-/// and stream the body afterwards, outside the timeout.
-async fn dispatch<B>(state: &State, _method: MethodDescriptor, req: Request<B>) -> Response<Body>
-where
-    B: HttpBody<Data = Bytes>,
-    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-{
-    let declared_too_large = req
-        .headers()
-        .get(CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .is_some_and(|len| len > state.max_body_bytes as u64);
-    if declared_too_large {
-        return empty(StatusCode::PAYLOAD_TOO_LARGE);
-    }
-    match Limited::new(req.into_body(), state.max_body_bytes)
-        .collect()
-        .await
-    {
-        Ok(_body) => empty(StatusCode::NOT_IMPLEMENTED),
-        Err(e) if e.is::<http_body_util::LengthLimitError>() => {
-            empty(StatusCode::PAYLOAD_TOO_LARGE)
-        }
-        Err(_) => empty(StatusCode::BAD_REQUEST),
     }
 }
 
@@ -619,10 +596,16 @@ mod tests {
     pub(super) const H2_TEST_STREAMS: u32 = 8;
 
     fn state(prefix: &str) -> State {
+        let runtime = Arc::new(crate::runtime::Runtime::new(
+            Arc::new(crate::storage::MemoryBackend),
+            Arc::new(crate::registry::SessionRegistry::new()),
+            Arc::new(crate::log_store::LogStore::new()),
+        ));
         State {
             prefix: prefix.into(),
             max_body_bytes: 16,
             request_timeout: Duration::from_secs(5),
+            server: MacpServer::new(runtime, crate::security::SecurityLayer::dev_mode()),
         }
     }
 
@@ -789,9 +772,16 @@ mod tests {
         ))
         .await;
         assert_eq!(s, StatusCode::UNSUPPORTED_MEDIA_TYPE);
-        // Placeholders until P5/P7/P8.
-        let (s, _, _) = status_of(req(Method::POST, "/api/macp/v1/Send", json, "{}")).await;
+        // An RPC is served (P5): authentication precedes the body.
+        let (s, h, _) = status_of(req(Method::POST, "/api/macp/v1/Send", json, "{}")).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        assert_eq!(h.get("www-authenticate").unwrap(), "Bearer");
+        let (s, _, _) = status_of(req(Method::POST, "/api/macp/v1/ListModes", json, "{}")).await;
+        assert_eq!(s, StatusCode::OK);
+        // Streaming RPCs until P6; CORS and discovery until P7/P8.
+        let (s, _, b) = status_of(req(Method::POST, "/macp/v1/WatchSignals", json, "{}")).await;
         assert_eq!(s, StatusCode::NOT_IMPLEMENTED);
+        assert!(b.is_empty());
         let (s, _, _) = status_of(req(Method::OPTIONS, "/macp/v1/Send", None, "")).await;
         assert_eq!(s, StatusCode::NOT_FOUND);
         let (s, _, _) = status_of(req(Method::GET, "/.well-known/macp.json", None, "")).await;
@@ -801,17 +791,24 @@ mod tests {
     #[tokio::test]
     async fn body_cap() {
         let json = Some("application/json");
-        let (s, _, _) =
-            status_of(req(Method::POST, "/macp/v1/Send", json, "0123456789abcdef")).await;
-        assert_eq!(s, StatusCode::NOT_IMPLEMENTED);
+        // At the cap: read, then refused as JSON. Over it: 413 before decoding.
         let (s, _, _) = status_of(req(
             Method::POST,
-            "/macp/v1/Send",
+            "/macp/v1/ListModes",
+            json,
+            "0123456789abcdef",
+        ))
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (s, h, _) = status_of(req(
+            Method::POST,
+            "/macp/v1/ListModes",
             json,
             "0123456789abcdefX",
         ))
         .await;
         assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(h.get("macp-error-code").unwrap(), "PAYLOAD_TOO_LARGE");
     }
 
     #[tokio::test]
@@ -827,12 +824,16 @@ mod tests {
             http_body_util::StreamBody::new(tokio_stream::wrappers::ReceiverStream::new(body));
         let r = Request::builder()
             .method(Method::POST)
-            .uri("/macp/v1/Send")
+            .uri("/macp/v1/ListModes")
             .header(CONTENT_TYPE, "application/json")
             .body(body)
             .unwrap();
         let resp = handle(&st, r).await;
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            resp.headers().get("macp-error-code").unwrap(),
+            "INTERNAL_ERROR"
+        );
     }
 
     /// The connection path in process: HTTP/1.1 and HTTP/2 (prior knowledge)
@@ -940,7 +941,7 @@ mod tests {
         let config = HttpConfig::from_env(&move |k| map.get(k).cloned())
             .unwrap()
             .unwrap();
-        let listener = HttpListener::bind(&config)
+        let listener = HttpListener::bind(&config, state("").server)
             .await
             .unwrap()
             .with_timings(FAST);

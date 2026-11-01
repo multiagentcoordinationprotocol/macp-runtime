@@ -351,6 +351,47 @@ impl MacpServer {
         self.finish_send(process, &env, result).await
     }
 
+    /// The HTTP binding's `Send` (RFC-MACP-0006 §4.4), after the request
+    /// layer: `identity` was authenticated from the request headers before
+    /// the body was read, and `env` is the decoded Envelope. Every decision
+    /// from here on is in band, exactly as on gRPC.
+    #[cfg(feature = "http-listener")]
+    pub(crate) async fn send_from_http(&self, identity: &AuthIdentity, env: Envelope) -> Ack {
+        let process = ProcessSpan::start(
+            self.telemetry(),
+            &env,
+            self.runtime.envelope_labels(&env.mode, &env.message_type),
+            None,
+        );
+        self.send_authenticated(identity, env, process).await
+    }
+
+    /// The in-band Ack for an Envelope the HTTP binding could not convert
+    /// from JSON (its payload or timestamp, RFC-MACP-0001 §10.11/§10.12):
+    /// `INVALID_ENVELOPE` with the Envelope's identifiers, shaped exactly like
+    /// every other error Ack ([`Self::make_error_ack`]), with the codec's
+    /// reason as the message.
+    #[cfg(feature = "http-listener")]
+    pub(crate) fn invalid_envelope_ack(session_id: &str, message_id: &str, reason: &str) -> Ack {
+        let stub = Envelope {
+            session_id: session_id.to_string(),
+            message_id: message_id.to_string(),
+            ..Envelope::default()
+        };
+        let mut ack = Self::make_error_ack(&MacpError::InvalidEnvelope, &stub);
+        if let Some(error) = ack.error.as_mut() {
+            error.message = format!("{}: {reason}", error.message);
+        }
+        ack
+    }
+
+    /// The shared security layer (authentication, buckets, limits); the HTTP
+    /// binding authenticates request headers with it before reading a body.
+    #[cfg(feature = "http-listener")]
+    pub(crate) fn security(&self) -> &SecurityLayer {
+        &self.security
+    }
+
     /// The tail every send takes, accepted or refused: link the anchor,
     /// finish the `process` span, count a session-scoped rejection, and build
     /// the `Ack`. A refusal echoes the Envelope as received (`raw`).

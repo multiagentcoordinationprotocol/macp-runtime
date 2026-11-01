@@ -583,4 +583,43 @@ fn decode_request_classifies_failures() {
     let bare =
         decode_request("Send", br#"{"macp_version":"1.0","message_type":"Signal"}"#).unwrap();
     assert!(!bare.has_field_by_name("envelope"));
+    // `null` is absent (§10.10): no envelope member.
+    let null = decode_request("Send", br#"{"envelope":null}"#).unwrap();
+    assert!(!null.has_field_by_name("envelope"));
+    // Anything wrong inside the envelope member is in band (RFC-MACP-0006
+    // §4.4), with the identifiers copied when they are strings.
+    for (body, mid, sid) in [
+        (r#"{"envelope":5}"#, "", ""),
+        (r#"{"envelope":"x"}"#, "", ""),
+        (
+            r#"{"envelope":{"mode":1,"message_id":"m1","session_id":"s1"}}"#,
+            "m1",
+            "s1",
+        ),
+        (
+            r#"{"envelope":{"message_id":7,"session_id":"s1","payload_b64":""}}"#,
+            "",
+            "s1",
+        ),
+    ] {
+        match decode_request("Send", body.as_bytes()).unwrap_err() {
+            JsonError::InvalidEnvelope {
+                message_id,
+                session_id,
+                ..
+            } => assert_eq!(
+                (message_id.as_str(), session_id.as_str()),
+                (mid, sid),
+                "{body}"
+            ),
+            other => panic!("{body}: {other}"),
+        }
+    }
+    // A wrong type outside the envelope member stays a request-level failure.
+    assert_eq!(
+        decode_request("GetSession", br#"{"session_id":7}"#)
+            .unwrap_err()
+            .code(),
+        "INVALID_REQUEST"
+    );
 }

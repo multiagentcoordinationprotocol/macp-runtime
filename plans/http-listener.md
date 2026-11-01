@@ -457,7 +457,7 @@ ship first.
 - **Docs:** deferred to P11 (env table drafted here in code comments).
 
 ### P5 — Unary RPCs through `MacpServer`; error mapping; `Send` two layers
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergences: request timeout is `500 INTERNAL_ERROR` with a §4.5 body (P4's 503 replaced); streaming RPCs answer 501 with no body until P6; any failure inside the `envelope` member is an in-band `INVALID_ENVELOPE` Ack per §4.4's exhaustive "not a SendRequest" list, `{"envelope":null}` stays 400 per §10.10; the `table == METHODS` pin runs in CI under `otel,http-listener`; binary tests bind HTTP/metrics on `:0` and read the bound address (TOCTOU port race), gRPC keeps a probed port with an AddrInUse respawn backstop; the metrics startup log now prints the bound address)
 - **Risk:** complex
 - **Delivers:** every non-streaming RPC at `POST …/macp/v1/{Method}` with JSON in/out, request-level errors per
   §4.5, `Send` per §4.4.

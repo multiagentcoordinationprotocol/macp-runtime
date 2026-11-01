@@ -554,6 +554,12 @@ jobs:
       - name: Test http-listener feature
         run: cargo test -p macp-runtime --features http-listener
 
+      # The HTTP dispatch table is pinned to telemetry::grpc::METHODS by a
+      # test that exists only with both features; the lib's http:: tests
+      # are cheap, so run them all under the combination.
+      - name: Test http-listener with otel (dispatch table = telemetry METHODS)
+        run: cargo test -p macp-runtime --features otel,http-listener --lib http::
+
       - name: Rustdoc (http-listener feature, deny warnings)
         run: cargo doc -p macp-runtime --no-deps --features http-listener
         env:

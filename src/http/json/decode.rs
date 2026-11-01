@@ -83,10 +83,20 @@ fn decode_object(
         ));
     }
     let Json::Object(obj) = value else {
-        return Err(invalid(
+        let err = invalid(
             path,
             format!("expected a JSON object for {}", desc.full_name()),
-        ));
+        );
+        // An Envelope member that is not an object is still an Envelope
+        // decision (RFC-MACP-0006 §4.4), with no identifiers to copy.
+        if is_envelope(desc) {
+            return Err(JsonError::InvalidEnvelope {
+                reason: err.reason().to_string(),
+                session_id: String::new(),
+                message_id: String::new(),
+            });
+        }
+        return Err(err);
     };
     if is_envelope(desc) {
         return decode_envelope(desc, obj, path, depth);
@@ -497,14 +507,21 @@ fn decode_rules(value: &Json, path: &str) -> Result<String, JsonError> {
 /// The Envelope (§10.1, §10.2, §10.11, §10.12). Every plain field decodes as
 /// usual; `timestamp` replaces `timestamp_unix_ms` (whose own name is not a
 /// JSON member), and exactly one of `payload`/`payload_b64` carries the
-/// payload. Failures in those two transforms are Envelope-level decisions,
-/// reported in band as `INVALID_ENVELOPE`.
+/// payload. Every failure inside the Envelope value, a plain field of the
+/// wrong JSON type included, is an Envelope-level decision reported in band
+/// as `INVALID_ENVELOPE` (RFC-MACP-0006 §4.4: a body with an `envelope`
+/// member is a `SendRequest`), carrying `message_id`/`session_id` when they
+/// are JSON strings.
 fn decode_envelope(
     desc: &MessageDescriptor,
     obj: &BTreeMap<String, Json>,
     path: &str,
     depth: usize,
 ) -> Result<DynamicMessage, JsonError> {
+    let raw = |name: &str| match obj.get(name) {
+        Some(Json::String(s)) => s.clone(),
+        _ => String::new(),
+    };
     let mut message = DynamicMessage::new(desc.clone());
     decode_fields(
         &mut message,
@@ -512,7 +529,12 @@ fn decode_envelope(
         path,
         depth,
         &["timestamp", "timestamp_unix_ms", "payload", "payload_b64"],
-    )?;
+    )
+    .map_err(|e| JsonError::InvalidEnvelope {
+        reason: e.reason().to_string(),
+        session_id: raw("session_id"),
+        message_id: raw("message_id"),
+    })?;
     let text = |name: &str| {
         message
             .get_field_by_name(name)

@@ -530,7 +530,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "http-listener")]
     let http_listener =
         match macp_runtime::http::HttpConfig::from_env(&|k: &str| std::env::var(k).ok()) {
-            Ok(Some(config)) => Some(macp_runtime::http::HttpListener::bind(&config).await?),
+            Ok(Some(config)) => {
+                Some(macp_runtime::http::HttpListener::bind(&config, svc.clone()).await?)
+            }
             Ok(None) => None,
             // Already reported by validate_env_config; unreachable in practice.
             Err(errors) => return Err(errors.join("; ").into()),
@@ -618,7 +620,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
             };
-            tracing::info!(%metrics_addr, "metrics endpoint listening (GET /metrics)");
+            // The bound address: the configured one, unless its port is 0.
+            let bound = listener
+                .local_addr()
+                .map(|a| a.to_string())
+                .unwrap_or_else(|_| metrics_addr.clone());
+            tracing::info!(metrics_addr = %bound, "metrics endpoint listening (GET /metrics)");
             let stop = metrics_shutdown.wait();
             tokio::pin!(stop);
             loop {

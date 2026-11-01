@@ -70,8 +70,10 @@ pub enum JsonError {
     /// `INVALID_REQUEST` (RFC-MACP-0006 §4.5).
     InvalidRequest(String),
     /// The body is a well-formed request, but an Envelope in it cannot be
-    /// accepted as JSON (its payload or timestamp, §10.11/§10.12): reported in
-    /// band as `INVALID_ENVELOPE`, with the Envelope's identifiers.
+    /// accepted as JSON (anything inside the Envelope value: not an object, a
+    /// field of the wrong type, its payload or timestamp, §10.11/§10.12):
+    /// reported in band as `INVALID_ENVELOPE` (RFC-MACP-0006 §4.4), with the
+    /// Envelope's identifiers when they are JSON strings.
     InvalidEnvelope {
         reason: String,
         session_id: String,

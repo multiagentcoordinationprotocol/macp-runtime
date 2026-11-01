@@ -1039,11 +1039,12 @@ fn failure_paths() {
         envelope_from_json(&env).unwrap_err().code(),
         "INVALID_ENVELOPE"
     );
-    // A wrong type in the Envelope's own fields is a request-level error.
+    // So is a wrong type in the Envelope's own fields (RFC-MACP-0006 §4.4:
+    // anything inside the `envelope` member is an Envelope decision).
     let env = json!({"mode": 1, "payload_b64": ""});
     assert_eq!(
         envelope_from_json(&env).unwrap_err().code(),
-        "INVALID_REQUEST"
+        "INVALID_ENVELOPE"
     );
     // Not JSON, or not an object.
     assert_eq!(
