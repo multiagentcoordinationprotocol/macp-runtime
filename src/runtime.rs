@@ -693,7 +693,7 @@ impl Runtime {
     /// requested range was discarded by log compaction — the caller must
     /// surface an explicit error, not silently skip missing history.
     ///
-    /// A wrapper over [`Self::subscribe_snapshot`] that drops the ordinals
+    /// A wrapper over `Self::subscribe_snapshot` that drops the ordinals
     /// and the high-water mark (kept as public API).
     pub async fn get_session_envelopes_after(
         &self,

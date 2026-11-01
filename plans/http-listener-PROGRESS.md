@@ -78,3 +78,5 @@ mapping #233 = `018e1fc`). `SPEC_REV` moved from `0f77753` to `99f3cfa` in P0 (0
 Plan review round 1 (REVISE, 17 findings) applied to the plan on 2026-10-31; see `## Plan review` there. Round 2 (A: rate limits in band, B: SIGTERM moved to P1b in PR A, C: stale P2 item dropped) applied; verdict SOUND after 2 rounds.
 
 - 2026-10-31 PR A ship gate (Fable): GAPS 2 (MIGRATING heading must be literal `## 0.12.0`; PROGRESS refs) fixed; one-way door (gRPC compacted resume) ship as-is, no user input needed: spec-mandated at both pins, no deployed consumer breaks.
+- pushed feat/http-listener 8a672bf
+- PR #269 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/269
