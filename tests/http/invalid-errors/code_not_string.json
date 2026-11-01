@@ -1,0 +1,10 @@
+{
+  "_invalid_because": "`code` MUST be a string (code `type`)",
+  "error": {
+    "code": 404,
+    "message": "session not found",
+    "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+    "message_id": "",
+    "details": ""
+  }
+}

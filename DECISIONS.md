@@ -989,3 +989,16 @@ Fable analyzed each before the merge, and the user confirmed all of its recommen
   - Trigger to revisit with a generic sidecar API: a second per-session side record.
 - **Prometheus semconv family names and the one-minor deprecation of `macp_*_total{mode}`: CONFIRMED.** These are the names the OTel Prometheus exporter produces, and the deprecation window is the spec's.
 - **`OTEL_EXPORTER_OTLP_CERTIFICATE` as the sole trust anchor: CONFIRMED.** This matches the OTel SDK semantics in Go, Java and Python.
+
+## 2026-10-31 -- SPEC_REV re-pinned to 99f3cfa for the HTTP/JSON binding (plans/http-listener.md P0)
+- **Context:** the 0f77753 entry above deliberately stopped short of spec main, deferring the parity-contract change and the HTTP fixtures to R4.
+- **Decision: re-pin to spec main `99f3cfa090b4bfb72b3063ca0134ec661436c3ef`, decided by Opus.** R4 needs `examples/http/*.json` and `schemas/json/macp-http-error.schema.json` (with its `tests/invalid-http-errors/` negatives), which are absent at 0f77753. A missing input is a failure in the policy's sense.
+- Among vendored trees, `0f77753..99f3cfa` changes only `schemas/parity/contract.json` (`RECEIPT_UNAVAILABLE` joins `error_codes.permanent`), which the runtime already produces; `tests/parity_contract.rs` now lists `MacpError::ReceiptUnavailable`. `schemas/conformance`, `schemas/json/policy` and `schemas/otel` are unchanged, and the error registry's HTTP/gRPC columns are unchanged.
+- **Not `122ad47`** (the HTTP binding commit): it avoids the contract change but pins behind spec fixes R1 already implements and leaves a known drift open.
+- The HTTP artifacts are vendored under `tests/http/` and drift-checked (`check_dir` for the two directories, a new one-file `check_file` for the schema); `spec-drift.yml` watches the three paths.
+- **Rev 99f3cfa also makes §3.2's `HISTORY_UNAVAILABLE` binding-wide**, which gRPC did not honour; fixed in P1 of the same plan.
+
+## 2026-10-31 — R4 PR A: gRPC compacted resume ends the stream with HISTORY_UNAVAILABLE (decided by Fable analysis, Opus)
+- **Change:** `fix(stream)!` (P1): a StreamSession subscribe below the compacted base is a terminal `FAILED_PRECONDITION` + `macp-error-code: HISTORY_UNAVAILABLE` + details `{"lowest_available_sequence":N}` instead of an inline `INVALID_ENVELOPE` frame; the old status sentence is kept.
+- **Analysis (Fable):** RFC-0006 §3.2 required `FAILED_PRECONDITION` already at the old pin `0f77753` (`:176`) and adds the code and details at `99f3cfa` (`:178`), so this is a conformance fix. `macp-control-plane` matches the kept sentence on its terminal path (`stream-consumer.service.ts:298-319`); the Python and TypeScript SDKs document both shapes and do not loop. No deployed consumer breaks.
+- **Verdict:** ship as-is; no user input needed. MIGRATING heading is the literal `## 0.12.0` the release gate requires.

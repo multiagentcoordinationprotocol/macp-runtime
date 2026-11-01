@@ -124,6 +124,25 @@ impl SecurityLayer {
         }
     }
 
+    /// Test support, hidden from docs and not a supported API: it may change
+    /// or go away in any release.
+    ///
+    /// Replace the per-sender SessionStart and message rate limits (what
+    /// `MACP_SESSION_START_LIMIT_PER_MINUTE` / `MACP_MESSAGE_LIMIT_PER_MINUTE`
+    /// set in [`Self::from_env`]) without touching process env. The rate
+    /// buckets themselves are kept, so clones made before the call still
+    /// share them.
+    #[doc(hidden)]
+    pub fn with_rate_limits(
+        mut self,
+        session_start: RateLimitConfig,
+        message: RateLimitConfig,
+    ) -> Self {
+        self.session_start_rate = session_start;
+        self.message_rate = message;
+        self
+    }
+
     /// Dev-mode authenticate: accepts any bearer token as a FULLY-PRIVILEGED
     /// identity (can start sessions, can manage the mode registry).
     ///

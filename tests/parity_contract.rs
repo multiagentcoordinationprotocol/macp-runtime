@@ -347,6 +347,7 @@ fn error_codes_permanent_set_matches_runtime() {
         MacpError::StreamLagged,
         MacpError::AgentNotFound,
         MacpError::HistoryUnavailable,
+        MacpError::ReceiptUnavailable,
     ];
     let produced: HashSet<&str> = variants.iter().map(|e| e.error_code()).collect();
 

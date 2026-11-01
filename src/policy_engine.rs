@@ -54,17 +54,29 @@ pub trait PolicyEngine: Send + Sync {
 }
 
 /// Convert an engine decision into a transport error, fail closed.
+///
+/// A denial is gRPC `PERMISSION_DENIED` stamped `macp-error-code: FORBIDDEN`
+/// (an authorization refusal, RFC-MACP-0002 §6.1), so it is as
+/// machine-branchable as every other coded `Status` the service returns.
 pub fn require_allow(decision: PolicyDecision, what: &str) -> Result<(), tonic::Status> {
-    match decision {
-        PolicyDecision::Allow { .. } => Ok(()),
-        PolicyDecision::Deny { reasons } => Err(tonic::Status::permission_denied(format!(
+    let message = match decision {
+        PolicyDecision::Allow { .. } => return Ok(()),
+        PolicyDecision::Deny { reasons } => format!(
             "policy engine denied {what}: {}",
             macp_core::policy::deny::join_messages(&reasons, "; ")
-        ))),
-        other => Err(tonic::Status::permission_denied(format!(
+        ),
+        other => format!(
             "policy engine returned unrecognized decision for {what} (fail closed): {other:?}"
-        ))),
-    }
+        ),
+    };
+    let mut status = tonic::Status::permission_denied(message);
+    status.metadata_mut().insert(
+        "macp-error-code",
+        tonic::metadata::MetadataValue::from_static(
+            macp_core::error::MacpError::Forbidden.error_code(),
+        ),
+    );
+    Err(status)
 }
 
 #[cfg(test)]
@@ -150,6 +162,20 @@ mod tests {
             "deny reasons must be joined into the message: {}",
             err.message()
         );
+    }
+
+    #[test]
+    fn require_allow_denial_is_coded_forbidden() {
+        for decision in [
+            PolicyDecision::Deny {
+                reasons: vec!["sender not on roster".into()],
+            },
+            PolicyDecision::Deny { reasons: vec![] },
+        ] {
+            let err = require_allow(decision, "session access").expect_err("must deny");
+            assert_eq!(err.code() as i32, 7);
+            assert_eq!(err.metadata().get("macp-error-code").unwrap(), "FORBIDDEN");
+        }
     }
 
     #[test]

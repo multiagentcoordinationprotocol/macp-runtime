@@ -1530,3 +1530,46 @@
 - **Alternatives:** Keep the break and document it in MIGRATING.md (forces a minor bump for an otel-only auto-trait loss).
 - **Blast radius if wrong:** Low. At worst a caller that catches a panic raised inside the SDK during a recording keeps using metric handles whose SDK-side aggregation state the SDK itself guards.
 - **Status:** CONFIRMED (2026-10-31). `src/telemetry/instruments.rs:40-41`; pin `src/metrics.rs:684`.
+
+## MIGRATING.md heading for the unreleased gRPC compacted-resume change
+- **Plan:** `plans/http-listener.md` (P1)
+- **Assumed:** P1 names `MIGRATING.md` but not a heading, and the next version is computed by release-plz. `scripts/embedder_contract.py` only looks for a `## <version>` heading when `cargo semver-checks` reports an embeddable-crate API break; P1 changes no public signature (`require_allow` keeps its signature, `MacpError` is untouched).
+- **Chose:** a `## The release after 0.11.0 — gRPC compacted resume, spec re-pin` section, mirroring `docs/deployment.md`'s existing "Upgrading to the release after 0.11.0" heading. The release PR renames it to the computed version.
+- **Alternatives:** `## 0.12.0` now (guesses release-plz's answer; wrong if the next release is 0.11.1).
+- **Blast radius if wrong:** Low; a heading rename. If a breaking change already sits on main, the embedder-contract gate asks for `## <next>` regardless of this section.
+- **Status:** CHANGED (2026-10-31, PR A ship gate). `fix(stream)!` makes the bump 0.11.0 → 0.12.0 certain, and `scripts/embedder_contract.py:73` (`release_migrating`) requires the literal `## 0.12.0` heading on `main` (`docs/stability.md:104-106`); a human commit on the release PR would only make release-plz reopen it. Renamed to `## 0.12.0 — …` in PR A.
+
+## P1b: the "second signal exits immediately" behaviour did not exist before; it is new
+- **Plan:** `plans/http-listener.md` (P1b)
+- **Assumed:** The plan says a second signal during the drain exits immediately, "current ctrl_c behaviour at `:602` preserved". The pre-P1b code did not do that: once `tokio::signal::ctrl_c()` is first polled, Tokio replaces the default SIGINT disposition for the life of the process, so a second ctrl-c was swallowed and the runtime waited out the full drain. SIGTERM was not handled at all (default disposition: immediate kill, no drain, no snapshot).
+- **Chose:** implement the plan's intent as new behaviour: `src/shutdown.rs` exits with `128 + signo` (130 SIGINT, 143 SIGTERM) on the second signal, skipping the final snapshot (accepted history is already durable). Pinned by `tests/shutdown_binary.rs::second_signal_during_drain_exits_immediately`.
+- **Alternatives:** swallow the second signal as before (operators then need SIGKILL to abort a long drain).
+- **Blast radius if wrong:** Low; only affects an operator who signals twice.
+- **Status:** UNCONFIRMED
+
+## P1b: `ShutdownSignal` is binary-private and installed where the old ctrl_c await was
+- **Plan:** `plans/http-listener.md` (P1b)
+- **Assumed:** Nothing outside the binary needs the signal (P4's HTTP listener also lives in the binary's startup path).
+- **Chose:** `src/shutdown.rs`, declared `mod shutdown;` from `src/main.rs` (not `lib.rs`), so no public API and no semver-checks surface. It is installed just before `serve_with_shutdown`, as the old `ctrl_c()` was first polled there, so a signal during startup (recovery, replay) keeps the default disposition (immediate exit), as before. On Unix both handlers register synchronously in `install()`. The Prometheus listener breaks its accept loop and drops the socket on the signal; responses already being written finish on their own tasks.
+- **Alternatives:** a public `macp_runtime::shutdown` module (P4 could then live in the library; revisit in P4 if it does).
+- **Blast radius if wrong:** Low; moving the module into `lib.rs` later is additive.
+- **Status:** UNCONFIRMED
+
+## P2: live ordinal = high_water + 1 is exact only for an after_sequence the client could have learned
+- **Plan:** `plans/http-listener.md` (P2 Approach: "the first live envelope not deduped is `high_water + 1`, regardless of `after_sequence`")
+- **Assumed:** Publish order equals ordinal order (all three publish sites run after the append, under the per-session mutex: `src/runtime.rs` `process_session_start`, `synthesize_due_accept`, `process_message`). But an envelope accepted between the bus subscribe and the snapshot whose ordinal is `<= after_sequence` is not in the replay, so the existing message-id dedup misses it, delivers it, and the cursor numbers it `high_water + 1`. That needs `after_sequence` above every ordinal published before the subscribe, which no client can learn from this runtime (an ordinal is observable only after its publish), so only a guessed `after_sequence` hits it.
+- **Chose:** keep the existing dedup exactly (zero gRPC change, as the phase requires) and document the bound on `SubscriptionCursor`. P6 (SSE) may additionally drop any cursor item with `ordinal <= after_sequence`.
+- **Alternatives:** return message-id -> ordinal for the last bus-capacity ordinals under the same guard and skip every buffered envelope found there (exact for any `after_sequence`, but changes gRPC delivery in that race).
+- **Blast radius if wrong:** Low; a guessing client may see one mislabeled SSE `id:` in a race window.
+- **Status:** UNCONFIRMED
+
+## P2: seam shapes that differ slightly from the plan text
+- **Plan:** `plans/http-listener.md` (P2 items 1-2)
+- **Assumed / Chose:**
+  - `send_authenticated(identity, env, process: ProcessSpan) -> Ack` takes the span by value (it finishes it) and **includes** the Envelope shape check, since acceptance (i) requires an in-band `PAYLOAD_TOO_LARGE` from it. gRPC still runs shape check then `authenticate_metadata` first, so on gRPC the (pure) shape check runs twice; output is byte-identical (`tests/grpc_refusal_snapshot.rs`).
+  - The one-session-per-stream ("bound session") check stays in gRPC's `process_subscribe_frame`; `open_subscription(identity, session_id, after_sequence)` has no stream state to check it against.
+  - A subscribe frame on a gRPC stream that is already bound reuses that stream's receiver (authorize + snapshot on the existing cursor) instead of calling `open_subscription`, which would subscribe a fresh receiver and drop buffered envelopes. The unbound path (the common one) calls `open_subscription`.
+  - The existing server test module drives `process_stream_request(.., &mut events, ..)` with `let mut events = None`; the parameter is now `&mut Option<SubscriptionCursor>`, so those tests compile and pass unchanged.
+  - `SecurityLayer::with_rate_limits` (new, public, additive in `macp-auth`) lets the unit test set both buckets without process env; `cargo semver-checks` vs 0.11.0 reports no update required.
+- **Blast radius if wrong:** Low; all `pub(crate)` except the additive `LogStore::get_incoming_after_with_high_water` and `with_rate_limits`.
+- **Status:** UNCONFIRMED

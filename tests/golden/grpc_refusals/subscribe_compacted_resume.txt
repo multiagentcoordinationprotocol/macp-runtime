@@ -1,0 +1,6 @@
+kind: status
+code: 9 (FailedPrecondition)
+message: session history before ordinal 5 was compacted; resume with after_sequence >= 5 or re-read state via GetSession
+metadata macp-error-code: HISTORY_UNAVAILABLE
+metadata macp-error-details-bin: eyJsb3dlc3RfYXZhaWxhYmxlX3NlcXVlbmNlIjo1fQ== (utf8: {"lowest_available_sequence":5})
+details_hex: 

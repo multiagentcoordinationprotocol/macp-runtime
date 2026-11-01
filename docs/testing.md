@@ -162,6 +162,8 @@ Activation, resource, endpoint/protocol/certificate resolution, label folding an
 
 The `macp-storage` anchor contract (`store_trace_anchor`/`load_trace_anchor`/`sweep_orphan_trace_anchors`) is unit-tested per backend in `crates/macp-storage/src/storage/`; the RocksDB tests need `cargo test -p macp-storage --features rocksdb-backend`.
 
+The HTTP/JSON binding artifacts in `tests/http/` (the spec's `examples/http/*.json`, `macp-http-error.schema.json` and its `invalid-http-errors/` negative fixtures, see `tests/http/SOURCE.md`) are vendored byte-identically and drift-checked by the conformance oracle (`check_dir` for the two directories, `check_file` for the schema).
+
 The conformance oracle reads the spec repo at a pinned revision (`SPEC_REV` in `ci.yml`), not at its default branch, so the check stays reproducible regardless of upstream merge timing. A separate scheduled workflow, `spec-drift.yml`, watches that pin daily and files a tracked `spec-drift`-labelled issue — but only when the upstream change is one the oracle's gates can actually act on. A change it can prove inert (a file outside the oracle's scope, or a policy-schema edit that is provably annotation-only once `description`/`$comment`/`title` are stripped) is reported on the workflow run's step summary instead of escalated, so the label stays a reliable signal rather than routine noise.
 
 Tier 3 runs only via manual GitHub Actions dispatch:

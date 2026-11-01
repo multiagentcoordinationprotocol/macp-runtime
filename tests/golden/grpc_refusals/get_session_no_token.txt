@@ -1,0 +1,5 @@
+kind: status
+code: 16 (Unauthenticated)
+message: Unauthenticated
+metadata macp-error-code: UNAUTHENTICATED
+details_hex: 

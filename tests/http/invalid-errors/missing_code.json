@@ -1,0 +1,9 @@
+{
+  "_invalid_because": "a MACPError MUST carry `code` (error `required`)",
+  "error": {
+    "message": "session not found",
+    "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+    "message_id": "",
+    "details": ""
+  }
+}

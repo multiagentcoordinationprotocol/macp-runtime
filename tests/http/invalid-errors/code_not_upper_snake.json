@@ -1,0 +1,10 @@
+{
+  "_invalid_because": "`code` MUST be an UPPER_SNAKE_CASE registry code (code `pattern`)",
+  "error": {
+    "code": "session_not_found",
+    "message": "session not found",
+    "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+    "message_id": "",
+    "details": ""
+  }
+}

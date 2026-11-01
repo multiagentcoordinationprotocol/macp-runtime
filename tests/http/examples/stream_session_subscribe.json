@@ -1,0 +1,152 @@
+{
+  "$comment": "Informative example for RFC-MACP-0006 §4.3 (HTTP binding, streaming): a passive StreamSession subscribe answered as server-sent events. `events` lists the stream in order: `data` is the event's data field (one line of JSON on the wire), `id` its id field, `event` its event field, and `comment` an SSE comment line. `raw` shows the first exchange's bytes on the wire. make json-validate validates every `envelope` object in this file against macp-envelope.schema.json, and every error body (an HTTP status of 400 or more, or an `event: error` data field) against macp-http-error.schema.json.",
+  "base": "https://runtime.example.com/api",
+  "exchanges": [
+    {
+      "title": "Resume after ordinal 41 with Last-Event-ID; replay, keepalive, live broadcast, then a fatal STREAM_LAGGED",
+      "request": {
+        "method": "POST",
+        "url": "https://runtime.example.com/api/macp/v1/StreamSession",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSJ9.observer.signature",
+          "Content-Type": "application/json",
+          "Accept": "text/event-stream",
+          "Last-Event-ID": "41"
+        },
+        "body": {
+          "subscribe_session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+          "after_sequence": 0
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-store"
+        },
+        "events": [
+          {
+            "id": "42",
+            "data": {
+              "envelope": {
+                "macp_version": "1.0",
+                "mode": "macp.mode.decision.v1",
+                "message_type": "Proposal",
+                "message_id": "01HV0Q2B1C3D5E7F9G1H3J5K7M",
+                "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+                "sender": "agent://security",
+                "timestamp": "2026-03-01T20:24:03Z",
+                "payload": {
+                  "proposal_id": "p-1",
+                  "option": "vendor-b",
+                  "rationale": "Passes the security review and fits the budget",
+                  "supporting_data": ""
+                }
+              }
+            }
+          },
+          {
+            "comment": "keepalive"
+          },
+          {
+            "id": "43",
+            "data": {
+              "envelope": {
+                "macp_version": "1.0",
+                "mode": "macp.mode.decision.v1",
+                "message_type": "Vote",
+                "message_id": "01HV0Q2D2E4F6G8H0J2K4M6N8P",
+                "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+                "sender": "agent://finance",
+                "timestamp": "2026-03-01T20:25:10Z",
+                "payload": {
+                  "proposal_id": "p-1",
+                  "vote": "APPROVE",
+                  "reason": "Within budget"
+                }
+              }
+            }
+          },
+          {
+            "event": "error",
+            "data": {
+              "error": {
+                "code": "STREAM_LAGGED",
+                "message": "subscriber fell behind; events were dropped",
+                "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+                "message_id": "",
+                "details": ""
+              }
+            }
+          }
+        ],
+        "raw": "id: 42\ndata: {\"envelope\":{\"macp_version\":\"1.0\",\"mode\":\"macp.mode.decision.v1\",\"message_type\":\"Proposal\",\"message_id\":\"01HV0Q2B1C3D5E7F9G1H3J5K7M\",\"session_id\":\"01HV0Q2A8W0Y2XQ5N1R8Y2K9B3\",\"sender\":\"agent://security\",\"timestamp\":\"2026-03-01T20:24:03Z\",\"payload\":{\"proposal_id\":\"p-1\",\"option\":\"vendor-b\",\"rationale\":\"Passes the security review and fits the budget\",\"supporting_data\":\"\"}}}\n\n: keepalive\n\nid: 43\ndata: {\"envelope\":{\"macp_version\":\"1.0\",\"mode\":\"macp.mode.decision.v1\",\"message_type\":\"Vote\",\"message_id\":\"01HV0Q2D2E4F6G8H0J2K4M6N8P\",\"session_id\":\"01HV0Q2A8W0Y2XQ5N1R8Y2K9B3\",\"sender\":\"agent://finance\",\"timestamp\":\"2026-03-01T20:25:10Z\",\"payload\":{\"proposal_id\":\"p-1\",\"vote\":\"APPROVE\",\"reason\":\"Within budget\"}}}\n\nevent: error\ndata: {\"error\":{\"code\":\"STREAM_LAGGED\",\"message\":\"subscriber fell behind; events were dropped\",\"session_id\":\"01HV0Q2A8W0Y2XQ5N1R8Y2K9B3\",\"message_id\":\"\",\"details\":\"\"}}\n\n"
+      }
+    },
+    {
+      "title": "Resume below the compacted base: refused with 409 HISTORY_UNAVAILABLE before the stream opens; details is base64 of {\"lowest_available_sequence\":41}",
+      "request": {
+        "method": "POST",
+        "url": "https://runtime.example.com/api/macp/v1/StreamSession",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSJ9.observer.signature",
+          "Content-Type": "application/json",
+          "Accept": "text/event-stream"
+        },
+        "body": {
+          "subscribe_session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+          "after_sequence": 7
+        }
+      },
+      "response": {
+        "status": 409,
+        "headers": {
+          "Content-Type": "application/json",
+          "MACP-Error-Code": "HISTORY_UNAVAILABLE"
+        },
+        "body": {
+          "error": {
+            "code": "HISTORY_UNAVAILABLE",
+            "message": "after_sequence 7 is below the compacted base; lowest available ordinal is 41",
+            "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+            "message_id": "",
+            "details": "eyJsb3dlc3RfYXZhaWxhYmxlX3NlcXVlbmNlIjo0MX0="
+          }
+        }
+      }
+    },
+    {
+      "title": "Last-Event-ID conflicts with a non-zero body after_sequence: 400 INVALID_REQUEST",
+      "request": {
+        "method": "POST",
+        "url": "https://runtime.example.com/api/macp/v1/StreamSession",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSJ9.observer.signature",
+          "Content-Type": "application/json",
+          "Accept": "text/event-stream",
+          "Last-Event-ID": "43"
+        },
+        "body": {
+          "subscribe_session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+          "after_sequence": 41
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "Content-Type": "application/json",
+          "MACP-Error-Code": "INVALID_REQUEST"
+        },
+        "body": {
+          "error": {
+            "code": "INVALID_REQUEST",
+            "message": "Last-Event-ID 43 conflicts with after_sequence 41",
+            "session_id": "01HV0Q2A8W0Y2XQ5N1R8Y2K9B3",
+            "message_id": "",
+            "details": ""
+          }
+        }
+      }
+    }
+  ]
+}

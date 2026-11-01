@@ -286,36 +286,113 @@ impl MacpServer {
         Ok(env)
     }
 
-    async fn authenticate_send_request(
+    /// The send-path decisions about an already authenticated identity and
+    /// its decoded Envelope: sender binding, mode authorization, the
+    /// per-sender rate limit (SessionStart or message bucket) and the
+    /// ingress policy engine. Returns the sender-bound Envelope and the
+    /// identity's `max_open_sessions` for a SessionStart.
+    async fn authorize_send(
         &self,
-        request: &Request<SendRequest>,
+        identity: &AuthIdentity,
         env: Envelope,
         process: &ProcessSpan,
     ) -> Result<(Envelope, Option<usize>), MacpError> {
-        let identity = self
-            .security
-            .authenticate_metadata(request.metadata())
-            .await?;
-        let env = Self::apply_authenticated_sender(&identity, env)?;
+        let env = Self::apply_authenticated_sender(identity, env)?;
         // The authenticated sender only, never the self-asserted one; recorded
         // before the mode, rate-limit and ingress checks, as the stream path
         // does, so those refusals carry it too.
         process.record_sender(&env.sender);
         let is_session_start = env.message_type == "SessionStart";
         self.security
-            .authorize_mode(&identity, &env.mode, is_session_start)?;
+            .authorize_mode(identity, &env.mode, is_session_start)?;
         self.security
             .enforce_rate_limit(&identity.sender, is_session_start)
             .await?;
         // External ingress policy engine (E3): after authentication and the
         // built-in security checks, before kernel acceptance.
-        self.enforce_ingress_policy(&identity, &env).await?;
+        self.enforce_ingress_policy(identity, &env).await?;
         let max_open = if is_session_start {
             identity.max_open_sessions
         } else {
             None
         };
         Ok((env, max_open))
+    }
+
+    /// The unary send seam shared by both bindings: everything **after**
+    /// authentication. Runs the Envelope shape check (payload limit
+    /// included), sender binding, mode authorization, both per-sender rate
+    /// buckets, the ingress policy engine and the kernel, and returns every
+    /// refusal as an error `Ack` (in band), never a `Status`. Finishes
+    /// `process` with the outcome.
+    ///
+    /// gRPC `send` runs the shape check and `authenticate_metadata` first (in
+    /// that order, as it always has) and then calls this, so the shape check
+    /// runs twice on that path; it is a pure function of the Envelope, so the
+    /// second run cannot refuse what the first accepted. The HTTP binding
+    /// authenticates from headers before reading the body (RFC-MACP-0006
+    /// §4.4) and hands the identity here.
+    pub(crate) async fn send_authenticated(
+        &self,
+        identity: &AuthIdentity,
+        env: Envelope,
+        process: ProcessSpan,
+    ) -> Ack {
+        let result = async {
+            self.validate_envelope_shape(&env)?;
+            let (bound, max_open) = self.authorize_send(identity, env.clone(), &process).await?;
+            self.runtime
+                .process(&bound, max_open)
+                .await
+                .map(|process_result| (bound, process_result))
+        }
+        .instrument(process.span().clone())
+        .await;
+        self.finish_send(process, &env, result).await
+    }
+
+    /// The tail every send takes, accepted or refused: link the anchor,
+    /// finish the `process` span, count a session-scoped rejection, and build
+    /// the `Ack`. A refusal echoes the Envelope as received (`raw`).
+    async fn finish_send(
+        &self,
+        process: ProcessSpan,
+        raw: &Envelope,
+        result: Result<(Envelope, crate::runtime::ProcessResult), MacpError>,
+    ) -> Ack {
+        if self.telemetry().is_enabled() {
+            self.link_process_anchor(&process, &raw.session_id).await;
+        }
+        let metrics = self.runtime.metrics();
+        match &result {
+            Ok((_, r)) if r.duplicate => process.finish(metrics, Outcome::Duplicate),
+            Ok(_) => process.finish(metrics, Outcome::Accepted),
+            Err(err) => process.finish(metrics, Outcome::Rejected(err)),
+        }
+
+        match result {
+            Ok((env, process_result)) => Ack {
+                ok: true,
+                duplicate: process_result.duplicate,
+                message_id: env.message_id.clone(),
+                session_id: env.session_id.clone(),
+                accepted_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+                session_state: Self::session_state_to_pb(&process_result.session_state),
+                error: None,
+            },
+            Err(err) => {
+                // Rejection counters were collected but never recorded before
+                // (permanently zero). Session-scoped rejections are counted
+                // per mode; commitments additionally under their own counter.
+                if !raw.session_id.is_empty() {
+                    self.runtime.metrics().record_message_rejected(&raw.mode);
+                    if raw.message_type == "Commitment" {
+                        self.runtime.metrics().record_commitment_rejected(&raw.mode);
+                    }
+                }
+                Self::make_error_ack(&err, raw)
+            }
+        }
     }
 
     async fn authenticate_session_access<T>(
@@ -367,12 +444,13 @@ impl MacpServer {
         Ok(())
     }
 
-    /// Subscribe-window dedupe (see `replay_dedup` in the stream loop): drop
-    /// a buffered envelope that was already delivered in the replay batch;
-    /// the first miss disarms the filter (the receiver is FIFO and every
-    /// in-window duplicate precedes the first post-snapshot envelope). Every
-    /// path that yields broadcast envelopes MUST route through this — the
-    /// drain loops bypassing it delivered subscribe-window duplicates.
+    /// Subscribe-window dedupe (see [`SubscriptionCursor`]): drop a buffered
+    /// envelope that was already delivered in the replay batch; the first
+    /// miss disarms the filter (the receiver is FIFO and every in-window
+    /// duplicate precedes the first post-snapshot envelope). Every path that
+    /// yields broadcast envelopes MUST route through this — the drain loops
+    /// bypassing it delivered subscribe-window duplicates. Both of the
+    /// cursor's receive paths (`next`, `try_next`) do.
     fn should_skip_replayed(
         replay_dedup: &mut Option<std::collections::HashSet<String>>,
         envelope: &Envelope,
@@ -386,36 +464,131 @@ impl MacpServer {
         false
     }
 
+    /// The next buffered Envelope of a gRPC stream's subscription, if any,
+    /// without waiting (subscribe-window dedup included); lag ends the stream.
     fn try_next_stream_event(
-        receiver: &mut Option<tokio::sync::broadcast::Receiver<Envelope>>,
+        cursor: &mut Option<SubscriptionCursor>,
     ) -> Result<Option<Envelope>, Status> {
-        use tokio::sync::broadcast::error::TryRecvError;
-
-        let rx = match receiver.as_mut() {
-            Some(rx) => rx,
-            None => return Ok(None),
-        };
-
-        match rx.try_recv() {
-            Ok(envelope) => Ok(Some(envelope)),
-            Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Closed) => {
-                *receiver = None;
-                Ok(None)
-            }
-            Err(TryRecvError::Lagged(skipped)) => {
-                // Terminate the stream so the client knows it missed messages.
-                // Consistent with the async recv() path which also returns ResourceExhausted.
-                tracing::warn!(
-                    skipped,
-                    "StreamSession receiver fell behind; terminating stream"
-                );
-                Err(Self::coded_status(
-                    MacpError::StreamLagged,
-                    format!("StreamSession receiver fell behind by {skipped} envelopes"),
-                ))
-            }
+        match cursor.as_mut() {
+            Some(cursor) => cursor
+                .try_next()
+                .map(|item| item.map(|(_ordinal, envelope)| envelope))
+                .map_err(|lagged| lagged.status()),
+            None => Ok(None),
         }
+    }
+
+    /// Attach the live bus to a gRPC stream on its first Envelope frame (or
+    /// after the channel closed), binding the stream to `session_id`.
+    fn bind_live(
+        &self,
+        session_id: &str,
+        bound_session_id: &mut Option<String>,
+        cursor: &mut Option<SubscriptionCursor>,
+    ) {
+        if cursor.as_ref().is_some_and(SubscriptionCursor::is_live) {
+            return;
+        }
+        *bound_session_id = Some(session_id.to_string());
+        let receiver = self.runtime.subscribe_session_stream(session_id);
+        match cursor.as_mut() {
+            Some(cursor) => cursor.attach(receiver),
+            None => *cursor = Some(SubscriptionCursor::new(receiver)),
+        }
+    }
+
+    /// May `identity` subscribe to `session_id`: the session exists, the
+    /// caller is its initiator, a declared participant or an observer, and
+    /// the ingress policy engine (if any) allows the read (fail closed).
+    async fn authorize_subscription(
+        &self,
+        identity: &AuthIdentity,
+        session_id: &str,
+    ) -> Result<(), SubscribeError> {
+        let session = self
+            .runtime
+            .get_session_checked(session_id)
+            .await
+            .ok_or_else(|| SubscribeError::UnknownSession {
+                session_id: session_id.to_string(),
+            })?;
+        let allowed = identity.is_observer
+            || session.initiator_sender == identity.sender
+            || session.participants.iter().any(|p| p == &identity.sender);
+        if !allowed {
+            return Err(SubscribeError::Forbidden {
+                message: "caller is not a declared participant or observer for this session".into(),
+            });
+        }
+        // External ingress policy engine (E3): stream-based history replay is
+        // a read and must be gated like GetSession (fail closed).
+        if let Some(engine) = &self.policy_engine {
+            let decision = engine.evaluate_session_access(identity, &session).await;
+            crate::policy_engine::require_allow(decision, "session access").map_err(|status| {
+                SubscribeError::Forbidden {
+                    message: status.message().to_string(),
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Load `cursor`'s snapshot (its bus receiver already exists).
+    async fn load_subscription_snapshot(
+        &self,
+        cursor: &mut SubscriptionCursor,
+        identity: &AuthIdentity,
+        session_id: &str,
+        after_sequence: u64,
+    ) -> Result<(), SubscribeError> {
+        tracing::info!(
+            session_id = %session_id,
+            sender = %identity.sender,
+            after_sequence = after_sequence,
+            "passive subscribe: replaying session history"
+        );
+        cursor
+            .load_snapshot(&self.runtime, session_id, after_sequence)
+            .await
+            .map_err(|base| SubscribeError::HistoryUnavailable {
+                lowest_available_sequence: base,
+            })
+    }
+
+    /// The subscribe seam shared by both bindings: authorize `identity` to
+    /// read `session_id`, subscribe to the live bus, then read the replay
+    /// strictly after `after_sequence` and the high-water mark (in that
+    /// order, see [`SubscriptionCursor`]). Every refusal comes back here,
+    /// before any stream exists.
+    pub(crate) async fn open_subscription(
+        &self,
+        identity: &AuthIdentity,
+        session_id: &str,
+        after_sequence: u64,
+    ) -> Result<SubscriptionCursor, SubscribeError> {
+        self.open_subscription_with(identity, session_id, after_sequence, async {})
+            .await
+    }
+
+    /// [`Self::open_subscription`] with `after_bus_subscribe` awaited between
+    /// the bus subscribe and the snapshot: a no-op in production, the
+    /// deterministic window for tests.
+    async fn open_subscription_with<F>(
+        &self,
+        identity: &AuthIdentity,
+        session_id: &str,
+        after_sequence: u64,
+        after_bus_subscribe: F,
+    ) -> Result<SubscriptionCursor, SubscribeError>
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        self.authorize_subscription(identity, session_id).await?;
+        let mut cursor = SubscriptionCursor::new(self.runtime.subscribe_session_stream(session_id));
+        after_bus_subscribe.await;
+        self.load_subscription_snapshot(&mut cursor, identity, session_id, after_sequence)
+            .await?;
+        Ok(cursor)
     }
 
     /// Process a single StreamSessionRequest frame.
@@ -431,7 +604,7 @@ impl MacpServer {
         identity: &AuthIdentity,
         req: StreamSessionRequest,
         bound_session_id: &mut Option<String>,
-        session_events: &mut Option<tokio::sync::broadcast::Receiver<Envelope>>,
+        session_events: &mut Option<SubscriptionCursor>,
         stream_span: &tracing::Span,
     ) -> Result<Vec<Envelope>, StreamFailure> {
         // RFC-MACP-0006-A1: Handle subscribe-only frame.
@@ -513,7 +686,7 @@ impl MacpServer {
         identity: &AuthIdentity,
         envelope: Envelope,
         bound_session_id: &mut Option<String>,
-        session_events: &mut Option<tokio::sync::broadcast::Receiver<Envelope>>,
+        session_events: &mut Option<SubscriptionCursor>,
         process: &ProcessSpan,
     ) -> Result<bool, StreamFailure> {
         let message_id = envelope.message_id.clone();
@@ -584,10 +757,7 @@ impl MacpServer {
             .await
             .map_err(rejected)?;
 
-        if session_events.is_none() {
-            *bound_session_id = Some(envelope.session_id.clone());
-            *session_events = Some(self.runtime.subscribe_session_stream(&envelope.session_id));
-        }
+        self.bind_live(&envelope.session_id, bound_session_id, session_events);
 
         let max_open = if is_session_start {
             identity.max_open_sessions
@@ -611,9 +781,10 @@ impl MacpServer {
         session_id: &str,
         after_sequence: u64,
         bound_session_id: &mut Option<String>,
-        session_events: &mut Option<tokio::sync::broadcast::Receiver<Envelope>>,
+        session_events: &mut Option<SubscriptionCursor>,
     ) -> Result<Vec<Envelope>, StreamFailure> {
-        // Validate: only one session per stream
+        // Validate: only one session per stream (a gRPC stream concept, so
+        // it stays here rather than in `open_subscription`).
         if let Some(bound) = bound_session_id.as_ref() {
             if bound != session_id {
                 return Err(StreamFailure::terminal(
@@ -623,73 +794,44 @@ impl MacpServer {
             }
         }
 
-        // Validate session exists
-        let session = self
-            .runtime
-            .get_session_checked(session_id)
-            .await
-            .ok_or_else(|| {
-                StreamFailure::terminal(
-                    MacpError::UnknownSession,
-                    format!("Session '{}' not found", session_id),
-                )
-            })?;
-
-        // Authorize: caller must be a declared participant, initiator, or observer
-        let allowed = identity.is_observer
-            || session.initiator_sender == identity.sender
-            || session.participants.iter().any(|p| p == &identity.sender);
-        if !allowed {
-            // Per-frame refusal, not a transport failure: inline, stream stays
-            // open (the subscriber may still send envelopes it is entitled to).
-            return Err(StreamFailure::Inline {
-                code: MacpError::Forbidden.error_code(),
-                message: "caller is not a declared participant or observer for this session".into(),
-            });
-        }
-        // External ingress policy engine (E3): stream-based history replay is
-        // a read and must be gated like GetSession (fail closed).
-        if let Some(engine) = &self.policy_engine {
-            let decision = engine.evaluate_session_access(identity, &session).await;
-            crate::policy_engine::require_allow(decision, "session access").map_err(|status| {
-                StreamFailure::Inline {
-                    code: MacpError::Forbidden.error_code(),
-                    message: status.message().to_string(),
+        match session_events.as_mut() {
+            // Already bound (an earlier Envelope or subscribe frame): keep
+            // the existing receiver and its buffered envelopes, re-attaching
+            // it if the channel closed.
+            Some(cursor) => {
+                self.authorize_subscription(identity, session_id)
+                    .await
+                    .map_err(SubscribeError::into_stream_failure)?;
+                if !cursor.is_live() {
+                    *bound_session_id = Some(session_id.to_string());
+                    cursor.attach(self.runtime.subscribe_session_stream(session_id));
                 }
-            })?;
+                self.load_subscription_snapshot(cursor, identity, session_id, after_sequence)
+                    .await
+                    .map_err(SubscribeError::into_stream_failure)?;
+            }
+            None => {
+                let cursor = self
+                    .open_subscription(identity, session_id, after_sequence)
+                    .await
+                    .map_err(SubscribeError::into_stream_failure)?;
+                *bound_session_id = Some(session_id.to_string());
+                *session_events = Some(cursor);
+            }
         }
 
-        // Subscribe to live broadcast (if not already subscribed)
-        if session_events.is_none() {
-            *bound_session_id = Some(session_id.to_string());
-            *session_events = Some(self.runtime.subscribe_session_stream(session_id));
-        }
-
-        tracing::info!(
-            session_id = %session_id,
-            sender = %identity.sender,
-            after_sequence = after_sequence,
-            "passive subscribe: replaying session history"
-        );
-
-        // Replay accepted envelopes from LogStore
-        let replay = self
-            .runtime
-            .get_session_envelopes_after(session_id, after_sequence)
-            .await
-            .map_err(|base| {
-                // The requested `after_sequence` cannot be served; the
-                // subscriber re-subscribes with a later one on the same stream.
-                StreamFailure::Inline {
-                    code: MacpError::InvalidEnvelope.error_code(),
-                    message: format!(
-                        "session history before ordinal {base} was compacted; \
-                         resume with after_sequence >= {base} or re-read state via GetSession"
-                    ),
-                }
-            })?;
-
-        Ok(replay)
+        // The replay batch goes out in one go; live envelopes follow through
+        // the cursor's dedup filter.
+        Ok(session_events
+            .as_mut()
+            .map(|cursor| {
+                cursor
+                    .take_replay()
+                    .into_iter()
+                    .map(|(_ordinal, envelope)| envelope)
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     fn build_stream_session_stream<S>(
@@ -701,7 +843,6 @@ impl MacpServer {
     where
         S: futures_core::Stream<Item = Result<StreamSessionRequest, Status>> + Send + 'static,
     {
-        use tokio::sync::broadcast;
         use tokio_stream::StreamExt;
 
         // Actions collected from tokio::select! arms to process outside the
@@ -713,25 +854,20 @@ impl MacpServer {
             ClientError(Status),
             ClientDone,
             EventsClosed,
-            Lagged(u64),
+            Lagged(StreamLagged),
         }
 
         let server = self.clone();
         let output = async_stream::try_stream! {
             let mut inbound = Box::pin(inbound);
             let mut bound_session_id: Option<String> = None;
-            let mut session_events: Option<broadcast::Receiver<Envelope>> = None;
-            // Subscribe-window dedup (RFC-0006 §3.2): the receiver is
-            // subscribed BEFORE the history snapshot is read, so an envelope
-            // accepted in that window arrives twice — once in the replay
-            // batch, once buffered on the receiver. Buffered events are FIFO
-            // and all in-window events precede post-snapshot ones, so we drop
-            // buffered envelopes whose message_id was replayed and disarm on
-            // the first miss.
-            let mut replay_dedup: Option<std::collections::HashSet<String>> = None;
+            // The stream's subscription (live bus + subscribe-window dedup,
+            // RFC-0006 §3.2), created by the first Envelope or subscribe
+            // frame. See `SubscriptionCursor`.
+            let mut session_events: Option<SubscriptionCursor> = None;
 
             loop {
-                if session_events.is_some() {
+                if session_events.as_ref().is_some_and(SubscriptionCursor::is_live) {
                     let action = {
                         let events = session_events.as_mut().unwrap();
                         tokio::select! {
@@ -742,11 +878,11 @@ impl MacpServer {
                                     None => StreamAction::ClientDone,
                                 }
                             }
-                            recv_result = events.recv() => {
-                                match recv_result {
-                                    Ok(envelope) => StreamAction::EmitEnvelope(envelope),
-                                    Err(broadcast::error::RecvError::Closed) => StreamAction::EventsClosed,
-                                    Err(broadcast::error::RecvError::Lagged(n)) => StreamAction::Lagged(n),
+                            next_event = events.next() => {
+                                match next_event {
+                                    Ok(Some((_ordinal, envelope))) => StreamAction::EmitEnvelope(envelope),
+                                    Ok(None) => StreamAction::EventsClosed,
+                                    Err(lagged) => StreamAction::Lagged(lagged),
                                 }
                             }
                         }
@@ -766,11 +902,7 @@ impl MacpServer {
                             {
                                 Ok(replay) => {
                                     // RFC-MACP-0006-A1: yield replayed envelopes from subscribe
-                                    if !replay.is_empty() {
-                                        replay_dedup = Some(
-                                            replay.iter().map(|e| e.message_id.clone()).collect(),
-                                        );
-                                    }
+                                    // (the cursor armed its dedup from the same batch)
                                     for env in replay {
                                         yield StreamSessionResponse {
                                             response: Some(
@@ -807,9 +939,6 @@ impl MacpServer {
                                 }
                             }
                             while let Some(envelope) = Self::try_next_stream_event(&mut session_events)? {
-                                if Self::should_skip_replayed(&mut replay_dedup, &envelope) {
-                                    continue;
-                                }
                                 yield StreamSessionResponse {
                                     response: Some(
                                         crate::pb::stream_session_response::Response::Envelope(envelope),
@@ -818,9 +947,6 @@ impl MacpServer {
                             }
                         }
                         StreamAction::EmitEnvelope(envelope) => {
-                            if Self::should_skip_replayed(&mut replay_dedup, &envelope) {
-                                continue;
-                            }
                             yield StreamSessionResponse {
                                 response: Some(
                                     crate::pb::stream_session_response::Response::Envelope(envelope),
@@ -832,9 +958,6 @@ impl MacpServer {
                         }
                         StreamAction::ClientDone => {
                             while let Some(envelope) = Self::try_next_stream_event(&mut session_events)? {
-                                if Self::should_skip_replayed(&mut replay_dedup, &envelope) {
-                                    continue;
-                                }
                                 yield StreamSessionResponse {
                                     response: Some(
                                         crate::pb::stream_session_response::Response::Envelope(envelope),
@@ -844,12 +967,11 @@ impl MacpServer {
                             break;
                         }
                         StreamAction::EventsClosed => {
-                            session_events = None;
+                            // The cursor detached its receiver; the next
+                            // Envelope or subscribe frame re-attaches one.
                         }
-                        StreamAction::Lagged(skipped) => {
-                            Err(Self::coded_status(MacpError::StreamLagged, format!(
-                                "StreamSession receiver fell behind by {skipped} envelopes"
-                            )))?;
+                        StreamAction::Lagged(lagged) => {
+                            Err(lagged.status())?;
                         }
                     }
                 } else {
@@ -867,11 +989,7 @@ impl MacpServer {
                             {
                                 Ok(replay) => {
                                     // RFC-MACP-0006-A1: yield replayed envelopes from subscribe
-                                    if !replay.is_empty() {
-                                        replay_dedup = Some(
-                                            replay.iter().map(|e| e.message_id.clone()).collect(),
-                                        );
-                                    }
+                                    // (the cursor armed its dedup from the same batch)
                                     for env in replay {
                                         yield StreamSessionResponse {
                                             response: Some(
@@ -908,9 +1026,6 @@ impl MacpServer {
                                 }
                             }
                             while let Some(envelope) = Self::try_next_stream_event(&mut session_events)? {
-                                if Self::should_skip_replayed(&mut replay_dedup, &envelope) {
-                                    continue;
-                                }
                                 yield StreamSessionResponse {
                                     response: Some(
                                         crate::pb::stream_session_response::Response::Envelope(envelope),
@@ -975,6 +1090,34 @@ impl MacpServer {
     /// registry, the watch streams) is as machine-branchable as `Send`.
     fn coded_status(err: MacpError, msg: impl Into<String>) -> Status {
         Self::coded_status_ref(&err, msg)
+    }
+
+    /// RFC-MACP-0006 §3.2: a `StreamSession` resume below the compacted base.
+    /// gRPC `FAILED_PRECONDITION` with `macp-error-code: HISTORY_UNAVAILABLE`
+    /// and `macp-error-details-bin` = the UTF-8 JSON text
+    /// `{"lowest_available_sequence":N}` (compact, as in the spec's
+    /// examples). A server-local helper rather than a field on
+    /// `MacpError::HistoryUnavailable`, a unit variant of a published enum.
+    ///
+    /// The message keeps the sentence clients already match on
+    /// (`session history before ordinal {N} was compacted; …`).
+    fn history_unavailable_status(lowest_available_sequence: u64) -> Status {
+        let mut status = Self::coded_status_ref(
+            &MacpError::HistoryUnavailable,
+            format!(
+                "session history before ordinal {lowest_available_sequence} was compacted; \
+                 resume with after_sequence >= {lowest_available_sequence} or re-read state via GetSession"
+            ),
+        );
+        let details = serde_json::to_vec(&serde_json::json!({
+            "lowest_available_sequence": lowest_available_sequence,
+        }))
+        .expect("a one-field JSON object always serializes");
+        status.metadata_mut().insert_bin(
+            "macp-error-details-bin",
+            tonic::metadata::MetadataValue::from_bytes(&details),
+        );
+        status
     }
 
     /// [`Self::coded_status`] without consuming the error.
@@ -1111,6 +1254,239 @@ pub mod what_if {
     }
 }
 
+/// Why a subscribe was refused. Decided by [`MacpServer::open_subscription`]
+/// before any stream exists, so a binding can answer it as a request-level
+/// error (HTTP, RFC-MACP-0006 §4.3) or map it onto its stream (gRPC: unknown
+/// session and history-unavailable end the stream, forbidden is an inline
+/// frame and the stream stays open).
+#[derive(Debug)]
+pub(crate) enum SubscribeError {
+    /// No such session (`SESSION_NOT_FOUND`).
+    UnknownSession { session_id: String },
+    /// The caller may not read the session (`FORBIDDEN`): it is not the
+    /// initiator, a declared participant or an observer, or the ingress
+    /// policy engine denied the read. `message` is the human-readable reason.
+    Forbidden { message: String },
+    /// `after_sequence` is below the compaction base (`HISTORY_UNAVAILABLE`,
+    /// RFC-MACP-0006 §3.2).
+    HistoryUnavailable { lowest_available_sequence: u64 },
+}
+
+impl SubscribeError {
+    /// The coded gRPC `Status` for this refusal (the same status and message
+    /// the gRPC stream has always ended with, for the terminal variants).
+    pub(crate) fn status(&self) -> Status {
+        match self {
+            SubscribeError::UnknownSession { session_id } => MacpServer::coded_status(
+                MacpError::UnknownSession,
+                format!("Session '{}' not found", session_id),
+            ),
+            SubscribeError::Forbidden { message } => {
+                MacpServer::coded_status(MacpError::Forbidden, message.clone())
+            }
+            SubscribeError::HistoryUnavailable {
+                lowest_available_sequence,
+            } => MacpServer::history_unavailable_status(*lowest_available_sequence),
+        }
+    }
+
+    /// The gRPC stream mapping: forbidden stays inline (the subscriber may
+    /// still send envelopes it is entitled to), the others end the stream.
+    fn into_stream_failure(self) -> StreamFailure {
+        match self {
+            SubscribeError::UnknownSession { .. } => StreamFailure::Terminal {
+                status: self.status(),
+                err: MacpError::UnknownSession,
+            },
+            SubscribeError::Forbidden { message } => StreamFailure::Inline {
+                code: MacpError::Forbidden.error_code(),
+                message,
+            },
+            SubscribeError::HistoryUnavailable { .. } => StreamFailure::Terminal {
+                status: self.status(),
+                err: MacpError::HistoryUnavailable,
+            },
+        }
+    }
+}
+
+/// A subscriber fell more than the bus capacity behind and missed
+/// envelopes (`STREAM_LAGGED`): the subscription cannot continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StreamLagged {
+    pub(crate) skipped: u64,
+}
+
+impl StreamLagged {
+    /// The coded status the gRPC stream ends with.
+    pub(crate) fn status(&self) -> Status {
+        MacpServer::coded_status(
+            MacpError::StreamLagged,
+            format!(
+                "StreamSession receiver fell behind by {} envelopes",
+                self.skipped
+            ),
+        )
+    }
+}
+
+/// One subscriber's view of a session's accepted envelopes: the replay
+/// batch from a snapshot, then the live bus, each Envelope with its accepted
+/// ordinal (RFC-MACP-0006 §3.2, 1-based).
+///
+/// The bus receiver is created **before** the snapshot is read, so an
+/// envelope accepted in between arrives twice (once in the replay, once
+/// buffered on the receiver). Buffered envelopes are FIFO and every
+/// in-window duplicate precedes the first post-snapshot envelope, so a
+/// buffered envelope whose `message_id` was replayed is dropped and the
+/// first miss disarms the filter. The runtime publishes in ordinal order
+/// (see `Runtime::subscribe_snapshot`), so the first live envelope delivered
+/// is `high_water + 1` and each later one the next ordinal.
+///
+/// The ordinal of a live envelope is exact whenever `after_sequence` is at
+/// most the highest ordinal published before the bus subscribe, which holds
+/// for every ordinal a client learned from this runtime (an ordinal is only
+/// observable after its publish). A guessed `after_sequence` beyond that
+/// could leave an in-window envelope at or below `after_sequence` unreplayed;
+/// it is then delivered and numbered `high_water + 1`, as the gRPC stream
+/// has always delivered it.
+///
+/// A cursor created by an Envelope frame on a gRPC stream (no snapshot) has
+/// no numbering and yields ordinal `0`, which is never a real ordinal; gRPC
+/// discards ordinals.
+pub(crate) struct SubscriptionCursor {
+    receiver: Option<tokio::sync::broadcast::Receiver<Envelope>>,
+    replay: std::collections::VecDeque<(u64, Envelope)>,
+    replay_dedup: Option<std::collections::HashSet<String>>,
+    next_live_ordinal: Option<u64>,
+}
+
+impl SubscriptionCursor {
+    fn new(receiver: tokio::sync::broadcast::Receiver<Envelope>) -> Self {
+        Self {
+            receiver: Some(receiver),
+            replay: std::collections::VecDeque::new(),
+            replay_dedup: None,
+            next_live_ordinal: None,
+        }
+    }
+
+    /// Whether the bus receiver is still attached (a closed channel detaches
+    /// it; the dedup state survives a re-attach, as it always has).
+    fn is_live(&self) -> bool {
+        self.receiver.is_some()
+    }
+
+    fn attach(&mut self, receiver: tokio::sync::broadcast::Receiver<Envelope>) {
+        self.receiver = Some(receiver);
+    }
+
+    /// Read the replay batch and the high-water mark under one log read
+    /// guard. A non-empty replay (re)arms the subscribe-window dedup; an
+    /// empty one leaves it as it was. `Err(base)` below the compaction base.
+    async fn load_snapshot(
+        &mut self,
+        runtime: &Runtime,
+        session_id: &str,
+        after_sequence: u64,
+    ) -> Result<(), u64> {
+        let (replay, high_water) = runtime
+            .subscribe_snapshot(session_id, after_sequence)
+            .await?;
+        if !replay.is_empty() {
+            self.replay_dedup = Some(replay.iter().map(|(_, e)| e.message_id.clone()).collect());
+        }
+        self.replay.extend(replay);
+        self.next_live_ordinal = Some(high_water + 1);
+        Ok(())
+    }
+
+    /// Take the replay batch not yet yielded (gRPC yields it in one go).
+    fn take_replay(&mut self) -> Vec<(u64, Envelope)> {
+        self.replay.drain(..).collect()
+    }
+
+    /// Number a live envelope that passed the dedup filter.
+    fn number(&mut self, envelope: Envelope) -> (u64, Envelope) {
+        let ordinal = match self.next_live_ordinal.as_mut() {
+            Some(next) => {
+                let ordinal = *next;
+                *next += 1;
+                ordinal
+            }
+            None => 0,
+        };
+        (ordinal, envelope)
+    }
+
+    /// The next Envelope: the replay first, then the live bus.
+    /// `Ok(None)` when the bus channel closed (nothing more will arrive).
+    ///
+    /// Cancel-safe inside `tokio::select!`: the replay pop has no await, the
+    /// broadcast `recv` is cancel-safe, and state changes only after `recv`
+    /// returned.
+    pub(crate) async fn next(&mut self) -> Result<Option<(u64, Envelope)>, StreamLagged> {
+        use tokio::sync::broadcast::error::RecvError;
+        if let Some(item) = self.replay.pop_front() {
+            return Ok(Some(item));
+        }
+        loop {
+            let Some(receiver) = self.receiver.as_mut() else {
+                return Ok(None);
+            };
+            match receiver.recv().await {
+                Ok(envelope) => {
+                    if MacpServer::should_skip_replayed(&mut self.replay_dedup, &envelope) {
+                        continue;
+                    }
+                    return Ok(Some(self.number(envelope)));
+                }
+                Err(RecvError::Closed) => {
+                    self.receiver = None;
+                    return Ok(None);
+                }
+                Err(RecvError::Lagged(skipped)) => return Err(StreamLagged { skipped }),
+            }
+        }
+    }
+
+    /// [`Self::next`] without waiting: `Ok(None)` when nothing is buffered
+    /// (or the channel closed).
+    fn try_next(&mut self) -> Result<Option<(u64, Envelope)>, StreamLagged> {
+        use tokio::sync::broadcast::error::TryRecvError;
+        if let Some(item) = self.replay.pop_front() {
+            return Ok(Some(item));
+        }
+        loop {
+            let Some(receiver) = self.receiver.as_mut() else {
+                return Ok(None);
+            };
+            match receiver.try_recv() {
+                Ok(envelope) => {
+                    if MacpServer::should_skip_replayed(&mut self.replay_dedup, &envelope) {
+                        continue;
+                    }
+                    return Ok(Some(self.number(envelope)));
+                }
+                Err(TryRecvError::Empty) => return Ok(None),
+                Err(TryRecvError::Closed) => {
+                    self.receiver = None;
+                    return Ok(None);
+                }
+                Err(TryRecvError::Lagged(skipped)) => {
+                    // Terminate the stream so the client knows it missed
+                    // messages, as the async path does.
+                    tracing::warn!(
+                        skipped,
+                        "StreamSession receiver fell behind; terminating stream"
+                    );
+                    return Err(StreamLagged { skipped });
+                }
+            }
+        }
+    }
+}
+
 /// Why a StreamSession frame failed: a transport/binding problem that ends the
 /// stream, or a protocol rejection of one envelope (inline unless
 /// [`MacpServer::is_stream_terminal_error`]).
@@ -1127,7 +1503,8 @@ enum StreamFailure {
         message_id: String,
     },
     /// A per-frame refusal with no `MacpError` (a subscribe frame's read
-    /// gate, an unservable `after_sequence`): inline, stream stays open.
+    /// gate): inline, stream stays open. An unservable `after_sequence` is
+    /// `Terminal` (RFC-MACP-0006 §3.2), not this.
     Inline {
         code: &'static str,
         message: String,
@@ -1254,61 +1631,27 @@ impl MacpRuntimeService for MacpServer {
         })?;
 
         // From receipt to the accept/reject decision: shape, authentication,
-        // authorization, rate limit, ingress policy and the kernel.
+        // then the shared seam (sender, mode, rate limit, ingress policy and
+        // the kernel). gRPC keeps its historical order — the shape check
+        // precedes authentication — and reports an authentication failure in
+        // the Ack like every other refusal.
         let process = ProcessSpan::start(
             self.telemetry(),
             &env,
             self.runtime.envelope_labels(&env.mode, &env.message_type),
             None,
         );
-        let result = async {
+        let authenticated = async {
             self.validate_envelope_shape(&env)?;
-            let (env, max_open) = self
-                .authenticate_send_request(&request, env, &process)
-                .await?;
-            self.runtime
-                .process(&env, max_open)
+            self.security
+                .authenticate_metadata(request.metadata())
                 .await
-                .map(|process_result| (env, process_result))
         }
         .instrument(process.span().clone())
         .await;
-
-        if self.telemetry().is_enabled() {
-            if let Some(raw) = request.get_ref().envelope.as_ref() {
-                self.link_process_anchor(&process, &raw.session_id).await;
-            }
-        }
-        let metrics = self.runtime.metrics();
-        match &result {
-            Ok((_, r)) if r.duplicate => process.finish(metrics, Outcome::Duplicate),
-            Ok(_) => process.finish(metrics, Outcome::Accepted),
-            Err(err) => process.finish(metrics, Outcome::Rejected(err)),
-        }
-
-        let ack = match result {
-            Ok((env, process_result)) => Ack {
-                ok: true,
-                duplicate: process_result.duplicate,
-                message_id: env.message_id.clone(),
-                session_id: env.session_id.clone(),
-                accepted_at_unix_ms: chrono::Utc::now().timestamp_millis(),
-                session_state: Self::session_state_to_pb(&process_result.session_state),
-                error: None,
-            },
-            Err(err) => {
-                let env = request.get_ref().envelope.clone().unwrap_or_default();
-                // Rejection counters were collected but never recorded before
-                // (permanently zero). Session-scoped rejections are counted
-                // per mode; commitments additionally under their own counter.
-                if !env.session_id.is_empty() {
-                    self.runtime.metrics().record_message_rejected(&env.mode);
-                    if env.message_type == "Commitment" {
-                        self.runtime.metrics().record_commitment_rejected(&env.mode);
-                    }
-                }
-                Self::make_error_ack(&err, &env)
-            }
+        let ack = match authenticated {
+            Ok(identity) => self.send_authenticated(&identity, env, process).await,
+            Err(err) => self.finish_send(process, &env, Err(err)).await,
         };
 
         Ok(Response::new(SendResponse { ack: Some(ack) }))
@@ -3659,6 +4002,198 @@ mod tests {
         assert_eq!(replay[0].message_id, "m3");
     }
 
+    /// Replace `sid`'s log with a checkpoint that discarded `base` accepted
+    /// ordinals followed by the last accepted entry, which therefore takes
+    /// ordinal `base + 1` -- the shape terminal compaction leaves behind.
+    async fn compact_log_to_base(runtime: &Runtime, sid: &str, base: u64) {
+        let log = runtime.log_store.get_log(sid).await.unwrap();
+        let mut checkpoint = log[0].clone();
+        checkpoint.entry_kind = crate::log_store::EntryKind::Checkpoint;
+        checkpoint.message_type = "Checkpoint".into();
+        checkpoint.compacted_incoming_ordinals = base;
+        let last = log
+            .iter()
+            .rev()
+            .find(|e| e.entry_kind == crate::log_store::EntryKind::Incoming)
+            .unwrap()
+            .clone();
+        runtime
+            .log_store
+            .replace_session_log(sid, vec![checkpoint, last])
+            .await;
+    }
+
+    async fn compacted_session(server: &MacpServer, runtime: &Runtime, base: u64) -> String {
+        let sid = new_sid();
+        let initiator = "agent://orchestrator";
+        let peer = "agent://fraud";
+        start_session(server, initiator, &sid, vec![initiator.into(), peer.into()]).await;
+        send_proposal(server, peer, &sid, "m2", "p1").await;
+        compact_log_to_base(runtime, &sid, base).await;
+        sid
+    }
+
+    /// RFC-MACP-0006 §3.2: a resume below the compacted base ends the stream
+    /// with FAILED_PRECONDITION / HISTORY_UNAVAILABLE, details =
+    /// `{"lowest_available_sequence":N}` byte-equal to the spec example.
+    #[tokio::test]
+    async fn subscribe_below_compacted_base_is_terminal_history_unavailable() {
+        use base64::Engine as _;
+        let (server, runtime) = make_server();
+        let sid = compacted_session(&server, &runtime, 41).await;
+
+        let mut bound = None;
+        let mut events = None;
+        let failure = server
+            .process_stream_request(
+                &stream_identity("agent://fraud"),
+                subscribe_frame(&sid, 7),
+                &mut bound,
+                &mut events,
+                &tracing::Span::none(),
+            )
+            .await
+            .unwrap_err();
+        let StreamFailure::Terminal { status, err } = failure else {
+            panic!("a compacted resume must end the stream, not answer inline");
+        };
+        assert!(matches!(err, MacpError::HistoryUnavailable));
+        assert_coded(
+            &status,
+            "HISTORY_UNAVAILABLE",
+            tonic::Code::FailedPrecondition,
+        );
+        assert_eq!(status.code() as i32, 9);
+        let details = status
+            .metadata()
+            .get_bin("macp-error-details-bin")
+            .expect("details must be present")
+            .to_bytes()
+            .unwrap();
+        assert_eq!(&details[..], br#"{"lowest_available_sequence":41}"#);
+        // The spec's worked example (examples/http/stream_session_subscribe.json).
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.encode(&details),
+            "eyJsb3dlc3RfYXZhaWxhYmxlX3NlcXVlbmNlIjo0MX0="
+        );
+        // The sentence macp-control-plane matches on is kept.
+        assert!(
+            status
+                .message()
+                .contains("session history before ordinal 41 was compacted;"),
+            "{}",
+            status.message()
+        );
+    }
+
+    /// The same refusal through the full stream: the client sees the status
+    /// as the stream's terminal error, after no frames.
+    #[tokio::test]
+    async fn compacted_resume_ends_the_grpc_stream() {
+        use tokio_stream::{iter, StreamExt};
+        let (server, runtime) = make_server();
+        let sid = compacted_session(&server, &runtime, 41).await;
+        let mut stream = server.build_stream_session_stream(
+            stream_identity("agent://fraud"),
+            iter(vec![Ok(subscribe_frame(&sid, 7))]),
+            tracing::Span::none(),
+        );
+        let status = stream.next().await.unwrap().unwrap_err();
+        assert_coded(
+            &status,
+            "HISTORY_UNAVAILABLE",
+            tonic::Code::FailedPrecondition,
+        );
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn subscribe_at_or_above_compacted_base_still_replays() {
+        let (server, runtime) = make_server();
+        let sid = compacted_session(&server, &runtime, 41).await;
+        for (after, expected) in [(41u64, vec!["m2"]), (42, vec![])] {
+            let mut bound = None;
+            let mut events = None;
+            let replay = server
+                .process_stream_request(
+                    &stream_identity("agent://fraud"),
+                    subscribe_frame(&sid, after),
+                    &mut bound,
+                    &mut events,
+                    &tracing::Span::none(),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("after_sequence {after} >= base must replay"));
+            let ids: Vec<&str> = replay.iter().map(|e| e.message_id.as_str()).collect();
+            assert_eq!(ids, expected, "after_sequence {after}");
+            assert!(events.is_some());
+        }
+    }
+
+    /// Regression: only the compacted resume became terminal. A forbidden
+    /// subscriber is still an inline frame and the stream stays open.
+    #[tokio::test]
+    async fn subscribe_forbidden_is_still_an_inline_frame() {
+        use tokio_stream::StreamExt;
+        let (server, _) = make_server();
+        let sid = new_sid();
+        start_session(
+            &server,
+            "agent://orchestrator",
+            &sid,
+            vec!["agent://orchestrator".into(), "agent://fraud".into()],
+        )
+        .await;
+
+        let mut bound = None;
+        let mut events = None;
+        let failure = server
+            .process_stream_request(
+                &stream_identity("agent://outsider"),
+                subscribe_frame(&sid, 0),
+                &mut bound,
+                &mut events,
+                &tracing::Span::none(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                failure,
+                StreamFailure::Inline {
+                    code: "FORBIDDEN",
+                    ..
+                }
+            ),
+            "forbidden subscribe must stay inline"
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(Ok(subscribe_frame(&sid, 0))).await.unwrap();
+        let inbound = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let mut stream = server.build_stream_session_stream(
+            stream_identity("agent://outsider"),
+            inbound,
+            tracing::Span::none(),
+        );
+        let frame = stream.next().await.unwrap().unwrap();
+        match frame.response.unwrap() {
+            crate::pb::stream_session_response::Response::Error(e) => {
+                assert_eq!(e.code, "FORBIDDEN")
+            }
+            other => panic!("expected an inline error frame, got {other:?}"),
+        }
+        // The stream is still open: nothing more arrives while the inbound
+        // side is alive.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+                .await
+                .is_err(),
+            "a forbidden subscribe must not end the stream"
+        );
+        drop(tx);
+    }
+
     #[tokio::test]
     async fn subscribe_unknown_session_returns_not_found() {
         let (server, _) = make_server();
@@ -3996,6 +4531,11 @@ mod tests {
             .await
             .expect_err("embargoed read must be denied");
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            err.metadata().get("macp-error-code").unwrap(),
+            "FORBIDDEN",
+            "a policy-engine read denial must be coded like every other Status"
+        );
     }
 
     /// E3 transport-parity: the ingress engine gates the STREAM path too — a
@@ -5098,6 +5638,326 @@ mod tests {
                 .policy_registry
                 .unwrap()
                 .what_if_replay
+        );
+    }
+
+    // ── P2 seams: send_authenticated and open_subscription ─────────────
+
+    fn seam_envelope(
+        message_type: &str,
+        message_id: &str,
+        sid: &str,
+        payload: Vec<u8>,
+    ) -> Envelope {
+        Envelope {
+            macp_version: "1.0".into(),
+            mode: "macp.mode.decision.v1".into(),
+            message_type: message_type.into(),
+            message_id: message_id.into(),
+            session_id: sid.into(),
+            sender: String::new(),
+            timestamp_unix_ms: Utc::now().timestamp_millis(),
+            payload,
+        }
+    }
+
+    async fn ack_authenticated(server: &MacpServer, identity: &AuthIdentity, env: Envelope) -> Ack {
+        let process = ProcessSpan::start(
+            server.telemetry(),
+            &env,
+            server.runtime.envelope_labels(&env.mode, &env.message_type),
+            None,
+        );
+        server.send_authenticated(identity, env, process).await
+    }
+
+    fn assert_refused(ack: &Ack, code: &str, message_id: &str) {
+        assert!(!ack.ok, "{message_id} must be refused");
+        let err = ack.error.as_ref().expect("an in-band error");
+        assert_eq!(err.code, code, "{message_id}");
+        assert_eq!(ack.message_id, message_id);
+        assert_eq!(err.message_id, message_id);
+    }
+
+    /// P2 (i): every decision after authentication is an in-band Ack from
+    /// `send_authenticated` (the HTTP binding relies on this to keep them
+    /// out of its request-level errors, RFC-MACP-0006 §4.4).
+    #[tokio::test]
+    async fn send_authenticated_answers_post_auth_refusals_in_band() {
+        use crate::security::RateLimitConfig;
+        let one_per_minute = || RateLimitConfig {
+            limit: 1,
+            window: std::time::Duration::from_secs(60),
+        };
+        let mut security =
+            SecurityLayer::dev_mode().with_rate_limits(one_per_minute(), one_per_minute());
+        security.max_payload_bytes = 200;
+        let (server, _) = make_server_with_security(security);
+
+        // Spoofed sender: the Envelope names someone else.
+        let mut spoofed = seam_envelope("Proposal", "m-spoofed", &new_sid(), vec![]);
+        spoofed.sender = "agent://someone-else".into();
+        let ack = ack_authenticated(&server, &stream_identity("agent://a"), spoofed).await;
+        assert_refused(&ack, "UNAUTHENTICATED", "m-spoofed");
+
+        // Forbidden mode.
+        let mut limited = stream_identity("agent://limited");
+        limited.allowed_modes = Some(["macp.mode.task.v1".to_string()].into_iter().collect());
+        let ack = ack_authenticated(
+            &server,
+            &limited,
+            seam_envelope("SessionStart", "m-mode", &new_sid(), start_payload()),
+        )
+        .await;
+        assert_refused(&ack, "FORBIDDEN", "m-mode");
+
+        // SessionStart rate limit: the first start is accepted, the second
+        // is over the per-sender bucket.
+        let starter = stream_identity("agent://starter");
+        let ack = ack_authenticated(
+            &server,
+            &starter,
+            seam_envelope("SessionStart", "m-start-1", &new_sid(), start_payload()),
+        )
+        .await;
+        assert!(ack.ok, "{:?}", ack.error);
+        let ack = ack_authenticated(
+            &server,
+            &starter,
+            seam_envelope("SessionStart", "m-start-2", &new_sid(), start_payload()),
+        )
+        .await;
+        assert_refused(&ack, "RATE_LIMITED", "m-start-2");
+
+        // Message rate limit: the first message fills the bucket (and is
+        // refused by the kernel), the second is over it.
+        let sender = stream_identity("agent://chatty");
+        let unknown = new_sid();
+        let ack = ack_authenticated(
+            &server,
+            &sender,
+            seam_envelope("Proposal", "m-msg-1", &unknown, vec![]),
+        )
+        .await;
+        assert_refused(&ack, "SESSION_NOT_FOUND", "m-msg-1");
+        let ack = ack_authenticated(
+            &server,
+            &sender,
+            seam_envelope("Proposal", "m-msg-2", &unknown, vec![]),
+        )
+        .await;
+        assert_refused(&ack, "RATE_LIMITED", "m-msg-2");
+
+        // Payload too large: the shape check is part of the seam.
+        let ack = ack_authenticated(
+            &server,
+            &stream_identity("agent://big"),
+            seam_envelope("Proposal", "m-big", &new_sid(), vec![0u8; 201]),
+        )
+        .await;
+        assert_refused(&ack, "PAYLOAD_TOO_LARGE", "m-big");
+    }
+
+    /// Accepted ordinals by message id, as the log numbers them (from the
+    /// compaction base, if any).
+    async fn log_ordinals(runtime: &Runtime, sid: &str) -> Vec<(u64, String)> {
+        let after = runtime
+            .log_store
+            .get_incoming_after(sid, 0)
+            .await
+            .err()
+            .unwrap_or(0);
+        runtime
+            .log_store
+            .get_incoming_after(sid, after)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(ordinal, entry)| (ordinal, entry.message_id))
+            .collect()
+    }
+
+    async fn cursor_next(cursor: &mut SubscriptionCursor) -> (u64, String) {
+        let (ordinal, env) = tokio::time::timeout(std::time::Duration::from_secs(5), cursor.next())
+            .await
+            .expect("an envelope within 5 s")
+            .expect("not lagged")
+            .expect("channel open");
+        (ordinal, env.message_id)
+    }
+
+    async fn two_party_session(server: &MacpServer) -> String {
+        let sid = new_sid();
+        start_session(
+            server,
+            "agent://orchestrator",
+            &sid,
+            vec!["agent://orchestrator".into(), "agent://fraud".into()],
+        )
+        .await;
+        sid
+    }
+
+    /// P2 (ii): replay then live; cursor ordinals equal the log's.
+    #[tokio::test]
+    async fn cursor_ordinals_match_the_log_for_replay_then_live() {
+        let (server, runtime) = make_server();
+        let sid = two_party_session(&server).await;
+        send_proposal(&server, "agent://fraud", &sid, "m2", "p1").await;
+
+        let mut cursor = server
+            .open_subscription(&stream_identity("agent://fraud"), &sid, 0)
+            .await
+            .unwrap();
+        let mut seen = vec![
+            cursor_next(&mut cursor).await,
+            cursor_next(&mut cursor).await,
+        ];
+        send_proposal(&server, "agent://fraud", &sid, "m3", "p2").await;
+        seen.push(cursor_next(&mut cursor).await);
+
+        assert_eq!(seen, log_ordinals(&runtime, &sid).await);
+        assert_eq!(seen[2], (3, "m3".to_string()));
+        assert!(cursor.try_next().unwrap().is_none());
+    }
+
+    /// P2 (ii): `after_sequence` beyond the count replays nothing, and the
+    /// first live envelope is still numbered from the high-water mark, not
+    /// from `after_sequence`.
+    #[tokio::test]
+    async fn cursor_numbers_live_envelopes_from_high_water_when_after_exceeds_count() {
+        let (server, runtime) = make_server();
+        let sid = two_party_session(&server).await;
+        send_proposal(&server, "agent://fraud", &sid, "m2", "p1").await;
+
+        let mut cursor = server
+            .open_subscription(&stream_identity("agent://fraud"), &sid, 10)
+            .await
+            .unwrap();
+        assert!(cursor.try_next().unwrap().is_none(), "nothing to replay");
+        send_proposal(&server, "agent://fraud", &sid, "m3", "p2").await;
+        let live = cursor_next(&mut cursor).await;
+        assert_eq!(live, (3, "m3".to_string()));
+        assert_eq!(log_ordinals(&runtime, &sid).await.last(), Some(&live));
+    }
+
+    /// P2 (ii): ordinals continue from a compaction base; a resume below it
+    /// is refused before any stream exists.
+    #[tokio::test]
+    async fn cursor_ordinals_continue_from_a_compacted_base() {
+        let (server, runtime) = make_server();
+        let sid = compacted_session(&server, &runtime, 41).await;
+        let identity = stream_identity("agent://fraud");
+
+        match server.open_subscription(&identity, &sid, 40).await {
+            Err(SubscribeError::HistoryUnavailable {
+                lowest_available_sequence: 41,
+            }) => {}
+            Err(other) => panic!("expected HISTORY_UNAVAILABLE, got {other:?}"),
+            Ok(_) => panic!("expected HISTORY_UNAVAILABLE, got a cursor"),
+        }
+
+        let mut cursor = server.open_subscription(&identity, &sid, 41).await.unwrap();
+        assert_eq!(cursor_next(&mut cursor).await, (42, "m2".to_string()));
+        send_proposal(&server, "agent://fraud", &sid, "m3", "p2").await;
+        assert_eq!(cursor_next(&mut cursor).await, (43, "m3".to_string()));
+        assert_eq!(
+            log_ordinals(&runtime, &sid).await,
+            vec![(42, "m2".to_string()), (43, "m3".to_string())]
+        );
+    }
+
+    /// P2 (ii): an envelope accepted between the bus subscribe and the
+    /// snapshot (driven deterministically through `open_subscription_with`)
+    /// is in the replay AND buffered on the receiver; it is delivered once,
+    /// with its log ordinal, and the next live envelope follows it.
+    #[tokio::test]
+    async fn cursor_delivers_a_subscribe_window_envelope_once() {
+        let (server, runtime) = make_server();
+        let sid = two_party_session(&server).await;
+        send_proposal(&server, "agent://fraud", &sid, "m2", "p1").await;
+
+        let mut cursor = server
+            .open_subscription_with(&stream_identity("agent://fraud"), &sid, 0, async {
+                send_proposal(&server, "agent://fraud", &sid, "m3", "p2").await;
+            })
+            .await
+            .unwrap();
+        // m3 is buffered on the receiver too: the window really happened.
+        assert_eq!(cursor.receiver.as_ref().unwrap().len(), 1);
+        send_proposal(&server, "agent://fraud", &sid, "m4", "p3").await;
+
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            seen.push(cursor_next(&mut cursor).await);
+        }
+        assert!(cursor.try_next().unwrap().is_none(), "m3 must not repeat");
+        assert_eq!(seen, log_ordinals(&runtime, &sid).await);
+        assert_eq!(
+            seen.iter()
+                .map(|(o, id)| (*o, id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "start"), (2, "m2"), (3, "m3"), (4, "m4")]
+        );
+    }
+
+    /// `next()` dropped while waiting (a `select!` losing) consumes nothing.
+    #[tokio::test]
+    async fn cursor_next_is_cancel_safe() {
+        let (server, _) = make_server();
+        let sid = two_party_session(&server).await;
+        let mut cursor = server
+            .open_subscription(&stream_identity("agent://fraud"), &sid, 1)
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            tokio::select! {
+                biased;
+                _ = cursor.next() => panic!("nothing is buffered yet"),
+                _ = tokio::task::yield_now() => {}
+            }
+        }
+        send_proposal(&server, "agent://fraud", &sid, "m2", "p1").await;
+        assert_eq!(cursor_next(&mut cursor).await, (2, "m2".to_string()));
+    }
+
+    /// The refusals `open_subscription` returns before any stream exists.
+    #[tokio::test]
+    async fn open_subscription_refusals_come_before_the_stream() {
+        let (server, _) = make_server();
+        let sid = two_party_session(&server).await;
+        let refusal = |r: Result<SubscriptionCursor, SubscribeError>| match r {
+            Err(e) => e,
+            Ok(_) => panic!("expected a refusal"),
+        };
+        let unknown = refusal(
+            server
+                .open_subscription(&stream_identity("agent://fraud"), &new_sid(), 0)
+                .await,
+        );
+        assert!(matches!(unknown, SubscribeError::UnknownSession { .. }));
+        assert_eq!(unknown.status().code(), tonic::Code::NotFound);
+        let forbidden = refusal(
+            server
+                .open_subscription(&stream_identity("agent://outsider"), &sid, 0)
+                .await,
+        );
+        assert!(matches!(forbidden, SubscribeError::Forbidden { .. }));
+        assert_coded(
+            &forbidden.status(),
+            "FORBIDDEN",
+            tonic::Code::PermissionDenied,
+        );
+    }
+
+    /// The lag error the cursor reports maps to the stream's STREAM_LAGGED.
+    #[test]
+    fn stream_lagged_status_is_coded() {
+        let status = StreamLagged { skipped: 7 }.status();
+        assert_coded(&status, "STREAM_LAGGED", tonic::Code::ResourceExhausted);
+        assert_eq!(
+            status.message(),
+            "StreamSession receiver fell behind by 7 envelopes"
         );
     }
 }

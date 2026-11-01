@@ -1,0 +1,4 @@
+{
+  "_invalid_because": "`error` MUST be a MACPError object (properties.error `type`)",
+  "error": "SESSION_NOT_FOUND"
+}

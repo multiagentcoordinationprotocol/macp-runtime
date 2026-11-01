@@ -14,6 +14,40 @@ Every release that may break an embeddable crate has an entry here, under a
 introduces a breaking API change must add it, and a release PR with a breaking
 bump fails without it. Patch releases have no entry.
 
+## 0.12.0 — gRPC compacted resume, spec re-pin, SIGTERM drain
+
+### gRPC wire (`macp-runtime` server)
+
+- A `StreamSession` subscribe whose `after_sequence` is below the compacted
+  base now **ends the stream** with gRPC `FAILED_PRECONDITION`,
+  `macp-error-code: HISTORY_UNAVAILABLE` and `macp-error-details-bin` = the
+  UTF-8 JSON text `{"lowest_available_sequence":N}` (RFC-MACP-0006 §3.2). It
+  was an inline `INVALID_ENVELOPE` frame with the stream left open. The status
+  message keeps the `session history before ordinal {N} was compacted; ...`
+  sentence. `MacpError::HistoryUnavailable` is unchanged (still a unit variant);
+  the details are built by the server.
+- `macp_runtime::policy_engine::require_allow` stamps `macp-error-code:
+  FORBIDDEN` on the `PERMISSION_DENIED` it returns. The gRPC code is unchanged.
+
+### `macp-runtime` binary: SIGTERM drains
+
+- The binary now drains on SIGTERM as well as SIGINT. SIGTERM used to kill it
+  at once; `docker stop` and Kubernetes now give in-flight requests up to
+  `MACP_SHUTDOWN_DRAIN_SECS` (default 10) and the runtime persists sessions
+  before exiting 0. This includes gRPC-only deployments. Set
+  `terminationGracePeriodSeconds` (or `docker stop -t`) above
+  `MACP_SHUTDOWN_DRAIN_SECS`, or the platform's SIGKILL ends the drain early.
+  A second signal during the drain exits at once (130 or 143). The
+  `MACP_METRICS_ADDR` port closes as soon as the first signal arrives. No
+  library API changed; the shutdown signal is private to the binary
+  (`src/shutdown.rs`). See [docs/deployment.md](docs/deployment.md#graceful-shutdown).
+
+### Fixtures and vectors
+
+- `SPEC_REV` moved to spec `99f3cfa`. `tests/parity/contract.json` lists
+  `RECEIPT_UNAVAILABLE` as permanent. The HTTP/JSON binding's examples, error
+  schema and negative fixtures are vendored under `tests/http/`.
+
 ## 0.11.0 — decision receipts
 
 ### `macp-pb` / macp-proto 0.1.13

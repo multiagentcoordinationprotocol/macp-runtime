@@ -108,9 +108,30 @@ impl LogStore {
         session_id: &str,
         after_sequence: u64,
     ) -> Result<Vec<(u64, LogEntry)>, u64> {
+        self.get_incoming_after_with_high_water(session_id, after_sequence)
+            .await
+            .map(|(entries, _high_water)| entries)
+    }
+
+    /// [`Self::get_incoming_after`] plus the session's **high-water mark**:
+    /// the highest accepted ordinal in the log (the compaction base plus the
+    /// Incoming entries after it; `0` for an empty or unknown log), read
+    /// under the same read guard as the entries, so the two describe one
+    /// instant.
+    ///
+    /// A subscriber that subscribes to the live bus *before* this read can
+    /// therefore label live envelopes exactly: the first one that is not a
+    /// replayed duplicate has ordinal `high_water + 1`, whatever
+    /// `after_sequence` was (the runtime publishes in ordinal order, under
+    /// the per-session lock, after the append).
+    pub async fn get_incoming_after_with_high_water(
+        &self,
+        session_id: &str,
+        after_sequence: u64,
+    ) -> Result<(Vec<(u64, LogEntry)>, u64), u64> {
         let guard = self.logs.read().await;
         let Some(entries) = guard.get(session_id) else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         };
         // Compaction may have replaced older entries with a checkpoint that
         // records how many accepted ordinals it discarded; remaining Incoming
@@ -126,14 +147,18 @@ impl LogStore {
         if after_sequence < base {
             return Err(base);
         }
-        Ok(entries
+        let mut high_water = base;
+        let mut out = Vec::new();
+        for e in entries
             .iter()
             .filter(|e| e.entry_kind == EntryKind::Incoming)
-            .enumerate()
-            .map(|(i, e)| (base + (i + 1) as u64, e))
-            .filter(|(ordinal, _)| *ordinal > after_sequence)
-            .map(|(ordinal, e)| (ordinal, e.clone()))
-            .collect())
+        {
+            high_water += 1;
+            if high_water > after_sequence {
+                out.push((high_water, e.clone()));
+            }
+        }
+        Ok((out, high_water))
     }
 
     /// Drop a session's in-memory log (eviction). The durable log remains in
@@ -243,5 +268,88 @@ mod tests {
         // Resuming below the compaction base is an error (history gone),
         // never a silent skip.
         assert!(matches!(store.get_incoming_after("s1", 3).await, Err(5)));
+    }
+
+    /// The high-water mark counts accepted ordinals only (interleaved
+    /// Internal and Checkpoint entries consume none), continues from a
+    /// compaction base, is reported even when nothing is after
+    /// `after_sequence`, and is 0 for an unknown log.
+    #[tokio::test]
+    async fn get_incoming_after_with_high_water_counts_accepted_ordinals() {
+        let store = LogStore::new();
+        store.create_session_log("s1").await;
+        store.append("s1", entry("m1", EntryKind::Incoming)).await; // 1
+        store.append("s1", entry("i1", EntryKind::Internal)).await;
+        store.append("s1", entry("cp", EntryKind::Checkpoint)).await; // base 0
+        store.append("s1", entry("m2", EntryKind::Incoming)).await; // 2
+        store.append("s1", entry("i2", EntryKind::Internal)).await;
+        store.append("s1", entry("m3", EntryKind::Incoming)).await; // 3
+        store
+            .append("s1", entry("cp2", EntryKind::Checkpoint))
+            .await;
+
+        let (all, hw) = store
+            .get_incoming_after_with_high_water("s1", 0)
+            .await
+            .unwrap();
+        assert_eq!(hw, 3);
+        let got: Vec<(u64, &str)> = all
+            .iter()
+            .map(|(o, e)| (*o, e.message_id.as_str()))
+            .collect();
+        assert_eq!(got, vec![(1, "m1"), (2, "m2"), (3, "m3")]);
+        // Same entries as the wrapper.
+        let plain = store.get_incoming_after("s1", 0).await.unwrap();
+        assert_eq!(plain.len(), all.len());
+
+        let (tail, hw) = store
+            .get_incoming_after_with_high_water("s1", 2)
+            .await
+            .unwrap();
+        assert_eq!((tail.len(), tail[0].0, hw), (1, 3, 3));
+        // after_sequence beyond the count: nothing to replay, high water kept.
+        let (none, hw) = store
+            .get_incoming_after_with_high_water("s1", 10)
+            .await
+            .unwrap();
+        assert!(none.is_empty());
+        assert_eq!(hw, 3);
+
+        // A compaction base: ordinals and the high water continue from it,
+        // and a resume below it is Err(base).
+        let mut cp = entry("cp", EntryKind::Checkpoint);
+        cp.compacted_incoming_ordinals = 5;
+        store.create_session_log("s2").await;
+        store.append("s2", cp).await;
+        store.append("s2", entry("i", EntryKind::Internal)).await;
+        store.append("s2", entry("m6", EntryKind::Incoming)).await;
+        let (rest, hw) = store
+            .get_incoming_after_with_high_water("s2", 5)
+            .await
+            .unwrap();
+        assert_eq!((rest[0].0, hw), (6, 6));
+        assert!(matches!(
+            store.get_incoming_after_with_high_water("s2", 4).await,
+            Err(5)
+        ));
+        // Terminal compaction leaves only the checkpoint: high water = base.
+        let mut only = entry("cp", EntryKind::Checkpoint);
+        only.compacted_incoming_ordinals = 9;
+        store.replace_session_log("s3", vec![only]).await;
+        assert_eq!(
+            store
+                .get_incoming_after_with_high_water("s3", 9)
+                .await
+                .unwrap()
+                .1,
+            9
+        );
+
+        let (unknown, hw) = store
+            .get_incoming_after_with_high_water("nope", 0)
+            .await
+            .unwrap();
+        assert!(unknown.is_empty());
+        assert_eq!(hw, 0);
     }
 }

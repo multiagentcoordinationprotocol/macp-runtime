@@ -279,3 +279,116 @@ async fn stream_request_with_both_envelope_and_subscribe_is_rejected() {
     let status = result.expect_err("expected InvalidArgument status");
     assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
 }
+
+/// RFC-MACP-0006 §3.2: a resume below the compacted base is refused as a
+/// terminal gRPC status, FAILED_PRECONDITION with `macp-error-code:
+/// HISTORY_UNAVAILABLE` and `macp-error-details-bin` =
+/// `{"lowest_available_sequence":N}`. Compaction needs a persistent backend
+/// (the memory backend skips it), so this test runs its own server.
+#[tokio::test]
+async fn subscribe_below_compacted_base_ends_stream_with_history_unavailable() {
+    const BUYER: &str = "agent://buyer";
+    const SELLER: &str = "agent://seller";
+    let binary =
+        std::env::var("MACP_TEST_BINARY").unwrap_or_else(|_| "../target/debug/macp-runtime".into());
+    let data_dir = tempfile::tempdir().expect("tempdir");
+    let data_dir_str = data_dir.path().to_string_lossy().to_string();
+    let manager = macp_integration_tests::server_manager::ServerManager::start_with_env(
+        &binary,
+        &[
+            ("MACP_MEMORY_ONLY", "0"),
+            ("MACP_DATA_DIR", data_dir_str.as_str()),
+        ],
+    )
+    .await
+    .expect("server must start");
+    let mut client = MacpRuntimeServiceClient::connect(manager.endpoint.clone())
+        .await
+        .expect("connect");
+
+    // SessionStart(1) → Proposal(2) → Accept(3) → Accept(4) → Commitment(5):
+    // resolving compacts the log to a checkpoint whose base is 5.
+    let sid = new_session_id();
+    let steps = [
+        (
+            BUYER,
+            "SessionStart",
+            session_start_payload("buy", &[BUYER, SELLER], 300_000),
+        ),
+        (
+            SELLER,
+            "Proposal",
+            proposal_mode_payload("p1", "offer", "terms"),
+        ),
+        (SELLER, "Accept", accept_proposal_payload("p1", "ok")),
+        (BUYER, "Accept", accept_proposal_payload("p1", "ok")),
+        (
+            BUYER,
+            "Commitment",
+            commitment_payload("c1", "proposal.accepted", "commercial", "bound", true),
+        ),
+    ];
+    for (sender, message_type, payload) in steps {
+        let ack = send_as(
+            &mut client,
+            sender,
+            envelope(
+                MODE_PROPOSAL,
+                message_type,
+                &new_message_id(),
+                &sid,
+                sender,
+                payload,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(ack.ok, "{message_type}: {:?}", ack.error);
+    }
+
+    let (tx, mut stream) = open_stream(&mut client, BUYER).await;
+    tx.send(subscribe_frame(&sid, 0))
+        .await
+        .expect("send subscribe");
+    let status = tokio::time::timeout(Duration::from_secs(2), stream.message())
+        .await
+        .expect("timed out waiting for termination")
+        .expect_err("a compacted resume must end the stream with a status");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{status:?}");
+    assert_eq!(
+        status
+            .metadata()
+            .get("macp-error-code")
+            .and_then(|v| v.to_str().ok()),
+        Some("HISTORY_UNAVAILABLE")
+    );
+    let details = status
+        .metadata()
+        .get_bin("macp-error-details-bin")
+        .expect("details present")
+        .to_bytes()
+        .expect("valid base64");
+    assert_eq!(&details[..], br#"{"lowest_available_sequence":5}"#);
+    assert!(
+        status
+            .message()
+            .contains("session history before ordinal 5 was compacted;"),
+        "{}",
+        status.message()
+    );
+    drop(tx);
+
+    // At the base, the resume is served: nothing to replay, and the stream
+    // stays open rather than failing.
+    let (tx, mut stream) = open_stream(&mut client, BUYER).await;
+    tx.send(subscribe_frame(&sid, 5))
+        .await
+        .expect("send subscribe");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), stream.message())
+            .await
+            .is_err(),
+        "a resume at the compacted base must not fail the stream"
+    );
+    drop(tx);
+}
