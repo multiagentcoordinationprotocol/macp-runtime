@@ -6,6 +6,14 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.12.1...macp-runtime-v0.13.0) - 2026-11-01
+
+### Other
+
+- *(release-plz)* allow a manual dispatch on main ([#283](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/283))
+- *(deps)* [**breaking**] upgrade opentelemetry 0.33, tower-http 0.7, rcgen 0.14 ([#273](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/273))
+- *(release)* re-enable semver_check for macp-runtime and macp-cli ([#282](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/282))
+
 ## [0.12.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.12.0...macp-runtime-v0.12.1) - 2026-11-01
 
 ### Other
