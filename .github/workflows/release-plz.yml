@@ -6,7 +6,7 @@ on:
   # Recovery path. A merge pushed with the default GITHUB_TOKEN (macp-ci's
   # shared auto-merge on Dependabot PRs: #273, #276) starts no workflow runs,
   # so release-plz never sees that commit. Dispatch this on main to recompute
-  # the release PR.
+  # the release PR (a dispatch runs `release-pr` only; see the step below).
   workflow_dispatch:
 
 permissions:
@@ -75,6 +75,12 @@ jobs:
 
       - uses: MarcoIeni/release-plz-action@f67a7e724bdad4a0f6875f186060a0ca2770d76c # v0.5.147
         id: release-plz
+        with:
+          # A dispatch only recomputes the release PR, never cuts a release:
+          # docker.yml, called below, cannot build a release image from a
+          # dispatched caller (it sees event_name=workflow_dispatch with a
+          # version but no ref and refuses). Empty = both commands, as on push.
+          command: ${{ github.event_name == 'workflow_dispatch' && 'release-pr' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
