@@ -6,6 +6,21 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.11.0...macp-runtime-v0.12.0) - 2026-11-01
+
+### Added
+
+- *(http)* HTTP/JSON binding (RFC-MACP-0006 §4) — PR B ([#275](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/275))
+- *(otel)* OpenTelemetry spans, semconv metrics and durable session anchor (R2) ([#268](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/268))
+
+### Fixed
+
+- *(stream)* [**breaking**] R4 PR A — spec re-pin, gRPC HISTORY_UNAVAILABLE on compacted resume, SIGTERM drain, shared server seams ([#269](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/269))
+
+### Other
+
+- *(deps)* bump rust ([#270](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/270))
+
 ## [0.11.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.10.1...macp-runtime-v0.11.0) - 2026-10-30
 
 ### Added
