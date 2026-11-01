@@ -66,24 +66,16 @@ version_group = "macp"
 [[package]]
 name = "macp-cli"
 version_group = "macp"
-# No semver baseline either, for the same reason as macp-runtime below: the
-# published macp-cli depends on macp-runtime, whose build.rs regenerates the
-# service trait from the newest macp-proto 0.1.x. macp-proto 0.1.13 added the
-# receipt RPCs, so building the 0.10.1 baseline fails (E0046), and release-plz
-# cannot compute the 0.11.0 release PR. MIGRATING.md lists macp-cli's breaks.
-semver_check = false
 [[package]]
 name = "macp-runtime"
 version_group = "macp"
 # The one GitHub Release per version rides the umbrella crate's tag
 # (`macp-runtime-v{version}`).
 git_release_enable = true
-# No semver baseline for the umbrella crate: the published 0.9.0 no longer
-# builds. Its build.rs generates the `macp.v1` service trait from whatever
-# `macp-proto` 0.1.x resolves to, and macp-proto 0.1.12 added `WhatIfReplay`,
-# which 0.9.0's server does not implement (E0046). cargo-semver-checks builds the
-# baseline without our lockfile, so every release-plz run after #248 failed and
-# the release PR went stale. The library crates above keep the check, and so
-# does ci.yml's "Semver (embeddable crates)" job. Re-enable once the newest
-# published macp-runtime builds against the current macp-proto.
-semver_check = false
+# semver_check is back on (inherited from [workspace]) for this crate and
+# macp-cli. build.rs generates the `macp.v1` service trait from whatever
+# `macp-proto` 0.1.x resolves to, so an RPC added in a 0.1.x patch broke the
+# published baseline (E0046; #253) and the check had to be off. The spec repo
+# now ships any RPC addition, removal or change as a minor bump (spec
+# VERSIONING.md §8, spec #255), which our caret 0.1.x requirement never
+# resolves to, so the baseline stays buildable.

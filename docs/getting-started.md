@@ -43,6 +43,8 @@ cd macp-runtime
 cargo build
 ```
 
+To install a published release from crates.io, use `cargo install --locked macp-runtime`. Without `--locked`, runtime 0.10.x and older fail to build (`E0046`): they resolve the newest `macp-proto` 0.1.x, which has RPCs added after their release that they don't implement: `WhatIfReplay` (0.1.12) and the receipt RPCs (0.1.13) for 0.9.x and older, and the receipt RPCs for 0.10.x. Any future `macp-proto` release that adds, removes or changes an RPC is a minor bump (0.2.0; spec `VERSIONING.md` §8), which a `0.1.x` requirement never resolves to, so 0.11 and later stay buildable.
+
 ### Starting a development server
 
 For local development, disable TLS and skip configuring tokens. With no auth resolvers configured, the runtime falls back to dev-mode auth:
