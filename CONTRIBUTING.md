@@ -30,6 +30,12 @@ cargo test -p macp-storage --features rocksdb-backend
 MACP_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test -p macp-storage --features redis-backend
 ```
 
+**For MACP org members only:** agents working in this repo can query the MACP
+knowledge base through the `macp-kb` MCP server. Setup is in the private
+`macp-docs` repo (README, "MCP server"). Answers cite the source repo and
+commit, so check freshness with `kb_status` before relying on one. Outside
+contributors can ignore this.
+
 ## Ground rules
 
 - **Read `CLAUDE.md`** for the architecture, layering invariants (enforced by
