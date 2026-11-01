@@ -368,8 +368,10 @@ jobs:
         # and pass a real leak.
         run: |
           set -euo pipefail
-          # ctree ARGS...: the cargo tree output with "(*)"/"(proc-macro)" notes stripped.
-          ctree() { local out; out=$(cargo tree "$@") || return 1; printf '%s\n' "$out" | sed 's/ ([^)]*)//'; }
+          # ctree ARGS...: the cargo tree output with "(*)"/"(proc-macro)" notes stripped,
+          # uncoloured (CI sets CARGO_TERM_COLOR=always, and the escape codes
+          # around the tree glyphs would defeat the anchored patterns below).
+          ctree() { local out; out=$(cargo tree --color never "$@") || return 1; printf '%s\n' "$out" | sed 's/ ([^)]*)//'; }
           for crate in macp-core macp-modes macp-pb macp-policy; do
             deps=$(ctree -p "$crate" --edges normal --all-features)
             if grep -qE "(prost-reflect|hyper-util|tokio-rustls) v" <<<"$deps"; then
