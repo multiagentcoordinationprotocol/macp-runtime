@@ -3,6 +3,11 @@ name: release-plz
 on:
   push:
     branches: [main]
+  # Recovery path. A merge pushed with the default GITHUB_TOKEN (macp-ci's
+  # shared auto-merge on Dependabot PRs: #273, #276) starts no workflow runs,
+  # so release-plz never sees that commit. Dispatch this on main to recompute
+  # the release PR.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -30,7 +35,8 @@ jobs:
   release-plz:
     name: release-plz
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'multiagentcoordinationprotocol' }}
+    # Main only: a dispatch can name any branch, and this job tags and releases.
+    if: ${{ github.repository_owner == 'multiagentcoordinationprotocol' && github.ref == 'refs/heads/main' }}
     outputs:
       releases_created: ${{ steps.release-plz.outputs.releases_created }}
       # `prs_created` and `pr` feed sync-integration-lock below. `pr` is a JSON
