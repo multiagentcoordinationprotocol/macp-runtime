@@ -639,7 +639,7 @@ mod listener {
         let cert = scratch.path().join("cert.pem");
         let key = scratch.path().join("key.pem");
         std::fs::write(&cert, ck.cert.pem()).unwrap();
-        std::fs::write(&key, ck.key_pair.serialize_pem()).unwrap();
+        std::fs::write(&key, ck.signing_key.serialize_pem()).unwrap();
         let cert_der = ck.cert.der().clone();
 
         let Launched {

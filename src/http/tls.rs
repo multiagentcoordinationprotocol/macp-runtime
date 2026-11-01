@@ -68,7 +68,7 @@ mod tests {
         let cert = dir.join("cert.pem");
         let key = dir.join("key.pem");
         std::fs::write(&cert, ck.cert.pem()).unwrap();
-        std::fs::write(&key, ck.key_pair.serialize_pem()).unwrap();
+        std::fs::write(&key, ck.signing_key.serialize_pem()).unwrap();
         (cert, key)
     }
 
@@ -79,7 +79,7 @@ mod tests {
         let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let config = server_config(
             vec![ck.cert.der().clone()],
-            PrivateKeyDer::Pkcs8(ck.key_pair.serialize_der().into()),
+            PrivateKeyDer::Pkcs8(ck.signing_key.serialize_der().into()),
         )
         .unwrap();
         assert_eq!(

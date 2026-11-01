@@ -86,7 +86,7 @@ pub fn resource(env: &impl Fn(&str) -> Option<String>) -> Resource {
 }
 
 /// `key1=value1,key2=value2`, parsed exactly as the SDK's
-/// `EnvResourceDetector` does (`opentelemetry_sdk-0.32.1/src/resource/env.rs`,
+/// `EnvResourceDetector` does (`opentelemetry_sdk-0.33.1/src/resource/env.rs`,
 /// `construct_otel_resources`). Re-implemented only so [`resource`] reads the
 /// injected `env` rather than the process environment.
 fn parse_resource_attributes(s: &str) -> Vec<KeyValue> {
@@ -153,7 +153,7 @@ pub fn export_config(
     }
     let signal = |name: &str| -> Result<SignalExport, String> {
         let specific = format!("OTEL_EXPORTER_OTLP_{name}_ENDPOINT");
-        // The exporter's own precedence (`opentelemetry-otlp-0.32.0`
+        // The exporter's own precedence (`opentelemetry-otlp-0.33.1`
         // `exporter/tonic/mod.rs`, `resolve_endpoint`): the signal-specific
         // variable, then the generic one. The generic one is used as-is for
         // gRPC (no `/v1/<signal>` suffix). No built-in default: activation
@@ -227,7 +227,7 @@ fn redact_userinfo(endpoint: &str) -> String {
 /// (`OTEL_EXPORTER_OTLP_CERTIFICATE`), that CA is the **only** trust anchor,
 /// which is the OTel spec's meaning of "the trusted certificate" and works on
 /// a host with no native root store. Without one, the TLS config asks for the
-/// native roots (`with_enabled_roots`); otlp 0.32 would otherwise build a
+/// native roots (`with_enabled_roots`); otlp 0.33 would otherwise build a
 /// bare `ClientTlsConfig::new()` that trusts nothing. Must run inside a tokio
 /// runtime (the tonic channel is built with `connect_lazy`).
 pub fn build_tracer_provider(
@@ -381,7 +381,7 @@ impl Guard {
         let meter = async {
             if let Some(provider) = self.meter_provider {
                 // `SdkMeterProvider::shutdown_with_timeout` ignores its timeout
-                // (opentelemetry_sdk 0.32.1 `metrics/meter_provider.rs:113`);
+                // (opentelemetry_sdk 0.33.1 `metrics/meter_provider.rs:113`);
                 // the thread bound in `shutdown_bounded` is what holds.
                 shutdown_bounded("meter", move || provider.shutdown()).await;
             }

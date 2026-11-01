@@ -14,6 +14,22 @@ Every release that may break an embeddable crate has an entry here, under a
 introduces a breaking API change must add it, and a release PR with a breaking
 bump fails without it. Patch releases have no entry.
 
+## 0.13.0 — OpenTelemetry 0.33 and tower-http 0.7 under `otel`
+
+The embeddable crates (`macp-core`, `macp-modes`, `macp-policy`, `macp-pb`) have
+no API change. Lockstep versioning moves them to 0.13.0 anyway: the minor bump
+comes from `macp-runtime` alone.
+
+- With the `otel` feature, public `macp_runtime::telemetry` signatures now use
+  `opentelemetry` / `opentelemetry_sdk` 0.33 and `tower-http` 0.7 types. That
+  covers `build_tracer_provider`, `build_meter_provider`, `otel_layer`,
+  `Instruments::new`, `ProcessSpan::link_anchor` and the gRPC `ServerLayer`
+  family. Callers of these must use the same majors. Without `otel`, nothing
+  changes.
+- `opentelemetry-otlp` 0.33 retries OTLP/gRPC exports by default, so an
+  unreachable collector now gets retried before an export is dropped. Shutdown
+  stays bounded at 5 seconds ([docs/deployment.md](docs/deployment.md)).
+
 ## 0.12.0 — gRPC compacted resume, spec re-pin, SIGTERM drain, HTTP/JSON binding
 
 ### gRPC wire (`macp-runtime` server)

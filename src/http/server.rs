@@ -1193,7 +1193,7 @@ mod tests {
             let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
             let (c, k) = (dir.path().join("c.pem"), dir.path().join("k.pem"));
             std::fs::write(&c, ck.cert.pem()).unwrap();
-            std::fs::write(&k, ck.key_pair.serialize_pem()).unwrap();
+            std::fs::write(&k, ck.signing_key.serialize_pem()).unwrap();
             vars.push(("MACP_TLS_CERT_PATH".into(), c.display().to_string()));
             vars.push(("MACP_TLS_KEY_PATH".into(), k.display().to_string()));
             cert = Some(ck.cert.der().clone());
