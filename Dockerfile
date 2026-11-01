@@ -16,9 +16,12 @@ COPY src/ src/
 # benches/ is declared as a [[bench]] target in Cargo.toml; cargo refuses to
 # parse the manifest if the file is missing, even for a release build.
 COPY benches/ benches/
-# Optional Cargo features, e.g. `--build-arg CARGO_FEATURES=otel` for the
-# OpenTelemetry export path. Empty (the default) builds the plain binary.
-ARG CARGO_FEATURES=""
+# Cargo features. The default matches the published image (docker.yml):
+# `otel` (OpenTelemetry export, inert until an OTEL_EXPORTER_OTLP_* endpoint
+# is set) and `http-listener` (the HTTP/JSON binding, which opens no socket
+# until MACP_HTTP_BIND_ADDR is set). `--build-arg CARGO_FEATURES=` builds the
+# plain binary.
+ARG CARGO_FEATURES="otel,http-listener"
 RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"}
 
 # Stage 2: Minimal runtime image
@@ -45,6 +48,8 @@ ENV MACP_BIND_ADDR=0.0.0.0:50051
 #   docker run -e MACP_ALLOW_INSECURE=1 ...   (local development only)
 ENV MACP_DATA_DIR=/home/macp/.macp-data
 
-EXPOSE 50051
+# 8080 is the conventional port of the optional HTTP listener; nothing
+# listens there unless MACP_HTTP_BIND_ADDR is set (e.g. 0.0.0.0:8080).
+EXPOSE 50051 8080
 
 ENTRYPOINT ["macp-entrypoint"]

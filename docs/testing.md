@@ -139,7 +139,7 @@ The policy engine has dedicated coverage across multiple test layers:
 
 ## CI/CD
 
-Every pull request runs the full gate in `.github/workflows/ci.yml`: MSRV check (1.89.0), fmt, clippy, rustdoc (`-D warnings`), unit + conformance + policy tests, release build, crate dependency-isolation checks, a blocking `cargo audit` (ignore list in `.cargo/audit.toml`), feature-gated builds and tests for the rocksdb/redis/otel features (including backend smoke tests through the real gRPC binary against rocksdb and a live redis service), the Tier 1 + Tier 2 integration suites, the conformance oracle against the spec repo's canonical fixtures, and a build-only Docker gate. Coverage uploads to Codecov as advisory. All jobs run on the toolchain pinned in `rust-toolchain.toml`; a weekly scheduled audit (`scheduled-audit.yml`) catches new RUSTSEC advisories between PRs.
+Every pull request runs the full gate in `.github/workflows/ci.yml`: MSRV check (1.89.0), fmt, clippy, rustdoc (`-D warnings`), unit + conformance + policy tests, release build, crate dependency-isolation checks, a blocking `cargo audit` (ignore list in `.cargo/audit.toml`), feature-gated builds and tests for the rocksdb/redis/otel features (including backend smoke tests through the real gRPC binary against rocksdb and a live redis service), the Tier 1 + Tier 2 integration suites, the conformance oracle against the spec repo's canonical fixtures, `macp-conform` over gRPC and HTTP, and a Docker gate that builds the image and smoke-tests the HTTP listener off and on. Coverage uploads to Codecov as advisory. All jobs run on the toolchain pinned in `rust-toolchain.toml`; a weekly scheduled audit (`scheduled-audit.yml`) catches new RUSTSEC advisories between PRs.
 
 The `features` job runs `cargo test -p macp-runtime --features otel` as well as clippy, so the `otel` feature is tested, not only compiled. The vendored OpenTelemetry semantic conventions (`tests/otel/macp-semconv.json`, see `tests/otel/SOURCE.md`) are drift-checked by the conformance oracle and pinned to the runtime's span and metric set by `cargo test --test otel_semconv`.
 
@@ -161,6 +161,22 @@ The `otel` feature is tested in the root crate, not in `integration_tests/`. Run
 Activation, resource, endpoint/protocol/certificate resolution, label folding and the anchor record format are unit tests in `src/telemetry/`.
 
 The `macp-storage` anchor contract (`store_trace_anchor`/`load_trace_anchor`/`sweep_orphan_trace_anchors`) is unit-tested per backend in `crates/macp-storage/src/storage/`; the RocksDB tests need `cargo test -p macp-storage --features rocksdb-backend`.
+
+### HTTP/JSON binding tests
+
+The `http-listener` feature is tested in the root crate. `cargo test -p macp-runtime --features http-listener` runs the unit tests in `src/http/` and the files below; the `features` job's "Test http-listener feature" step runs exactly that, and "Test http-listener with otel" adds the dispatch-table pin and `tests/otel_http.rs` (`cargo test -p macp-runtime --features otel,http-listener --test otel_http`).
+
+| File | Covers |
+|------|--------|
+| `tests/http_json.rs` | The canonical JSON codec (RFC-MACP-0001 §10): the vendored examples round-trip, canonical bytes, number rules |
+| `tests/http_binary.rs` | The real binary: no extra socket and a byte-identical `GetManifest` without `MACP_HTTP_BIND_ADDR`, configuration errors, TLS, shared shutdown |
+| `tests/http_unary.rs` | Unary RPCs and `Send`'s in-band Ack, status mapping, golden parity with gRPC, the vendored `send.json`/`errors.json` exchanges |
+| `tests/http_sse.rs` | SSE streams: `Last-Event-ID` resume, framing, keepalive, how each stream ends, lag, the vendored subscribe/`WatchSignals` exchanges |
+| `tests/http_cors_discovery.rs` | CORS preflight and actual-response headers; `/.well-known/macp.json` |
+| `tests/otel_http.rs` | The HTTP SERVER span and `http.server.request.duration` (`otel,http-listener`) |
+| `tests/conformance_http.rs` | The conformance fixtures through `macp-conform`'s `HttpTarget`, with outcomes equal to the gRPC target's |
+
+Two more checks run in CI against built artifacts. The `conform-cli` job runs `macp-conform --transport http` against a local binary, and then `scripts/check-http-examples.sh`, which executes every marked curl example in [Examples](examples.md#httpjson-binding-curl) against that binary and fails on any unexpected status or output (run it locally after `cargo build -p macp-runtime --features http-listener`). The `docker-build` job runs the image it builds twice: without `MACP_HTTP_*` it must listen on 50051 only, and with `MACP_HTTP_BIND_ADDR=0.0.0.0:8080` `GetManifest` over HTTP must answer `200`.
 
 The HTTP/JSON binding artifacts in `tests/http/` (the spec's `examples/http/*.json`, `macp-http-error.schema.json` and its `invalid-http-errors/` negative fixtures, see `tests/http/SOURCE.md`) are vendored byte-identically and drift-checked by the conformance oracle (`check_dir` for the two directories, `check_file` for the schema).
 

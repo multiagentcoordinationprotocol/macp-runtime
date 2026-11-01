@@ -27,6 +27,8 @@ This release adds OpenTelemetry traces and metrics (`macp-semconv/0.1`, experime
 7. **A telemetry misconfiguration never stops the runtime.** An unsupported `OTEL_EXPORTER_OTLP_PROTOCOL` (anything but `grpc`, including the `_TRACES_`/`_METRICS_` variants), an unreadable `OTEL_EXPORTER_OTLP_CERTIFICATE` (or a per-signal variant), or an invalid endpoint logs one `ERROR` line naming the variable and leaves telemetry off; the runtime serves normally.
 8. **A `StreamSession` resume below the compacted base now ends the stream** (RFC-MACP-0006 §3.2), with gRPC `FAILED_PRECONDITION`, `macp-error-code: HISTORY_UNAVAILABLE` and `macp-error-details-bin` = `{"lowest_available_sequence":N}`. It was an inline `INVALID_ENVELOPE` frame on a stream left open. The status message keeps the sentence `session history before ordinal N was compacted; ...`, so a client matching that text on a terminal error keeps working; a client that waited for the inline frame must now handle the status and resume on a new stream. Separately, an installed ingress policy engine's `PERMISSION_DENIED` now carries `macp-error-code: FORBIDDEN` (gRPC code unchanged).
 9. **SIGTERM now drains, as SIGINT always did.** The runtime used to drain only on SIGINT (ctrl-c); SIGTERM, which `docker stop` and Kubernetes send, killed it at once with no drain and no final session snapshot. Both signals now stop new connections, close the `MACP_METRICS_ADDR` port, let in-flight requests finish for up to `MACP_SHUTDOWN_DRAIN_SECS` (default 10), persist sessions and exit 0. A second signal during the drain exits at once (code 130 for SIGINT, 143 for SIGTERM) without the snapshot. This applies to gRPC-only deployments too: set Kubernetes `terminationGracePeriodSeconds` (or `docker stop -t`) **above** `MACP_SHUTDOWN_DRAIN_SECS`, plus 5 seconds with telemetry on, or the platform's SIGKILL cuts the drain short. See [Graceful shutdown](#graceful-shutdown).
+10. **An opt-in HTTP/JSON listener** (RFC-MACP-0006 §4), compiled with the `http-listener` Cargo feature and included in images published after `0.11.0`. Nothing changes unless `MACP_HTTP_BIND_ADDR` is set: no socket, no task, no log line, and `GetManifest` is byte-identical. A binary built without the feature refuses to start when `MACP_HTTP_BIND_ADDR` is set, rather than ignoring it. See [HTTP/JSON listener](#httpjson-listener).
+11. **`WatchPolicies` requires a credential** (#274), like `ListPolicies`/`GetPolicy`; an unauthenticated call is refused with `UNAUTHENTICATED` before the stream opens.
 
 ## Upgrading to 0.11.0
 
@@ -363,6 +365,35 @@ Notes:
 - **Logs are unchanged.** `RUST_LOG` governs logging only: it can neither silence telemetry spans nor add them to log lines, and no log event (including any `reason` text) is exported as telemetry.
 - **An unreachable collector is not fatal.** Exports fail in the background, the OpenTelemetry SDK's own warnings reach the log subject to `RUST_LOG`, and shutdown waits at most 5 seconds for the final flush. That 5-second cap comes **after** the `MACP_SHUTDOWN_DRAIN_SECS` drain (and the final session snapshot), so the worst-case exit time with telemetry on is the drain deadline plus 5 seconds.
 
+### HTTP/JSON listener
+
+These variables take effect **only in a binary built with the `http-listener` Cargo feature** (`cargo build --features http-listener`); images published after `0.11.0` include it (see [Container deployment](#container-deployment)). The listener is a second port beside gRPC, serving the same RPCs as HTTP/JSON with server-sent events; the wire format is in [API: HTTP/JSON binding](API.md#httpjson-binding).
+
+The listener starts **only when `MACP_HTTP_BIND_ADDR` is set** to a non-empty value. Unset (or empty), no socket is opened, no task runs, nothing is logged, and no other `MACP_HTTP_*` variable is read. Set, every `MACP_HTTP_*` variable is validated before anything binds, and every error is reported at once, prefixed with its variable name, and aborts startup. A binary built without the feature refuses to start when `MACP_HTTP_BIND_ADDR` is set, so the setting is never silently ignored.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MACP_HTTP_BIND_ADDR` | -- (listener off) | Socket address of the HTTP listener, e.g. `0.0.0.0:8080`. Must not collide with `MACP_BIND_ADDR` (same port with the same IP, or either side unspecified); port `0` never collides |
+| `MACP_HTTP_PUBLIC_URL` | -- | The binding's public base URL (RFC-MACP-0006 §4.1 `{base}`), e.g. `https://macp.example.com/api`: absolute, no trailing slash, no query or fragment, no userinfo, `https` unless `MACP_ALLOW_INSECURE=1`. Its path is the route prefix (`{prefix}/macp/v1/{Method}`; `/macp/v1/{Method}` is served too). When set, `GetManifest` and `/.well-known/macp.json` advertise it as the `macp.transport.http.v1` endpoint |
+| `MACP_HTTP_CORS_ORIGINS` | empty (closed) | Comma-separated browser origins allowed cross-origin, each `scheme://host[:port]` (`http` or `https`). `*`, a path and an empty entry are refused; a trailing `/` and a default port (`:443`, `:80`) are dropped, and scheme and host are lowercased |
+| `MACP_HTTP_MAX_BODY_BYTES` | `ceil(4/3 × MACP_MAX_PAYLOAD_BYTES) + 65536` (1,463,638 at the default payload limit) | Request body cap; a larger body is `413 PAYLOAD_TOO_LARGE`. A value below the default is refused, so a base64 payload at the payload limit always reaches the payload check |
+| `MACP_HTTP_MAX_CONNECTIONS` | `1024` | Concurrent connections the listener admits; at the bound new connections wait in the kernel backlog |
+
+The listener **reuses** these gRPC settings, parsed exactly as the gRPC listener parses them: `MACP_TLS_CERT_PATH`/`MACP_TLS_KEY_PATH` (one identity for both ports), `MACP_ALLOW_INSECURE`, `MACP_MAX_PAYLOAD_BYTES` (checked in band, in the `Send` Ack), `MACP_REQUEST_TIMEOUT_SECS` (bounds producing a response head; an SSE stream's events flow after it and are not bounded), `MACP_MAX_CONCURRENT_STREAMS` (the HTTP/2 stream bound) and `MACP_SHUTDOWN_DRAIN_SECS` (one drain for both listeners). Authentication and the per-sender rate limits are the same objects on both bindings, so a sender's buckets are shared, not doubled.
+
+**TLS.** With both PEM paths set, the listener serves TLS (rustls) and offers ALPN `h2` then `http/1.1`: a client that negotiates `h2` gets HTTP/2, anything else (including no ALPN) gets HTTP/1.1. Without TLS the listener refuses to start unless `MACP_ALLOW_INSECURE=1`, and then serves HTTP/1.1 and prior-knowledge HTTP/2 in the clear and logs a warning. Connections that send nothing are dropped: 10 s for the TLS handshake and for the first bytes, 10 s to read an HTTP/1.1 request head (also between keep-alive requests), and an HTTP/2 keep-alive PING every 30 s that must be answered within 20 s. These deadlines are fixed.
+
+**CORS.** Closed unless `MACP_HTTP_CORS_ORIGINS` lists origins. Every `OPTIONS` is a preflight answered `204`; only a listed origin gets `Access-Control-Allow-*` headers. Credentials mode is never allowed (the binding uses `Authorization`, never cookies). Details in [API: CORS](API.md#cors).
+
+**Behind a reverse proxy or load balancer:**
+
+- **Do not buffer `text/event-stream` responses.** The streaming RPCs (`StreamSession`, `Watch*`) answer with `Content-Type: text/event-stream` and `Cache-Control: no-store`, one event per message; a proxy that buffers the response delays every event until its buffer fills. On nginx set `proxy_buffering off;` (and `proxy_cache off;`) for the `/macp/v1/` location; on other proxies disable response buffering or compression for that content type.
+- **Set idle and read timeouts above 30 s.** An idle stream carries a `: keepalive` comment every 30 s, so a proxy idle timeout of 30 s or less cuts healthy streams; 60 s or more is safe (nginx `proxy_read_timeout` defaults to 60 s; check your load balancer's idle timeout).
+- **Pass `Last-Event-ID` through**, together with `Authorization`, `Content-Type`, `Accept`, `traceparent` and `tracestate`. A client resumes a subscribe stream with `Last-Event-ID`; a proxy that drops it makes every reconnect replay from the start of the session.
+- **Body size.** Allow request bodies up to `MACP_HTTP_MAX_BODY_BYTES` (nginx `client_max_body_size`), or a `Send` near the payload limit is refused by the proxy instead of answered by the runtime.
+- **Path prefix.** Mount the runtime under a prefix by setting `MACP_HTTP_PUBLIC_URL` to the public base; the proxy may forward the prefix or strip it, since both route shapes are served. `/.well-known/macp.json` is answered at the root of the listener whatever the prefix, so route it there if clients discover the runtime through it.
+- **Shutdown and failover.** When the runtime drains, open SSE streams end without an error event, as a lost connection, and clients reconnect with `Last-Event-ID` to another instance or after the restart.
+
 ### Governance policy files
 
 Validate a policies directory before you roll it out: `MACP_POLICIES_DRY_RUN=1 MACP_POLICIES_DIR=/etc/macp/policies macp-runtime` reports every file by name and exits `0`/`1` without starting the server. See [Policy](policy.md#validating-a-policies-directory-before-startup).
@@ -537,6 +568,8 @@ The runtime provides operational visibility through several mechanisms:
 
 **Tracing** (`otel` builds with telemetry on; see "OpenTelemetry" under Environment variables) -- Every `macp.v1.MACPRuntimeService` RPC gets one OpenTelemetry span of kind SERVER, named `macp.v1.MACPRuntimeService/{Method}` (a method the service does not define is named `_OTHER`), with the gRPC attributes `rpc.system=grpc`, `rpc.service`, `rpc.method` and `rpc.grpc.status_code`. Its parent is the caller's W3C `traceparent`/`tracestate`, read from **gRPC metadata only** (RFC-MACP-0006 §2.1), never from an Envelope; without a valid `traceparent` the span starts a new trace. The span status is ERROR only for `UNKNOWN`, `DEADLINE_EXCEEDED`, `UNIMPLEMENTED`, `INTERNAL`, `UNAVAILABLE` and `DATA_LOSS`, with the code name as its description (never the error message); `NOT_FOUND`, `INVALID_ARGUMENT`, `PERMISSION_DENIED` and the other codes are protocol outcomes and leave it unset. A streaming RPC's span lasts until its stream ends, so a long-lived `Watch*` stream is exported when the client disconnects (and is lost on a hard shutdown). Health checks and reflection get no span, and no peer address is recorded. A request that hits `MACP_REQUEST_TIMEOUT_SECS` before its response headers go out ends its span without `rpc.grpc.status_code` (tonic answers `CANCELLED`, outside the error set, and applies that timeout outside the tracing layer).
 
+**HTTP tracing and metrics** (`otel` builds with the `http-listener` feature and telemetry on) -- Every request the HTTP listener answers gets one span of kind SERVER, named `{method} {route}` per the OpenTelemetry HTTP semantic conventions (`POST /macp/v1/Send`; `GET /.well-known/macp.json`), or the method alone when no route matched (an `OPTIONS` preflight, a transport `404`); a method outside the RFC 9110 set is recorded as `_OTHER` and the span is named `HTTP`. Attributes: `http.request.method`, `http.route` (the RPC path **without** the `MACP_HTTP_PUBLIC_URL` prefix, only for a matched route), `url.scheme`, `network.protocol.version` and `http.response.status_code`, plus `error.type` (the status code) on a `5xx`. No header, token, body, query, client-supplied path or peer address is recorded. The span status is ERROR, with no description, only for a `5xx`; a `4xx` leaves it unset. Its parent is the request's `traceparent`/`tracestate` header, and the `process` span of a `Send` is its child. An SSE stream's span lasts as long as the stream. The same point records the histogram `http.server.request.duration` (unit `s`, bucket bounds 5 ms to 10 s) with `http.request.method`, `http.route`, `http.response.status_code`, `url.scheme` and, on a `5xx`, `error.type`; it is exported over OTLP only (it is not rendered on `/metrics`), and for a stream it measures the stream's lifetime.
+
 **Envelope processing spans** (`otel` builds with telemetry on) -- Every received Envelope gets one INTERNAL span covering receipt to the accept/reject decision, named `process {macp.mode.id}` (`process _OTHER` for a mode the runtime has not registered, bare `process` for an ambient Signal or Progress). On `Send` its parent is the RPC's SERVER span; on `StreamSession` every Envelope on a stream is a child of the stream-open SERVER span. The attributes are those of `span.macp.process` in the protocol's [OpenTelemetry semantic conventions](https://github.com/multiagentcoordinationprotocol/multiagentcoordinationprotocol/blob/main/docs/opentelemetry.md) (`macp-semconv/0.1`); `macp.mode.id` keeps the mode as received, and `macp.sender.id` is the **authenticated** sender, absent when the Envelope is refused before authentication. Privacy defaults: spans carry identifiers and types only -- never a payload, an extension value, a `reason`, or an error message. Every client-supplied string is cut to 256 bytes. A rejection records its registry code as `error.type` and outcome `rejected`, and leaves the span status unset; only an implementation failure (a storage failure, recorded as `INTERNAL_ERROR`) or a span that never reached a decision (a panic, or a client that disconnected mid-request) is ERROR, with `INTERNAL_ERROR` as the description. An Envelope-less `SendRequest`, a stream subscribe frame, and the handoff synthetic implicit accept (no Envelope is received) get no `process` span.
 
 **Envelope metrics** -- In **every** build, `/metrics` also renders the semconv Envelope families, after all the lines above: `macp_envelope_processed_total{macp_mode_id,macp_message_type,macp_envelope_outcome}` (a counter; `macp_envelope_outcome` is `accepted`, `duplicate` or `rejected`) and the histogram `macp_envelope_process_duration_seconds_{bucket,sum,count}` with the same labels and the bucket bounds 0.5 ms to 10 s. `macp_mode_id` is omitted for an ambient Signal or Progress. Neither family appears before the first Envelope. An `otel` build with metrics export on also exports them over OTLP as `macp.envelope.processed` and `macp.envelope.process.duration`, every `OTEL_METRIC_EXPORT_INTERVAL` (default 60 s). Labels cannot be grown by a client: a mode the runtime has not registered is recorded as `_OTHER` with message type `_OTHER`, a message type the mode's descriptor does not list is `_OTHER` (`Signal` and `Progress` are kept under every registered mode), and beyond 2,000 label sets new ones fold into `macp_mode_id="_OTHER",macp_message_type="_OTHER"`. No session, message or sender identifier is ever a label. Every received Envelope is counted, including those refused before the kernel (shape, authentication, rate limit) and those on `StreamSession`. `macp_messages_accepted_total` also counts the runtime's handoff synthetic implicit accepts, which `macp_envelope_processed_total` does not (no Envelope is received), so the two differ by that number; this is expected.
@@ -559,10 +592,11 @@ SIGINT (ctrl-c) and, on Unix, SIGTERM trigger the same graceful shutdown; non-Un
 
 1. The gRPC server stops accepting connections and drains: requests already in flight run to completion.
 2. The Prometheus listener (`MACP_METRICS_ADDR`) stops accepting at once and closes its port.
-3. A deadline of `MACP_SHUTDOWN_DRAIN_SECS` (default `10`) starts. Long-lived server streams (`StreamSession`, `WatchSessions`, `WatchSignals`, ...) never end by themselves, so with any open the runtime waits out the whole deadline, logs `drain deadline reached with connections still open; forcing shutdown` and stops anyway.
-4. Every in-memory session is persisted (unless `MACP_MEMORY_ONLY=1`), the OTLP providers flush for at most 5 seconds (`otel` builds with telemetry on), and the process exits 0.
+3. The HTTP listener, when `MACP_HTTP_BIND_ADDR` is set, stops accepting, closes its port and lets in-flight requests finish; its SSE streams end at once without an error event, so they never hold the drain open, and clients resume with `Last-Event-ID`.
+4. A deadline of `MACP_SHUTDOWN_DRAIN_SECS` (default `10`) starts. Long-lived gRPC server streams (`StreamSession`, `WatchSessions`, `WatchSignals`, ...) never end by themselves, so with any open the runtime waits out the whole deadline, logs `drain deadline reached with connections still open; forcing shutdown` and stops anyway.
+5. Every in-memory session is persisted (unless `MACP_MEMORY_ONLY=1`), the OTLP providers flush for at most 5 seconds (`otel` builds with telemetry on), and the process exits 0.
 
-A second SIGINT or SIGTERM during the drain exits immediately with `128 + signo` (130 or 143), skipping steps 3 and 4. The accepted history is already durable (every accepted message is appended before it is acknowledged), so only the final session snapshot is lost, and recovery rebuilds it from the log.
+A second SIGINT or SIGTERM during the drain exits immediately with `128 + signo` (130 or 143), skipping steps 4 and 5. The accepted history is already durable (every accepted message is appended before it is acknowledged), so only the final session snapshot is lost, and recovery rebuilds it from the log.
 
 Size the platform's grace period above the drain: Kubernetes `terminationGracePeriodSeconds` (default 30) or `docker stop -t` (default 10) must exceed `MACP_SHUTDOWN_DRAIN_SECS`, plus 5 seconds with telemetry on. With Docker's default of 10 seconds and the default drain of 10, an open stream lets SIGKILL arrive before the snapshot.
 
@@ -622,9 +656,10 @@ write access to the directory. A cluster that enforces `runAsNonRoot` must set
 
 #### OpenTelemetry in the image
 
-Images published after `0.11.0` are built with `--features otel`
-(`docker.yml` passes `--build-arg CARGO_FEATURES=otel`; so does the CI
-`docker-build` gate). The feature is inert until you configure it:
+Images published after `0.11.0` are built with `--features otel,http-listener`
+(the `Dockerfile` default; `docker.yml` and the CI `docker-build` gate pass
+`--build-arg CARGO_FEATURES=otel,http-listener` explicitly). The `otel`
+feature is inert until you configure it:
 
 - **Zero egress without `OTEL_*`.** With none of `OTEL_EXPORTER_OTLP_ENDPOINT`,
   `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
@@ -644,21 +679,45 @@ Images published after `0.11.0` are built with `--features otel`
   unpacked). With no `OTEL_*` variable set, median startup-to-SERVING moved by
   under 3 ms and idle memory by under 1 MiB, both within run-to-run noise.
 
-To build an image **without** the feature, build the repository's
-`Dockerfile` with the default (empty) build argument; to add it to a self-built
-image, pass it explicitly:
+#### HTTP/JSON listener in the image
+
+The `http-listener` feature is inert until `MACP_HTTP_BIND_ADDR` is set: the
+container listens on 50051 only, logs nothing about HTTP and answers exactly
+as an image without the feature. The CI `docker-build` gate checks both
+sides on every PR: without `MACP_HTTP_*` the container's only listening
+socket is 50051, and with `MACP_HTTP_BIND_ADDR=0.0.0.0:8080` `GetManifest`
+over HTTP answers `200`. To turn it on, bind inside the container and publish
+the port (the image `EXPOSE`s 8080 for this):
 
 ```bash
-docker build -t macp-runtime:plain .                                  # no otel
-docker build --build-arg CARGO_FEATURES=otel -t macp-runtime:otel .  # otel
+docker run -p 50051:50051 -p 8080:8080 \
+  -e MACP_HTTP_BIND_ADDR=0.0.0.0:8080 \
+  -e MACP_HTTP_PUBLIC_URL=https://macp.example.com \
+  -e MACP_AUTH_TOKENS_FILE=/etc/macp/tokens.json \
+  -e MACP_TLS_CERT_PATH=/etc/macp/tls.crt -e MACP_TLS_KEY_PATH=/etc/macp/tls.key \
+  -v ./secrets:/etc/macp -v macp-data:/home/macp/.macp-data \
+  ghcr.io/multiagentcoordinationprotocol/macp-runtime:<release after 0.11.0>
 ```
 
-`CARGO_FEATURES` is passed verbatim to `cargo build --release --features`.
+See [HTTP/JSON listener](#httpjson-listener) for the variables and the
+reverse-proxy notes.
+
+To build an image **without** either feature, pass an empty build argument;
+to pick features for a self-built image, pass them explicitly:
+
+```bash
+docker build -t macp-runtime .                                          # otel,http-listener (default)
+docker build --build-arg CARGO_FEATURES= -t macp-runtime:plain .        # neither
+docker build --build-arg CARGO_FEATURES=otel -t macp-runtime:otel .     # otel only
+```
+
+`CARGO_FEATURES` is passed verbatim to `cargo build --release --features`;
+empty builds the plain binary.
 
 When deploying in containers:
 
 - Mount a persistent volume at `MACP_DATA_DIR` so session logs survive container restarts.
-- Expose port 50051 (or the port configured via `MACP_BIND_ADDR`).
+- Expose port 50051 (or the port configured via `MACP_BIND_ADDR`), and the HTTP port when `MACP_HTTP_BIND_ADDR` is set.
 - Provide TLS certificates and auth tokens via mounted secrets.
 - Set `MACP_BIND_ADDR=0.0.0.0:50051` to accept connections from outside the container.
 
@@ -667,9 +726,11 @@ When deploying in containers:
 Every image is multi-arch (`linux/amd64`, `linux/arm64`) with SLSA provenance
 and an SBOM attached, built by `.github/workflows/docker.yml`. Every image
 published after `0.11.0`, release or branch build, is built with
-`--features otel` (inert until an `OTEL_EXPORTER_OTLP_*` endpoint is set; see
-[OpenTelemetry in the image](#opentelemetry-in-the-image)); `0.11.0` and
-earlier are plain builds. Every push to
+`--features otel,http-listener` (inert until an `OTEL_EXPORTER_OTLP_*`
+endpoint, respectively `MACP_HTTP_BIND_ADDR`, is set; see
+[OpenTelemetry in the image](#opentelemetry-in-the-image) and
+[HTTP/JSON listener in the image](#httpjson-listener-in-the-image)); `0.11.0`
+and earlier are plain builds. Every push to
 `main` (a "branch build") publishes three of these together, always pointing
 at the same digest; a release publishes the other two, also always sharing a
 digest with each other but never with a branch build's:

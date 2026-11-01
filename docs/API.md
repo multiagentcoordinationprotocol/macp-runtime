@@ -4,6 +4,8 @@ This is the reference for all 24 gRPC RPCs exposed by the MACP Runtime on `macp.
 
 Not every state transition a client observes comes from an RPC: [Background maintenance](#background-maintenance) covers the ones the runtime makes on its own timer.
 
+The same RPCs are also served as HTTP/JSON by a binary built with the `http-listener` feature when `MACP_HTTP_BIND_ADDR` is set: see [HTTP/JSON binding](#httpjson-binding).
+
 For protocol-level transport semantics, see the [protocol transports documentation](https://www.multiagentcoordinationprotocol.io/docs/transports).
 
 Driving sessions in-process instead, with no gRPC? The same acceptance and replay code is a library API: see [Embedding the coordination kernel](embedding.md).
@@ -454,3 +456,56 @@ The same five variables appear in [`README.md`](../README.md) and [`docs/deploym
 ### Page caps
 
 `MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE` and `MACP_LIST_SESSIONS_MAX_PAGE_SIZE` bound the size of a single [`ListSessions`](#listsessions) response. They are **not** rate limits: exceeding the cap is not an error and never returns `RATE_LIMITED` -- an over-large `page_size` is silently clamped, and the caller continues the traversal with `next_page_token`. A caller may page as fast as the message rate limit allows.
+
+## HTTP/JSON binding
+
+The HTTP/JSON transport binding of RFC-MACP-0006 §4 is a second surface over the same server: every RPC above runs the same handler, authentication, rate-limit buckets, payload limit and request timeout on both bindings. It is compiled only with the non-default `http-listener` Cargo feature (the published images after `0.11.0` include it) and starts only when `MACP_HTTP_BIND_ADDR` is set; unset, no socket is opened and nothing above changes. Configuration, TLS and proxy notes are in [Deployment: HTTP/JSON listener](deployment.md#httpjson-listener); runnable curl examples are in [Examples](examples.md#httpjson-binding-curl).
+
+### Requests
+
+Every RPC is `POST {prefix}/macp/v1/{Method}`, where `{Method}` is the `macp.v1.MACPRuntimeService` method name (`Send`, `GetSession`, `WatchSignals`, ...) and `{prefix}` is the path of `MACP_HTTP_PUBLIC_URL` (empty when it is unset or has no path). `/macp/v1/{Method}` is served as well, so a proxy that strips the prefix and one that does not both work.
+
+- **Body.** `Content-Type: application/json` (an optional `charset=utf-8` only), and the canonical JSON of the request message (RFC-MACP-0001 §10): proto field names, `int64` as JSON numbers, `bytes` as standard base64, enums by name. An RPC with no request fields takes `{}`. An Envelope's `payload` is JSON when its `(mode, message_type)` has a schema, or `payload_b64` (the protobuf bytes, base64) otherwise.
+- **Credential.** `Authorization: Bearer <token>`, the same resolver chain as gRPC ([Authentication](#authentication)). The `x-macp-token` header is **not** honoured over HTTP, and no cookie is read. The RPCs open on gRPC (`Initialize`, `GetManifest`, `ListModes`, `ListRoots`, `ListExtModes`, `GetReceiptKeys`, `WatchModeRegistry`, `WatchRoots`) are open here too; every other RPC authenticates from the headers **before the body is read**.
+- **Trace context.** `traceparent` and `tracestate` are honoured per request; no other header reaches the handler.
+
+### Responses and status mapping
+
+| Outcome | Status | Body |
+|---------|--------|------|
+| Unary RPC succeeded | `200` | The response message, canonical JSON (`application/json`) |
+| `Send`, any per-Envelope decision | `200` | `{"ack": {...}}` -- accepted, duplicate **or refused**; read `ack.ok` and `ack.error` |
+| Request-level error | the registry status of its code (below) | `{"error": MACPError}`, plus a `MACP-Error-Code: <code>` header; a `401` also carries `WWW-Authenticate: Bearer` |
+| Unknown path or method name | `404` | none |
+| A method other than `POST` on an RPC path | `405`, `Allow: POST` | none |
+| `Content-Type` not `application/json` | `415` | none |
+| Stream RPC whose `Accept` excludes `text/event-stream` | `406` | none |
+
+**`Send` answers in band.** Once the credential is accepted and the body is a `SendRequest`, every decision about the Envelope -- a duplicate (`duplicate: true`), `INVALID_ENVELOPE`, `SESSION_NOT_OPEN`, `FORBIDDEN`, the per-sender `RATE_LIMITED`, a payload over `MACP_MAX_PAYLOAD_BYTES` -- is a `200` with the Ack, exactly the Ack gRPC returns (§4.4). Only these are request-level for `Send`: a missing or refused credential (`401`), a body over the body cap (`413 PAYLOAD_TOO_LARGE`), and a body that is not JSON, not an object, or has no `envelope` member (`400 INVALID_REQUEST`). Anything wrong *inside* `envelope` is in band.
+
+**Other RPCs** map a refusal through the error-codes registry (`macp_core::error::ERROR_CODE_REGISTRY`): `UNAUTHENTICATED` 401; `FORBIDDEN`, `POLICY_DENIED` 403; `SESSION_NOT_FOUND`, `UNKNOWN_POLICY_VERSION`, `AGENT_NOT_FOUND` 404; `SESSION_NOT_OPEN`, `DUPLICATE_MESSAGE`, `SESSION_ALREADY_EXISTS`, `REGISTRY_READ_ONLY`, `HISTORY_UNAVAILABLE`, `RECEIPT_UNAVAILABLE` 409; `PAYLOAD_TOO_LARGE` 413; `RATE_LIMITED` 429; the `INVALID_*` codes, `UNSUPPORTED_PROTOCOL_VERSION` and `MODE_NOT_SUPPORTED` 400; `STREAM_LAGGED` 503; `INTERNAL_ERROR` 500. The `details` member is the same bytes gRPC sends in `macp-error-details-bin`, base64. A request that exceeds `MACP_REQUEST_TIMEOUT_SECS` before its response head is `500 INTERNAL_ERROR` ("request timed out"); a `Send` may already have been applied, so retry with the same `message_id`.
+
+Precedence for a request with several faults: the header checks (`415` content type and, on a stream route, `406` `Accept`) come first, then `401` (credentials) before `413` (body cap) before `400` (decode) before the handler.
+
+### Server-sent event streams
+
+`StreamSession` and the five `Watch*` RPCs are `POST` requests answered with `Content-Type: text/event-stream` and `Cache-Control: no-store`:
+
+| RPC | HTTP form | Request body |
+|-----|-----------|--------------|
+| `StreamSession` | Passive subscribe only (no `envelope`; send Envelopes with `Send`) | `{"subscribe_session_id": "...", "after_sequence": N}` |
+| `WatchSessions`, `WatchSignals`, `WatchPolicies` | Authenticated watch | `{}` (or the request message's fields) |
+| `WatchModeRegistry`, `WatchRoots` | Open watch | `{}` |
+
+- **Framing.** One event per message: `data:` is the response message's canonical JSON on one line. Subscribe envelope events also carry `id:` = the Envelope's ordinal (RFC-MACP-0006 §3.2); watch events carry no `id:`. After 30 s without an event the runtime writes a `: keepalive` comment. No `retry:` field is sent.
+- **Resume.** Reconnect with `Last-Event-ID: <last id>` (or `after_sequence` in the body; when both are sent and `after_sequence` is non-zero they must agree). Replay resumes at the next ordinal, then live Envelopes follow on the same response.
+- **Refused before the stream** (request-level, no stream opened): `400 INVALID_REQUEST` (a body with an `envelope`, an empty `subscribe_session_id`, a malformed or disagreeing `Last-Event-ID`), `401`, `403 FORBIDDEN` (not the initiator, a participant or an observer), `404 SESSION_NOT_FOUND`, and `409 HISTORY_UNAVAILABLE` with `details` = `{"lowest_available_sequence":N}` for a resume below the compacted base.
+- **How a stream ends.** A subscribe to a resolved session ends normally after the Envelope that resolved it. A session that is cancelled or expires delivers no terminal Envelope, so the stream ends with one `event: error` whose `data:` is `{"error": ...}` with `SESSION_NOT_OPEN`. A client too slow to read gets `event: error` `STREAM_LAGGED`. On shutdown streams end with no error event, as a lost connection: resume elsewhere with `Last-Event-ID`. A stream is not bounded by the request timeout.
+
+### Discovery
+
+`GET /.well-known/macp.json` (and `HEAD`) answers `200` with the runtime's `AgentManifest` in canonical JSON, `Content-Type: application/macp-manifest+json`, with no credential, at the origin root whatever the prefix. Any other method is `405` (`Allow: GET, HEAD`). When `MACP_HTTP_PUBLIC_URL` is set, the manifest -- this document and `GetManifest` on both bindings -- lists a `transport_endpoints` entry `{"transport": "macp.transport.http.v1", "uri": <MACP_HTTP_PUBLIC_URL>, "content_types": ["application/json"]}`; without it the list is empty, as on a gRPC-only runtime.
+
+### CORS
+
+Closed by default. `MACP_HTTP_CORS_ORIGINS` lists the browser origins allowed cross-origin (§4.10). Every `OPTIONS` request is a preflight answered `204` before routing and authentication: from a listed origin it carries `Access-Control-Allow-Origin: <origin>`, `Access-Control-Allow-Methods: POST`, `Access-Control-Allow-Headers: Authorization, Content-Type, Last-Event-ID, traceparent, tracestate`, `Access-Control-Max-Age: 600` and `Vary: Origin`; from any other origin (or none, or `null`) it carries no `Access-Control-*` header, so the browser blocks the call. Every actual response to a listed origin, errors and streams included, carries `Access-Control-Allow-Origin` and `Access-Control-Expose-Headers: MACP-Error-Code`; with an allowlist configured every response carries `Vary: Origin`. `Access-Control-Allow-Credentials` is never sent.

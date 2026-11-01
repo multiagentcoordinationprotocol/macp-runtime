@@ -672,7 +672,7 @@ ship first.
   path, covered by P3/P5 tests instead).
 
 ### P11 — Docs, examples, image, release notes
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergences: CLAUDE.md is gitignored/untracked, so its edits are local only and the CI env-doc check covers docs/deployment.md; the image check is a shell smoke test in docker-build (no-HTTP: only 50051 listening; HTTP: GetManifest 200), not tests/http_binary.rs against the image; deploy/docker-compose.yml left at 0.10.0)
 - **Risk:** simple
 - **Delivers:** operator and SDK-facing documentation; the image built with the feature.
 - **Depends on:** P4-P10.

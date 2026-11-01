@@ -199,6 +199,21 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+      - name: Every MACP_HTTP_* variable is documented
+        # The names are read from src/http/config.rs, the only reader.
+        # CLAUDE.md is gitignored (local-only), so only the operator doc is
+        # checked here.
+        run: |
+          vars=$(grep -ohE 'MACP_HTTP_[A-Z_]+' src/http/config.rs | sort -u)
+          test -n "$vars" || { echo "::error::no MACP_HTTP_* variable found in src/http/config.rs"; exit 1; }
+          missing=0
+          for v in $vars; do
+            if ! grep -qF "\`$v\`" docs/deployment.md; then
+              echo "::error file=docs/deployment.md::$v (src/http/config.rs) is not documented in docs/deployment.md"; missing=1
+            fi
+          done
+          exit "$missing"
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -912,6 +927,11 @@ jobs:
           cargo build -p macp-conform --features grpc,http --bin macp-conform
           cargo build --bin macp-runtime --features http-listener
 
+      - name: Run the HTTP curl examples of docs/examples.md
+        # Every marked curl block in the "HTTP/JSON binding (curl)" section,
+        # against the binary just built (plans/http-listener.md P11).
+        run: scripts/check-http-examples.sh
+
       - name: Start the runtime image
         run: |
           docker run -d --name macp -p 50051:50051 \
@@ -1017,11 +1037,56 @@ jobs:
         with:
           context: .
           push: false
+          load: true
+          tags: macp-runtime:ci
           # Same features as the published image (docker.yml).
           build-args: |
-            CARGO_FEATURES=otel
+            CARGO_FEATURES=otel,http-listener
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Image without MACP_HTTP_* opens only the gRPC port
+        # The image includes http-listener; with no MACP_HTTP_* set it must
+        # behave as before: one listening socket (50051), no HTTP log line.
+        run: |
+          docker run -d --name plain -e MACP_ALLOW_INSECURE=1 -e MACP_MEMORY_ONLY=1 macp-runtime:ci
+          listening() {
+            # Local ports in LISTEN state (0A), from the container's netns.
+            docker exec plain cat /proc/net/tcp /proc/net/tcp6 2>/dev/null \
+              | awk '$4 == "0A" { split($2, a, ":"); print a[2] }' | sort -u
+          }
+          for _ in $(seq 1 60); do
+            if listening | grep -qx C383; then break; fi
+            sleep 1
+          done
+          ports=$(listening | tr '\n' ' ')
+          echo "listening (hex): $ports"
+          test "$ports" = "C383 " || { docker logs plain; echo "::error::expected only 50051 (C383), got: $ports"; exit 1; }
+          if docker logs plain 2>&1 | grep -q 'HTTP listener'; then
+            docker logs plain; echo "::error::HTTP listener started without MACP_HTTP_BIND_ADDR"; exit 1
+          fi
+
+      - name: Image with MACP_HTTP_BIND_ADDR answers GetManifest over HTTP
+        run: |
+          docker run -d --name http -p 8080:8080 \
+            -e MACP_ALLOW_INSECURE=1 -e MACP_MEMORY_ONLY=1 -e MACP_HTTP_BIND_ADDR=0.0.0.0:8080 \
+            macp-runtime:ci
+          code=
+          for _ in $(seq 1 60); do
+            code=$(curl -sS --max-time 5 -o manifest.json -w '%{http_code}' -X POST \
+              -H 'Content-Type: application/json' -d '{}' \
+              http://127.0.0.1:8080/macp/v1/GetManifest || true)
+            if [ "$code" = 200 ]; then break; fi
+            sleep 1
+          done
+          test "$code" = 200 || { docker logs http; echo "::error::GetManifest over HTTP answered '$code', expected 200"; exit 1; }
+          jq -e '.manifest' manifest.json > /dev/null
+
+      - name: Container logs
+        if: failure()
+        run: |
+          docker logs plain || true
+          docker logs http || true
 
   ci-pass:
     name: All Checks Passed
@@ -1042,5 +1107,5 @@ jobs:
           echo "  - security audit (blocking)"
           echo "  - feature-gated code (rocksdb, redis, otel)"
           echo "  - tier-1 + tier-2 integration suites"
-          echo "  - docker image build"
-          echo "  - macp-conform CLI against the published image"
+          echo "  - docker image build (+ HTTP listener off/on smoke)"
+          echo "  - macp-conform CLI against the published image (+ HTTP curl examples)"

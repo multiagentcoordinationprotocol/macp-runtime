@@ -28,8 +28,9 @@
 //! it UNSET (a `4xx` is the client's outcome, not a runtime failure).
 //!
 //! The same end point records `http.server.request.duration` (seconds), with
-//! `http.request.method`, `http.route` and `http.response.status_code`, when
-//! metrics export.
+//! `http.request.method`, `http.route`, `url.scheme`,
+//! `http.response.status_code` and, on a `5xx`, `error.type`, when metrics
+//! export.
 
 use std::pin::Pin;
 use std::sync::Arc;
