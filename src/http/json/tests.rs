@@ -155,8 +155,8 @@ fn request_bodies_keep_number_text_end_to_end() {
         let m = decode_message_text(&desc, ok.as_bytes()).unwrap();
         assert_eq!(field(&m, "ttl_ms"), PbValue::I64(1000), "{ok}");
     }
-    // The text parser agrees with serde_json on structure and duplicates.
-    let text = r#" {"a": [1, -2.5e3, true, false, null, "\u00e9\n"], "a2": {}, "k": 1, "k": 2} "#;
+    // The text parser agrees with serde_json on structure.
+    let text = r#" {"a": [1, -2.5e3, true, false, null, "\u00e9\n"], "a2": {}, "k": 1} "#;
     let ours = parse_json(text.as_bytes()).unwrap();
     let theirs: Value = serde_json::from_str(text).unwrap();
     assert_eq!(ours.to_value().unwrap(), theirs);
@@ -177,6 +177,18 @@ fn request_bodies_keep_number_text_end_to_end() {
             "{bad:?} oracle"
         );
     }
+    // A duplicate key is refused at any depth (serde_json keeps the last),
+    // compared after unescaping; keys differing in case are distinct.
+    for dup in [
+        r#"{"k": 1, "k": 2}"#,
+        r#"{"a": {"k": 1, "k": 1}}"#,
+        r#"[{"k": null, "k": null}]"#,
+        r#"{"k": 1, "\u006b": 2}"#,
+    ] {
+        let err = parse_json(dup.as_bytes()).unwrap_err();
+        assert!(err.contains("duplicate object key"), "{dup}: {err}");
+    }
+    assert!(parse_json(br#"{"k": 1, "K": 2}"#).is_ok());
     let deep = "[".repeat(200) + &"]".repeat(200);
     assert!(parse_json(deep.as_bytes()).is_err(), "depth cap");
 }

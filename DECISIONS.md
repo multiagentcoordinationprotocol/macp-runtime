@@ -1002,3 +1002,32 @@ Fable analyzed each before the merge, and the user confirmed all of its recommen
 - **Change:** `fix(stream)!` (P1): a StreamSession subscribe below the compacted base is a terminal `FAILED_PRECONDITION` + `macp-error-code: HISTORY_UNAVAILABLE` + details `{"lowest_available_sequence":N}` instead of an inline `INVALID_ENVELOPE` frame; the old status sentence is kept.
 - **Analysis (Fable):** RFC-0006 §3.2 required `FAILED_PRECONDITION` already at the old pin `0f77753` (`:176`) and adds the code and details at `99f3cfa` (`:178`), so this is a conformance fix. `macp-control-plane` matches the kept sentence on its terminal path (`stream-consumer.service.ts:298-319`); the Python and TypeScript SDKs document both shapes and do not loop. No deployed consumer breaks.
 - **Verdict:** ship as-is; no user input needed. MIGRATING heading is the literal `## 0.12.0` the release gate requires.
+
+## 2026-10-31 -- HTTP listener (plans/http-listener.md), /reconcile reversible tier, 17 entries
+Decided by Opus (reconcile, reversible tier), checked against HEAD 1e0119e and spec `99f3cfa`; no code change. Left UNCONFIRMED for the one-way analysis: P3 duplicate JSON keys (whole entry), and one sub-bullet each of P4 (request-timeout answer), P9 (`http.route` shape) and P11 (Dockerfile default features and `EXPOSE 8080`).
+- **P1b second signal exits `128 + signo`: CONFIRMED**, the plan's intent with conventional exit codes; decided by Opus.
+- **P1b `ShutdownSignal` binary-private: CONFIRMED**, nothing outside the binary needs it and promotion is additive; decided by Opus.
+- **P2 live ordinal `high_water + 1`: CONFIRMED**, only a guessed gRPC `after_sequence` hits it and SSE applies the floor-and-drop mitigation; decided by Opus.
+- **P2 seam shapes: CONFIRMED**, all `pub(crate)` or `#[doc(hidden)]` except one additive `LogStore` read; decided by Opus.
+- **P3 integers judged on the number text: CONFIRMED**, the only way to meet §10.8's proto3 base mapping and §10.9's no-rounding rule without crate-wide `arbitrary_precision`; decided by Opus.
+- **P3 `chrono` in the codec: CONFIRMED**, an existing dependency; decided by Opus.
+- **P3 codec ambiguities: CONFIRMED**, each is spec-decided or moot (no enum-valued or non-string-keyed map exists); decided by Opus.
+- **P3 deps-isolation on direct edges: CONFIRMED**, the whole-tree check cannot pass through tonic; decided by Opus.
+- **P3 conformance envelopes derived at test time: CONFIRMED**, avoids an undrift-checked copy; decided by Opus.
+- **P4 listener skeleton, all but the timeout answer: CONFIRMED**, internal, conservative or the compose empty-is-unset convention; decided by Opus.
+- **P5 unary dispatch: CONFIRMED**, open rows are inherited from the gRPC handlers and the in-band rule is §4.4; decided by Opus.
+- **P6 SSE streams: CONFIRMED**, shutdown/close, `406` and keepalive follow §4.3, auth rows mirror gRPC; decided by Opus.
+- **P7 CORS: CONFIRMED**, unlisted `204` is §4.10 and the rest only loosens config or adds `Vary`; decided by Opus.
+- **P8 discovery: CONFIRMED**, `GET`/`HEAD` can be widened later and no-auth matches gRPC `GetManifest`; decided by Opus.
+- **P9 observability, all but `http.route`: CONFIRMED**, OTel HTTP semconv or internal; decided by Opus.
+- **P10 conformance over HTTP: CONFIRMED**, hyper adds no crate and avoids the reqwest TLS unification; decided by Opus.
+- **P11 docs, CI and curl script, all but the Dockerfile default: CONFIRMED**, docs and CI shape; decided by Opus.
+- **P11 `deploy/docker-compose.yml` unchanged: DEFERRED**, trigger: `deploy/` pinning a runtime image that includes the listener; decided by Opus.
+
+## 2026-11-01 -- HTTP listener (plans/http-listener.md), one-way tier, analysed by Fable
+
+- **P3 duplicate JSON object keys** (was last-wins). Fable: one-way in the lenient direction; every upstream protojson parser rejects duplicates, and last-wins is a parser differential against a first-key JSON proxy. **Decided by the user: CHANGE** -- refuse with `400 INVALID_REQUEST` at any depth. Applied before PR B (`src/http/json/decode.rs`, tests in `src/http/json/tests.rs`, `tests/http_json.rs`, `tests/http_unary.rs`; `docs/API.md`).
+- **Names**: env `MACP_HTTP_BIND_ADDR`/`_PUBLIC_URL`/`_CORS_ORIGINS`/`_MAX_BODY_BYTES`/`_MAX_CONNECTIONS`, Cargo features `http-listener` (root) and `http` (macp-conform), and a feature-off binary refusing to start with `MACP_HTTP_BIND_ADDR` set. Fable: consistent with `MACP_TLS_*`/`rocksdb-backend`; refusal matches the storage precedent and is the reversible direction. **Decided by the user: CONFIRM.**
+- **P9 `http.route` = unprefixed `/macp/v1/{Method}`**. Fable: the listener strips the prefix itself, so this is the matched template; one series per RPC. **Decided by the user: CONFIRM.**
+- **P4 request timeout = `500 INTERNAL_ERROR` with body**. Fable: not one-way (registry `permanent` = entry stability; the description already says retry). **Dropped a tier; CONFIRMED by Opus.**
+- **P11 image default `otel,http-listener` + `EXPOSE 8080`**. Fable: not one-way (metadata and a build-arg; dormant without the variable, CI-checked). **Dropped a tier; CONFIRMED by Opus.**

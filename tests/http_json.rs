@@ -1059,9 +1059,13 @@ fn failure_paths() {
         decode_request("Nope", b"{}"),
         Err(JsonError::UnknownMethod(_))
     ));
-    // Duplicate keys: serde_json keeps the last (documented behaviour).
-    let m = decode_request("GetSession", br#"{"session_id":"a","session_id":"b"}"#).unwrap();
-    assert_eq!(get(&m, "session_id"), PbValue::String("b".into()));
+    // A duplicate key is refused, as in upstream protojson parsers.
+    assert_eq!(
+        decode_request("GetSession", br#"{"session_id":"a","session_id":"b"}"#)
+            .unwrap_err()
+            .code(),
+        "INVALID_REQUEST"
+    );
 }
 
 #[test]

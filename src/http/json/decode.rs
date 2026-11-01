@@ -629,8 +629,8 @@ pub(crate) fn decode_message_at_depth(
 // ---------------------------------------------------------------------------
 
 /// A parsed JSON value whose numbers keep their source text, so integrality
-/// and range are judged on the digits, never on a rounded `f64`. Objects keep
-/// the last of duplicate keys, as `serde_json` does.
+/// and range are judged on the digits, never on a rounded `f64`. A duplicate
+/// object key is a parse error, as in every upstream protojson parser.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Json {
     Null,
@@ -761,10 +761,17 @@ impl Parser<'_> {
                 }
                 loop {
                     self.ws();
+                    let key_at = self.i;
                     let key = self.string()?;
                     self.expect(b':')?;
                     let value = self.value(depth + 1)?;
-                    obj.insert(key, value);
+                    if obj.insert(key, value).is_some() {
+                        // As every upstream protojson parser does; it also
+                        // closes a parser differential with any JSON-reading
+                        // proxy that keeps the first occurrence.
+                        self.i = key_at;
+                        return Err(self.err("duplicate object key"));
+                    }
                     self.ws();
                     match self.peek() {
                         Some(b',') => self.i += 1,

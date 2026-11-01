@@ -31,8 +31,9 @@
 //!
 //! Request bodies are parsed by a small parser that keeps each number's
 //! source text, so integer fields are judged on the digits and never on a
-//! rounded `f64` (§10.9). Duplicate JSON object keys keep the last
-//! occurrence, as `serde_json` does. Timestamps use `chrono`, an existing
+//! rounded `f64` (§10.9). A duplicate JSON object key, at any depth,
+//! is a parse error (as in upstream protojson parsers), so a request body
+//! with one is refused `400` before any field is read. Timestamps use `chrono`, an existing
 //! root dependency.
 //!
 //! This module is transport-free: it imports no `tonic`, `hyper` or server

@@ -954,6 +954,18 @@ async fn body_cap_and_malformed_bodies() {
         assert_eq!(r.status, 400, "{}", String::from_utf8_lossy(&body));
         assert_eq!(r.error_code(), "INVALID_REQUEST");
     }
+    // A duplicate object key, at the top level or inside the Envelope, is
+    // a malformed body (400), never an in-band Ack.
+    let env = serde_json::to_string(&proposal(&sid(), "dup-key")).unwrap();
+    assert!(env.contains(r#""session_id":"#));
+    for body in [
+        format!(r#"{{"envelope": {env}, "envelope": {env}}}"#),
+        format!(r#"{{"envelope": {{"session_id": "x", {}}}"#, &env[1..]),
+    ] {
+        let r = rig.post("/macp/v1/Send", &auth, body.clone()).await;
+        assert_eq!(r.status, 400, "{body}");
+        assert_eq!(r.error_code(), "INVALID_REQUEST");
+    }
     // A JSON number above i64 (or any int32) for an integer field: 400.
     for page_size in ["99999999999999999999", "2147483648", "1.5"] {
         let body = format!(r#"{{"page_size": {page_size}}}"#);
