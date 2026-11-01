@@ -556,9 +556,13 @@ jobs:
 
       # The HTTP dispatch table is pinned to telemetry::grpc::METHODS by a
       # test that exists only with both features; the lib's http:: tests
-      # are cheap, so run them all under the combination.
-      - name: Test http-listener with otel (dispatch table = telemetry METHODS)
-        run: cargo test -p macp-runtime --features otel,http-listener --lib http::
+      # are cheap (the filter also matches telemetry::http::), so run them all
+      # under the combination, together with the HTTP SERVER span and
+      # request-duration tests (tests/otel_http.rs, which needs both too).
+      - name: Test http-listener with otel (dispatch table, HTTP telemetry)
+        run: |
+          cargo test -p macp-runtime --features otel,http-listener --lib http::
+          cargo test -p macp-runtime --features otel,http-listener --test otel_http
 
       - name: Rustdoc (http-listener feature, deny warnings)
         run: cargo doc -p macp-runtime --no-deps --features http-listener

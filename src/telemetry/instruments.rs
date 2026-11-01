@@ -22,7 +22,20 @@ pub struct Instruments {
     envelope_duration: Histogram<f64>,
     session_transitions: Counter<u64>,
     session_duration: Histogram<f64>,
+    /// `http.server.request.duration` (OpenTelemetry HTTP semantic
+    /// conventions, stable), fed by the HTTP binding.
+    #[cfg(feature = "http-listener")]
+    http_request_duration: Histogram<f64>,
 }
+
+/// Bucket boundaries, in seconds, of `http.server.request.duration`: the
+/// OpenTelemetry HTTP semantic conventions' advisory boundaries, set
+/// explicitly as the Envelope histogram's are (the SDK default is
+/// millisecond-shaped and would put every request in the first bucket).
+#[cfg(feature = "http-listener")]
+pub const HTTP_REQUEST_DURATION_BOUNDARIES: [f64; 14] = [
+    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
+];
 
 impl fmt::Debug for Instruments {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -69,6 +82,13 @@ impl Instruments {
                 )
                 .with_boundaries(SESSION_DURATION_BOUNDARIES.to_vec())
                 .build(),
+            #[cfg(feature = "http-listener")]
+            http_request_duration: meter
+                .f64_histogram("http.server.request.duration")
+                .with_unit("s")
+                .with_description("Duration of HTTP server requests.")
+                .with_boundaries(HTTP_REQUEST_DURATION_BOUNDARIES.to_vec())
+                .build(),
         }
     }
 
@@ -111,5 +131,35 @@ impl Instruments {
                 KeyValue::new("macp.session.state", state),
             ],
         );
+    }
+
+    /// Record one HTTP request (RFC-MACP-0006 §4), in seconds, from the
+    /// request head to the end of the response body. `method` is the
+    /// normalized request method, `route` the matched route (absent for a
+    /// preflight or a transport `404`).
+    #[cfg(feature = "http-listener")]
+    pub(crate) fn record_http_request(
+        &self,
+        method: &'static str,
+        route: Option<&str>,
+        scheme: &'static str,
+        status: u16,
+        seconds: f64,
+    ) {
+        let mut attrs = Vec::with_capacity(5);
+        attrs.push(KeyValue::new("http.request.method", method));
+        if let Some(route) = route {
+            attrs.push(KeyValue::new("http.route", route.to_owned()));
+        }
+        attrs.push(KeyValue::new("url.scheme", scheme));
+        attrs.push(KeyValue::new(
+            "http.response.status_code",
+            i64::from(status),
+        ));
+        if (500..600).contains(&status) {
+            // HTTP semconv: the status code is `error.type` on a 5xx.
+            attrs.push(KeyValue::new("error.type", status.to_string()));
+        }
+        self.http_request_duration.record(seconds, &attrs);
     }
 }

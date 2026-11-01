@@ -611,7 +611,7 @@ ship first.
 - **Docs:** P11.
 
 ### P9 — Observability for HTTP
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergences: `http.route` excludes the public prefix; non-standard methods record `_OTHER` and span name `HTTP`; `error.type` = status code on a 5xx and `url.scheme` on the metric (semconv, bounded); `url.path` deliberately omitted (unbounded client input, S-c); the debug event is emitted in every build but never reaches the OTel layer; hyper's own 400/431 get no span)
 - **Risk:** simple
 - **Delivers:** under `otel`: one SERVER span per HTTP request named `POST /macp/v1/{Method}` (or `POST` for an
   unknown route, so cardinality is bounded), parent extracted from `traceparent`/`tracestate` through the global

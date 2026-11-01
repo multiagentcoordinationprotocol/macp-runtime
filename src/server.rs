@@ -98,7 +98,7 @@ impl MacpServer {
 
     /// The OpenTelemetry switch, read from the runtime (no constructor
     /// parameter of its own).
-    fn telemetry(&self) -> &crate::telemetry::Telemetry {
+    pub(crate) fn telemetry(&self) -> &crate::telemetry::Telemetry {
         self.runtime.telemetry()
     }
 

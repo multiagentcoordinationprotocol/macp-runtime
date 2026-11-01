@@ -24,6 +24,8 @@
 pub(crate) mod anchor;
 #[cfg(feature = "otel")]
 pub mod grpc;
+#[cfg(all(feature = "otel", feature = "http-listener"))]
+pub mod http;
 #[cfg(feature = "otel")]
 pub mod init;
 #[cfg(feature = "otel")]

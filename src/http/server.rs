@@ -107,6 +107,8 @@ pub(crate) struct State {
     cors_origins: Vec<String>,
     max_body_bytes: usize,
     request_timeout: Duration,
+    /// `url.scheme` of the HTTP SERVER span: `https` with TLS, else `http`.
+    scheme: &'static str,
     /// The same server gRPC serves (shared runtime, security layer and rate
     /// buckets).
     server: MacpServer,
@@ -127,6 +129,11 @@ impl State {
             server,
         );
         state.cors_origins = config.cors_origins.clone();
+        state.scheme = if config.tls.is_some() {
+            "https"
+        } else {
+            "http"
+        };
         state
     }
 
@@ -141,6 +148,7 @@ impl State {
             cors_origins: Vec::new(),
             max_body_bytes,
             request_timeout,
+            scheme: "http",
             server,
             sse_keepalive: super::sse::KEEPALIVE_INTERVAL,
             shutdown: tokio::sync::watch::channel(false).0,
@@ -608,13 +616,84 @@ pub(crate) fn unquote(raw: &str) -> String {
     }
 }
 
-/// Answer one request: CORS (RFC-MACP-0006 §4.10) around [`route_request`].
+/// Answer one request: [`answer`], observed. Under `otel` with telemetry
+/// active, one HTTP SERVER span (`telemetry::http`) covers the
+/// handler and the response body; in every build, one `debug` event names
+/// the normalized method, the RPC (if the path names one) and the status,
+/// never a header, query or body.
+pub(crate) async fn handle<B>(state: &State, req: Request<B>) -> Response<Body>
+where
+    B: HttpBody<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let method = method_label(req.method());
+    // A preflight is answered before routing, so it has no route.
+    let route = if req.method() == Method::OPTIONS {
+        Route::NotFound
+    } else {
+        route(req.uri().path(), &state.prefix)
+    };
+    let rpc = match &route {
+        Route::Rpc(m) => Some(m.name().to_string()),
+        _ => None,
+    };
+    #[cfg(feature = "otel")]
+    let resp = {
+        use tracing::Instrument as _;
+        let http_route = match &route {
+            Route::Rpc(m) => Some(format!("{RPC_PATH}{}", m.name())),
+            Route::WellKnown => Some(WELL_KNOWN_PATH.to_string()),
+            Route::NotFound => None,
+        };
+        match crate::telemetry::http::RequestTrace::start(
+            state.server.telemetry(),
+            &req,
+            method,
+            http_route,
+            state.scheme,
+        ) {
+            Some(trace) => {
+                let span = trace.span().clone();
+                trace.finish(answer(state, route, req).instrument(span).await)
+            }
+            None => answer(state, route, req).await,
+        }
+    };
+    #[cfg(not(feature = "otel"))]
+    let resp = answer(state, route, req).await;
+    tracing::debug!(
+        method,
+        rpc = rpc.as_deref().unwrap_or(""),
+        status = resp.status().as_u16(),
+        "HTTP request answered"
+    );
+    resp
+}
+
+/// The request method as recorded: the RFC 9110 methods by name, anything
+/// else `_OTHER`, so a client cannot grow label or span-name cardinality.
+pub(crate) fn method_label(method: &Method) -> &'static str {
+    match *method {
+        Method::GET => "GET",
+        Method::HEAD => "HEAD",
+        Method::POST => "POST",
+        Method::PUT => "PUT",
+        Method::DELETE => "DELETE",
+        Method::CONNECT => "CONNECT",
+        Method::OPTIONS => "OPTIONS",
+        Method::TRACE => "TRACE",
+        Method::PATCH => "PATCH",
+        _ => "_OTHER",
+    }
+}
+
+/// CORS (RFC-MACP-0006 §4.10) around [`route_request`].
 /// Every `OPTIONS` is a preflight, answered `204` before routing and
 /// authentication; every other response to a listed origin, whatever its
 /// status and including an SSE stream, carries the actual-response headers,
 /// and with an allowlist configured every actual response carries
 /// `Vary: Origin`.
-pub(crate) async fn handle<B>(state: &State, req: Request<B>) -> Response<Body>
+async fn answer<B>(state: &State, route: Route, req: Request<B>) -> Response<Body>
 where
     B: HttpBody<Data = Bytes>,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -623,7 +702,7 @@ where
     if req.method() == Method::OPTIONS {
         return cors::preflight(origin);
     }
-    let mut resp = route_request(state, req).await;
+    let mut resp = route_request(state, route, req).await;
     if !state.cors_origins.is_empty() {
         cors::vary_origin(&mut resp);
     }
@@ -634,12 +713,12 @@ where
 }
 
 /// Answer one non-`OPTIONS` request.
-async fn route_request<B>(state: &State, req: Request<B>) -> Response<Body>
+async fn route_request<B>(state: &State, route: Route, req: Request<B>) -> Response<Body>
 where
     B: HttpBody<Data = Bytes>,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    match route(req.uri().path(), &state.prefix) {
+    match route {
         Route::WellKnown => discovery::well_known(&state.server, req.method()).await,
         Route::NotFound => empty(StatusCode::NOT_FOUND),
         Route::Rpc(_) if req.method() != Method::POST => {

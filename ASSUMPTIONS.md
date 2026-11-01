@@ -1694,3 +1694,16 @@
   - **Canonical JSON emits `"metadata": {}`** in the entry (the codec's default-emission rule); the document is byte-equal to the canonical JSON of gRPC's manifest.
 - **Blast radius if wrong:** Low; local to `src/http/discovery.rs`, `src/server.rs` `get_manifest`, `src/main.rs`.
 - **Status:** UNCONFIRMED
+
+## P9: HTTP observability choices the plan left open
+- **Plan:** `plans/http-listener.md` (P9)
+- **Assumed / Chose:**
+  - **`http.route` is the unprefixed RPC path** (`/macp/v1/Send`) even when the request came in under the `MACP_HTTP_PUBLIC_URL` prefix, and `/.well-known/macp.json` for discovery; absent for a transport `404` and for every `OPTIONS` (answered before routing). A `405`/`415`/`401` on a matched RPC path still carries the route (the path matched; only the request was refused). Keeps one route value per RPC whichever proxy shape is in front.
+  - **Method normalization:** the nine RFC 9110 methods by name, anything else `_OTHER` and span-named `HTTP` (OTel HTTP semconv), so neither span names nor metric labels grow with client input. `http.request.method_original` is not recorded (it would carry a client-controlled string).
+  - **ERROR has no description; `error.type` is the status code on a 5xx** (CHANGED after the P9 verify, on the span and the metric point, per HTTP semconv "conditionally required"; bounded to 500..=599). The metric also carries `url.scheme` (semconv required; two values). `url.path` stays off the span on purpose: the raw path is unbounded client input (S-c), and `http.route` carries the matched RPC. A timeout `500` produced inside `handle` is an ERROR; hyper's own `400`/`431` (outside `handle`) get no span at all.
+  - **Duration ends at the end of the response body** (OTel: "until the full response is sent"), so an SSE stream's point records the stream's lifetime, same moment the span ends. Boundaries are the semconv's advisory set (`HTTP_REQUEST_DURATION_BOUNDARIES`, 5 ms-10 s), set explicitly as the Envelope histogram's are; the vendored `macp-semconv.json` defines no HTTP group, so the pin is the upstream OTel HTTP semconv (name `http.server.request.duration`, unit `s`), not the vendored file.
+  - **The `debug` event is emitted in every build** (not only without `otel`): fields `method` (normalized), `rpc` (the routed method name or empty) and `status`. Its target is `macp_runtime::http::server`, never `telemetry::TARGET`, so it never reaches the OpenTelemetry layer.
+  - **`MacpServer::telemetry`** went from private to `pub(crate)` (no public API change).
+  - **SSE span end time** is the span's last exit (tracing-opentelemetry), i.e. the last body poll; for a client that vanishes this is the last keepalive poll, not the moment hyper drops the body.
+- **Blast radius if wrong:** Low; local to `src/telemetry/{http,instruments}.rs` and `src/http/server.rs` `handle`, pinned by `tests/otel_http.rs`. Attribute/metric names are OTel-standard; changing the route shape later is a dashboard-visible change.
+- **Status:** UNCONFIRMED

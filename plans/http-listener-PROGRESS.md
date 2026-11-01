@@ -71,7 +71,7 @@ mapping #233 = `018e1fc`). `SPEC_REV` moved from `0f77753` to `99f3cfa` in P0 (0
 | P6 SSE + resume | complex | DONE | (this commit) | Opus, 2 rounds: R1 GAPS (race-test hook inert; keepalive knob silent no-op; sender_authenticated=false untested), R2 PASS (mutation-checked race test) | workspace 1150; http-listener 480 ×2; http_sse 16/16 ×5 |
 | P7 CORS | simple | DONE | (this commit) | Opus, batched with P8, 2 rounds: R1 GAPS (Vary: Origin only on listed responses — shared-cache unsafe; fixed inline), R2 PASS | http-listener 493 |
 | P8 discovery | simple | DONE | (this commit) | Opus, batched with P7, 1 round PASS | http-listener 493; zero-impact manifest unchanged |
-| P9 observability | simple | TODO | | | |
+| P9 observability | simple | DONE | (this commit) | Opus, 1 round PASS (+ semconv follow-up error.type/url.scheme re-confirmed) | otel+http 584; otel 447; otel_http 7 |
 | P10 macp-conform over HTTP | complex | TODO | | | |
 | P11 docs, image, release notes | simple | TODO | | | |
 
