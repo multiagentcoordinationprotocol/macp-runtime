@@ -28,6 +28,12 @@ bump fails without it. Patch releases have no entry.
   the details are built by the server.
 - `macp_runtime::policy_engine::require_allow` stamps `macp-error-code:
   FORBIDDEN` on the `PERMISSION_DENIED` it returns. The gRPC code is unchanged.
+- `WatchPolicies` now **requires a credential**, like `ListPolicies` and
+  `GetPolicy`, whose descriptors it streams (#274). An unauthenticated call is
+  refused with `UNAUTHENTICATED` before the stream opens; it previously
+  streamed the full policy registry to anyone. Send the same `authorization`
+  header you send to `ListPolicies`. `WatchModeRegistry` and `WatchRoots` stay
+  open, like `ListModes`/`ListRoots`.
 
 ### `macp-runtime` binary: SIGTERM drains
 

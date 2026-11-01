@@ -58,8 +58,8 @@ pub(crate) enum Kind {
     /// (every RPC except the open discovery ones).
     Unary { authenticated: bool },
     /// Server-streaming (`Watch*`), served as SSE (§4.3); `authenticated`
-    /// as for `Unary` (the gRPC handlers of `WatchModeRegistry`, `WatchRoots`
-    /// and `WatchPolicies` read no credential).
+    /// as for `Unary` (the gRPC handlers of `WatchModeRegistry` and
+    /// `WatchRoots` read no credential, like `ListModes`/`ListRoots`).
     ServerStream { authenticated: bool },
     /// Bidirectional on gRPC (`StreamSession`); its passive-subscribe form is
     /// SSE on HTTP (§4.3). Always authenticated.
@@ -143,7 +143,7 @@ dispatch_table! {
         "WatchRoots" => Kind::ServerStream { authenticated: false };
         "WatchSignals" => Kind::ServerStream { authenticated: true };
         "WatchSessions" => Kind::ServerStream { authenticated: true };
-        "WatchPolicies" => Kind::ServerStream { authenticated: false };
+        "WatchPolicies" => Kind::ServerStream { authenticated: true };
     }
 }
 

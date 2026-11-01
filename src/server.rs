@@ -2649,8 +2649,15 @@ impl MacpRuntimeService for MacpServer {
 
     async fn watch_policies(
         &self,
-        _request: Request<WatchPoliciesRequest>,
+        request: Request<WatchPoliciesRequest>,
     ) -> Result<Response<Self::WatchPoliciesStream>, Status> {
+        // Same credential as `ListPolicies`/`GetPolicy`: the stream carries
+        // the full descriptors those RPCs guard (#274).
+        let _identity = self
+            .security
+            .authenticate_metadata(request.metadata())
+            .await
+            .map_err(Self::status_from_error)?;
         let mut rx = self.runtime.subscribe_policy_changes();
         let runtime = Arc::clone(&self.runtime);
         let stream = async_stream::try_stream! {
@@ -4945,6 +4952,19 @@ mod tests {
             page_token: String::new(),
         });
         let err = server.list_sessions(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn watch_policies_requires_authentication() {
+        let (server, _runtime) = make_server();
+        let err = match server
+            .watch_policies(Request::new(WatchPoliciesRequest {}))
+            .await
+        {
+            Ok(_) => panic!("unauthenticated WatchPolicies must be refused"),
+            Err(err) => err,
+        };
         assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err:?}");
     }
 

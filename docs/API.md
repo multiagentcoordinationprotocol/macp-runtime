@@ -414,7 +414,7 @@ rpc WatchSignals(WatchSignalsRequest) returns (stream WatchSignalsResponse)
 
 ### WatchPolicies
 
-Server-streaming RPC that fires when policies are registered or unregistered.
+Server-streaming RPC that fires when policies are registered or unregistered. It requires the same credential as `ListPolicies`/`GetPolicy` (an unauthenticated call is refused with `UNAUTHENTICATED` before the stream opens); `WatchModeRegistry` and `WatchRoots`, like `ListModes`/`ListRoots`, need none.
 
 ```protobuf
 rpc WatchPolicies(WatchPoliciesRequest) returns (stream WatchPoliciesResponse)
