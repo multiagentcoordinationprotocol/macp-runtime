@@ -17,9 +17,11 @@
 //!   that sent the preface and then nothing.
 //! - **Shutdown.** The listener stops accepting when the shared shutdown
 //!   signal fires, closes its socket, and asks every connection to finish
-//!   gracefully; [`HttpListener::serve`] returns when all have closed. The
-//!   process-wide drain deadline in `main` force-exits connections that never
-//!   close (long-lived streams).
+//!   gracefully; [`HttpListener::serve`] returns when all have closed. Open
+//!   SSE streams end when the drain starts (a lost connection to the client,
+//!   which resumes elsewhere with `Last-Event-ID`), so they do not hold the
+//!   drain open; the process-wide drain deadline in `main` still force-exits
+//!   any connection that never closes.
 //! - **Routing.** `{prefix}/macp/v1/{Method}`, where `{prefix}` is the path of
 //!   `MACP_HTTP_PUBLIC_URL`, and also `/macp/v1/{Method}`, so a proxy that
 //!   strips the prefix and one that does not both work. The method set is the
@@ -29,7 +31,7 @@
 //!   response *head* of an RPC, body collection included (the deadline starts
 //!   when the request head is complete, so a body trickled in slowly times
 //!   out), exactly as tonic's timeout bounds a gRPC call; a streaming body
-//!   (SSE, P6) flows after the head and is therefore not subject to it. On
+//!   (SSE) flows after the head and is therefore not subject to it. On
 //!   expiry the answer is `500 INTERNAL_ERROR` "request timed out" with the
 //!   §4.5 body: no registry code names a deadline, and a `Send` may already
 //!   have been applied, which a retry with the same `message_id` resolves
@@ -66,7 +68,7 @@ use super::errors::{empty, RequestError};
 use super::{dispatch, tls};
 use crate::server::MacpServer;
 
-/// Every response body of the listener. Unsync so a streaming body (P6) can
+/// Every response body of the listener. Unsync so a streaming body (SSE) can
 /// hold a `!Sync` stream.
 pub type Body = UnsyncBoxBody<Bytes, Infallible>;
 
@@ -102,16 +104,43 @@ pub(crate) struct State {
     /// The same server gRPC serves (shared runtime, security layer and rate
     /// buckets).
     server: MacpServer,
+    /// SSE idle interval before a `: keepalive` comment (RFC-MACP-0006 §4.3:
+    /// 30 s); shortened only by tests.
+    sse_keepalive: Duration,
+    /// Set to `true` when the listener starts draining: every open SSE
+    /// stream ends at once (see [`super::sse`]).
+    shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl State {
     pub(crate) fn from_config(config: &HttpConfig, server: MacpServer) -> Self {
-        Self {
-            prefix: config.prefix.clone(),
-            max_body_bytes: config.max_body_bytes,
-            request_timeout: config.request_timeout,
+        Self::new(
+            config.prefix.clone(),
+            config.max_body_bytes,
+            config.request_timeout,
             server,
+        )
+    }
+
+    fn new(
+        prefix: String,
+        max_body_bytes: usize,
+        request_timeout: Duration,
+        server: MacpServer,
+    ) -> Self {
+        Self {
+            prefix,
+            max_body_bytes,
+            request_timeout,
+            server,
+            sse_keepalive: super::sse::KEEPALIVE_INTERVAL,
+            shutdown: tokio::sync::watch::channel(false).0,
         }
+    }
+
+    /// What an SSE stream opened now needs from the listener.
+    fn sse_context(&self) -> super::sse::Context {
+        super::sse::Context::new(self.sse_keepalive, self.shutdown.subscribe())
     }
 }
 
@@ -216,6 +245,21 @@ impl HttpListener {
         self.listener.local_addr()
     }
 
+    /// Test support: the SSE keepalive interval (RFC-MACP-0006 §4.3's 30 s
+    /// by default), shortened so a test can observe the comment. Not
+    /// configurable in production; no environment variable reads it.
+    #[doc(hidden)]
+    ///
+    /// The state is shared only by [`HttpListener::serve`], which consumes
+    /// the listener, so the setting always applies; were that ever to change,
+    /// this panics rather than silently keeping the default.
+    pub fn with_sse_keepalive(mut self, interval: Duration) -> Self {
+        Arc::get_mut(&mut self.state)
+            .expect("the listener state is unshared until `serve`")
+            .sse_keepalive = interval;
+        self
+    }
+
     #[cfg(test)]
     fn with_timings(mut self, timings: Timings) -> Self {
         let streams = tests::H2_TEST_STREAMS;
@@ -276,6 +320,11 @@ impl HttpListener {
         if let Some(addr) = addr {
             tracing::info!(%addr, "HTTP listener closed; draining connections");
         }
+        // SSE streams have no natural end, so the graceful drain would wait
+        // for them until the drain deadline; they end now instead, as a lost
+        // connection (no `event: error`), which a subscriber resumes with
+        // `Last-Event-ID` (RFC-MACP-0006 §4.3).
+        state.shutdown.send_replace(true);
         graceful.shutdown().await;
     }
 }
@@ -509,7 +558,7 @@ pub(crate) fn is_json_content_type<'a>(mut values: impl Iterator<Item = &'a Head
 
 /// Split a header value on `;` outside quoted strings (RFC 9110 §5.6.4,
 /// with `\` quoted-pairs). `None` for an unterminated quoted string.
-fn split_params(value: &str) -> Option<Vec<&str>> {
+pub(crate) fn split_params(value: &str) -> Option<Vec<&str>> {
     let mut parts = Vec::new();
     let (mut start, mut quoted, mut escaped) = (0, false, false);
     for (i, c) in value.char_indices() {
@@ -532,7 +581,7 @@ fn split_params(value: &str) -> Option<Vec<&str>> {
 }
 
 /// A parameter value, with a quoted string's quotes and quoted-pairs removed.
-fn unquote(raw: &str) -> String {
+pub(crate) fn unquote(raw: &str) -> String {
     match raw.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
         None => raw.to_string(),
         Some(inner) => {
@@ -575,7 +624,13 @@ where
             empty(StatusCode::UNSUPPORTED_MEDIA_TYPE)
         }
         Route::Rpc(method) => {
-            let serve = dispatch::serve(&state.server, state.max_body_bytes, method, req);
+            let serve = dispatch::serve(
+                &state.server,
+                state.max_body_bytes,
+                method,
+                req,
+                state.sse_context(),
+            );
             match tokio::time::timeout(state.request_timeout, serve).await {
                 Ok(resp) => resp,
                 // No registry code names a deadline; INTERNAL_ERROR with the
@@ -601,12 +656,12 @@ mod tests {
             Arc::new(crate::registry::SessionRegistry::new()),
             Arc::new(crate::log_store::LogStore::new()),
         ));
-        State {
-            prefix: prefix.into(),
-            max_body_bytes: 16,
-            request_timeout: Duration::from_secs(5),
-            server: MacpServer::new(runtime, crate::security::SecurityLayer::dev_mode()),
-        }
+        State::new(
+            prefix.into(),
+            16,
+            Duration::from_secs(5),
+            MacpServer::new(runtime, crate::security::SecurityLayer::dev_mode()),
+        )
     }
 
     fn name(r: Route) -> Option<String> {
@@ -778,10 +833,10 @@ mod tests {
         assert_eq!(h.get("www-authenticate").unwrap(), "Bearer");
         let (s, _, _) = status_of(req(Method::POST, "/api/macp/v1/ListModes", json, "{}")).await;
         assert_eq!(s, StatusCode::OK);
-        // Streaming RPCs until P6; CORS and discovery until P7/P8.
-        let (s, _, b) = status_of(req(Method::POST, "/macp/v1/WatchSignals", json, "{}")).await;
-        assert_eq!(s, StatusCode::NOT_IMPLEMENTED);
-        assert!(b.is_empty());
+        // A streaming RPC authenticates like a unary one (no Accept header
+        // admits the stream); CORS and discovery until P7/P8.
+        let (s, _, _) = status_of(req(Method::POST, "/macp/v1/WatchSignals", json, "{}")).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
         let (s, _, _) = status_of(req(Method::OPTIONS, "/macp/v1/Send", None, "")).await;
         assert_eq!(s, StatusCode::NOT_FOUND);
         let (s, _, _) = status_of(req(Method::GET, "/.well-known/macp.json", None, "")).await;

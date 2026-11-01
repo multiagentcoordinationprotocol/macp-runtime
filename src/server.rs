@@ -385,6 +385,13 @@ impl MacpServer {
         ack
     }
 
+    /// The runtime this server serves (the HTTP binding's SSE streams read
+    /// session state and the lifecycle bus from it).
+    #[cfg(feature = "http-listener")]
+    pub(crate) fn runtime(&self) -> &Arc<Runtime> {
+        &self.runtime
+    }
+
     /// The shared security layer (authentication, buckets, limits); the HTTP
     /// binding authenticates request headers with it before reading a body.
     #[cfg(feature = "http-listener")]
@@ -1493,7 +1500,7 @@ impl SubscriptionCursor {
 
     /// [`Self::next`] without waiting: `Ok(None)` when nothing is buffered
     /// (or the channel closed).
-    fn try_next(&mut self) -> Result<Option<(u64, Envelope)>, StreamLagged> {
+    pub(crate) fn try_next(&mut self) -> Result<Option<(u64, Envelope)>, StreamLagged> {
         use tokio::sync::broadcast::error::TryRecvError;
         if let Some(item) = self.replay.pop_front() {
             return Ok(Some(item));

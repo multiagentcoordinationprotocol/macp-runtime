@@ -68,7 +68,7 @@ mapping #233 = `018e1fc`). `SPEC_REV` moved from `0f77753` to `99f3cfa` in P0 (0
 | P3 canonical JSON codec | complex | DONE | (this commit) | Opus, 2 rounds: R1 GAPS (deps-isolation SIGPIPE false-pass; §10.9 silent rounding; minor), R2 GAPS (ctree swallowed cargo tree failure, fixed inline) | workspace 1146; http-listener 399 (http_json 15, codec 23) |
 | P4 listener skeleton | complex | DONE | (this commit) | Opus, 2 rounds: R1 GAPS (idle socket pins permit via un-deadlined auto sniff; quoted content-type params), R2 PASS (accepted risk: PING-answering idle h2 client) | workspace 1148; http-listener 431 (http_binary 9 real-binary) |
 | P5 unary + errors + Send layers | complex | DONE | (this commit) | Opus, 2 rounds: R1 GAPS (bad Envelope → 400 vs §4.4 in-band; METHODS pin dead in CI; free_port TOCTOU flake), R2 PASS | workspace 1150; http-listener 454 ×2; http_binary 10/10 ×3 |
-| P6 SSE + resume | complex | TODO | | | |
+| P6 SSE + resume | complex | DONE | (this commit) | Opus, 2 rounds: R1 GAPS (race-test hook inert; keepalive knob silent no-op; sender_authenticated=false untested), R2 PASS (mutation-checked race test) | workspace 1150; http-listener 480 ×2; http_sse 16/16 ×5 |
 | P7 CORS | simple | TODO | | | |
 | P8 discovery | simple | TODO | | | |
 | P9 observability | simple | TODO | | | |
@@ -81,3 +81,4 @@ Plan review round 1 (REVISE, 17 findings) applied to the plan on 2026-10-31; see
 - pushed feat/http-listener 8a672bf
 - PR #269 opened: https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/269
 - 2026-10-31 merged #269 (52e05f7) — PR A (P0-P2)
+- 2026-10-31 filed #274 (security: WatchPolicies unauthenticated, pre-existing on gRPC; found by P6 verifier)

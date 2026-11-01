@@ -101,29 +101,53 @@ impl RequestError {
 
 /// A `MacpServer` status as the binding answers it.
 pub(crate) fn status_response(status: &Status, session_id: &str) -> Response<Body> {
-    if status.code() == Code::Unimplemented {
-        return empty(StatusCode::NOT_FOUND);
+    match RequestError::from_status(status, session_id) {
+        Some(err) => err.into_response(),
+        None => empty(StatusCode::NOT_FOUND),
     }
-    let code = status
-        .metadata()
-        .get("macp-error-code")
-        .and_then(|v| v.to_str().ok())
-        .and_then(macp_core::error::registry_entry)
-        .map(|e| e.code)
-        .unwrap_or_else(|| fallback_code(status.code()));
-    let details = status
-        .metadata()
-        .get_bin("macp-error-details-bin")
-        .and_then(|v| v.to_bytes().ok())
-        .map(|b| b.to_vec())
-        .unwrap_or_default();
-    RequestError {
-        code,
-        message: status.message().to_string(),
-        session_id: session_id.to_string(),
-        details,
+}
+
+impl RequestError {
+    /// Fill the error's `session_id`.
+    pub(crate) fn with_session(mut self, session_id: &str) -> Self {
+        self.session_id = session_id.to_string();
+        self
     }
-    .into_response()
+
+    /// A `MacpServer` status as a request-level error: its registry code
+    /// (`macp-error-code`, else a fallback by gRPC code) and its details
+    /// bytes. `None` for `UNIMPLEMENTED`, which is the §4.1 transport `404`.
+    pub(crate) fn from_status(status: &Status, session_id: &str) -> Option<Self> {
+        if status.code() == Code::Unimplemented {
+            return None;
+        }
+        Some(Self::from_coded_status(status, session_id))
+    }
+
+    /// [`Self::from_status`] for a status that must become an error whatever
+    /// its gRPC code (a fatal SSE `event: error`, §4.3): `UNIMPLEMENTED`
+    /// falls back to `INTERNAL_ERROR` like any other uncoded status.
+    pub(crate) fn from_coded_status(status: &Status, session_id: &str) -> Self {
+        let code = status
+            .metadata()
+            .get("macp-error-code")
+            .and_then(|v| v.to_str().ok())
+            .and_then(macp_core::error::registry_entry)
+            .map(|e| e.code)
+            .unwrap_or_else(|| fallback_code(status.code()));
+        let details = status
+            .metadata()
+            .get_bin("macp-error-details-bin")
+            .and_then(|v| v.to_bytes().ok())
+            .map(|b| b.to_vec())
+            .unwrap_or_default();
+        RequestError {
+            code,
+            message: status.message().to_string(),
+            session_id: session_id.to_string(),
+            details,
+        }
+    }
 }
 
 /// The registry code for a status that carries none, by its gRPC code.

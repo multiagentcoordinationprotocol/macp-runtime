@@ -2021,9 +2021,11 @@ async fn golden_parity_with_grpc() {
     assert_eq!(unary.len(), 21);
 }
 
-/// Streaming RPCs are P6: until then a clear `501` with no body.
+/// The streaming RPCs are routed to the SSE binding (P6, covered in
+/// `tests/http_sse.rs`), not to the unary path: a client that accepts only
+/// JSON is refused with `406` before anything else.
 #[tokio::test]
-async fn streaming_rpcs_are_placeholders_until_p6() {
+async fn streaming_rpcs_are_event_streams() {
     let rig = rig(Opts::default()).await;
     for method in [
         "StreamSession",
@@ -2033,8 +2035,18 @@ async fn streaming_rpcs_are_placeholders_until_p6() {
         "WatchSessions",
         "WatchPolicies",
     ] {
-        let r = rig.call(method, Some("tok-orch"), &json!({})).await;
-        assert_eq!(r.status, 501, "{method}");
+        let r = rig
+            .post(
+                &format!("/macp/v1/{method}"),
+                &[
+                    ("authorization", "Bearer tok-orch"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json"),
+                ],
+                "{}",
+            )
+            .await;
+        assert_eq!(r.status, 406, "{method}");
         assert!(r.body.is_empty());
     }
 }

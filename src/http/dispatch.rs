@@ -28,11 +28,13 @@
 //!    which depend on the decoded Envelope's `message_type` and so are not
 //!    request-level checks "made before the Envelope is decoded".
 //!
-//! Streaming rows (`StreamSession`, the `Watch*` RPCs) are served as
-//! server-sent events by P6; until then they answer `501` with no body.
+//! Streaming rows (`StreamSession`, the `Watch*` RPCs) take the same steps
+//! as server-sent events (§4.3, [`super::sse`]), with one check before all
+//! of them: an `Accept` header that does not admit `text/event-stream` is the
+//! transport `406`, and no stream is opened.
 
 use bytes::Bytes;
-use http::header::{HeaderMap, CONTENT_LENGTH};
+use http::header::{HeaderMap, ACCEPT, CONTENT_LENGTH};
 use http::{Response, StatusCode};
 use http_body_util::{BodyExt, Limited};
 use hyper::body::Body as HttpBody;
@@ -45,6 +47,7 @@ use super::errors::{empty, json_response, status_response, RequestError};
 use super::json::{self, JsonError};
 use super::metadata::metadata_from_headers;
 use super::server::Body;
+use super::sse;
 use crate::pb::macp_runtime_service_server::MacpRuntimeService;
 use crate::server::MacpServer;
 
@@ -54,10 +57,12 @@ pub(crate) enum Kind {
     /// Unary; `authenticated` when the gRPC handler authenticates the caller
     /// (every RPC except the open discovery ones).
     Unary { authenticated: bool },
-    /// Server-streaming (`Watch*`): SSE, P6.
-    ServerStream,
+    /// Server-streaming (`Watch*`), served as SSE (§4.3); `authenticated`
+    /// as for `Unary` (the gRPC handlers of `WatchModeRegistry`, `WatchRoots`
+    /// and `WatchPolicies` read no credential).
+    ServerStream { authenticated: bool },
     /// Bidirectional on gRPC (`StreamSession`); its passive-subscribe form is
-    /// SSE on HTTP (§4.3), P6.
+    /// SSE on HTTP (§4.3). Always authenticated.
     Bidi,
 }
 
@@ -71,12 +76,12 @@ pub(crate) struct Row {
 macro_rules! dispatch_table {
     (
         unary { $( $uname:literal => $method:ident ( $req:ty ), authenticated: $auth:literal; )* }
-        streaming { $( $sname:literal => $skind:ident; )* }
+        streaming { $( $sname:literal => $skind:expr; )* }
     ) => {
         /// Every RPC of `macp.v1.MACPRuntimeService`.
         pub(crate) const ROWS: &[Row] = &[
             $( Row { name: $uname, kind: Kind::Unary { authenticated: $auth } }, )*
-            $( Row { name: $sname, kind: Kind::$skind }, )*
+            $( Row { name: $sname, kind: $skind }, )*
         ];
 
         /// Call the unary RPC `method` with `request` (a message of its input
@@ -133,12 +138,12 @@ dispatch_table! {
         "GetReceiptKeys" => get_receipt_keys(crate::pb::GetReceiptKeysRequest), authenticated: false;
     }
     streaming {
-        "StreamSession" => Bidi;
-        "WatchModeRegistry" => ServerStream;
-        "WatchRoots" => ServerStream;
-        "WatchSignals" => ServerStream;
-        "WatchSessions" => ServerStream;
-        "WatchPolicies" => ServerStream;
+        "StreamSession" => Kind::Bidi;
+        "WatchModeRegistry" => Kind::ServerStream { authenticated: false };
+        "WatchRoots" => Kind::ServerStream { authenticated: false };
+        "WatchSignals" => Kind::ServerStream { authenticated: true };
+        "WatchSessions" => Kind::ServerStream { authenticated: true };
+        "WatchPolicies" => Kind::ServerStream { authenticated: false };
     }
 }
 
@@ -148,7 +153,7 @@ pub(crate) fn row(name: &str) -> Option<&'static Row> {
 }
 
 /// A generated response as a message of the method's output type.
-fn to_dynamic<T: prost::Message>(
+pub(crate) fn to_dynamic<T: prost::Message>(
     method: &MethodDescriptor,
     resp: &T,
 ) -> Result<DynamicMessage, Status> {
@@ -160,12 +165,15 @@ fn to_dynamic<T: prost::Message>(
 }
 
 /// Serve one RPC whose route, method and media type are already checked.
-/// The caller bounds it with the request timeout.
+/// The caller bounds it with the request timeout, which therefore covers a
+/// stream's pre-stream checks but not its body (§4.3: the events flow after
+/// the response head).
 pub(crate) async fn serve<B>(
     server: &MacpServer,
     max_body_bytes: usize,
     method: MethodDescriptor,
     req: http::Request<B>,
+    sse: sse::Context,
 ) -> Response<Body>
 where
     B: HttpBody<Data = Bytes>,
@@ -176,11 +184,16 @@ where
         // here a method without a row.
         return empty(StatusCode::NOT_FOUND);
     };
-    let Kind::Unary { authenticated } = row.kind else {
-        // Streaming RPCs are P6 (SSE, RFC-MACP-0006 §4.3).
-        return empty(StatusCode::NOT_IMPLEMENTED);
+    let (authenticated, streaming) = match row.kind {
+        Kind::Unary { authenticated } => (authenticated, false),
+        Kind::ServerStream { authenticated } => (authenticated, true),
+        Kind::Bidi => (true, true),
     };
     let (parts, body) = req.into_parts();
+    // (0) Streams only: `Accept` must admit `text/event-stream` (§4.3).
+    if streaming && !sse::accepts_event_stream(parts.headers.get_all(ACCEPT).iter()) {
+        return empty(StatusCode::NOT_ACCEPTABLE);
+    }
     let metadata = metadata_from_headers(&parts.headers);
 
     // (1) Authentication from the headers, before the body is read.
@@ -198,6 +211,19 @@ where
         Ok(bytes) => bytes,
         Err(e) => return e.into_response(),
     };
+
+    if streaming {
+        return sse::serve(
+            server,
+            &method,
+            &parts.headers,
+            metadata,
+            identity,
+            &bytes,
+            sse,
+        )
+        .await;
+    }
 
     if method.name() == "Send" {
         let Some(identity) = identity else {
@@ -349,7 +375,7 @@ mod tests {
             let (client, server) = (m.is_client_streaming(), m.is_server_streaming());
             match row.kind {
                 Kind::Unary { .. } => assert!(!client && !server, "{}", m.name()),
-                Kind::ServerStream => assert!(!client && server, "{}", m.name()),
+                Kind::ServerStream { .. } => assert!(!client && server, "{}", m.name()),
                 Kind::Bidi => assert!(client && server, "{}", m.name()),
             }
         }

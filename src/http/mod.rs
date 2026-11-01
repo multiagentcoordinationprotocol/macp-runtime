@@ -17,6 +17,9 @@
 //!   body, the body cap, `Send`'s two layers, §4.4).
 //! - `errors`: request-level errors (§4.5) and JSON responses.
 //! - `metadata`: the request headers a handler sees as gRPC metadata.
+//! - `sse`: the streaming RPCs as server-sent events (§4.3): `Accept`
+//!   negotiation, `Last-Event-ID` resume, framing, keepalive and how each
+//!   stream ends.
 //! - `tls`: the rustls acceptor (ring provider, ALPN `h2`/`http/1.1`).
 
 pub mod config;
@@ -25,6 +28,7 @@ mod errors;
 pub mod json;
 mod metadata;
 pub mod server;
+mod sse;
 mod tls;
 
 #[doc(hidden)]

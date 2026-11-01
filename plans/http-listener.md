@@ -517,7 +517,7 @@ ship first.
 - **Docs:** P11.
 
 ### P6 — SSE streams with resume
-- **Status:** TODO
+- **Status:** DONE (2026-10-31; divergences: the runtime sends lifecycle `Resolved` before publishing the Commitment (`runtime.rs:1463` vs `:1476`), so the stream records the last ordinal at `Resolved` and closes once it has delivered it — equivalent to "close after the Commitment" and order-safe; resume opens at min(after_sequence, high water) then drops `<= after_sequence`, retrying at after_sequence below the compacted base; `WatchPolicies`/`WatchModeRegistry`/`WatchRoots` mirror gRPC's per-RPC auth (no token) — `WatchPolicies` bypassing `ListPolicies`' auth is pre-existing, filed as #274; streams end when drain starts, without `event: error`, so clients resume)
 - **Risk:** complex
 - **Delivers:** `WatchModeRegistry`, `WatchRoots`, `WatchSignals`, `WatchSessions`, `WatchPolicies` and
   `StreamSession` (subscribe only) as `text/event-stream` per §4.3.

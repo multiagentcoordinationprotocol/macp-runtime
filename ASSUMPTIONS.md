@@ -1658,3 +1658,17 @@
   - **Golden parity of mutating RPCs** runs on twin objects (one created per binding) whose ids are renamed (substring, since ids appear inside refusal messages) before comparing canonical JSON with `*_unix_ms`/`timestamp` zeroed; refusals compare code, details and `session_id`.
 - **Blast radius if wrong:** Low; local to `src/http/{dispatch,errors,metadata}.rs` and tests.
 - **Status:** UNCONFIRMED
+
+## P6: SSE stream choices the plan left open
+- **Plan:** `plans/http-listener.md` (P6)
+- **Assumed / Chose:**
+  - **Shutdown ends streams at the drain signal**, with no `event: error`: a lost connection by §4.3, so the client resumes with `Last-Event-ID`. Waiting for the drain deadline would hold every idle watch stream open until it and gain nothing; an error event would tell the client the failure is fatal when it is not.
+  - **"Normal close after the Commitment" = after the resolved session's last ordinal.** The runtime sends the `Resolved` lifecycle event before it publishes the Commitment to the bus, so the stream reads the final high water on `Resolved` and closes once it has delivered it. Equivalent to the plan's wording and race-safe (unit test, 200 rounds with the bus held until after `Resolved`).
+  - **Resume opens at `min(after, high water)`** and drops ordinals `<= after`. Dropping alone (the plan's mitigation) would still number later live envelopes from the high water, mislabelling ids when `after` is above it; an open floor below a compaction base retries at `after`.
+  - **Auth rows mirror gRPC**: `WatchModeRegistry`, `WatchRoots` and `WatchPolicies` take no credential (their gRPC handlers read none); `WatchSignals`, `WatchSessions` and `StreamSession` do. Pinned against gRPC's answer to an unauthenticated call.
+  - **Accept**: a missing header admits the stream; a present but empty header, or one whose most specific matching range has `q=0`, is `406` (empty body, no code), checked before authentication. A malformed q-value ignores that range.
+  - **Keepalive knob** is `HttpListener::with_sse_keepalive` (`#[doc(hidden)]`, additive, semver-checks clean); no env variable.
+  - **Lag test** runs over HTTP/2 with a 2 KiB stream window so a non-reading client exerts back-pressure; the flood uses Votes by 20 extra declared voters (Decision admits only Votes once voting starts).
+  - **Error-event JSON** is the canonical encoder's sorted-key output; the examples' key order differs and is compared as parsed JSON.
+- **Blast radius if wrong:** Low; local to `src/http/{sse,dispatch,server,errors}.rs` and tests.
+- **Status:** UNCONFIRMED
