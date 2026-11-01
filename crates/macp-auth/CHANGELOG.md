@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-auth-v0.11.0...macp-auth-v0.12.0) - 2026-11-01
+
+### Added
+
+- *(http)* HTTP/JSON binding (RFC-MACP-0006 §4) — PR B ([#275](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/275))
+
+### Fixed
+
+- *(stream)* [**breaking**] R4 PR A — spec re-pin, gRPC HISTORY_UNAVAILABLE on compacted resume, SIGTERM drain, shared server seams ([#269](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/269))
+
 ## [0.9.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-auth-v0.8.8...macp-auth-v0.9.0) - 2026-10-17
 
 ### Added

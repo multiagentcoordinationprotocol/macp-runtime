@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-storage-v0.11.0...macp-storage-v0.12.0) - 2026-11-01
+
+### Added
+
+- *(otel)* OpenTelemetry spans, semconv metrics and durable session anchor (R2) ([#268](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/268))
+
+### Fixed
+
+- *(stream)* [**breaking**] R4 PR A — spec re-pin, gRPC HISTORY_UNAVAILABLE on compacted resume, SIGTERM drain, shared server seams ([#269](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/269))
+
 ## [0.11.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-storage-v0.10.1...macp-storage-v0.11.0) - 2026-10-30
 
 ### Added

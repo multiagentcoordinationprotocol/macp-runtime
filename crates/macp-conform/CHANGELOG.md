@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-conform-v0.11.0...macp-conform-v0.12.0) - 2026-11-01
+
+### Added
+
+- *(http)* HTTP/JSON binding (RFC-MACP-0006 §4) — PR B ([#275](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/275))
+
 ## [0.11.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-conform-v0.10.1...macp-conform-v0.11.0) - 2026-10-30
 
 ### Other
