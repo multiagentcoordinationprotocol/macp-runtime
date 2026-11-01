@@ -84,3 +84,5 @@ Plan review round 1 (REVISE, 17 findings) applied to the plan on 2026-10-31; see
 - 2026-10-31 filed #274 (security: WatchPolicies unauthenticated, pre-existing on gRPC; found by P6 verifier)
 - 2026-10-31 #274 fix committed on feat/http-listener-b (2a568dd); ships with PR B
 - 2026-10-31 #274 fix verified PASS (Opus); docs b06e323; SDK issues filed: macp-sdk-python#206, macp-sdk-typescript#222
+
+- 2026-11-01: ship gate Opus PASS (rebased on c02ad74); pushed feat/http-listener-b cf3ea89
