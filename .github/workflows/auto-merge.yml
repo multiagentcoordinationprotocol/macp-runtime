@@ -5,4 +5,5 @@ permissions:
   pull-requests: write
 jobs:
   call:
-    uses: multiagentcoordinationprotocol/macp-ci/.github/workflows/auto-merge.yml@v1
+    uses: multiagentcoordinationprotocol/macp-ci/.github/workflows/auto-merge.yml@v1.1
+    secrets: inherit
