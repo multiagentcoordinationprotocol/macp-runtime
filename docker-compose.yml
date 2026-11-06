@@ -8,8 +8,10 @@
 # Usage:
 #   docker compose build integration-tests
 #   docker compose run --rm integration-tests                                          # tier 1 + tier2 (default CMD)
-#   docker compose run --rm integration-tests cargo test --test tier3 -- --ignored --test-threads=1   # tier 3, real LLM
-#   docker compose run --rm integration-tests cargo test -- --test-threads=1            # everything except #[ignore]d tier 3
+#   docker compose run --rm integration-tests --test tier3 -- --ignored --test-threads=1   # tier 3, real LLM
+#   docker compose run --rm integration-tests -- --test-threads=1                       # everything except #[ignore]d tier 3
+#
+# The image ENTRYPOINT is already `cargo test`, so pass only its arguments.
 services:
   integration-tests:
     build:
