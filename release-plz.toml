@@ -19,6 +19,13 @@
 # breaking changes per cargo's semver interpretation.)
 semver_check = true
 
+# Open a release PR only when at least one unreleased commit is a feat, fix or
+# perf commit. Without this, any commit that touches a packaged file (a CI
+# workflow, a doc move) opened a no-op release PR — v0.13.1 (#289) was opened
+# for a CI-only SPEC_REV bump (#288). ci:, docs:, chore:, build:, test: and
+# refactor: commits now ride along with the next real release instead.
+release_commits = "^(feat|fix|perf)"
+
 # Label the release PRs release-plz opens.
 pr_labels = ["release"]
 
