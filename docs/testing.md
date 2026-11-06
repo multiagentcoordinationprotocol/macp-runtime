@@ -107,7 +107,7 @@ Or run it in a container via `docker-compose.yml`, which builds the runtime bina
 ```bash
 docker compose build integration-tests
 docker compose run --rm integration-tests                                                          # tier 1 + 2 (default CMD)
-docker compose run --rm integration-tests cargo test --test tier3 -- --ignored --test-threads=1    # tier 3, real LLM
+docker compose run --rm integration-tests --test tier3 -- --ignored --test-threads=1    # tier 3, real LLM (ENTRYPOINT is already `cargo test`)
 ```
 
 **CI does not use this** -- the `integration` job in `ci.yml` runs the suite directly on the runner. `docker-compose.yml` is a contributor convenience for a reproducible local environment, not the canonical test path.

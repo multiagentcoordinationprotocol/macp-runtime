@@ -24,15 +24,20 @@ COPY src/ src/
 COPY benches/ benches/
 COPY integration_tests/ integration_tests/
 
-# Build the runtime binary the tests spawn, then pre-build the test binaries
+# Build the runtime binary the tests spawn, plus the `macp` CLI that
+# test_decision_receipts shells out to (ci.yml builds both with
+# `-p macp-runtime -p macp-cli --bins`), then pre-build the test binaries
 # themselves so `docker compose run` pays compile time once at image build,
 # not on every test invocation.
-RUN cargo build
+RUN cargo build && cargo build -p macp-cli --bin macp
 RUN cd integration_tests && cargo metadata --locked --manifest-path Cargo.toml --format-version 1 > /dev/null && cargo build --tests
 
 WORKDIR /app/integration_tests
 ENV MACP_TEST_BINARY=/app/target/debug/macp-runtime
+ENV MACP_TEST_CLI=/app/target/debug/macp
 ENV RUST_LOG=warn
 
+# The ENTRYPOINT is already `cargo test`: pass only its arguments to
+# `docker compose run` (e.g. `--test tier1 -- --test-threads=1`).
 ENTRYPOINT ["cargo", "test"]
 CMD ["--test", "tier1", "--test", "tier1_jwt", "--test", "tier2", "--", "--test-threads=1"]
