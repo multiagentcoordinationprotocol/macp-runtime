@@ -6,6 +6,12 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.13.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.13.0...macp-runtime-v0.13.1) - 2026-11-06
+
+### Other
+
+- bump conformance-oracle SPEC_REV to spec b142b06 ([#288](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/288))
+
 ## [0.13.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.12.1...macp-runtime-v0.13.0) - 2026-11-01
 
 ### Other
