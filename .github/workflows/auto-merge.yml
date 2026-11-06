@@ -5,5 +5,7 @@ permissions:
   pull-requests: write
 jobs:
   call:
-    uses: multiagentcoordinationprotocol/macp-ci/.github/workflows/auto-merge.yml@v1.1
-    secrets: inherit
+    uses: multiagentcoordinationprotocol/macp-ci/.github/workflows/auto-merge.yml@v1.2
+    secrets:   # only the bot credentials, never `inherit`
+      MACP_BOT_APP_ID: ${{ secrets.MACP_BOT_APP_ID }}
+      MACP_BOT_PRIVATE_KEY: ${{ secrets.MACP_BOT_PRIVATE_KEY }}

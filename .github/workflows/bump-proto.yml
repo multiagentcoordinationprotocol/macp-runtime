@@ -10,9 +10,11 @@ on:
         default: ''
 jobs:
   bump:
-    uses: multiagentcoordinationprotocol/macp-ci/.github/workflows/bump-consume.yml@v1
+    uses: multiagentcoordinationprotocol/macp-ci/.github/workflows/bump-consume.yml@v1.2
     with:
       ecosystem: cargo
       package: 'macp-proto'
       version: ${{ github.event.inputs.version }}
-    secrets: inherit
+    secrets:   # only the bot credentials, never `inherit`
+      MACP_BOT_APP_ID: ${{ secrets.MACP_BOT_APP_ID }}
+      MACP_BOT_PRIVATE_KEY: ${{ secrets.MACP_BOT_PRIVATE_KEY }}
