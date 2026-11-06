@@ -10,7 +10,7 @@ description = "MACP reference runtime: a coordination kernel and gRPC server enf
 readme = "README.md"
 default-run = "macp-runtime"
 # Keep operational and development-only directories out of the published crate.
-exclude = ["/temp", "/.macp-data", "/plans", "/scripts", "/.githooks"]
+exclude = ["/temp", "/.macp-data", "/plans", "/scripts", "/.githooks", "/.github"]
 
 [workspace]
 members = ["crates/*"]
