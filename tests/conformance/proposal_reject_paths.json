@@ -86,6 +86,197 @@
         "reason": "withdrawing my own counter-proposal"
       },
       "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0008 Section 5 rule 4: p2 was withdrawn at the previous step, so it MUST NOT later be accepted.",
+      "sender": "agent://buyer",
+      "message_type": "Accept",
+      "payload_type": "macp.modes.proposal.v1.AcceptPayload",
+      "payload": {
+        "proposal_id": "p2",
+        "reason": ""
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0008 Section 5 rule 1: proposal_id p1 is already in use in this Session (it is still live), so a second Proposal reusing it is a duplicate identifier.",
+      "sender": "agent://seller",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.proposal.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "title": "offer",
+        "summary": "terms",
+        "details": [],
+        "tags": []
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0008 Section 5 rule 2: supersedes_proposal_id names p9, which is well-formed and non-empty but does not exist. Isolates rule 2 from the empty-value case at index 1.",
+      "sender": "agent://buyer",
+      "message_type": "CounterProposal",
+      "payload_type": "macp.modes.proposal.v1.CounterProposalPayload",
+      "payload": {
+        "proposal_id": "p3",
+        "supersedes_proposal_id": "p9",
+        "title": "counter",
+        "summary": "revised terms"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0008 Section 5 rule 3: Accept MUST reference an existing proposal; p9 was never submitted.",
+      "sender": "agent://buyer",
+      "message_type": "Accept",
+      "payload_type": "macp.modes.proposal.v1.AcceptPayload",
+      "payload": {
+        "proposal_id": "p9",
+        "reason": ""
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0008 Section 5 rule 3: Reject MUST reference an existing proposal; p9 was never submitted.",
+      "sender": "agent://buyer",
+      "message_type": "Reject",
+      "payload_type": "macp.modes.proposal.v1.RejectPayload",
+      "payload": {
+        "proposal_id": "p9",
+        "reason": "not acceptable",
+        "terminal": false
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0008 Section 5 rule 3: Withdraw MUST reference an existing proposal; p9 was never submitted, so there is no author whose authority could be checked.",
+      "sender": "agent://buyer",
+      "message_type": "Withdraw",
+      "payload_type": "macp.modes.proposal.v1.WithdrawPayload",
+      "payload": {
+        "proposal_id": "p9",
+        "reason": "withdrawn"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0008 Section 2.1: Proposal is authorized for declared participants only; mallory is not in participants.",
+      "sender": "agent://mallory",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.proposal.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p4",
+        "title": "offer",
+        "summary": "terms",
+        "details": [],
+        "tags": []
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "RFC-MACP-0008 Section 2.1: CounterProposal from a non-participant. p1 exists and is live, so the rejection is the authority rule, not rule 2.",
+      "sender": "agent://mallory",
+      "message_type": "CounterProposal",
+      "payload_type": "macp.modes.proposal.v1.CounterProposalPayload",
+      "payload": {
+        "proposal_id": "p5",
+        "supersedes_proposal_id": "p1",
+        "title": "counter",
+        "summary": "revised terms"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "RFC-MACP-0008 Section 2.1: Accept from a non-participant, of an existing live proposal.",
+      "sender": "agent://mallory",
+      "message_type": "Accept",
+      "payload_type": "macp.modes.proposal.v1.AcceptPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "reason": ""
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "RFC-MACP-0008 Section 2.1: Reject from a non-participant. It is terminal, so accepting it would wrongly make a negative Commitment eligible.",
+      "sender": "agent://mallory",
+      "message_type": "Reject",
+      "payload_type": "macp.modes.proposal.v1.RejectPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "reason": "not acceptable",
+        "terminal": true
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "RFC-MACP-0008 Section 5 rule 5: the seller accepts the live proposal p1.",
+      "sender": "agent://seller",
+      "message_type": "Accept",
+      "payload_type": "macp.modes.proposal.v1.AcceptPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "reason": ""
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0008 Section 5 rule 6: only the seller has accepted p1; the buyer, also a required participant, has not, so the Session is not yet eligible for Commitment.",
+      "sender": "agent://buyer",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "proposal.accepted",
+        "authority_scope": "test",
+        "reason": "done",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0008 Section 4: a Reject that is not terminal is accepted into history but does not end the negotiation.",
+      "sender": "agent://buyer",
+      "message_type": "Reject",
+      "payload_type": "macp.modes.proposal.v1.RejectPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "reason": "not acceptable",
+        "terminal": false
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0008 Section 5 rule 6: only a Reject with terminal=true makes a negative Commitment eligible. The Reject at the previous step was not terminal.",
+      "sender": "agent://buyer",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "proposal.rejected",
+        "authority_scope": "test",
+        "reason": "done",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
     }
   ],
   "expected_final_state": "Open",
@@ -97,7 +288,15 @@
         "proposal_id": "p2",
         "proposer": "agent://buyer",
         "disposition": "Withdrawn"
+      },
+      "p1": {
+        "proposal_id": "p1",
+        "proposer": "agent://seller",
+        "disposition": "Live"
       }
+    },
+    "accepts": {
+      "agent://seller": "p1"
     }
   }
 }

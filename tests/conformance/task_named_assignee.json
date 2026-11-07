@@ -1,0 +1,166 @@
+{
+  "_comment": "RFC-MACP-0009 Section 2.1 and Section 5 rules 2, 4 and 5 on a task with a named requested_assignee: only that participant may accept or decline it, nothing completes before an Accept, Commitment waits for TaskComplete, and only the requester commits.",
+  "description": "Task Mode with a named assignee: sender checks, completion ordering, and Commitment authority.",
+  "mode": "macp.mode.task.v1",
+  "initiator": "agent://planner",
+  "participants": [
+    "agent://planner",
+    "agent://worker",
+    "agent://other"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://planner",
+      "message_type": "TaskRequest",
+      "payload_type": "macp.modes.task.v1.TaskRequestPayload",
+      "payload": {
+        "task_id": "t1",
+        "title": "Build",
+        "instructions": "Do it",
+        "requested_assignee": "agent://worker",
+        "deadline_unix_ms": 0
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 5 rule 2: requested_assignee is worker, so a TaskAccept from another declared participant is not authorized.",
+      "sender": "agent://other",
+      "message_type": "TaskAccept",
+      "payload_type": "macp.modes.task.v1.TaskAcceptPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://other",
+        "reason": "ready"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 5 rule 2: the same rule for TaskReject.",
+      "sender": "agent://other",
+      "message_type": "TaskReject",
+      "payload_type": "macp.modes.task.v1.TaskRejectPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://other",
+        "reason": "busy"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 5 rule 2: the requester is a declared participant but is not the requested assignee.",
+      "sender": "agent://planner",
+      "message_type": "TaskAccept",
+      "payload_type": "macp.modes.task.v1.TaskAcceptPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://planner",
+        "reason": "ready"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 5 rule 4: TaskComplete MUST come from the active assignee. worker is the requested assignee but has not accepted, so no assignee is active.",
+      "sender": "agent://worker",
+      "message_type": "TaskComplete",
+      "payload_type": "macp.modes.task.v1.TaskCompletePayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://worker",
+        "output": "result",
+        "summary": "done"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "sender": "agent://worker",
+      "message_type": "TaskAccept",
+      "payload_type": "macp.modes.task.v1.TaskAcceptPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://worker",
+        "reason": "ready"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 5 rule 5: the task is accepted but has not completed or failed, so the Session is not yet eligible for Commitment.",
+      "sender": "agent://planner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "task.completed",
+        "authority_scope": "test",
+        "reason": "done",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "sender": "agent://worker",
+      "message_type": "TaskComplete",
+      "payload_type": "macp.modes.task.v1.TaskCompletePayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://worker",
+        "output": "result",
+        "summary": "done"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 2.1: the Session is now eligible, but the assignee is not the Commitment authority; the requester (initiator) is.",
+      "sender": "agent://worker",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "task.completed",
+        "authority_scope": "test",
+        "reason": "done",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "sender": "agent://planner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "task.completed",
+        "authority_scope": "test",
+        "reason": "done",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "task.completed",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}

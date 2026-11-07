@@ -5,7 +5,8 @@
   "participants": [
     "agent://planner",
     "agent://w1",
-    "agent://w2"
+    "agent://w2",
+    "agent://w3"
   ],
   "mode_version": "1.0.0",
   "configuration_version": "cfg-1",
@@ -79,6 +80,19 @@
       "expected_error_code": "INVALID_ENVELOPE"
     },
     {
+      "_comment": "RFC-MACP-0009 Section 5 rule 2: on a broadcast task only an eligible declared participant may send TaskAccept; mallory is not in participants. No assignee is active yet, so rule 3a does not apply.",
+      "sender": "agent://mallory",
+      "message_type": "TaskAccept",
+      "payload_type": "macp.modes.task.v1.TaskAcceptPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://mallory",
+        "reason": "ready"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
       "_comment": "RFC-MACP-0009 Section 5 rules 2a and 3a: w1's decline does not change w2's eligibility, so w2's first TaskAccept designates it the active assignee.",
       "sender": "agent://w2",
       "message_type": "TaskAccept",
@@ -128,6 +142,79 @@
         "message": "halfway through"
       },
       "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 5 rule 3a: w3 is eligible and has never declined, but w2 is already the active assignee. Isolates rule 3a from rule 2a, which also applies to w1's attempt above.",
+      "sender": "agent://w3",
+      "message_type": "TaskAccept",
+      "payload_type": "macp.modes.task.v1.TaskAcceptPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://w3",
+        "reason": "ready"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 5 rule 3b: the active assignee MUST NOT send TaskReject after TaskAccept. No policy is bound, so allow_reassignment_on_reject is false.",
+      "sender": "agent://w2",
+      "message_type": "TaskReject",
+      "payload_type": "macp.modes.task.v1.TaskRejectPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://w2",
+        "reason": "busy"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 5 rule 4: TaskComplete MUST come from the active assignee (w2).",
+      "sender": "agent://w1",
+      "message_type": "TaskComplete",
+      "payload_type": "macp.modes.task.v1.TaskCompletePayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://w1",
+        "output": "result",
+        "summary": "done"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 5 rule 4: TaskFail MUST come from the active assignee; the requester is not it.",
+      "sender": "agent://planner",
+      "message_type": "TaskFail",
+      "payload_type": "macp.modes.task.v1.TaskFailPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://planner",
+        "error_code": "BUILD_FAILED",
+        "reason": "compilation error",
+        "retryable": false
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 5 rule 5: Commitment is eligible only after TaskComplete or TaskFail. Neither has been accepted.",
+      "sender": "agent://planner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "task.completed",
+        "authority_scope": "test",
+        "reason": "done",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
     }
   ],
   "expected_final_state": "Open"

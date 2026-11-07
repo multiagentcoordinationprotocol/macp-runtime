@@ -1,0 +1,96 @@
+{
+  "_comment": "RFC-MACP-0009 Section 5 rule 2a: when requested_assignee is non-empty, that participant's TaskReject leaves no eligible assignee, and the Session becomes eligible for a negative Commitment with no TaskFail. A positive Commitment is not eligible, and the participant that declined can never accept.",
+  "description": "Task Mode: a named assignee's decline makes a negative Commitment eligible.",
+  "mode": "macp.mode.task.v1",
+  "initiator": "agent://planner",
+  "participants": [
+    "agent://planner",
+    "agent://worker"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://planner",
+      "message_type": "TaskRequest",
+      "payload_type": "macp.modes.task.v1.TaskRequestPayload",
+      "payload": {
+        "task_id": "t1",
+        "title": "Build",
+        "instructions": "Do it",
+        "requested_assignee": "agent://worker",
+        "deadline_unix_ms": 0
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://worker",
+      "message_type": "TaskReject",
+      "payload_type": "macp.modes.task.v1.TaskRejectPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://worker",
+        "reason": "busy"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 5 rule 2a: a participant that has declined MUST NOT later send TaskAccept for the same task.",
+      "sender": "agent://worker",
+      "message_type": "TaskAccept",
+      "payload_type": "macp.modes.task.v1.TaskAcceptPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://worker",
+        "reason": "ready"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 5 rules 2a and 5: the decline makes only a negative Commitment eligible. Nothing completed, so a positive one is not.",
+      "sender": "agent://planner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "task.completed",
+        "authority_scope": "test",
+        "reason": "done",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0009 Section 5 rule 2a: the named assignee declined, so the requester may bind the negative outcome.",
+      "sender": "agent://planner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "task.declined",
+        "authority_scope": "test",
+        "reason": "done",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "task.declined",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": false
+  }
+}

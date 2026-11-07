@@ -287,10 +287,27 @@ conformance_test!(
     conformance_proposal_negative_outcome,
     "proposal_negative_outcome.json"
 );
+conformance_test!(
+    conformance_proposal_counter_live_original,
+    "proposal_counter_live_original.json"
+);
+conformance_test!(
+    conformance_proposal_withdrawn_after_accept,
+    "proposal_withdrawn_after_accept.json"
+);
 conformance_test!(conformance_task_reject_paths, "task_reject_paths.json");
 conformance_test!(
     conformance_task_negative_outcome,
     "task_negative_outcome.json"
+);
+conformance_test!(conformance_task_named_assignee, "task_named_assignee.json");
+conformance_test!(
+    conformance_task_named_reject_negative,
+    "task_named_reject_negative.json"
+);
+conformance_test!(
+    conformance_task_reassignment_on_reject,
+    "task_reassignment_on_reject.json"
 );
 conformance_test!(
     conformance_handoff_reject_paths,
