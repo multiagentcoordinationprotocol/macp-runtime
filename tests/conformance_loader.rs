@@ -598,6 +598,17 @@ conformance_test!(
     "policy_task_reassignment_on_reject.json"
 );
 
+// RFC-MACP-0004 §6 (isolation) and RFC-MACP-0006 §4.7 (per-Envelope
+// macp_version, in band), from the spec's RFC promotion prep.
+conformance_test!(
+    conformance_security_isolation_reject_paths,
+    "security_isolation_reject_paths.json"
+);
+conformance_test!(
+    conformance_transport_macp_version_in_band,
+    "transport_macp_version_in_band.json"
+);
+
 /// Guard: every vendored fixture must be registered with `conformance_test!`.
 ///
 /// Unlike both SDK harnesses, which discover fixtures dynamically, the
