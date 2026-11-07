@@ -496,6 +496,21 @@ conformance_test!(
     "quorum_admission_reject_paths.json"
 );
 conformance_test!(conformance_quorum_all_abstain, "quorum_all_abstain.json");
+conformance_test!(conformance_core_ttl_expired, "core_ttl_expired.json");
+conformance_test!(
+    conformance_core_mode_before_policy,
+    "core_mode_before_policy.json"
+);
+conformance_test!(
+    conformance_core_runtime_annotation_reject_paths,
+    "core_runtime_annotation_reject_paths.json"
+);
+conformance_test!(
+    conformance_core_envelope_reject_paths,
+    "core_envelope_reject_paths.json"
+);
+conformance_test!(conformance_core_config_default, "core_config_default.json");
+conformance_test!(conformance_core_signal_ambient, "core_signal_ambient.json");
 
 // Spec RFC-MACP-0012 fixture batch B3: SessionStart policy resolution, the
 // Commitment echo, Decision quorum/evaluation/veto/weighted rules, and the
@@ -707,9 +722,9 @@ fn fixtures_conform_to_canonical_format() {
     // `decision_zero_proposal_commitment.json`, and to 37 by the Seam-driven
     // corpus (spec #192/#193: quorum overrides, handoff implicit accept,
     // SessionStart obligations), and to 40 by the W2.7 policy-pack fixtures
-    // (spec #209), and to 46 by the RFC-MACP-0007 promotion-prep corpus.
+    // (spec #209), and to 89 by the RFC promotion-prep corpus (spec #263-#268).
     assert!(
-        checked >= 46,
+        checked >= 89,
         "expected all fixtures checked, got {checked}"
     );
 }
