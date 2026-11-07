@@ -85,9 +85,10 @@ MACP_TEST_BINARY=../target/debug/macp-runtime cargo test -- --test-threads=1
 MACP_TEST_BINARY=../target/debug/macp-runtime cargo test --test tier1 -- --test-threads=1
 MACP_TEST_BINARY=../target/debug/macp-runtime cargo test --test tier2 -- --test-threads=1
 
-# Tier 3 (requires OpenAI API key)
-OPENAI_API_KEY=sk-... MACP_TEST_BINARY=../target/debug/macp-runtime \
+# Tier 3 (requires OpenAI API key; Doppler macp-runtime/dev holds it, see CONTRIBUTING.md)
+doppler run -- env MACP_TEST_BINARY=../target/debug/macp-runtime \
   cargo test --test tier3 -- --ignored --test-threads=1
+# or, without Doppler: OPENAI_API_KEY=sk-... MACP_TEST_BINARY=... cargo test ...
 
 # Against a hosted runtime (no local server started)
 MACP_TEST_ENDPOINT=host:50051 cargo test -- --test-threads=1
@@ -98,7 +99,7 @@ Or use the Makefile targets from the project root:
 ```bash
 make test-integration-grpc      # Tier 1
 make test-integration-agents    # Tier 2
-make test-integration-e2e       # Tier 3
+make test-integration-e2e       # Tier 3 (doppler run -- make test-integration-e2e, or a root .env)
 make test-integration-hosted    # All tiers against MACP_TEST_ENDPOINT
 ```
 
@@ -122,7 +123,7 @@ docker compose run --rm integration-tests --test tier3 -- --ignored --test-threa
 | `MACP_TEST_AUTH_TOKEN` | Bearer token for hosted runtime | Dev headers |
 | `MACP_TEST_BACKEND` | Run the storage-backend smoke test on `rocksdb`/`redis`/`file` (binary must be built with the matching feature) | Test skips if unset |
 | `MACP_TEST_REDIS_URL` | Redis endpoint for the redis backend smoke test | `redis://127.0.0.1:6379` |
-| `OPENAI_API_KEY` | Required for Tier 3 tests | Tier 3 tests skip if unset |
+| `OPENAI_API_KEY` | Required for Tier 3 tests. Doppler `macp-runtime/dev` holds it (`doppler run -- ...`); a root `.env` is the fallback | Tier 3 tests skip if unset |
 | `MACP_CONFORMANCE_FIXTURES_DIR` | Run `tests/conformance_loader.rs`'s suite against an external fixtures directory instead of the vendored `tests/conformance/` copy (also set by `ci.yml`'s `conformance-oracle` job) | Uses the vendored copy |
 
 ## Policy tests

@@ -1,0 +1,22 @@
+# Keys deploy/doppler-sync.sh pushes from Doppler (macp-runtime/prd) into the
+# Railway service macp-runtime. Doppler owns exactly these; the script never
+# touches any other Railway variable and never deletes one.
+#
+# Left to Railway on purpose: RAILWAY_DEPLOYMENT_DRAINING_SECONDS (RAILWAY_*
+# variables are Railway-managed).
+
+# config
+MACP_ALLOW_INSECURE
+MACP_AUTH_AUDIENCE
+MACP_AUTH_ISSUER
+MACP_AUTH_JWKS_TTL_SECS
+MACP_AUTH_JWKS_URL
+MACP_BIND_ADDR
+MACP_COMPACT_TERMINAL_LOGS
+MACP_RECEIPT_SIGNING_KID
+MACP_RUNTIME_ID
+MACP_SESSION_DISK_RETENTION_SECS
+
+# secret
+MACP_AUTH_TOKENS_JSON
+MACP_RECEIPT_SIGNING_KEY

@@ -30,6 +30,43 @@ cargo test -p macp-storage --features rocksdb-backend
 MACP_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test -p macp-storage --features redis-backend
 ```
 
+## Secrets and configuration (Doppler)
+
+Doppler is the source of truth for this repo's secrets and hosted config.
+The Doppler project is `macp-runtime`:
+
+| Config | Holds |
+|---|---|
+| `dev` | Local development keys (the LLM keys the Tier 3 tests need) |
+| `dev_personal` | Your own overrides of `dev` |
+| `stg` | `prd`'s non-secret config only; there is no Railway staging environment yet |
+| `prd` | The hosted runtime's Railway variables (project `macp-scenario-runner`, service `macp-runtime`) |
+
+Local development:
+
+```bash
+doppler setup --project macp-runtime --config dev   # once per checkout
+doppler run -- make test-integration-e2e            # Tier 3, real LLM
+doppler run -- docker compose run --rm integration-tests --test tier3 -- --ignored --test-threads=1
+```
+
+Without Doppler access, copy `.env.example` to `.env` (gitignored) and fill
+in your own keys. The Makefile's integration targets and `docker-compose.yml`
+read `.env` only for keys the environment does not already set.
+
+The hosted service: change a value in Doppler `macp-runtime/prd`, then
+
+```bash
+deploy/doppler-sync.sh           # dry run: key names, changed/unchanged
+deploy/doppler-sync.sh --apply   # push the changed keys, then redeploy
+```
+
+The script manages only the keys in `deploy/doppler-keys.txt`. It never
+deletes a Railway variable and never touches a Railway reference
+(`${{service.VAR}}`) or a `RAILWAY_*` variable. It pipes values from Doppler
+to Railway without printing them, and refuses to run on a dirty tree. Railway
+holds no Doppler token.
+
 **For MACP org members only:** agents working in this repo can query the MACP
 knowledge base through the `macp-kb` MCP server. Setup is in the private
 `macp-docs` repo (README, "MCP server"). Answers cite the source repo and

@@ -1,4 +1,4 @@
-.PHONY: setup build test test-integration test-conformance test-all fmt clippy check audit coverage test-integration-grpc test-integration-agents test-integration-e2e test-integration-hosted
+.PHONY: setup build test test-integration test-conformance test-all fmt clippy check audit coverage test-integration-grpc test-integration-agents test-integration-e2e test-integration-hosted doppler-sync
 
 ## First-time setup: configure git hooks
 setup:
@@ -43,8 +43,19 @@ test-integration-grpc:
 test-integration-agents:
 	cd integration_tests && cargo test --test tier2 -- --test-threads=1
 
+# Real-LLM keys come from the environment: `doppler run -- make <target>`
+# (Doppler macp-runtime/dev). Without Doppler, a gitignored root .env is read
+# for any key the environment does not already set (.env.example).
+LOAD_DOTENV = if [ -f .env ]; then while IFS= read -r line; do \
+	  case "$$line" in ''|'\#'*) continue ;; esac; k="$${line%%=*}"; \
+	  [ -n "$$(printenv "$$k")" ] || export "$$line"; done < .env; fi;
+
 test-integration-e2e:
-	cd integration_tests && cargo test -- --ignored --test-threads=1
+	@$(LOAD_DOTENV) cd integration_tests && cargo test -- --ignored --test-threads=1
 
 test-integration-hosted:
-	cd integration_tests && cargo test -- --test-threads=1
+	@$(LOAD_DOTENV) cd integration_tests && cargo test -- --test-threads=1
+
+## Push the hosted service's config from Doppler to Railway (dry run; ARGS=--apply to push)
+doppler-sync:
+	deploy/doppler-sync.sh $(ARGS)
