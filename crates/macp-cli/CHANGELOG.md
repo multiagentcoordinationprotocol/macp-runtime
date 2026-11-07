@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-cli-v0.13.2...macp-cli-v0.14.0) - 2026-11-07
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [0.13.2](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-cli-v0.13.0...macp-cli-v0.13.2) - 2026-11-07
 
 ### Other
