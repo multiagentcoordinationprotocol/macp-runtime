@@ -6,6 +6,12 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.14.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.13.2...macp-runtime-v0.14.0) - 2026-11-07
+
+### Fixed
+
+- *(handoff)* [**breaking**] positive Commitment needs an accepted offer; annotations via Send are FORBIDDEN in every mode ([#300](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/300))
+
 ## [0.13.2](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.13.0...macp-runtime-v0.13.2) - 2026-11-07
 
 ### Fixed
