@@ -104,6 +104,9 @@ jobs:
           DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
         run: |
           test -n "$DOPPLER_TOKEN" || { echo "::error::DOPPLER_TOKEN repo secret is not set"; exit 1; }
-          doppler secrets get OPENAI_API_KEY --plain >/dev/null || { echo "::error::OPENAI_API_KEY is missing from Doppler macp-runtime/ci"; exit 1; }
-          doppler run -- sh -c 'test -n "$OPENAI_API_KEY" || { echo "::error::OPENAI_API_KEY is empty in Doppler macp-runtime/ci"; exit 1; }; exec cargo test -- --ignored --test-threads=1'
+          OPENAI_API_KEY="$(doppler secrets get OPENAI_API_KEY --plain)" || { echo "::error::cannot read OPENAI_API_KEY from Doppler macp-runtime/ci"; exit 1; }
+          echo "::add-mask::$OPENAI_API_KEY"
+          test -n "$OPENAI_API_KEY" || { echo "::error::OPENAI_API_KEY is empty in Doppler macp-runtime/ci"; exit 1; }
+          export OPENAI_API_KEY; unset DOPPLER_TOKEN
+          cargo test -- --ignored --test-threads=1
         timeout-minutes: 10
