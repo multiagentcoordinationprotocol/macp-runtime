@@ -10,10 +10,13 @@
 # key: the playground runs agents deterministically unless PLAYGROUND_ALLOW_LLM
 # is set, which this file never does.
 #
-# Credentials are local-dev defaults, overridable from a `.env` next to this
-# file (copy `.env.example`). Every port binds to 127.0.0.1: auth-service mints
-# a token for any sender it is asked for, so this stack must not be reachable
-# from other machines as configured.
+# Credentials are fixed, PUBLICLY KNOWN local-dev placeholders (macp-dev-*),
+# overridable from a `.env` next to this file (copy `.env.example`). Production
+# images refuse to boot without some of them (the playground's AUTH_API_KEYS,
+# auth-service's TOKEN_ISSUER_KEYS), which is why they are set even here. Every
+# port binds to 127.0.0.1: anyone holding the token-issuer key can mint a token
+# for any sender, and these defaults are in this file, so this stack must not be
+# reachable from other machines as configured.
 
 name: macp
 
@@ -35,6 +38,10 @@ services:
       MACP_AUTH_AUDIENCE: macp-runtime
       MACP_AUTH_DEFAULT_TTL_SECONDS: "3600"
       MACP_AUTH_MAX_TTL_SECONDS: "7200"
+      # Shared key POST /tokens requires (Authorization: Bearer). Images after
+      # 1.0.0 refuse to boot without it (the image runs NODE_ENV=production);
+      # 1.0.0 ignores it. The playground sends the same value below.
+      TOKEN_ISSUER_KEYS: ${MACP_TOKEN_ISSUER_KEY:-macp-dev-token-issuer-key}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3200/healthz"]
       interval: 3s
@@ -117,7 +124,8 @@ services:
       RUNTIME_TLS: "false"
       RUNTIME_ALLOW_INSECURE: "true"
       # Static bearer, no MACP_AUTH_SERVICE_URL: the control plane uses JWT mode
-      # only when that is set. It runs its migrations at boot, before serving.
+      # only when that is set (and would then also need MACP_AUTH_SERVICE_API_KEY
+      # set to the token-issuer key). It runs its migrations at boot, before serving.
       RUNTIME_BEARER_TOKEN: ${MACP_CP_RUNTIME_TOKEN:-macp-dev-cp-observer}
       AUTH_API_KEYS: ${MACP_CP_API_KEY:-macp-dev-key}
       CORS_ORIGIN: http://localhost:${MACP_CONSOLE_PORT:-3000}
@@ -142,8 +150,9 @@ services:
 
   # The playground is what spawns the agents: the console launches a run with
   # POST /examples/run, and the control plane only observes. Deterministic
-  # unless PLAYGROUND_ALLOW_LLM is set. Do not set AUTH_API_KEYS here: the
-  # image's HEALTHCHECK sends no key.
+  # unless PLAYGROUND_ALLOW_LLM is set. AUTH_API_KEYS gates every route but
+  # /healthz (x-api-key; the console sends it as MACP_PLAYGROUND_API_KEY).
+  # Images after 0.2.1 refuse to boot in production without it.
   playground:
     image: ${MACP_PLAYGROUND_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-playground:0.2.1}
     environment:
@@ -153,7 +162,11 @@ services:
       MACP_RUNTIME_ADDRESS: runtime:50051
       MACP_RUNTIME_TLS: "false"
       MACP_RUNTIME_ALLOW_INSECURE: "true"
+      AUTH_API_KEYS: ${MACP_PLAYGROUND_API_KEY:-macp-dev-playground-key}
       MACP_AUTH_SERVICE_URL: http://auth-service:3200
+      # auth-service's TOKEN_ISSUER_KEYS above; images after 0.2.1 send it on
+      # POST /tokens, 0.2.1 ignores it (and auth-service 1.0.0 needs none).
+      MACP_AUTH_SERVICE_API_KEY: ${MACP_TOKEN_ISSUER_KEY:-macp-dev-token-issuer-key}
       MACP_AUTH_TOKEN_TTL_SECONDS: "3600"
       MACP_CONTROL_PLANE_URL: http://control-plane:3001
       MACP_CONTROL_PLANE_API_KEY: ${MACP_CP_API_KEY:-macp-dev-key}
@@ -182,6 +195,7 @@ services:
       MACP_CONTROL_PLANE_BASE_URL: http://control-plane:3001
       MACP_CONTROL_PLANE_API_KEY: ${MACP_CP_API_KEY:-macp-dev-key}
       MACP_PLAYGROUND_BASE_URL: http://playground:3000
+      MACP_PLAYGROUND_API_KEY: ${MACP_PLAYGROUND_API_KEY:-macp-dev-playground-key}
     ports:
       - "127.0.0.1:${MACP_CONSOLE_PORT:-3000}:3000"
     depends_on:
