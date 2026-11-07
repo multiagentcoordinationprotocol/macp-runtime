@@ -349,6 +349,37 @@ conformance_test!(
     "decision_finalize_decline_quorum_waiver.json"
 );
 
+// RFC-MACP-0007 promotion-prep corpus (criterion 3 of the spec's VERSIONING.md
+// §9.1): the Passed arm's negative half with and without
+// allow_decline_over_approval, the decline guard's require_vote_quorum
+// conjunct, accepted deliberation values with ABSTAIN outside the denominator,
+// an objection-authorized decline on a Passed tally, and an initiator outside
+// the participant list.
+conformance_test!(
+    conformance_decision_decline_over_approval,
+    "decision_decline_over_approval.json"
+);
+conformance_test!(
+    conformance_decision_decline_over_approval_allowed,
+    "decision_decline_over_approval_allowed.json"
+);
+conformance_test!(
+    conformance_decision_decline_guard_quorum,
+    "decision_decline_guard_quorum.json"
+);
+conformance_test!(
+    conformance_decision_abstain_denominator,
+    "decision_abstain_denominator.json"
+);
+conformance_test!(
+    conformance_decision_objection_decline_passed,
+    "decision_objection_decline_passed.json"
+);
+conformance_test!(
+    conformance_decision_0007_initiator_not_participant,
+    "decision_0007_initiator_not_participant.json"
+);
+
 // The `schema_version` 3 / empty-tally corpus added upstream by spec #99
 // (RFC-MACP-0012 Sections 4.1 and 8, RFC-MACP-0007 Section 6.2). Two of these
 // are legacy-arm regression guards rather than new coverage:
@@ -530,9 +561,9 @@ fn fixtures_conform_to_canonical_format() {
     // `decision_zero_proposal_commitment.json`, and to 37 by the Seam-driven
     // corpus (spec #192/#193: quorum overrides, handoff implicit accept,
     // SessionStart obligations), and to 40 by the W2.7 policy-pack fixtures
-    // (spec #209).
+    // (spec #209), and to 46 by the RFC-MACP-0007 promotion-prep corpus.
     assert!(
-        checked >= 40,
+        checked >= 46,
         "expected all fixtures checked, got {checked}"
     );
 }

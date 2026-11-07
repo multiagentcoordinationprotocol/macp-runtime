@@ -104,6 +104,100 @@
       "expected_error_code": "INVALID_ENVELOPE"
     },
     {
+      "_comment": "RFC-MACP-0007 Section 5 rule 1: Proposal.proposal_id MUST be unique within the Session. p1 was accepted at index 1. The sender is a declared participant and no Vote has been accepted yet, so neither FORBIDDEN nor rule 6 can be the cause.",
+      "sender": "agent://a",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "rollback",
+        "rationale": "a different option reusing an existing id",
+        "supporting_data": []
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0007 Section 5 rule 2: Evaluation MUST reference an existing proposal_id. The recommendation is a valid value, so Section 4 cannot be the cause.",
+      "sender": "agent://b",
+      "message_type": "Evaluation",
+      "payload_type": "macp.modes.decision.v1.EvaluationPayload",
+      "payload": {
+        "proposal_id": "p-does-not-exist",
+        "recommendation": "APPROVE",
+        "confidence": 0.7,
+        "reason": "evaluating a proposal that was never submitted"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0007 Section 5 rule 2: Vote MUST reference an existing proposal_id. agent://b casts no accepted Vote in this transcript, so rule 3 cannot be the cause, and a rejected Vote does not open the voting phase (RFC-MACP-0001 Section 8.3), so rule 6 does not start here.",
+      "sender": "agent://b",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p-does-not-exist",
+        "vote": "APPROVE",
+        "reason": "voting on a proposal that was never submitted"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0007 Section 4: MAYBE is not one of APPROVE, REJECT or ABSTAIN. This is an out-of-set value, not a casing variant, which the earlier vote case already covers.",
+      "sender": "agent://b",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "MAYBE",
+        "reason": "undecided"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "RFC-MACP-0007 Section 2.1 Authority Matrix: Evaluation is restricted to declared participants. The payload is otherwise valid and references the live p1.",
+      "sender": "agent://outsider",
+      "message_type": "Evaluation",
+      "payload_type": "macp.modes.decision.v1.EvaluationPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "recommendation": "APPROVE",
+        "confidence": 0.7,
+        "reason": "outsider analysis"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "RFC-MACP-0007 Section 2.1: Objection is restricted to declared participants.",
+      "sender": "agent://outsider",
+      "message_type": "Objection",
+      "payload_type": "macp.modes.decision.v1.ObjectionPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "reason": "outsider concern",
+        "severity": "high"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "RFC-MACP-0007 Section 2.1: Vote is restricted to declared participants. Because the Vote is rejected, it neither opens the voting phase nor occupies a ballot slot.",
+      "sender": "agent://outsider",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "outsider ballot"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
       "_comment": "RFC-MACP-0007 Section 5 rule 4: a runtime MUST reject Commitment from unauthorized senders. agent://a is a declared participant but not the initiator, and the bound policy's commitment authority does not extend to it. FORBIDDEN rather than INVALID_ENVELOPE because the breach is sender authorization, per RFC-MACP-0002 Section 6.1.",
       "sender": "agent://a",
       "message_type": "Commitment",
