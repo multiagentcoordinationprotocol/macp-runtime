@@ -1,0 +1,45 @@
+{
+  "_comment": "Pins OPEN -> EXPIRED (RFC-MACP-0001 Section 7.2, Section 7.3; RFC-MACP-0003 Section 2). Clocked: the harness opens the session at acceptance time 0 with Envelope timestamp 0, so the deadline is 1000. Every Envelope timestamp stays at the harness default of 0, so a runtime that times the TTL off the Envelope clock (contrary to RFC-MACP-0001 Section 7.6 item 4) never expires the session and fails the final-state check.",
+  "description": "Core lifecycle: a session whose TTL elapses is EXPIRED and rejects further messages.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 1000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept",
+      "accepted_at_ms": 500
+    },
+    {
+      "_comment": "RFC-MACP-0001 Section 7.2/7.3 and RFC-MACP-0003 Section 2: the deadline is the SessionStart's acceptance time 0 plus ttl_ms 1000. At acceptance time 1500 the session has expired, so the Vote is rejected with a non-OPEN session error.",
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "r"
+      },
+      "expect": "reject",
+      "expected_error_code": "SESSION_NOT_OPEN",
+      "accepted_at_ms": 1500
+    }
+  ],
+  "expected_final_state": "Expired"
+}

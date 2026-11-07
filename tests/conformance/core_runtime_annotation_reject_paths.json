@@ -1,0 +1,75 @@
+{
+  "_comment": "Pins RFC-MACP-0001 Section 7.3 and Section 7.5: SessionCancel, SessionSuspend and SessionResume are appended only by the runtime, through the CancelSession, SuspendSession and ResumeSession RPCs. A Send of any of them is rejected and leaves the session OPEN. Message 1 is an accepted Proposal so the session has a mode state to preserve.",
+  "description": "Core lifecycle: runtime-emitted annotations submitted via Send are rejected.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "expected_mode_state": {
+    "proposals": {
+      "p1": {
+        "proposal_id": "p1",
+        "sender": "agent://orchestrator"
+      }
+    }
+  },
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0001 Section 7.3: SessionCancel is runtime-emitted and MUST NOT be submitted via Send, even by the initiator. The RFC names no error code for this rejection; the code here is the one the reference runtime returns.",
+      "sender": "agent://orchestrator",
+      "message_type": "SessionCancel",
+      "payload_type": "macp.v1.SessionCancelPayload",
+      "payload": {
+        "reason": "abort",
+        "cancelled_by": "agent://orchestrator"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "RFC-MACP-0001 Section 7.5: SessionSuspend is runtime-emitted and MUST NOT be submitted via Send, even by the initiator. The RFC names no error code for this rejection; the code here is the one the reference runtime returns.",
+      "sender": "agent://orchestrator",
+      "message_type": "SessionSuspend",
+      "payload_type": "macp.v1.SessionSuspendPayload",
+      "payload": {
+        "reason": "pause",
+        "suspended_by": "agent://orchestrator"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "RFC-MACP-0001 Section 7.5: SessionResume is runtime-emitted and MUST NOT be submitted via Send, even by the initiator. The RFC names no error code for this rejection; the code here is the one the reference runtime returns.",
+      "sender": "agent://orchestrator",
+      "message_type": "SessionResume",
+      "payload_type": "macp.v1.SessionResumePayload",
+      "payload": {
+        "reason": "continue",
+        "resumed_by": "agent://orchestrator",
+        "banked_ms": 0
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    }
+  ],
+  "expected_final_state": "Open"
+}

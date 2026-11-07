@@ -53,6 +53,32 @@ pub fn encode_payload(
             supersedes: None,
         }
         .encode_to_vec(),
+        // Core payloads a fixture may submit only to assert a rejection or an
+        // ambient acceptance: Signal (RFC-MACP-0001 §5.1) and the runtime-emitted
+        // annotations that MUST NOT arrive via Send (§7.3, §7.5).
+        "macp.v1.SignalPayload" => macp_pb::pb::SignalPayload {
+            signal_type: s(p, "signal_type"),
+            data: s(p, "data").into_bytes(),
+            confidence: p["confidence"].as_f64().unwrap_or_default(),
+            correlation_session_id: s(p, "correlation_session_id"),
+        }
+        .encode_to_vec(),
+        "macp.v1.SessionCancelPayload" => macp_pb::pb::SessionCancelPayload {
+            reason: s(p, "reason"),
+            cancelled_by: s(p, "cancelled_by"),
+        }
+        .encode_to_vec(),
+        "macp.v1.SessionSuspendPayload" => macp_pb::pb::SessionSuspendPayload {
+            reason: s(p, "reason"),
+            suspended_by: s(p, "suspended_by"),
+        }
+        .encode_to_vec(),
+        "macp.v1.SessionResumePayload" => macp_pb::pb::SessionResumePayload {
+            reason: s(p, "reason"),
+            resumed_by: s(p, "resumed_by"),
+            banked_ms: p["banked_ms"].as_i64().unwrap_or_default(),
+        }
+        .encode_to_vec(),
         t if t.starts_with("macp.modes.decision.v1.") => decision(message_type, p)?,
         t if t.starts_with("macp.modes.proposal.v1.") => proposal(message_type, p)?,
         t if t.starts_with("macp.modes.task.v1.") => task(message_type, p)?,

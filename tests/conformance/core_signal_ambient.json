@@ -1,0 +1,67 @@
+{
+  "_comment": "Pins RFC-MACP-0001 Section 5.1: Signals MUST NOT affect session state. A Signal accepted on the ambient plane between two session messages leaves this session's history and mode state exactly as if it had not been sent: the Vote that follows is accepted and the mode state holds exactly that one vote.",
+  "description": "Core: an ambient Signal is accepted and leaves the session untouched.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "expected_mode_state": {
+    "votes": {
+      "p1": {
+        "agent://a": {
+          "vote": "APPROVE"
+        }
+      }
+    }
+  },
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0001 Section 5.1: a Signal is ambient (empty session_id and mode) and MUST NOT change session state. It names this session only as a correlation reference.",
+      "sender": "agent://a",
+      "message_type": "Signal",
+      "payload_type": "macp.v1.SignalPayload",
+      "payload": {
+        "signal_type": "observation.latency",
+        "data": "slow",
+        "confidence": 0.5,
+        "correlation_session_id": ""
+      },
+      "envelope": {
+        "session_id": "",
+        "mode": ""
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "r"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Open"
+}
