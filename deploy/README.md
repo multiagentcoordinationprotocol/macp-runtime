@@ -72,8 +72,8 @@ To change them, copy `.env.example` to `.env` and edit it.
 | Credential | Default | Used by |
 |---|---|---|
 | `MACP_CP_API_KEY` | `macp-dev-key` | Every caller of the control plane API: the console, the playground and you. Send it as `Authorization: Bearer <key>`. |
-| `MACP_PLAYGROUND_API_KEY` | `macp-dev-playground-key` | The playground's `AUTH_API_KEYS` and the console's key for it, sent as `x-api-key`. Playground images after 0.2.1 refuse to start in production without it. |
-| `MACP_TOKEN_ISSUER_KEY` | `macp-dev-token-issuer-key` | auth-service's `TOKEN_ISSUER_KEYS` and the playground's `MACP_AUTH_SERVICE_API_KEY`: the shared key `POST /tokens` requires as `Authorization: Bearer <key>`. auth-service images after 1.0.0 refuse to start without it. |
+| `MACP_PLAYGROUND_API_KEY` | `macp-dev-playground-key` | The playground's `AUTH_API_KEYS` and the console's key for it, sent as `x-api-key`. Playground 0.3.0+ refuses to start in production without it. |
+| `MACP_TOKEN_ISSUER_KEY` | `macp-dev-token-issuer-key` | auth-service's `TOKEN_ISSUER_KEYS` and the playground's `MACP_AUTH_SERVICE_API_KEY`: the shared key `POST /tokens` requires as `Authorization: Bearer <key>`. auth-service 2.0.0+ refuses to start without it. |
 | `MACP_CP_RUNTIME_TOKEN` | `macp-dev-cp-observer` | The control plane's static bearer to the runtime. The runtime maps it to sender `macp-control-plane` with observer rights. |
 | `POSTGRES_PASSWORD` | `macp` | The control plane's database login. |
 | `MACP_RECEIPT_SIGNING_KEY` | empty (unsigned) | The runtime's decision-receipt signing key, with `MACP_RECEIPT_SIGNING_KID` and `MACP_RUNTIME_ID`. See [Decision receipts](../docs/deployment.md#decision-receipts). |
