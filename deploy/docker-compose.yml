@@ -43,7 +43,7 @@ services:
     restart: unless-stopped
 
   runtime:
-    image: ${MACP_RUNTIME_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.10.0}
+    image: ${MACP_RUNTIME_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.14.0}
     # From 0.12 SIGTERM drains for up to MACP_SHUTDOWN_DRAIN_SECS (default 10,
     # the whole deadline while any stream is open) and then snapshots
     # sessions; Docker's default 10s grace would SIGKILL first. Grace = drain
