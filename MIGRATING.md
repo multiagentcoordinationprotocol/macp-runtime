@@ -14,6 +14,25 @@ Every release that may break an embeddable crate has an entry here, under a
 introduces a breaking API change must add it, and a release PR with a breaking
 bump fails without it. Patch releases have no entry.
 
+## 0.14.0 — Handoff Commitment readiness and runtime annotations (`semantics_rev` 5)
+
+No API is removed or renamed. Two behaviour changes reach embedders that drive
+`macp_modes::step` themselves:
+
+- **`CURRENT_SEMANTICS_REV` is 5.** In a Handoff session started at rev 5, a
+  positive `Commitment` is refused (`MacpError::InvalidPayload`, wire
+  `INVALID_ENVELOPE`) unless some offer has been accepted; a declined offer
+  no longer makes it ready (RFC-MACP-0010 §6.1). Gated by
+  `handoff::POSITIVE_COMMITMENT_NEEDS_ACCEPT_REV`; sessions recorded at rev
+  0-4 replay unchanged. At every revision, a negative `Commitment` is now
+  accepted with no offer at all, or with one still pending (a loosening).
+- **`step::admit` refuses runtime annotations.** A client-submitted
+  `SessionCancel`, `SessionSuspend` or `SessionResume` is
+  `MacpError::Forbidden` before the mode is consulted, in every mode
+  (RFC-MACP-0001 §7.6 item 9). It used to be `InvalidPayload` in Proposal,
+  Task, Handoff and Quorum. New: `step::RUNTIME_ANNOTATION_TYPES` and
+  `step::is_runtime_annotation`.
+
 ## 0.13.0 — OpenTelemetry 0.33 and tower-http 0.7 under `otel`
 
 The embeddable crates (`macp-core`, `macp-modes`, `macp-policy`, `macp-pb`) have

@@ -36,7 +36,7 @@ env:
   # of truth -- and files one tracked issue when upstream moves ahead of it in a
   # way that touches the mirrored trees. Pin without that watcher and the gate
   # quietly rots; that pairing is the whole design.
-  SPEC_REV: "c7a4daf7e1b64f7db7bf2f8d298cf171b037d549"
+  SPEC_REV: "c2b6cf1b418f45b15f236cecbc12b2c01e76a5bd"
 
 jobs:
   actionlint:

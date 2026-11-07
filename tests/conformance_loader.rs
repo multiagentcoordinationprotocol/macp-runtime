@@ -624,6 +624,23 @@ conformance_test!(
     "transport_macp_version_in_band.json"
 );
 
+// RFC-MACP-0010 §6.1 (Commitment readiness): a positive Commitment needs an
+// accepted offer; a negative one has no precondition, not even an offer.
+conformance_test!(
+    conformance_handoff_commitment_readiness,
+    "handoff_commitment_readiness.json"
+);
+conformance_test!(
+    conformance_handoff_no_target_commitment,
+    "handoff_no_target_commitment.json"
+);
+// RFC-MACP-0001 §7.6 item 9 outside Decision Mode: a runtime-emitted
+// annotation submitted through Send is FORBIDDEN in every mode.
+conformance_test!(
+    conformance_quorum_runtime_annotation_reject_paths,
+    "quorum_runtime_annotation_reject_paths.json"
+);
+
 /// Guard: every vendored fixture must be registered with `conformance_test!`.
 ///
 /// Unlike both SDK harnesses, which discover fixtures dynamically, the
@@ -724,7 +741,7 @@ fn fixtures_conform_to_canonical_format() {
     // SessionStart obligations), and to 40 by the W2.7 policy-pack fixtures
     // (spec #209), and to 89 by the RFC promotion-prep corpus (spec #263-#268).
     assert!(
-        checked >= 89,
+        checked >= 92,
         "expected all fixtures checked, got {checked}"
     );
 }

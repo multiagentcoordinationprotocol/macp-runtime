@@ -120,15 +120,46 @@ pub fn check_preconditions(
     Ok(Precheck::Proceed)
 }
 
-/// Sender authorization, then the client boundary
-/// ([`Mode::validate_client_envelope`]). Pure. Runs before synthesis, so an
-/// unauthorized or forged envelope can never provoke a synthetic append.
+/// The runtime-emitted session annotations (RFC-MACP-0001 §7.3, §7.5).
+///
+/// The runtime appends these itself, through the `CancelSession`,
+/// `SuspendSession` and `ResumeSession` RPCs (or an embedder's equivalent
+/// calls on [`Session`]). No client may submit one: [`admit`] rejects them
+/// with [`MacpError::Forbidden`] in every mode (RFC-MACP-0001 §7.6 item 9).
+pub const RUNTIME_ANNOTATION_TYPES: [&str; 3] =
+    ["SessionCancel", "SessionSuspend", "SessionResume"];
+
+/// Whether `message_type` is one of [`RUNTIME_ANNOTATION_TYPES`].
+pub fn is_runtime_annotation(message_type: &str) -> bool {
+    RUNTIME_ANNOTATION_TYPES.contains(&message_type)
+}
+
+/// The runtime-annotation check, then sender authorization, then the client
+/// boundary ([`Mode::validate_client_envelope`]). Pure. Runs before synthesis,
+/// so an unauthorized or forged envelope can never provoke a synthetic append.
+///
+/// The runtime-annotation check is mode-independent and comes first
+/// (RFC-MACP-0001 §7.6 item 9): a client-submitted `SessionCancel`,
+/// `SessionSuspend` or `SessionResume` is [`MacpError::Forbidden`] whatever
+/// the session's mode, because no submitter is authorized to emit a
+/// runtime-only message type. It used to be left to each mode, which made it
+/// `FORBIDDEN` in Decision (whose `authorize_sender` refuses unknown types)
+/// but `INVALID_ENVELOPE` in Proposal, Task, Handoff and Quorum (whose
+/// `authorize_sender` admits any participant and whose dispatch refuses the
+/// unknown type). It runs after [`check_preconditions`], so a duplicate is
+/// still a duplicate (§8.2), a mode mismatch is still `INVALID_ENVELOPE`
+/// (§7.6 item 8) and a non-`Open` session still reports `SESSION_NOT_OPEN`
+/// (§7.3), exactly as for any other unauthorized message.
 ///
 /// The client boundary rejects envelope shapes that are legal as *recorded
 /// history* but illegal as *client submissions* (the reserved
 /// `implicit-accept:` id namespace, for one). Replay must not call this — it
-/// re-reads entries that already passed it.
+/// re-reads entries that already passed it, and replays the runtime's own
+/// annotations as lifecycle events, never through a mode.
 pub fn admit(session: &Session, env: &Envelope, mode: &dyn Mode) -> Result<(), MacpError> {
+    if is_runtime_annotation(&env.message_type) {
+        return Err(MacpError::Forbidden);
+    }
     mode.authorize_sender(session, env)?;
     mode.validate_client_envelope(session, env)
 }
@@ -836,6 +867,47 @@ mod tests {
         assert!(matches!(err, MacpError::InvalidEnvelope));
         assert!(s2.seen_message_ids.is_empty());
         assert_eq!(s2.state, SessionState::Open);
+    }
+
+    /// RFC-MACP-0001 §7.6 item 9: a runtime annotation submitted by a client is
+    /// `Forbidden` before the mode is consulted at all, even from a declared
+    /// participant that the mode's own `authorize_sender` would admit, and the
+    /// rejection consumes no dedup slot. Mode-independence is the point:
+    /// `BoundaryMode` admits every participant and dispatches anything.
+    #[test]
+    fn runtime_annotations_are_forbidden_before_the_mode() {
+        for message_type in RUNTIME_ANNOTATION_TYPES {
+            let mode = BoundaryMode::new();
+            let mut s = session();
+            let err = step(&mut s, &env("agent://a", message_type, "m1"), &mode, 1).unwrap_err();
+            assert!(
+                matches!(err, MacpError::Forbidden),
+                "{message_type}: {err:?}"
+            );
+            assert!(!mode.dispatched(), "{message_type} reached dispatch");
+            assert!(s.seen_message_ids.is_empty());
+            assert_eq!(s.state, SessionState::Open);
+        }
+
+        // The check follows the preconditions: a non-Open session reports
+        // SessionNotOpen, and a reused id is still a duplicate.
+        let mode = BoundaryMode::new();
+        let mut s = session();
+        s.state = SessionState::Resolved;
+        assert!(matches!(
+            step(&mut s, &env("agent://a", "SessionCancel", "m1"), &mode, 1).unwrap_err(),
+            MacpError::SessionNotOpen
+        ));
+        let mut s = session();
+        s.seen_message_ids.insert("m1".into());
+        assert_eq!(
+            step(&mut s, &env("agent://a", "SessionCancel", "m1"), &mode, 1).unwrap(),
+            StepOutcome::Duplicate
+        );
+
+        // Lookalikes are ordinary types, left to the mode.
+        assert!(!is_runtime_annotation("SessionStart"));
+        assert!(!is_runtime_annotation("sessioncancel"));
     }
 
     /// The default hook is `Ok(())`, so every mode that has no client-boundary

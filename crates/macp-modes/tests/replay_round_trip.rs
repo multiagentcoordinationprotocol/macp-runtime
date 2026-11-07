@@ -11,7 +11,7 @@ use macp_modes::replay::{
     apply_event, replay, replay_start, RecordedStart, ReplayEvent, ReplayOptions,
 };
 use macp_modes::step::{accept_session_start, step, StartOptions, StepOutcome};
-use macp_pb::handoff_pb::HandoffOfferPayload;
+use macp_pb::handoff_pb::{HandoffDeclinePayload, HandoffOfferPayload};
 use macp_pb::pb::{CommitmentPayload, Envelope, SessionStartPayload};
 use prost::Message;
 
@@ -294,4 +294,62 @@ fn an_empty_requested_policy_binds_the_resolved_id() {
     assert_eq!(live.policy_version, POLICY_ID);
     let replayed = replay_start(&RecordedStart::from_session(start, &live, None), &m).unwrap();
     assert_same_session(&replayed, &live);
+}
+
+/// `semantics_rev` 5 (RFC-MACP-0010 §6.1): a history recorded at rev 4 that
+/// resolved with a positive `Commitment` after its only offer was declined
+/// still replays to that outcome; the same history at rev 5 is refused,
+/// because rev 5 needs an accepted offer for a positive `Commitment`.
+#[test]
+fn positive_commitment_after_decline_replays_only_under_the_legacy_rev() {
+    let m = mode();
+    let start = start_env();
+    let s = accept_session_start(
+        &start,
+        STARTED_AT,
+        &m,
+        Some(policy()),
+        &StartOptions::default(),
+    )
+    .expect("session starts");
+    let decline = env(
+        TARGET,
+        "HandoffDecline",
+        "decline-1",
+        HandoffDeclinePayload {
+            handoff_id: "h1".into(),
+            declined_by: TARGET.into(),
+            reason: "busy".into(),
+        }
+        .encode_to_vec(),
+    );
+    let events = || {
+        vec![
+            ReplayEvent::Message {
+                envelope: offer(),
+                accepted_at_ms: OFFERED_AT,
+            },
+            ReplayEvent::Message {
+                envelope: decline.clone(),
+                accepted_at_ms: OFFERED_AT + 1,
+            },
+            ReplayEvent::Message {
+                envelope: commitment(&s),
+                accepted_at_ms: OFFERED_AT + 2,
+            },
+        ]
+    };
+    let opts = ReplayOptions::default();
+
+    let mut legacy = RecordedStart::from_session(start.clone(), &s, None);
+    legacy.semantics_rev = macp_modes::mode::handoff::POSITIVE_COMMITMENT_NEEDS_ACCEPT_REV - 1;
+    let replayed = replay(&legacy, events(), &m, &opts).expect("rev 4 history replays");
+    assert_eq!(replayed.state, SessionState::Resolved);
+
+    let current = RecordedStart::from_session(start, &s, None);
+    assert_eq!(
+        current.semantics_rev,
+        macp_core::session::CURRENT_SEMANTICS_REV
+    );
+    assert!(replay(&current, events(), &m, &opts).is_err());
 }

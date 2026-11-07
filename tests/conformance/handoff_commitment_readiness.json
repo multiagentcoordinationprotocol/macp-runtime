@@ -1,0 +1,82 @@
+{
+  "_comment": "Pins RFC-MACP-0010 Section 6.1 (Commitment readiness): a positive Commitment needs an accepted HandoffAccept, and a decline is not one. The only offer is declined, so the positive Commitment is rejected INVALID_ENVELOPE (RFC-MACP-0002 Section 6.1: a message arriving in a session state the Mode's rules forbid). A negative Commitment then resolves the Session. No policy is bound, so no POLICY_DENIED path is in play.",
+  "description": "Handoff Mode: a positive Commitment after the only offer was declined is rejected; a negative one resolves the Session.",
+  "mode": "macp.mode.handoff.v1",
+  "initiator": "agent://owner",
+  "participants": [
+    "agent://owner",
+    "agent://target"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://owner",
+      "message_type": "HandoffOffer",
+      "payload_type": "macp.modes.handoff.v1.HandoffOfferPayload",
+      "payload": {
+        "handoff_id": "h1",
+        "target_participant": "agent://target",
+        "scope": "support",
+        "reason": "escalate"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://target",
+      "message_type": "HandoffDecline",
+      "payload_type": "macp.modes.handoff.v1.HandoffDeclinePayload",
+      "payload": {
+        "handoff_id": "h1",
+        "declined_by": "agent://target",
+        "reason": "out of scope"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Section 6.1: outcome_positive is true but no offer has been accepted; h1 was declined. The sender is the commitment authority and the payload is well formed, so readiness is the only fault.",
+      "sender": "agent://owner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "handoff.accepted",
+        "authority_scope": "test",
+        "reason": "transfer complete",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "Section 6.1: a negative Commitment has no readiness precondition. A new commitment_id is used because the rejected c1 left no trace.",
+      "sender": "agent://owner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "action": "handoff.declined",
+        "authority_scope": "test",
+        "reason": "target declined",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "handoff.declined",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": false
+  }
+}

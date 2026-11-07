@@ -136,6 +136,17 @@ pub struct HandoffState {
 /// a target that declined earlier in the Session (Seam finding S5, #185).
 pub const DECLINED_TARGET_BAR_REV: u32 = 4;
 
+/// First `semantics_rev` at which RFC-MACP-0010 §6.1 holds a *positive*
+/// `Commitment` to an accepted offer: some offer must have been accepted
+/// (explicitly, or by the synthetic accept of §5.1). Revisions 0-4 also let a
+/// declined offer make a positive `Commitment` ready, and keep that rule so
+/// their histories replay to the outcome they were accepted with.
+///
+/// The other half of §6.1 -- a *negative* `Commitment` has no readiness
+/// precondition, not even an offer -- is a loosening and applies at every
+/// revision (`docs/semantics-revisions.md`, guarantee 3).
+pub const POSITIVE_COMMITMENT_NEEDS_ACCEPT_REV: u32 = 5;
+
 pub struct HandoffMode {
     evaluator: std::sync::Arc<dyn macp_core::policy::PolicyEvaluator>,
 }
@@ -246,10 +257,28 @@ impl HandoffMode {
         rules.acceptance.implicit_accept_timeout_ms as i64
     }
 
-    fn commitment_ready(state: &HandoffState) -> bool {
+    /// RFC-MACP-0010 §6.1 (Commitment readiness).
+    ///
+    /// - Negative (`outcome_positive == false`): always ready, at every
+    ///   revision. §6 lets it bind a definitive no-target outcome, so it needs
+    ///   no offer at all; it is a loosening, so no gate.
+    /// - Positive, rev >= [`POSITIVE_COMMITMENT_NEEDS_ACCEPT_REV`]: ready only
+    ///   once some offer is `Accepted`. A decline transfers nothing.
+    /// - Positive, rev <= 4: the legacy rule, any `Accepted` or `Declined`
+    ///   offer.
+    ///
+    /// A `false` result is rejected `InvalidPayload` (wire `INVALID_ENVELOPE`):
+    /// RFC-MACP-0002 §6.1 maps a message that arrives in a session state the
+    /// Mode's rules forbid to `INVALID_ENVELOPE`, and the rule is not
+    /// conditioned on a policy, so it is not `POLICY_DENIED`.
+    fn commitment_ready(session: &Session, state: &HandoffState, outcome_positive: bool) -> bool {
+        if !outcome_positive {
+            return true;
+        }
+        let needs_accept = session.semantics_rev >= POSITIVE_COMMITMENT_NEEDS_ACCEPT_REV;
         state.offers.values().any(|offer| {
             offer.disposition == HandoffDisposition::Accepted
-                || offer.disposition == HandoffDisposition::Declined
+                || (!needs_accept && offer.disposition == HandoffDisposition::Declined)
         })
     }
 }
@@ -644,10 +673,11 @@ impl HandoffMode {
                         // replay cannot reproduce.
                         //
                         // The consequence at rev >= 2 is deliberately
-                        // fail-loud: a `Commitment` on a history that *lacks*
-                        // the synthetic entry now falls through to
+                        // fail-loud: a positive `Commitment` on a history that
+                        // *lacks* the synthetic entry now falls through to
                         // `commitment_ready` below and is rejected
-                        // `InvalidPayload`. Leaving the interim active would
+                        // `InvalidPayload` (a negative one is always ready,
+                        // RFC-MACP-0010 §6.1). Leaving the interim active would
                         // instead let replay of a foreign or buggy rev-2 log
                         // silently resolve — hiding exactly the divergence
                         // this revision exists to make impossible.
@@ -666,7 +696,7 @@ impl HandoffMode {
                         }
                     }
                 }
-                if !Self::commitment_ready(&state) {
+                if !Self::commitment_ready(session, &state, commitment.outcome_positive) {
                     return Err(MacpError::InvalidPayload);
                 }
                 // Governance policy gate (shared): fail closed, only
@@ -1266,10 +1296,25 @@ mod tests {
         assert!(matches!(result, ModeResponse::PersistAndResolve { .. }));
     }
 
-    #[test]
-    fn commitment_after_decline() {
-        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+    fn negative_commitment_payload() -> Vec<u8> {
+        CommitmentPayload {
+            commitment_id: "c1".into(),
+            action: "handoff.declined".into(),
+            authority_scope: "support".into(),
+            reason: "no transfer".into(),
+            mode_version: "1.0.0".into(),
+            policy_version: "policy".into(),
+            configuration_version: "config".into(),
+            outcome_positive: false,
+            supersedes: None,
+        }
+        .encode_to_vec()
+    }
+
+    /// A started session at `rev` whose only offer `h1` the target declined.
+    fn declined_session(mode: &HandoffMode, rev: u32) -> Session {
         let mut session = base_session();
+        session.semantics_rev = rev;
         let result = mode
             .on_session_start(&session, &env("owner", "SessionStart", vec![]))
             .unwrap();
@@ -1288,8 +1333,93 @@ mod tests {
             )
             .unwrap();
         apply(&mut session, result);
+        session
+    }
+
+    /// RFC-MACP-0010 §6.1: a decline transfers nothing, so a positive
+    /// `Commitment` after the only offer was declined is not ready.
+    #[test]
+    fn positive_commitment_after_decline_rejected() {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let session = declined_session(&mode, macp_core::session::CURRENT_SEMANTICS_REV);
+        let err = mode
+            .on_message(&session, &env("owner", "Commitment", commitment_payload()))
+            .unwrap_err();
+        assert!(matches!(err, MacpError::InvalidPayload), "{err:?}");
+        assert_eq!(err.error_code(), "INVALID_ENVELOPE");
+    }
+
+    /// Revisions before [`POSITIVE_COMMITMENT_NEEDS_ACCEPT_REV`] keep the rule
+    /// their histories were accepted under: a decline made a positive
+    /// `Commitment` ready.
+    #[test]
+    fn positive_commitment_after_decline_still_resolves_on_legacy_rev() {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let session = declined_session(&mode, POSITIVE_COMMITMENT_NEEDS_ACCEPT_REV - 1);
         let result = mode
             .on_message(&session, &env("owner", "Commitment", commitment_payload()))
+            .unwrap();
+        assert!(matches!(result, ModeResponse::PersistAndResolve { .. }));
+    }
+
+    #[test]
+    fn negative_commitment_after_decline() {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let session = declined_session(&mode, macp_core::session::CURRENT_SEMANTICS_REV);
+        let result = mode
+            .on_message(
+                &session,
+                &env("owner", "Commitment", negative_commitment_payload()),
+            )
+            .unwrap();
+        assert!(matches!(result, ModeResponse::PersistAndResolve { .. }));
+    }
+
+    /// RFC-MACP-0010 §6: a negative `Commitment` MAY bind a definitive
+    /// no-target outcome, so it needs no offer. A loosening: it holds at every
+    /// revision, rev 0 included.
+    #[test]
+    fn negative_commitment_with_no_offers_accepted_at_every_rev() {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        for rev in 0..=macp_core::session::CURRENT_SEMANTICS_REV {
+            let mut session = base_session();
+            session.semantics_rev = rev;
+            let result = mode
+                .on_session_start(&session, &env("owner", "SessionStart", vec![]))
+                .unwrap();
+            apply(&mut session, result);
+            let result = mode
+                .on_message(
+                    &session,
+                    &env("owner", "Commitment", negative_commitment_payload()),
+                )
+                .unwrap_or_else(|e| panic!("rev {rev}: {e:?}"));
+            assert!(matches!(result, ModeResponse::PersistAndResolve { .. }));
+        }
+    }
+
+    /// §6.1 gives a negative `Commitment` no precondition, so the owner may
+    /// abandon the transfer while an offer is still pending.
+    #[test]
+    fn negative_commitment_with_pending_offer_accepted() {
+        let mode = HandoffMode::new(std::sync::Arc::new(macp_policy::DefaultPolicyEvaluator));
+        let mut session = base_session();
+        let result = mode
+            .on_session_start(&session, &env("owner", "SessionStart", vec![]))
+            .unwrap();
+        apply(&mut session, result);
+        let result = mode
+            .on_message(
+                &session,
+                &env("owner", "HandoffOffer", make_offer("h1", "target")),
+            )
+            .unwrap();
+        apply(&mut session, result);
+        let result = mode
+            .on_message(
+                &session,
+                &env("owner", "Commitment", negative_commitment_payload()),
+            )
             .unwrap();
         assert!(matches!(result, ModeResponse::PersistAndResolve { .. }));
     }

@@ -201,7 +201,7 @@ Every session records the behavioural revision it was accepted under
 upgrade never changes what an old history rebuilds to.
 
 - `accept_session_start` and `Session::builder` both default to
-  `CURRENT_SEMANTICS_REV`, which is **4** in 0.9.0.
+  `CURRENT_SEMANTICS_REV`, which is **5** from 0.14.0 (**4** in 0.9.0 through 0.13).
 - A legacy record that carries no revision replays as `0`.
 - Set a lower revision only to replay a history recorded under it.
 

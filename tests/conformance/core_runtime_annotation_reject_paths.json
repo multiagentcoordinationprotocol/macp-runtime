@@ -34,7 +34,7 @@
       "expect": "accept"
     },
     {
-      "_comment": "RFC-MACP-0001 Section 7.3: SessionCancel is runtime-emitted and MUST NOT be submitted via Send, even by the initiator. The RFC names no error code for this rejection; the code here is the one the reference runtime returns.",
+      "_comment": "RFC-MACP-0001 Section 7.3: SessionCancel is runtime-emitted and MUST NOT be submitted via Send, even by the initiator. RFC-MACP-0001 Section 7.6 item 9 requires FORBIDDEN, in every Mode.",
       "sender": "agent://orchestrator",
       "message_type": "SessionCancel",
       "payload_type": "macp.v1.SessionCancelPayload",
@@ -46,7 +46,7 @@
       "expected_error_code": "FORBIDDEN"
     },
     {
-      "_comment": "RFC-MACP-0001 Section 7.5: SessionSuspend is runtime-emitted and MUST NOT be submitted via Send, even by the initiator. The RFC names no error code for this rejection; the code here is the one the reference runtime returns.",
+      "_comment": "RFC-MACP-0001 Section 7.5: SessionSuspend is runtime-emitted and MUST NOT be submitted via Send, even by the initiator. RFC-MACP-0001 Section 7.6 item 9 requires FORBIDDEN, in every Mode.",
       "sender": "agent://orchestrator",
       "message_type": "SessionSuspend",
       "payload_type": "macp.v1.SessionSuspendPayload",
@@ -58,7 +58,7 @@
       "expected_error_code": "FORBIDDEN"
     },
     {
-      "_comment": "RFC-MACP-0001 Section 7.5: SessionResume is runtime-emitted and MUST NOT be submitted via Send, even by the initiator. The RFC names no error code for this rejection; the code here is the one the reference runtime returns.",
+      "_comment": "RFC-MACP-0001 Section 7.5: SessionResume is runtime-emitted and MUST NOT be submitted via Send, even by the initiator. RFC-MACP-0001 Section 7.6 item 9 requires FORBIDDEN, in every Mode.",
       "sender": "agent://orchestrator",
       "message_type": "SessionResume",
       "payload_type": "macp.v1.SessionResumePayload",
