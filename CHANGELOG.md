@@ -6,6 +6,19 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.13.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.13.0...macp-runtime-v0.13.1) - 2026-11-07
+
+### Fixed
+
+- *(test)* build macp CLI in integration image ([#295](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/295))
+
+### Other
+
+- *(http)* vendored schema $id to multiagentcoordinationprotocol.io ([#297](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/297))
+- *(auto-merge)* use macp-ci v1.1 and pass secrets to the reusable workflow ([#292](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/292))
+- *(release-plz)* open release PRs only for feat/fix/perf commits; stop shipping .github in the crate ([#291](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/291))
+- bump conformance-oracle SPEC_REV to spec b142b06 ([#288](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/288))
+
 ## [0.13.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.12.1...macp-runtime-v0.13.0) - 2026-11-01
 
 ### Other
