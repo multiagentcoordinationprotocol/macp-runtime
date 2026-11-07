@@ -1,0 +1,61 @@
+{
+  "_comment": "Pins RFC-MACP-0012 Section 6.1 (a SessionStart naming a policy_version that is not registered is rejected with UNKNOWN_POLICY_VERSION) and Section 2.2 (the same holds inside the reserved policy.std. namespace for an identifier the RFC does not assign). The fixture's own Decision session is opened implicitly by the harness and stays Open. Each message is a SessionStart for a DIFFERENT session (envelope.session_id) that is otherwise valid, so it fails on the policy binding alone. An ASSIGNED policy.std.* profile is deliberately not used: Section 5.2 lets a runtime omit the reserved profiles, so no fixture can pin either outcome for one.",
+  "description": "SessionStart policy binding: an unregistered vendor policy_version and an unassigned policy.std.* id are both rejected with UNKNOWN_POLICY_VERSION.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://lead",
+  "participants": [
+    "agent://lead",
+    "agent://peer"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "_comment": "(a) Section 6.1: policy.acme.absent was never registered. A runtime MUST NOT fall back to policy.default for a non-empty identifier it cannot resolve.",
+      "sender": "agent://lead",
+      "message_type": "SessionStart",
+      "payload_type": "macp.v1.SessionStartPayload",
+      "payload": {
+        "intent": "bind policy",
+        "participants": [
+          "agent://lead",
+          "agent://peer"
+        ],
+        "mode_version": "1.0.0",
+        "configuration_version": "cfg-1",
+        "policy_version": "policy.acme.absent",
+        "ttl_ms": 60000
+      },
+      "envelope": {
+        "session_id": "0b6f7d3e-5a41-4c8e-9f27-3d1c6a8e4b52"
+      },
+      "expect": "reject",
+      "expected_error_code": "UNKNOWN_POLICY_VERSION"
+    },
+    {
+      "_comment": "(b) Section 2.2: policy.std.unassigned is inside the reserved namespace but is not one of the identifiers the RFC assigns, so no runtime can hold it (registration under policy.std. is refused). It MUST resolve as unknown, not as a reserved profile.",
+      "sender": "agent://lead",
+      "message_type": "SessionStart",
+      "payload_type": "macp.v1.SessionStartPayload",
+      "payload": {
+        "intent": "bind policy",
+        "participants": [
+          "agent://lead",
+          "agent://peer"
+        ],
+        "mode_version": "1.0.0",
+        "configuration_version": "cfg-1",
+        "policy_version": "policy.std.unassigned",
+        "ttl_ms": 60000
+      },
+      "envelope": {
+        "session_id": "7c2e9a14-8b3f-4d60-a5e1-92f04b7c6d38"
+      },
+      "expect": "reject",
+      "expected_error_code": "UNKNOWN_POLICY_VERSION"
+    }
+  ],
+  "expected_final_state": "Open"
+}

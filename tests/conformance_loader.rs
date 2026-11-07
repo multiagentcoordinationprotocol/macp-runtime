@@ -497,6 +497,107 @@ conformance_test!(
 );
 conformance_test!(conformance_quorum_all_abstain, "quorum_all_abstain.json");
 
+// Spec RFC-MACP-0012 fixture batch B3: SessionStart policy resolution, the
+// Commitment echo, Decision quorum/evaluation/veto/weighted rules, and the
+// Quorum, Proposal and Task rule groups.
+conformance_test!(
+    conformance_policy_commitment_echo,
+    "policy_commitment_echo.json"
+);
+conformance_test!(
+    conformance_policy_decision_annotation_ignored,
+    "policy_decision_annotation_ignored.json"
+);
+conformance_test!(
+    conformance_policy_decision_any_participant,
+    "policy_decision_any_participant.json"
+);
+conformance_test!(
+    conformance_policy_decision_evaluation_required,
+    "policy_decision_evaluation_required.json"
+);
+conformance_test!(
+    conformance_policy_decision_finalize_decline_evaluation_waiver,
+    "policy_decision_finalize_decline_evaluation_waiver.json"
+);
+conformance_test!(
+    conformance_policy_decision_minimum_confidence,
+    "policy_decision_minimum_confidence.json"
+);
+conformance_test!(
+    conformance_policy_decision_minimum_confidence_met,
+    "policy_decision_minimum_confidence_met.json"
+);
+conformance_test!(
+    conformance_policy_decision_percentage_quorum,
+    "policy_decision_percentage_quorum.json"
+);
+conformance_test!(
+    conformance_policy_decision_quorum_inert,
+    "policy_decision_quorum_inert.json"
+);
+conformance_test!(
+    conformance_policy_decision_supermajority_binary64,
+    "policy_decision_supermajority_binary64.json"
+);
+conformance_test!(
+    conformance_policy_decision_v3_quorum_floor,
+    "policy_decision_v3_quorum_floor.json"
+);
+conformance_test!(
+    conformance_policy_decision_v3_vacuous_floor,
+    "policy_decision_v3_vacuous_floor.json"
+);
+conformance_test!(
+    conformance_policy_decision_veto_threshold,
+    "policy_decision_veto_threshold.json"
+);
+conformance_test!(
+    conformance_policy_decision_veto_threshold_met,
+    "policy_decision_veto_threshold_met.json"
+);
+conformance_test!(
+    conformance_policy_decision_weighted_quorum_floor,
+    "policy_decision_weighted_quorum_floor.json"
+);
+conformance_test!(
+    conformance_policy_decision_weighted_ratio,
+    "policy_decision_weighted_ratio.json"
+);
+conformance_test!(conformance_policy_default_echo, "policy_default_echo.json");
+conformance_test!(
+    conformance_policy_default_explicit,
+    "policy_default_explicit.json"
+);
+conformance_test!(
+    conformance_policy_proposal_criterion_counterparty,
+    "policy_proposal_criterion_counterparty.json"
+);
+conformance_test!(
+    conformance_policy_proposal_criterion_initiator,
+    "policy_proposal_criterion_initiator.json"
+);
+conformance_test!(
+    conformance_policy_proposal_max_rounds_unlimited,
+    "policy_proposal_max_rounds_unlimited.json"
+);
+conformance_test!(
+    conformance_policy_proposal_terminal_on_any_reject,
+    "policy_proposal_terminal_on_any_reject.json"
+);
+conformance_test!(
+    conformance_policy_quorum_percentage_ceil,
+    "policy_quorum_percentage_ceil.json"
+);
+conformance_test!(
+    conformance_policy_session_start_reject_paths,
+    "policy_session_start_reject_paths.json"
+);
+conformance_test!(
+    conformance_policy_task_reassignment_on_reject,
+    "policy_task_reassignment_on_reject.json"
+);
+
 /// Guard: every vendored fixture must be registered with `conformance_test!`.
 ///
 /// Unlike both SDK harnesses, which discover fixtures dynamically, the

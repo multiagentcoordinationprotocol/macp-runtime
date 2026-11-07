@@ -1,0 +1,106 @@
+{
+  "_comment": "Pins RFC-MACP-0012 Section 4.1 (critical_objection_action finalize_decline) and RFC-MACP-0007 Section 6.2: an objection-authorized decline is not subject to the evaluation.* prerequisites. No evaluation and no ballot exist, so a runtime that applied required_before_voting or minimum_confidence to the decline would leave the session with no acceptable Commitment. The companion decision_finalize_decline_quorum_waiver.json pins the require_vote_quorum half of the same waiver.",
+  "description": "Decision Mode: a finalize_decline decline is accepted although the evaluation prerequisites are unmet.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.finalize-decline-evaluation-waiver",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Majority with required evaluations and a critical-objection veto that finalizes as a decline.",
+    "rules": {
+      "voting": {
+        "algorithm": "majority",
+        "threshold": 0.5
+      },
+      "evaluation": {
+        "required_before_voting": true,
+        "minimum_confidence": 0.8
+      },
+      "objection_handling": {
+        "critical_severity_vetoes": true,
+        "critical_objection_action": "finalize_decline"
+      },
+      "commitment": {
+        "authority": "initiator_only"
+      }
+    }
+  },
+  "policy_version": "policy.decision.finalize-decline-evaluation-waiver",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://b",
+      "message_type": "Objection",
+      "payload_type": "macp.modes.decision.v1.ObjectionPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "reason": "critical finding",
+        "severity": "critical"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "The positive direction is still vetoed.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "commitment c1",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.finalize-decline-evaluation-waiver",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "_comment": "Objection-authorized decline: no evaluation exists, and the waiver covers evaluation.* (RFC-MACP-0007 Section 6.2).",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "outcome_positive": false,
+        "action": "decision.rejected",
+        "authority_scope": "test",
+        "reason": "commitment c2",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.finalize-decline-evaluation-waiver",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.rejected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": false
+  }
+}

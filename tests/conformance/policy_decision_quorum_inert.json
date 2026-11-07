@@ -1,0 +1,85 @@
+{
+  "_comment": "Pins RFC-MACP-0012 Section 4.1, 'voting.quorum is inert on its own': a count floor of 3 without require_vote_quorum imposes no participation requirement.",
+  "description": "Decision Mode: voting.quorum count 3 without require_vote_quorum does not gate; one approval commits.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.quorum-inert",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Majority with an unbound count floor of 3.",
+    "rules": {
+      "voting": {
+        "algorithm": "majority",
+        "threshold": 0.5,
+        "quorum": {
+          "type": "count",
+          "value": 3
+        }
+      },
+      "commitment": {
+        "authority": "initiator_only",
+        "require_vote_quorum": false
+      }
+    }
+  },
+  "policy_version": "policy.decision.quorum-inert",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "approve"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "One ballot against a declared floor of 3. The floor is not applied because require_vote_quorum is false.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "commitment c1",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.quorum-inert",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}

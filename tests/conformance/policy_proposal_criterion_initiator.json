@@ -1,0 +1,93 @@
+{
+  "_comment": "Pins RFC-MACP-0012 Section 4.3 acceptance.criterion initiator: only the session initiator's Accept is needed for convergence. The proposer (seller) never accepts, so under the default all_parties the final Commitment would be rejected as not eligible.",
+  "description": "Proposal Mode, criterion initiator: the initiator's Accept alone makes the session eligible.",
+  "mode": "macp.mode.proposal.v1",
+  "initiator": "agent://buyer",
+  "participants": [
+    "agent://buyer",
+    "agent://seller"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.proposal.criterion-initiator",
+    "mode": "macp.mode.proposal.v1",
+    "schema_version": 3,
+    "description": "Only the initiator must accept.",
+    "rules": {
+      "acceptance": {
+        "criterion": "initiator"
+      }
+    }
+  },
+  "policy_version": "policy.proposal.criterion-initiator",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://seller",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.proposal.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "title": "offer",
+        "summary": "terms",
+        "details": [],
+        "tags": []
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Nobody has accepted; not eligible.",
+      "sender": "agent://buyer",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "proposal.accepted",
+        "authority_scope": "test",
+        "reason": "commitment c1",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.proposal.criterion-initiator",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "sender": "agent://buyer",
+      "message_type": "Accept",
+      "payload_type": "macp.modes.proposal.v1.AcceptPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "reason": ""
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "The initiator accepted; the seller's Accept is not required.",
+      "sender": "agent://buyer",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "outcome_positive": true,
+        "action": "proposal.accepted",
+        "authority_scope": "test",
+        "reason": "commitment c2",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.proposal.criterion-initiator",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "proposal.accepted",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}

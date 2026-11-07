@@ -1,0 +1,104 @@
+{
+  "_comment": "Pins RFC-MACP-0012 Section 4.3 acceptance.criterion counterparty: every declared participant other than the proposer must accept. The initiator proposes and never accepts its own proposal, which all_parties would require.",
+  "description": "Proposal Mode, criterion counterparty: all participants except the proposer must accept.",
+  "mode": "macp.mode.proposal.v1",
+  "initiator": "agent://buyer",
+  "participants": [
+    "agent://buyer",
+    "agent://seller",
+    "agent://auditor"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.proposal.criterion-counterparty",
+    "mode": "macp.mode.proposal.v1",
+    "schema_version": 3,
+    "description": "All parties other than the proposer must accept.",
+    "rules": {
+      "acceptance": {
+        "criterion": "counterparty"
+      }
+    }
+  },
+  "policy_version": "policy.proposal.criterion-counterparty",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://buyer",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.proposal.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "title": "offer",
+        "summary": "terms",
+        "details": [],
+        "tags": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://seller",
+      "message_type": "Accept",
+      "payload_type": "macp.modes.proposal.v1.AcceptPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "reason": ""
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "The auditor has not accepted.",
+      "sender": "agent://buyer",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "proposal.accepted",
+        "authority_scope": "test",
+        "reason": "commitment c1",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.proposal.criterion-counterparty",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "sender": "agent://auditor",
+      "message_type": "Accept",
+      "payload_type": "macp.modes.proposal.v1.AcceptPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "reason": ""
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Both counterparties accepted; the proposer's own Accept is not required.",
+      "sender": "agent://buyer",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "outcome_positive": true,
+        "action": "proposal.accepted",
+        "authority_scope": "test",
+        "reason": "commitment c2",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.proposal.criterion-counterparty",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "proposal.accepted",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}
