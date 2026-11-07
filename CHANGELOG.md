@@ -6,6 +6,12 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.13.2](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.13.0...macp-runtime-v0.13.2) - 2026-11-07
+
+### Fixed
+
+- *(task)* INVALID_ENVELOPE for denied reassignment; vendor RFC-promotion conformance fixtures ([#299](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/299))
+
 ## [0.13.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.13.0...macp-runtime-v0.13.1) - 2026-11-07
 
 ### Fixed
