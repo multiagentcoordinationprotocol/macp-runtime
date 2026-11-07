@@ -189,4 +189,4 @@ Tier 3 runs only via manual GitHub Actions dispatch:
 Actions -> "Integration Tests" -> Run workflow -> check "Run Tier 3 E2E"
 ```
 
-Tier 3 tests require the `OPENAI_API_KEY` repository secret. Tiers 1 and 2 run without any secrets.
+Tier 3 reads `OPENAI_API_KEY` from Doppler `macp-runtime/ci`, using the read-only service token in the `DOPPLER_TOKEN` repository secret; the job fails if the key is missing rather than skipping. Tiers 1 and 2 run without any secrets.

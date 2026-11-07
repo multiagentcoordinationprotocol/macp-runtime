@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       run_e2e:
-        description: 'Also run Tier 3 E2E tests (requires OPENAI_API_KEY secret)'
+        description: 'Also run Tier 3 E2E tests (OPENAI_API_KEY from Doppler macp-runtime/ci)'
         type: boolean
         default: false
 
@@ -91,10 +91,22 @@ jobs:
       - name: Build runtime binary
         run: cargo build
 
+      # OPENAI_API_KEY comes from Doppler macp-runtime/ci via the read-only service
+      # token in the DOPPLER_TOKEN repo secret. The tests skip when the key is unset,
+      # so an empty key fails here instead of turning Tier 3 into a silent green.
+      - name: Install Doppler CLI
+        uses: dopplerhq/cli-action@014df23b1329b615816a38eb5f473bb9000700b1 # v3
+
       - name: Run Tier 3 E2E tests
         working-directory: integration_tests
         env:
           MACP_TEST_BINARY: ../target/debug/macp-runtime
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: cargo test -- --ignored --test-threads=1
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+        run: |
+          test -n "$DOPPLER_TOKEN" || { echo "::error::DOPPLER_TOKEN repo secret is not set"; exit 1; }
+          OPENAI_API_KEY="$(doppler secrets get OPENAI_API_KEY --plain)" || { echo "::error::cannot read OPENAI_API_KEY from Doppler macp-runtime/ci"; exit 1; }
+          echo "::add-mask::$OPENAI_API_KEY"
+          test -n "$OPENAI_API_KEY" || { echo "::error::OPENAI_API_KEY is empty in Doppler macp-runtime/ci"; exit 1; }
+          export OPENAI_API_KEY; unset DOPPLER_TOKEN
+          cargo test -- --ignored --test-threads=1
         timeout-minutes: 10
