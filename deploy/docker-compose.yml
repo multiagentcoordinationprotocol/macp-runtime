@@ -31,16 +31,16 @@ services:
   # ephemeral key at boot; the runtime re-reads the JWKS (TTL below) after a
   # restart. Not published to the host.
   auth-service:
-    image: ${MACP_AUTH_SERVICE_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-auth-service:1.0.0}
+    image: ${MACP_AUTH_SERVICE_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-auth-service:2.0.0}
     environment:
       PORT: "3200"
       MACP_AUTH_ISSUER: macp-auth-service
       MACP_AUTH_AUDIENCE: macp-runtime
       MACP_AUTH_DEFAULT_TTL_SECONDS: "3600"
       MACP_AUTH_MAX_TTL_SECONDS: "7200"
-      # Shared key POST /tokens requires (Authorization: Bearer). Images after
-      # 1.0.0 refuse to boot without it (the image runs NODE_ENV=production);
-      # 1.0.0 ignores it. The playground sends the same value below.
+      # Shared key POST /tokens requires (Authorization: Bearer). Since 2.0.0 the
+      # image refuses to boot without it (it runs NODE_ENV=production). The
+      # playground sends the same value below.
       TOKEN_ISSUER_KEYS: ${MACP_TOKEN_ISSUER_KEY:-macp-dev-token-issuer-key}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3200/healthz"]
@@ -152,9 +152,9 @@ services:
   # POST /examples/run, and the control plane only observes. Deterministic
   # unless PLAYGROUND_ALLOW_LLM is set. AUTH_API_KEYS gates every route but
   # /healthz (x-api-key; the console sends it as MACP_PLAYGROUND_API_KEY).
-  # Images after 0.2.1 refuse to boot in production without it.
+  # Since 0.3.0 the image refuses to boot in production without it.
   playground:
-    image: ${MACP_PLAYGROUND_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-playground:0.2.1}
+    image: ${MACP_PLAYGROUND_IMAGE:-ghcr.io/multiagentcoordinationprotocol/macp-playground:0.3.0}
     environment:
       NODE_ENV: production
       PORT: "3000"
@@ -164,8 +164,8 @@ services:
       MACP_RUNTIME_ALLOW_INSECURE: "true"
       AUTH_API_KEYS: ${MACP_PLAYGROUND_API_KEY:-macp-dev-playground-key}
       MACP_AUTH_SERVICE_URL: http://auth-service:3200
-      # auth-service's TOKEN_ISSUER_KEYS above; images after 0.2.1 send it on
-      # POST /tokens, 0.2.1 ignores it (and auth-service 1.0.0 needs none).
+      # auth-service's TOKEN_ISSUER_KEYS above, sent on POST /tokens (playground
+      # 0.3.0+; auth-service 2.0.0+ answers 401 without it).
       MACP_AUTH_SERVICE_API_KEY: ${MACP_TOKEN_ISSUER_KEY:-macp-dev-token-issuer-key}
       MACP_AUTH_TOKEN_TTL_SECONDS: "3600"
       MACP_CONTROL_PLANE_URL: http://control-plane:3001
