@@ -1,0 +1,160 @@
+{
+  "_comment": "Pins RFC-MACP-0010 Section 6.1 (Commitment readiness) across one Session's offers. A positive Commitment needs an accepted offer; a negative Commitment needs the Session settled without a transfer (no offer, or every offer declined). Every rejection is INVALID_ENVELOPE (RFC-MACP-0002 Section 6.1: a message arriving in a session state the Mode's rules forbid). No policy is bound, so neither POLICY_DENIED nor Section 5.1 implicit acceptance is in play. Each Commitment carries its own commitment_id for readability. The negative-after-declines corner is pinned by handoff_negative_outcome.json, the no-offer corner by handoff_no_target_commitment.json.",
+  "description": "Handoff Mode: Commitment readiness while an offer is pending, after a decline, and after an accept.",
+  "mode": "macp.mode.handoff.v1",
+  "initiator": "agent://owner",
+  "participants": [
+    "agent://owner",
+    "agent://target",
+    "agent://target2"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://owner",
+      "message_type": "HandoffOffer",
+      "payload_type": "macp.modes.handoff.v1.HandoffOfferPayload",
+      "payload": {
+        "handoff_id": "h1",
+        "target_participant": "agent://target",
+        "scope": "support",
+        "reason": "escalate"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Section 6.1 rule 2: h1 is pending, so the Session is not settled and a negative Commitment is not ready. The owner abandons a pending transfer with CancelSession instead.",
+      "sender": "agent://owner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "handoff.declined",
+        "authority_scope": "test",
+        "reason": "no transfer",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "sender": "agent://target",
+      "message_type": "HandoffDecline",
+      "payload_type": "macp.modes.handoff.v1.HandoffDeclinePayload",
+      "payload": {
+        "handoff_id": "h1",
+        "declined_by": "agent://target",
+        "reason": "out of scope"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Section 6.1 rule 1: outcome_positive is true but no offer has been accepted; h1 was declined, and a decline transfers nothing.",
+      "sender": "agent://owner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "action": "handoff.accepted",
+        "authority_scope": "test",
+        "reason": "transfer complete",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "sender": "agent://owner",
+      "message_type": "HandoffOffer",
+      "payload_type": "macp.modes.handoff.v1.HandoffOfferPayload",
+      "payload": {
+        "handoff_id": "h2",
+        "target_participant": "agent://target2",
+        "scope": "support",
+        "reason": "escalate"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Section 6.1 rule 2: h1 is declined but h2 is pending, so not every offer has been declined and a negative Commitment is still not ready.",
+      "sender": "agent://owner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c3",
+        "action": "handoff.declined",
+        "authority_scope": "test",
+        "reason": "no transfer",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "sender": "agent://target2",
+      "message_type": "HandoffAccept",
+      "payload_type": "macp.modes.handoff.v1.HandoffAcceptPayload",
+      "payload": {
+        "handoff_id": "h2",
+        "accepted_by": "agent://target2",
+        "reason": "ready"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Section 6.1 rule 2: h2 has been accepted, so the transfer happened and a negative Commitment is not ready.",
+      "sender": "agent://owner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c4",
+        "action": "handoff.declined",
+        "authority_scope": "test",
+        "reason": "no transfer",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "Section 6.1 rule 1: h2 was accepted, so a positive Commitment is ready and resolves the Session.",
+      "sender": "agent://owner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c5",
+        "action": "handoff.accepted",
+        "authority_scope": "test",
+        "reason": "transfer complete",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "handoff.accepted",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}

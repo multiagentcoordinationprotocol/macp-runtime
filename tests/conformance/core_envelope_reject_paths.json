@@ -1,6 +1,6 @@
 {
-  "_comment": "Pins envelope-level rejections inside an OPEN session. Message 2 carries an unsupported macp_version; message 3 names an unknown session. Neither changes this session: both voters can still vote afterwards, and the final mode state records exactly those two votes.",
-  "description": "Core envelope handling: unsupported in-session macp_version and an unknown session_id are rejected without side effects.",
+  "_comment": "Pins envelope-level rejections inside an OPEN session. Message 2 carries an unsupported macp_version; message 3 names an unknown session; message 4 names a mode other than the one this session is bound to. None of them changes this session: both voters can still vote afterwards, and the final mode state records exactly those two votes.",
+  "description": "Core envelope handling: unsupported in-session macp_version, an unknown session_id and a mismatched mode are rejected without side effects.",
   "mode": "macp.mode.decision.v1",
   "initiator": "agent://orchestrator",
   "participants": [
@@ -68,6 +68,22 @@
       "envelope": {
         "session_id": "9c2e4b7a-1d3f-4e8a-a5b6-7f0c9d2e1a48"
       }
+    },
+    {
+      "_comment": "RFC-MACP-0001 Section 7.6 item 8: the envelope's mode differs from the mode bound at SessionStart, so it is rejected INVALID_ENVELOPE before any Mode rule runs. Everything else matches the Vote accepted next.",
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "r"
+      },
+      "envelope": {
+        "mode": "macp.mode.quorum.v1"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
     },
     {
       "sender": "agent://a",

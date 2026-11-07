@@ -39,7 +39,7 @@ async fn in_process_target_passes_every_vendored_fixture() {
     assert!(!report.is_failure());
     assert_eq!(
         report.claim.as_deref(),
-        Some("Standard modes + multi_round, Embedded profile, semantics_rev 4")
+        Some("Standard modes + multi_round, Embedded profile, semantics_rev 5")
     );
 }
 

@@ -147,7 +147,14 @@ pub const MAX_SUSPENSION_CYCLES: usize = 1024;
 ///   Quorum's S4 change in the same release is a *loosening* -- everything
 ///   an older revision accepted is still accepted -- so it needs no gate and
 ///   applies to every session.
-pub const CURRENT_SEMANTICS_REV: u32 = 4;
+/// - 5 — Handoff Commitment readiness (RFC-MACP-0010 1.3.0-draft §6.1;
+///   `handoff::COMMITMENT_READINESS_REV`): a positive `Commitment` needs an
+///   accepted offer, and a negative one needs the Session settled without a
+///   transfer (no offer, or every offer declined). Revisions 0-4 keep "any
+///   accepted or declined offer makes either polarity ready". A negative
+///   `Commitment` with no offer at all is a loosening and is accepted at
+///   every revision.
+pub const CURRENT_SEMANTICS_REV: u32 = 5;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SessionState {

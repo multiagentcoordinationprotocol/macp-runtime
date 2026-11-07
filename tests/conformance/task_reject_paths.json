@@ -157,6 +157,19 @@
       "expected_error_code": "INVALID_ENVELOPE"
     },
     {
+      "_comment": "RFC-MACP-0009 Section 5 rule 3d: while w2 is the active assignee, a TaskReject from any other participant is rejected INVALID_ENVELOPE. w3 is an eligible declared participant that has not declined, so the active assignment is the only fault.",
+      "sender": "agent://w3",
+      "message_type": "TaskReject",
+      "payload_type": "macp.modes.task.v1.TaskRejectPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://w3",
+        "reason": "busy"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
       "_comment": "RFC-MACP-0009 Section 5 rule 3b: the active assignee MUST NOT send TaskReject after TaskAccept. No policy is bound, so allow_reassignment_on_reject is false.",
       "sender": "agent://w2",
       "message_type": "TaskReject",

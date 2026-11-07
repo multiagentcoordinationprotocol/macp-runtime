@@ -1,0 +1,79 @@
+{
+  "_comment": "Pins RFC-MACP-0001 Section 7.6 item 9 outside Decision Mode: SessionCancel, SessionSuspend and SessionResume submitted via Send are rejected FORBIDDEN by a mode-independent check, leave the session OPEN, and do not disturb the accepted ApprovalRequest. core_runtime_annotation_reject_paths.json pins the same rule in Decision Mode.",
+  "description": "Core lifecycle in Quorum Mode: runtime-emitted annotations submitted via Send are rejected FORBIDDEN.",
+  "mode": "macp.mode.quorum.v1",
+  "initiator": "agent://coordinator",
+  "participants": [
+    "agent://alice",
+    "agent://bob",
+    "agent://carol"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://coordinator",
+      "message_type": "ApprovalRequest",
+      "payload_type": "macp.modes.quorum.v1.ApprovalRequestPayload",
+      "payload": {
+        "request_id": "r1",
+        "action": "deploy",
+        "summary": "Deploy v2",
+        "details": [],
+        "required_approvals": 2
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "RFC-MACP-0001 Section 7.6 item 9: SessionCancel is runtime-emitted and MUST be rejected with FORBIDDEN when submitted through Send, in every Mode. The sender is a declared voter, so it passes Quorum's own sender authorization; a runtime that let the envelope reach Mode dispatch would report INVALID_ENVELOPE instead.",
+      "sender": "agent://alice",
+      "message_type": "SessionCancel",
+      "payload_type": "macp.v1.SessionCancelPayload",
+      "payload": {
+        "reason": "abort",
+        "cancelled_by": "agent://alice"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "RFC-MACP-0001 Section 7.6 item 9: SessionSuspend is runtime-emitted and MUST be rejected with FORBIDDEN when submitted through Send, in every Mode. The sender is a declared voter, so it passes Quorum's own sender authorization; a runtime that let the envelope reach Mode dispatch would report INVALID_ENVELOPE instead.",
+      "sender": "agent://bob",
+      "message_type": "SessionSuspend",
+      "payload_type": "macp.v1.SessionSuspendPayload",
+      "payload": {
+        "reason": "pause",
+        "suspended_by": "agent://bob"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "RFC-MACP-0001 Section 7.6 item 9: SessionResume is runtime-emitted and MUST be rejected with FORBIDDEN when submitted through Send, in every Mode. The sender is a declared voter, so it passes Quorum's own sender authorization; a runtime that let the envelope reach Mode dispatch would report INVALID_ENVELOPE instead.",
+      "sender": "agent://carol",
+      "message_type": "SessionResume",
+      "payload_type": "macp.v1.SessionResumePayload",
+      "payload": {
+        "reason": "continue",
+        "resumed_by": "agent://carol",
+        "banked_ms": 0
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "The rejected annotations changed nothing: the session is still OPEN and accepts a ballot.",
+      "sender": "agent://alice",
+      "message_type": "Approve",
+      "payload_type": "macp.modes.quorum.v1.ApprovePayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "ballot"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Open"
+}

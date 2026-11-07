@@ -14,6 +14,32 @@ Before exposing the runtime to production traffic, ensure these four items are c
 
 4. **Bind address** -- Set `MACP_BIND_ADDR` to the desired listen address. The default `127.0.0.1:50051` only accepts local connections.
 
+## Upgrading to 0.14.0
+
+### 1. Revision 5: Handoff Commitment readiness
+
+Sessions started by 0.14.0 are bound to `semantics_rev` 5. In a Handoff
+session at rev 5 (RFC-MACP-0010 §6.1), each refusal being `INVALID_ENVELOPE`:
+
+- a positive `Commitment` needs an accepted offer, explicit or by the
+  implicit-accept timeout; a declined offer no longer makes it ready;
+- a negative `Commitment` needs the Session settled without a transfer: no
+  offer at all, or every offer declined. It is refused while an offer is
+  pending and after one was accepted. To abandon a pending transfer, call
+  `CancelSession`.
+
+Sessions started by an older release keep their revision and their old rule.
+In every Handoff session, whatever its revision, a negative `Commitment` with
+no offer at all (a definitive no-target outcome) is now accepted; it used to
+be refused.
+
+### 2. Runtime annotations sent through `Send` are `FORBIDDEN` in every mode
+
+A `SessionCancel`, `SessionSuspend` or `SessionResume` submitted through
+`Send` was `FORBIDDEN` in Decision but `INVALID_ENVELOPE` in Proposal, Task,
+Handoff and Quorum. It is now `FORBIDDEN` everywhere (RFC-MACP-0001 §7.6
+item 9). Use the `CancelSession`, `SuspendSession` and `ResumeSession` RPCs.
+
 ## Upgrading to the release after 0.11.0 (OpenTelemetry)
 
 This release adds OpenTelemetry traces and metrics (`macp-semconv/0.1`, experimental). Nothing about sessions, messages, replay or recovery behaves differently, with or without telemetry. Items 3, 4, 5 and 7 affect only a binary built with `--features otel`; published images up to and including `0.11.0` are plain builds, and images published after it include `otel` (see [Container deployment](#container-deployment)) and export nothing until an endpoint is set.

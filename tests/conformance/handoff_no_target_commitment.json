@@ -1,0 +1,59 @@
+{
+  "_comment": "Pins RFC-MACP-0010 Section 6.1 in a Session in which no HandoffOffer was ever made: a positive Commitment is rejected INVALID_ENVELOPE, and a negative Commitment binds the definitive no-target outcome Section 6 allows.",
+  "description": "Handoff Mode: with no offers, a positive Commitment is rejected and a negative (no-target) Commitment resolves the Session.",
+  "mode": "macp.mode.handoff.v1",
+  "initiator": "agent://owner",
+  "participants": [
+    "agent://owner",
+    "agent://target"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "_comment": "Section 6.1: no offer exists, so none has been accepted and a positive Commitment is not ready.",
+      "sender": "agent://owner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "handoff.accepted",
+        "authority_scope": "test",
+        "reason": "transfer complete",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "Section 6: a negative Commitment MAY bind a definitive no-target outcome. Section 6.1 rule 2 counts a Session with no offer as settled, so it is accepted.",
+      "sender": "agent://owner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "action": "handoff.no_target",
+        "authority_scope": "test",
+        "reason": "no eligible target",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "handoff.no_target",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": false
+  }
+}
