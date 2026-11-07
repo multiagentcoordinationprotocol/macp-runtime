@@ -479,6 +479,23 @@ conformance_test!(
     conformance_quorum_policy_pack_two_agent_rule,
     "quorum_policy_pack_two_agent_rule.json"
 );
+// RFC-MACP-0010 §2.1/§5 sender, reference and offer-sequencing rules, and the
+// two §5.1(4) implicit-accept races; RFC-MACP-0011 §2.1/§5 admission, voter
+// eligibility and the 4a/4b all-abstain boundary (promotion-prep batch B5).
+conformance_test!(conformance_handoff_offer_rules, "handoff_offer_rules.json");
+conformance_test!(
+    conformance_handoff_implicit_accept_declined,
+    "handoff_implicit_accept_declined.json"
+);
+conformance_test!(
+    conformance_handoff_implicit_accept_late_decline,
+    "handoff_implicit_accept_late_decline.json"
+);
+conformance_test!(
+    conformance_quorum_admission_reject_paths,
+    "quorum_admission_reject_paths.json"
+);
+conformance_test!(conformance_quorum_all_abstain, "quorum_all_abstain.json");
 
 /// Guard: every vendored fixture must be registered with `conformance_test!`.
 ///
