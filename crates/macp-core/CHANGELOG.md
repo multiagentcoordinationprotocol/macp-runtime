@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-core-v0.13.2...macp-core-v0.14.0) - 2026-11-07
+
+### Fixed
+
+- *(handoff)* [**breaking**] positive Commitment needs an accepted offer; annotations via Send are FORBIDDEN in every mode ([#300](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/300))
+
 ## [0.11.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-core-v0.10.1...macp-core-v0.11.0) - 2026-10-30
 
 ### Added
