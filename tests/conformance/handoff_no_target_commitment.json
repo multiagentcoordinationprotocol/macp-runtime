@@ -31,7 +31,7 @@
       "expected_error_code": "INVALID_ENVELOPE"
     },
     {
-      "_comment": "Section 6: a negative Commitment MAY bind a definitive no-target outcome. Section 6.1 gives it no readiness precondition, so it is accepted with no offer in history.",
+      "_comment": "Section 6: a negative Commitment MAY bind a definitive no-target outcome. Section 6.1 rule 2 counts a Session with no offer as settled, so it is accepted.",
       "sender": "agent://owner",
       "message_type": "Commitment",
       "payload_type": "macp.v1.CommitmentPayload",

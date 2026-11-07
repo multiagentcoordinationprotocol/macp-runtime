@@ -19,13 +19,15 @@ bump fails without it. Patch releases have no entry.
 No API is removed or renamed. Two behaviour changes reach embedders that drive
 `macp_modes::step` themselves:
 
-- **`CURRENT_SEMANTICS_REV` is 5.** In a Handoff session started at rev 5, a
-  positive `Commitment` is refused (`MacpError::InvalidPayload`, wire
-  `INVALID_ENVELOPE`) unless some offer has been accepted; a declined offer
-  no longer makes it ready (RFC-MACP-0010 §6.1). Gated by
-  `handoff::POSITIVE_COMMITMENT_NEEDS_ACCEPT_REV`; sessions recorded at rev
-  0-4 replay unchanged. At every revision, a negative `Commitment` is now
-  accepted with no offer at all, or with one still pending (a loosening).
+- **`CURRENT_SEMANTICS_REV` is 5.** Handoff `Commitment` readiness follows
+  RFC-MACP-0010 §6.1 in sessions started at rev 5: a positive `Commitment`
+  needs an accepted offer (a declined one no longer counts), and a negative
+  one needs the Session settled without a transfer -- no offer, or every
+  offer declined. A negative `Commitment` while an offer is pending or after
+  one was accepted is refused. Refusals are `MacpError::InvalidPayload`
+  (wire `INVALID_ENVELOPE`). Gated by `handoff::COMMITMENT_READINESS_REV`;
+  sessions recorded at rev 0-4 replay unchanged. At every revision, a
+  negative `Commitment` with no offer at all is now accepted (a loosening).
 - **`step::admit` refuses runtime annotations.** A client-submitted
   `SessionCancel`, `SessionSuspend` or `SessionResume` is
   `MacpError::Forbidden` before the mode is consulted, in every mode

@@ -19,13 +19,19 @@ Before exposing the runtime to production traffic, ensure these four items are c
 ### 1. Revision 5: Handoff Commitment readiness
 
 Sessions started by 0.14.0 are bound to `semantics_rev` 5. In a Handoff
-session at rev 5, a positive `Commitment` (`outcome_positive: true`) is
-refused with `INVALID_ENVELOPE` unless some offer has been accepted, explicitly
-or by the implicit-accept timeout; a declined offer no longer makes it ready
-(RFC-MACP-0010 §6.1). Sessions started by an older release keep their
-revision and their old rule. In every Handoff session, whatever its revision,
-a negative `Commitment` is now accepted with no offer at all (a definitive
-no-target outcome) or while an offer is pending; it used to be refused.
+session at rev 5 (RFC-MACP-0010 §6.1), each refusal being `INVALID_ENVELOPE`:
+
+- a positive `Commitment` needs an accepted offer, explicit or by the
+  implicit-accept timeout; a declined offer no longer makes it ready;
+- a negative `Commitment` needs the Session settled without a transfer: no
+  offer at all, or every offer declined. It is refused while an offer is
+  pending and after one was accepted. To abandon a pending transfer, call
+  `CancelSession`.
+
+Sessions started by an older release keep their revision and their old rule.
+In every Handoff session, whatever its revision, a negative `Commitment` with
+no offer at all (a definitive no-target outcome) is now accepted; it used to
+be refused.
 
 ### 2. Runtime annotations sent through `Send` are `FORBIDDEN` in every mode
 

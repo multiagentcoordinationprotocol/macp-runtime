@@ -70,7 +70,7 @@ without a row here.
 | 2 | 0.8.0 | Handoff's implicit accept becomes a recorded synthetic `HandoffAccept` entry (RFC-MACP-0010 §5.1), and its deadline excludes suspended time. Independently, in every mode, `Session::resume` force-expires a session past `MAX_SUSPENSION_CYCLES`. |
 | 3 | 0.8.3 | `ext.multi_round.v1` `Contribute` decoding gains the canonical-proto tie-break (issue #192). |
 | 4 | 0.9.0 | Decision wire enums are case-exact and an empty `Objection.severity` is refused (S7). Handoff cannot re-offer to a target that declined (rule 3a, S5). A pre-assignment `TaskReject` is a personal decline (rule 2a, S6). |
-| 5 | 0.14.0 | A positive Handoff `Commitment` needs an accepted offer; a declined one no longer makes it ready (RFC-MACP-0010 §6.1). |
+| 5 | 0.14.0 | Handoff `Commitment` readiness (RFC-MACP-0010 §6.1): a positive one needs an accepted offer, and a negative one needs no pending and no accepted offer. |
 
 ## Adding a revision
 
