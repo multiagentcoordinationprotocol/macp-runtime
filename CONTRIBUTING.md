@@ -41,6 +41,7 @@ The Doppler project is `macp-runtime`:
 | `dev_personal` | Your own overrides of `dev` |
 | `stg` | `prd`'s non-secret config only; there is no Railway staging environment yet |
 | `prd` | The hosted runtime's Railway variables (project `macp-scenario-runner`, service `macp-runtime`) |
+| `ci` | GitHub Actions secrets (`OPENAI_API_KEY` for the Tier 3 job in `integration-tests.yml`), read with the read-only service token in the `DOPPLER_TOKEN` repo secret |
 
 Local development:
 
