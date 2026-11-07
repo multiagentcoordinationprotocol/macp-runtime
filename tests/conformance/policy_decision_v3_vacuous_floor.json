@@ -1,0 +1,81 @@
+{
+  "_comment": "Pins RFC-MACP-0012 Section 4.1, Vacuous participation floor: at schema_version 3 with voting.quorum absent, require_vote_quorum true is equivalent to false. A runtime MUST NOT substitute a floor the policy did not declare, so a single approval that passes majority is enough. The empty-tally rule still applies and is not what this fixture tests: one decisive ballot is cast before the commitment.",
+  "description": "Decision Mode, schema_version 3: require_vote_quorum true with no voting.quorum gates nothing; one approval commits.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.v3-vacuous-floor",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Majority with require_vote_quorum true and no declared floor.",
+    "rules": {
+      "voting": {
+        "algorithm": "majority",
+        "threshold": 0.5
+      },
+      "commitment": {
+        "authority": "initiator_only",
+        "require_vote_quorum": true
+      }
+    }
+  },
+  "policy_version": "policy.decision.v3-vacuous-floor",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "approve"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "One of three participants voted. A runtime that invented a floor (for example a majority of declared participants) would deny this.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "commitment c1",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.v3-vacuous-floor",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}

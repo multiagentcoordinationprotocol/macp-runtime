@@ -1,0 +1,113 @@
+{
+  "_comment": "Pins RFC-MACP-0012 Section 4.4 assignment.allow_reassignment_on_reject with RFC-MACP-0009 Section 5 rule 3c: when the ACTIVE assignee rejects, the session returns to the pre-assignment state and another eligible participant may accept the original request. require_output is left false because the fixture format cannot carry TaskComplete.output bytes.",
+  "description": "Task Mode: with allow_reassignment_on_reject, w2 takes over after the active assignee w1 rejects, and the task completes.",
+  "mode": "macp.mode.task.v1",
+  "initiator": "agent://planner",
+  "participants": [
+    "agent://planner",
+    "agent://w1",
+    "agent://w2"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.task.reassign-on-reject",
+    "mode": "macp.mode.task.v1",
+    "schema_version": 3,
+    "description": "Rejected tasks may be reassigned.",
+    "rules": {
+      "assignment": {
+        "allow_reassignment_on_reject": true
+      }
+    }
+  },
+  "policy_version": "policy.task.reassign-on-reject",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://planner",
+      "message_type": "TaskRequest",
+      "payload_type": "macp.modes.task.v1.TaskRequestPayload",
+      "payload": {
+        "task_id": "t1",
+        "title": "Build",
+        "instructions": "Do it",
+        "requested_assignee": "",
+        "input": [],
+        "deadline_unix_ms": 0
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://w1",
+      "message_type": "TaskAccept",
+      "payload_type": "macp.modes.task.v1.TaskAcceptPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://w1",
+        "reason": "ready"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "The active assignee rejects; rule 3c returns the task to pre-assignment.",
+      "sender": "agent://w1",
+      "message_type": "TaskReject",
+      "payload_type": "macp.modes.task.v1.TaskRejectPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://w1",
+        "reason": "blocked"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Another eligible participant accepts the original request; no new TaskRequest.",
+      "sender": "agent://w2",
+      "message_type": "TaskAccept",
+      "payload_type": "macp.modes.task.v1.TaskAcceptPayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://w2",
+        "reason": "taking over"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://w2",
+      "message_type": "TaskComplete",
+      "payload_type": "macp.modes.task.v1.TaskCompletePayload",
+      "payload": {
+        "task_id": "t1",
+        "assignee": "agent://w2",
+        "output": [],
+        "summary": "done"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://planner",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "task.completed",
+        "authority_scope": "test",
+        "reason": "commitment c1",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.task.reassign-on-reject",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "task.completed",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}

@@ -1,0 +1,119 @@
+{
+  "_comment": "Pins the carve-out in RFC-MACP-0012 Section 4.1's weighted electorate rule: a vote from an unlisted (weight-0) participant is non-decisive, but it 'still counts as a vote cast for the voting.quorum participation floor'. Only a is in the weights map. a's approval passes the ratio but not the count floor of 2; c's unlisted approval meets the floor without changing the ratio.",
+  "description": "Decision Mode, weighted: an unlisted participant's ballot counts toward the quorum floor.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b",
+    "agent://c"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.weighted-floor",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Weighted vote with only a in the electorate and a count floor of 2.",
+    "rules": {
+      "voting": {
+        "algorithm": "weighted",
+        "threshold": 0.5,
+        "weights": {
+          "agent://a": 1
+        },
+        "quorum": {
+          "type": "count",
+          "value": 2
+        }
+      },
+      "commitment": {
+        "authority": "initiator_only",
+        "require_vote_quorum": true
+      }
+    }
+  },
+  "policy_version": "policy.decision.weighted-floor",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "approve"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Ratio 1/1 passes; 1 ballot < floor 2.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "commitment c1",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.weighted-floor",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "_comment": "c is unlisted: weight 0, non-decisive, but a ballot cast.",
+      "sender": "agent://c",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "approve"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "2 ballots meet the floor; the ratio is still 1/1.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "commitment c2",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.weighted-floor",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}

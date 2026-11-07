@@ -1,0 +1,76 @@
+{
+  "_comment": "Pins both halves of RFC-MACP-0007 Section 2's initiator rule when the initiator is NOT a declared participant: it cannot propose, and it can still commit. Every other Decision fixture with a non-empty roster lists the initiator in participants, so neither half was observable; decision_zero_participants.json covers only the empty roster.",
+  "description": "Decision Mode: an initiator outside the participant list cannot propose but remains the default Commitment authority.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "_comment": "RFC-MACP-0007 Section 2: the initiator MUST be in participants if it intends to emit Proposal, and here it is not. Proposal is authorized only for declared participants (Section 2.1), so this is FORBIDDEN.",
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "THE DISCRIMINATOR. RFC-MACP-0007 Section 2: the initiator is the default Commitment authority regardless of participant-list membership. No policy is bound, so the face-value exception applies (Section 6.2).",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "commit",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  },
+  "expected_mode_state": {
+    "phase": "Committed",
+    "proposals": {
+      "p1": {
+        "proposal_id": "p1",
+        "sender": "agent://a"
+      }
+    }
+  }
+}

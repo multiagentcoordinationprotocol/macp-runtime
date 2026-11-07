@@ -1,0 +1,65 @@
+{
+  "_comment": "Pins RFC-MACP-0001 Section 7.1: a runtime MUST accept configuration_version 'config.default' for every Mode it implements. Every other fixture binds 'cfg-1'. This is the Decision Mode instance; the other modes' happy paths are the place for theirs.",
+  "description": "Core: a session bound to the reserved configuration_version 'config.default' runs to resolution.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "config.default",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "config.default",
+    "outcome_positive": true
+  },
+  "verify_replay_equivalence": true,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "r"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "done",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "config.default",
+        "outcome_positive": true
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved"
+}

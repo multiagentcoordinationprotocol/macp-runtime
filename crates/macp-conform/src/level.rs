@@ -88,7 +88,16 @@ pub fn group_of_fixture(file_name: &str) -> Group {
     let starts = |p: &str| file_name.starts_with(p);
     if starts("session_start_") {
         Group::Level(Level::Core)
-    } else if starts("decision_") {
+    } else if starts("policy_proposal_") || starts("policy_quorum_") || starts("policy_task_") {
+        Group::Level(Level::Standard)
+    } else if starts("decision_")
+        || starts("core_")
+        || starts("policy_")
+        || starts("security_")
+        || starts("transport_")
+    {
+        // security_* and transport_* pin RFC-MACP-0004 / RFC-MACP-0006 rules
+        // through a Decision Mode session, so they need the Decision level.
         Group::Level(Level::Decision)
     } else if starts("proposal_") || starts("task_") || starts("handoff_") || starts("quorum_") {
         Group::Level(Level::Standard)
@@ -114,10 +123,15 @@ mod tests {
             group_of_fixture("session_start_reject_paths.json"),
             Group::Level(Level::Core)
         );
-        assert_eq!(
-            group_of_fixture("decision_plurality.json"),
-            Group::Level(Level::Decision)
-        );
+        for f in [
+            "decision_plurality.json",
+            "security_isolation_reject_paths.json",
+            "core_ttl_expired.json",
+            "policy_commitment_echo.json",
+            "transport_macp_version_in_band.json",
+        ] {
+            assert_eq!(group_of_fixture(f), Group::Level(Level::Decision));
+        }
         for f in [
             "proposal_x.json",
             "task_x.json",

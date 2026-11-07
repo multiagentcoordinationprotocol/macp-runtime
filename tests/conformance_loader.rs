@@ -287,10 +287,27 @@ conformance_test!(
     conformance_proposal_negative_outcome,
     "proposal_negative_outcome.json"
 );
+conformance_test!(
+    conformance_proposal_counter_live_original,
+    "proposal_counter_live_original.json"
+);
+conformance_test!(
+    conformance_proposal_withdrawn_after_accept,
+    "proposal_withdrawn_after_accept.json"
+);
 conformance_test!(conformance_task_reject_paths, "task_reject_paths.json");
 conformance_test!(
     conformance_task_negative_outcome,
     "task_negative_outcome.json"
+);
+conformance_test!(conformance_task_named_assignee, "task_named_assignee.json");
+conformance_test!(
+    conformance_task_named_reject_negative,
+    "task_named_reject_negative.json"
+);
+conformance_test!(
+    conformance_task_reassignment_on_reject,
+    "task_reassignment_on_reject.json"
 );
 conformance_test!(
     conformance_handoff_reject_paths,
@@ -347,6 +364,37 @@ conformance_test!(
 conformance_test!(
     conformance_decision_finalize_decline_quorum_waiver,
     "decision_finalize_decline_quorum_waiver.json"
+);
+
+// RFC-MACP-0007 promotion-prep corpus (criterion 3 of the spec's VERSIONING.md
+// §9.1): the Passed arm's negative half with and without
+// allow_decline_over_approval, the decline guard's require_vote_quorum
+// conjunct, accepted deliberation values with ABSTAIN outside the denominator,
+// an objection-authorized decline on a Passed tally, and an initiator outside
+// the participant list.
+conformance_test!(
+    conformance_decision_decline_over_approval,
+    "decision_decline_over_approval.json"
+);
+conformance_test!(
+    conformance_decision_decline_over_approval_allowed,
+    "decision_decline_over_approval_allowed.json"
+);
+conformance_test!(
+    conformance_decision_decline_guard_quorum,
+    "decision_decline_guard_quorum.json"
+);
+conformance_test!(
+    conformance_decision_abstain_denominator,
+    "decision_abstain_denominator.json"
+);
+conformance_test!(
+    conformance_decision_objection_decline_passed,
+    "decision_objection_decline_passed.json"
+);
+conformance_test!(
+    conformance_decision_0007_initiator_not_participant,
+    "decision_0007_initiator_not_participant.json"
 );
 
 // The `schema_version` 3 / empty-tally corpus added upstream by spec #99
@@ -430,6 +478,150 @@ conformance_test!(
 conformance_test!(
     conformance_quorum_policy_pack_two_agent_rule,
     "quorum_policy_pack_two_agent_rule.json"
+);
+// RFC-MACP-0010 §2.1/§5 sender, reference and offer-sequencing rules, and the
+// two §5.1(4) implicit-accept races; RFC-MACP-0011 §2.1/§5 admission, voter
+// eligibility and the 4a/4b all-abstain boundary (promotion-prep batch B5).
+conformance_test!(conformance_handoff_offer_rules, "handoff_offer_rules.json");
+conformance_test!(
+    conformance_handoff_implicit_accept_declined,
+    "handoff_implicit_accept_declined.json"
+);
+conformance_test!(
+    conformance_handoff_implicit_accept_late_decline,
+    "handoff_implicit_accept_late_decline.json"
+);
+conformance_test!(
+    conformance_quorum_admission_reject_paths,
+    "quorum_admission_reject_paths.json"
+);
+conformance_test!(conformance_quorum_all_abstain, "quorum_all_abstain.json");
+conformance_test!(conformance_core_ttl_expired, "core_ttl_expired.json");
+conformance_test!(
+    conformance_core_mode_before_policy,
+    "core_mode_before_policy.json"
+);
+conformance_test!(
+    conformance_core_runtime_annotation_reject_paths,
+    "core_runtime_annotation_reject_paths.json"
+);
+conformance_test!(
+    conformance_core_envelope_reject_paths,
+    "core_envelope_reject_paths.json"
+);
+conformance_test!(conformance_core_config_default, "core_config_default.json");
+conformance_test!(conformance_core_signal_ambient, "core_signal_ambient.json");
+
+// Spec RFC-MACP-0012 fixture batch B3: SessionStart policy resolution, the
+// Commitment echo, Decision quorum/evaluation/veto/weighted rules, and the
+// Quorum, Proposal and Task rule groups.
+conformance_test!(
+    conformance_policy_commitment_echo,
+    "policy_commitment_echo.json"
+);
+conformance_test!(
+    conformance_policy_decision_annotation_ignored,
+    "policy_decision_annotation_ignored.json"
+);
+conformance_test!(
+    conformance_policy_decision_any_participant,
+    "policy_decision_any_participant.json"
+);
+conformance_test!(
+    conformance_policy_decision_evaluation_required,
+    "policy_decision_evaluation_required.json"
+);
+conformance_test!(
+    conformance_policy_decision_finalize_decline_evaluation_waiver,
+    "policy_decision_finalize_decline_evaluation_waiver.json"
+);
+conformance_test!(
+    conformance_policy_decision_minimum_confidence,
+    "policy_decision_minimum_confidence.json"
+);
+conformance_test!(
+    conformance_policy_decision_minimum_confidence_met,
+    "policy_decision_minimum_confidence_met.json"
+);
+conformance_test!(
+    conformance_policy_decision_percentage_quorum,
+    "policy_decision_percentage_quorum.json"
+);
+conformance_test!(
+    conformance_policy_decision_quorum_inert,
+    "policy_decision_quorum_inert.json"
+);
+conformance_test!(
+    conformance_policy_decision_supermajority_binary64,
+    "policy_decision_supermajority_binary64.json"
+);
+conformance_test!(
+    conformance_policy_decision_v3_quorum_floor,
+    "policy_decision_v3_quorum_floor.json"
+);
+conformance_test!(
+    conformance_policy_decision_v3_vacuous_floor,
+    "policy_decision_v3_vacuous_floor.json"
+);
+conformance_test!(
+    conformance_policy_decision_veto_threshold,
+    "policy_decision_veto_threshold.json"
+);
+conformance_test!(
+    conformance_policy_decision_veto_threshold_met,
+    "policy_decision_veto_threshold_met.json"
+);
+conformance_test!(
+    conformance_policy_decision_weighted_quorum_floor,
+    "policy_decision_weighted_quorum_floor.json"
+);
+conformance_test!(
+    conformance_policy_decision_weighted_ratio,
+    "policy_decision_weighted_ratio.json"
+);
+conformance_test!(conformance_policy_default_echo, "policy_default_echo.json");
+conformance_test!(
+    conformance_policy_default_explicit,
+    "policy_default_explicit.json"
+);
+conformance_test!(
+    conformance_policy_proposal_criterion_counterparty,
+    "policy_proposal_criterion_counterparty.json"
+);
+conformance_test!(
+    conformance_policy_proposal_criterion_initiator,
+    "policy_proposal_criterion_initiator.json"
+);
+conformance_test!(
+    conformance_policy_proposal_max_rounds_unlimited,
+    "policy_proposal_max_rounds_unlimited.json"
+);
+conformance_test!(
+    conformance_policy_proposal_terminal_on_any_reject,
+    "policy_proposal_terminal_on_any_reject.json"
+);
+conformance_test!(
+    conformance_policy_quorum_percentage_ceil,
+    "policy_quorum_percentage_ceil.json"
+);
+conformance_test!(
+    conformance_policy_session_start_reject_paths,
+    "policy_session_start_reject_paths.json"
+);
+conformance_test!(
+    conformance_policy_task_reassignment_on_reject,
+    "policy_task_reassignment_on_reject.json"
+);
+
+// RFC-MACP-0004 §6 (isolation) and RFC-MACP-0006 §4.7 (per-Envelope
+// macp_version, in band), from the spec's RFC promotion prep.
+conformance_test!(
+    conformance_security_isolation_reject_paths,
+    "security_isolation_reject_paths.json"
+);
+conformance_test!(
+    conformance_transport_macp_version_in_band,
+    "transport_macp_version_in_band.json"
 );
 
 /// Guard: every vendored fixture must be registered with `conformance_test!`.
@@ -530,9 +722,9 @@ fn fixtures_conform_to_canonical_format() {
     // `decision_zero_proposal_commitment.json`, and to 37 by the Seam-driven
     // corpus (spec #192/#193: quorum overrides, handoff implicit accept,
     // SessionStart obligations), and to 40 by the W2.7 policy-pack fixtures
-    // (spec #209).
+    // (spec #209), and to 89 by the RFC promotion-prep corpus (spec #263-#268).
     assert!(
-        checked >= 40,
+        checked >= 89,
         "expected all fixtures checked, got {checked}"
     );
 }

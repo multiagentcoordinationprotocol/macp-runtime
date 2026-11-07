@@ -1,0 +1,273 @@
+{
+  "_comment": "Pins RFC-MACP-0010 Section 2.1 (authority matrix) and Section 5 rules 1-5 and 5.1(3), one constraint per rejected step. No implicit-accept policy is bound.",
+  "description": "Handoff Mode: sender authority, handoff_id references, one outstanding offer at a time, and settled-offer rules.",
+  "mode": "macp.mode.handoff.v1",
+  "initiator": "agent://owner",
+  "participants": [
+    "agent://owner",
+    "agent://target",
+    "agent://target2"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "_comment": "Section 2.1: only the current responsibility owner (the initiator) may send HandoffOffer. No offer is outstanding and h1 is unused, so the sender is the only fault.",
+      "sender": "agent://target",
+      "message_type": "HandoffOffer",
+      "payload_type": "macp.modes.handoff.v1.HandoffOfferPayload",
+      "payload": {
+        "handoff_id": "h1",
+        "target_participant": "agent://target2",
+        "scope": "support",
+        "reason": "escalate"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "sender": "agent://owner",
+      "message_type": "HandoffOffer",
+      "payload_type": "macp.modes.handoff.v1.HandoffOfferPayload",
+      "payload": {
+        "handoff_id": "h1",
+        "target_participant": "agent://target",
+        "scope": "support",
+        "reason": "escalate"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Section 5 rule 5: a new HandoffOffer MUST NOT be issued while a prior offer is still pending. h1 is unaccepted and undeclined; h2 is a new id to a target that has not declined.",
+      "sender": "agent://owner",
+      "message_type": "HandoffOffer",
+      "payload_type": "macp.modes.handoff.v1.HandoffOfferPayload",
+      "payload": {
+        "handoff_id": "h2",
+        "target_participant": "agent://target2",
+        "scope": "support",
+        "reason": "escalate"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "Section 2.1: only the current responsibility owner may send HandoffContext.",
+      "sender": "agent://target",
+      "message_type": "HandoffContext",
+      "payload_type": "macp.modes.handoff.v1.HandoffContextPayload",
+      "payload": {
+        "handoff_id": "h1",
+        "content_type": "text/plain",
+        "context": "notes"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "Section 5 rule 2: HandoffContext MUST reference an existing handoff_id.",
+      "sender": "agent://owner",
+      "message_type": "HandoffContext",
+      "payload_type": "macp.modes.handoff.v1.HandoffContextPayload",
+      "payload": {
+        "handoff_id": "h9",
+        "content_type": "text/plain",
+        "context": "notes"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "Section 5 rule 2: HandoffDecline MUST reference an existing handoff_id.",
+      "sender": "agent://target",
+      "message_type": "HandoffDecline",
+      "payload_type": "macp.modes.handoff.v1.HandoffDeclinePayload",
+      "payload": {
+        "handoff_id": "h9",
+        "declined_by": "agent://target",
+        "reason": "at capacity"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "Section 5 rule 3 and Section 2.1: HandoffAccept MUST come from the offer's target_participant; agent://target2 is a declared participant but not h1's target.",
+      "sender": "agent://target2",
+      "message_type": "HandoffAccept",
+      "payload_type": "macp.modes.handoff.v1.HandoffAcceptPayload",
+      "payload": {
+        "handoff_id": "h1",
+        "accepted_by": "agent://target2",
+        "reason": "ready"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "Section 5 rule 3 and Section 2.1: HandoffDecline MUST come from the offer's target_participant.",
+      "sender": "agent://target2",
+      "message_type": "HandoffDecline",
+      "payload_type": "macp.modes.handoff.v1.HandoffDeclinePayload",
+      "payload": {
+        "handoff_id": "h1",
+        "declined_by": "agent://target2",
+        "reason": "at capacity"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "Section 5.1(3): a client-submitted HandoffAccept carrying implicit: true MUST be rejected. The sender is h1's target and h1 is pending, so implicit is the only fault.",
+      "sender": "agent://target",
+      "message_type": "HandoffAccept",
+      "payload_type": "macp.modes.handoff.v1.HandoffAcceptPayload",
+      "payload": {
+        "handoff_id": "h1",
+        "accepted_by": "agent://target",
+        "reason": "ready",
+        "implicit": true
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "sender": "agent://target",
+      "message_type": "HandoffDecline",
+      "payload_type": "macp.modes.handoff.v1.HandoffDeclinePayload",
+      "payload": {
+        "handoff_id": "h1",
+        "declined_by": "agent://target",
+        "reason": "at capacity"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Section 5 rules 1 and 3a: after a decline, a new HandoffOffer MUST carry a new handoff_id. h1 is reused; agent://target2 has not declined and no offer is pending, so the reused id is the only fault.",
+      "sender": "agent://owner",
+      "message_type": "HandoffOffer",
+      "payload_type": "macp.modes.handoff.v1.HandoffOfferPayload",
+      "payload": {
+        "handoff_id": "h1",
+        "target_participant": "agent://target2",
+        "scope": "support",
+        "reason": "escalate"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "Section 2.1: Commitment authority is the current responsibility owner by default; agent://target is a participant but not the owner.",
+      "sender": "agent://target",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "handoff.declined",
+        "authority_scope": "test",
+        "reason": "done",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "Section 5 rule 5: sequential offers to different targets are allowed once the prior offer is settled.",
+      "sender": "agent://owner",
+      "message_type": "HandoffOffer",
+      "payload_type": "macp.modes.handoff.v1.HandoffOfferPayload",
+      "payload": {
+        "handoff_id": "h2",
+        "target_participant": "agent://target2",
+        "scope": "support",
+        "reason": "escalate"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://target2",
+      "message_type": "HandoffAccept",
+      "payload_type": "macp.modes.handoff.v1.HandoffAcceptPayload",
+      "payload": {
+        "handoff_id": "h2",
+        "accepted_by": "agent://target2",
+        "reason": "ready"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Section 5 rule 4: once an offer has been accepted, no competing accept for that same handoff_id is valid.",
+      "sender": "agent://target2",
+      "message_type": "HandoffAccept",
+      "payload_type": "macp.modes.handoff.v1.HandoffAcceptPayload",
+      "payload": {
+        "handoff_id": "h2",
+        "accepted_by": "agent://target2",
+        "reason": "ready"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "Section 5 rule 4 and Section 5.1(4): a decline after the offer is accepted is invalid.",
+      "sender": "agent://target2",
+      "message_type": "HandoffDecline",
+      "payload_type": "macp.modes.handoff.v1.HandoffDeclinePayload",
+      "payload": {
+        "handoff_id": "h2",
+        "declined_by": "agent://target2",
+        "reason": "at capacity"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "Section 5 rule 5: once an offer is accepted, no further offers may be issued for the Session. h3 is new and agent://target2 has never declined, so acceptance of h2 is the only fault.",
+      "sender": "agent://owner",
+      "message_type": "HandoffOffer",
+      "payload_type": "macp.modes.handoff.v1.HandoffOfferPayload",
+      "payload": {
+        "handoff_id": "h3",
+        "target_participant": "agent://target2",
+        "scope": "support",
+        "reason": "escalate"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "Section 2.1: the new responsibility holder does not acquire Commitment authority; the default authority remains the session initiator.",
+      "sender": "agent://target2",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "handoff.accepted",
+        "authority_scope": "test",
+        "reason": "done",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    }
+  ],
+  "expected_final_state": "Open",
+  "expected_mode_state": {
+    "offers": {
+      "h1": {
+        "disposition": "Declined"
+      },
+      "h2": {
+        "disposition": "Accepted"
+      }
+    }
+  },
+  "expect_resolution_present": false
+}

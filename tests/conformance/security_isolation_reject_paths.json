@@ -1,0 +1,162 @@
+{
+  "_comment": "Pins RFC-MACP-0004 Section 6 (isolation and injection prevention) through Send alone. The fixture's own Decision session is opened by the harness. (a) An envelope addressed to a session that does not exist is rejected and opens nothing. (b) After the first accepted Commitment, every further session-scoped message is rejected with the non-OPEN error of RFC-MACP-0001 Section 7.3 item 5, including a Commitment from the initiator. (c) A Commitment from a non-initiator after resolution gets SESSION_NOT_OPEN, not FORBIDDEN, because Section 7.3 step 1 checks state before step 2 checks authorization. (d) expected_history proves that no rejected envelope entered accepted history (RFC-MACP-0004 Section 6, mutation of accepted history; RFC-MACP-0001 Section 8.3).",
+  "description": "Security isolation: unknown-session injection, no message after a terminal state, rejected envelopes never enter history.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "_comment": "(a) RFC-MACP-0004 Section 6: a Proposal addressed to a well-formed session_id (lowercase UUID v4) that names no session. It is rejected and must not open or touch any session.",
+      "sender": "agent://a",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "reject",
+      "envelope": {
+        "session_id": "3d6f0a2b-7c4e-4f1a-9b8d-2e5c7a1f9b04"
+      },
+      "expected_error_code": "SESSION_NOT_FOUND"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "ok"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://b",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "ok"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "First accepted Commitment: OPEN to RESOLVED (RFC-MACP-0001 Section 7.3 step 4).",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "done",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "(b) RFC-MACP-0001 Section 7.3 item 5 and RFC-MACP-0004 Section 6: a Mode message after resolution.",
+      "sender": "agent://a",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p2",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "reject",
+      "expected_error_code": "SESSION_NOT_OPEN"
+    },
+    {
+      "_comment": "(b) RFC-MACP-0004 Section 6, terminal messages for non-OPEN sessions: a second Commitment from the initiator, who is authorized to commit.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "done",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "SESSION_NOT_OPEN"
+    },
+    {
+      "_comment": "(c) RFC-MACP-0001 Section 7.3 step 1 runs before step 2: agent://a may not commit (FORBIDDEN on an OPEN session), but the session is no longer OPEN, so the state error wins.",
+      "sender": "agent://a",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c3",
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "done",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "SESSION_NOT_OPEN"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  },
+  "expected_history": [
+    {
+      "message_type": "Proposal",
+      "sender": "agent://a"
+    },
+    {
+      "message_type": "Vote",
+      "sender": "agent://a"
+    },
+    {
+      "message_type": "Vote",
+      "sender": "agent://b"
+    },
+    {
+      "message_type": "Commitment",
+      "sender": "agent://orchestrator"
+    }
+  ],
+  "verify_replay_equivalence": true
+}

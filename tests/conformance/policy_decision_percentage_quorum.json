@@ -1,0 +1,115 @@
+{
+  "_comment": "Pins RFC-MACP-0012 Section 4.1, Quorum: type percentage is the minimum percentage of DECLARED participants that must vote. Four participants are declared (the initiator included), so 50 requires 2 ballots: 1/4 = 25% is short and 2/4 = 50% meets it (inclusive).",
+  "description": "Decision Mode: a percentage quorum of 50 over 4 declared participants requires 2 ballots.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b",
+    "agent://c"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.percentage-floor",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Majority with a 50% participation floor, bound by require_vote_quorum.",
+    "rules": {
+      "voting": {
+        "algorithm": "majority",
+        "threshold": 0.5,
+        "quorum": {
+          "type": "percentage",
+          "value": 50
+        }
+      },
+      "commitment": {
+        "authority": "initiator_only",
+        "require_vote_quorum": true
+      }
+    }
+  },
+  "policy_version": "policy.decision.percentage-floor",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "approve"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "1 of 4 declared participants voted: 25% < 50%.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "commitment c1",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.percentage-floor",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "sender": "agent://b",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "approve"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "2 of 4 voted: 50% >= 50%.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "commitment c2",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.percentage-floor",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}

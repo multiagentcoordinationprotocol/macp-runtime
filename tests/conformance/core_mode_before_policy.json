@@ -1,0 +1,79 @@
+{
+  "_comment": "Pins RFC-MACP-0002 Section 6.1 (and RFC-MACP-0012 Section 6.4): mode validation runs before policy evaluation, so a message that breaches both a mode rule and a policy rule is rejected with the mode-rule code. Message 2 breaches both; message 3 is the control, showing the bound policy really does deny this tally on its own.",
+  "description": "Core error mapping: a Commitment breaching both sender authorization and policy is FORBIDDEN, not POLICY_DENIED.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "policy.decision.core-precedence",
+  "ttl_ms": 60000,
+  "policy": {
+    "policy_id": "policy.decision.core-precedence",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Unanimous vote, initiator-only commitment, schema_version 3: an empty tally denies a positive commitment.",
+    "rules": {
+      "voting": {
+        "algorithm": "unanimous"
+      },
+      "commitment": {
+        "authority": "initiator_only"
+      }
+    }
+  },
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Breaches both rules: agent://a is not the commitment authority (a sender-authorization rule, FORBIDDEN), and the tally is empty, which schema_version 3 'unanimous' denies (POLICY_DENIED). The mode-rule code wins.",
+      "sender": "agent://a",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "done",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.core-precedence",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "Control: the authorized initiator sends the same positive Commitment on the same empty tally. It passes mode validation, so policy evaluation runs and denies it.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "done",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.core-precedence",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    }
+  ],
+  "expected_final_state": "Open"
+}

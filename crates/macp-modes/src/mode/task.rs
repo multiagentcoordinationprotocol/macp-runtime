@@ -260,12 +260,9 @@ impl Mode for TaskMode {
                         .allow_reassignment_on_reject
                     });
                     if !allow {
-                        return Err(MacpError::PolicyDenied {
-                            reasons: vec![macp_core::policy::DenyReason::new(
-                                macp_core::policy::DenyCode::REASSIGNMENT_NOT_ALLOWED,
-                                "reassignment after rejection not allowed by policy",
-                            )],
-                        });
+                        // RFC-MACP-0002 §6.1: POLICY_DENIED is reserved for Commitment;
+                        // a non-Commitment rejected by a mode rule is INVALID_ENVELOPE.
+                        return Err(MacpError::InvalidPayload);
                     }
                 }
                 if !payload.assignee.is_empty() && payload.assignee != env.sender {
@@ -297,12 +294,9 @@ impl Mode for TaskMode {
                             .allow_reassignment_on_reject
                         });
                         if !allow {
-                            return Err(MacpError::PolicyDenied {
-                                reasons: vec![macp_core::policy::DenyReason::new(
-                                    macp_core::policy::DenyCode::REASSIGNMENT_NOT_ALLOWED,
-                                    "active assignee cannot reject without allow_reassignment_on_reject policy",
-                                )],
-                            });
+                            // RFC-MACP-0002 §6.1: POLICY_DENIED is reserved for Commitment;
+                            // a non-Commitment rejected by a mode rule is INVALID_ENVELOPE.
+                            return Err(MacpError::InvalidPayload);
                         }
                         // Policy permits: clear assignee, return to pre-assignment state
                     } else {
@@ -1551,7 +1545,7 @@ mod tests {
                 &env("worker", "TaskReject", make_task_reject("t1", "worker")),
             )
             .unwrap_err();
-        assert_eq!(err.to_string(), "PolicyDenied");
+        assert_eq!(err.to_string(), "InvalidPayload");
     }
 
     // --- RFC-MACP-0009 §5 rule 2a (Seam finding S6, #185), semantics_rev >= 4 ---
@@ -1758,6 +1752,6 @@ mod tests {
                 &env("w2", "TaskAccept", make_task_accept("t1", "w2")),
             )
             .unwrap_err();
-        assert_eq!(err.to_string(), "PolicyDenied");
+        assert_eq!(err.to_string(), "InvalidPayload");
     }
 }

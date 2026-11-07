@@ -1,0 +1,105 @@
+{
+  "_comment": "Pins RFC-MACP-0012 Section 4.2's rounding rule: the effective threshold is ceil(value x declared / 100), so 50 over 3 declared participants requires 2 approvals, not 1 (a truncating runtime would accept the first positive Commitment). The policy overrides the ApprovalRequest's required_approvals of 1. The first positive Commitment is rejected by the mode's eligibility check (RFC-MACP-0011), which runs before policy (RFC-MACP-0012 Section 6.4), so the code is INVALID_ENVELOPE.",
+  "description": "Quorum Mode: percentage 50 over 3 declared participants requires 2 approvals.",
+  "mode": "macp.mode.quorum.v1",
+  "initiator": "agent://coordinator",
+  "participants": [
+    "agent://alice",
+    "agent://bob",
+    "agent://carol"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.quorum.percentage-50",
+    "mode": "macp.mode.quorum.v1",
+    "schema_version": 3,
+    "description": "percentage threshold of 50 (effective 2 of 3).",
+    "rules": {
+      "threshold": {
+        "type": "percentage",
+        "value": 50
+      }
+    }
+  },
+  "policy_version": "policy.quorum.percentage-50",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://coordinator",
+      "message_type": "ApprovalRequest",
+      "payload_type": "macp.modes.quorum.v1.ApprovalRequestPayload",
+      "payload": {
+        "request_id": "r1",
+        "action": "deploy",
+        "summary": "Deploy v2",
+        "details": [],
+        "required_approvals": 1
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://alice",
+      "message_type": "Approve",
+      "payload_type": "macp.modes.quorum.v1.ApprovePayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "ok"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "1 approval < ceil(50 x 3 / 100) = 2.",
+      "sender": "agent://coordinator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "quorum.approved",
+        "authority_scope": "test",
+        "reason": "commitment c1",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.quorum.percentage-50",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "sender": "agent://bob",
+      "message_type": "Approve",
+      "payload_type": "macp.modes.quorum.v1.ApprovePayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "ok"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "2 approvals meet the effective threshold.",
+      "sender": "agent://coordinator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "outcome_positive": true,
+        "action": "quorum.approved",
+        "authority_scope": "test",
+        "reason": "commitment c2",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.quorum.percentage-50",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "quorum.approved",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}

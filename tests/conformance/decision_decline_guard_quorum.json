@@ -1,0 +1,159 @@
+{
+  "_comment": "Pins the require_vote_quorum conjunct of the decline guard for a vote-authorized negative commitment (RFC-MACP-0007 Section 6.2). decision_finalize_decline_quorum_waiver.json pins that an objection-authorized decline is NOT subject to this conjunct; this fixture pins that a vote-authorized one IS.",
+  "description": "Decision Mode: a vote-authorized negative commitment is denied until the voting quorum is met, even with decisive REJECTs cast.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b",
+    "agent://c"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.decline-guard-quorum",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Majority vote with a count-3 participation floor and require_vote_quorum.",
+    "rules": {
+      "voting": {
+        "algorithm": "majority",
+        "quorum": {
+          "type": "count",
+          "value": 3
+        }
+      },
+      "commitment": {
+        "authority": "initiator_only",
+        "require_vote_quorum": true
+      }
+    }
+  },
+  "policy_version": "policy.decision.decline-guard-quorum",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://c",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "REJECT",
+        "reason": "ballot"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "THE DISCRIMINATOR. One decisive REJECT has been cast, so the tally is Failed and the decline guard's reject_count > 0 conjunct holds. require_vote_quorum is true and the count-3 quorum is unmet (one vote), so the guard's second conjunct fails and this vote-authorized negative commitment MUST be denied (RFC-MACP-0007 Section 6.2, Decline guard). A runtime that checks only reject_count accepts this message and fails the fixture. No objection is recorded, so the decline cannot be objection-authorized.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": false,
+        "action": "decision.rejected",
+        "authority_scope": "test",
+        "reason": "commit",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.decline-guard-quorum",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "REJECT",
+        "reason": "ballot"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Two votes cast: the count-3 quorum is still unmet.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "outcome_positive": false,
+        "action": "decision.rejected",
+        "authority_scope": "test",
+        "reason": "commit",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.decline-guard-quorum",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "sender": "agent://b",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "REJECT",
+        "reason": "ballot"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Three votes cast: the quorum is met and the tally holds decisive REJECTs, so both conjuncts of the decline guard hold.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c3",
+        "outcome_positive": false,
+        "action": "decision.rejected",
+        "authority_scope": "test",
+        "reason": "commit",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.decline-guard-quorum",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.rejected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": false
+  },
+  "expected_mode_state": {
+    "phase": "Committed",
+    "votes": {
+      "p1": {
+        "agent://a": {
+          "vote": "REJECT"
+        },
+        "agent://b": {
+          "vote": "REJECT"
+        },
+        "agent://c": {
+          "vote": "REJECT"
+        }
+      }
+    }
+  }
+}

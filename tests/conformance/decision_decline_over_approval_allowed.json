@@ -1,0 +1,120 @@
+{
+  "_comment": "Twin of decision_decline_over_approval.json. The two differ only in commitment.allow_decline_over_approval, so together they show that this flag, and nothing else, decides a guard-satisfying negative commitment on a Passed tally (RFC-MACP-0007 Section 6.2; RFC-MACP-0012 Section 4.1).",
+  "description": "Decision Mode: with allow_decline_over_approval true, a Passed vote permits a guard-satisfying negative commitment.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b",
+    "agent://c"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.decline-over-approval-allowed",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Majority vote, initiator-only commitment, allow_decline_over_approval true.",
+    "rules": {
+      "voting": {
+        "algorithm": "majority"
+      },
+      "commitment": {
+        "authority": "initiator_only",
+        "allow_decline_over_approval": true
+      }
+    }
+  },
+  "policy_version": "policy.decision.decline-over-approval-allowed",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "ballot"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://b",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "ballot"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "One decisive REJECT, so the decline guard's reject_count > 0 conjunct holds, and require_vote_quorum is unset. The tally is 2 APPROVE / 1 REJECT = 0.667 >= 0.5, so the result is Passed. The only remaining ground for denying a negative commitment is the Passed arm of RFC-MACP-0007 Section 6.2, which is what this pair of fixtures isolates.",
+      "sender": "agent://c",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "REJECT",
+        "reason": "ballot"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "THE DISCRIMINATOR. RFC-MACP-0007 Section 6.2, Passed: with commitment.allow_decline_over_approval true, a negative commitment is allowed. The decline guard still applies across all three voting results, and agent://c's decisive REJECT satisfies it.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": false,
+        "action": "decision.rejected",
+        "authority_scope": "test",
+        "reason": "commit",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.decline-over-approval-allowed",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.rejected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": false
+  },
+  "expected_mode_state": {
+    "phase": "Committed",
+    "votes": {
+      "p1": {
+        "agent://a": {
+          "vote": "APPROVE"
+        },
+        "agent://b": {
+          "vote": "APPROVE"
+        },
+        "agent://c": {
+          "vote": "REJECT"
+        }
+      }
+    }
+  }
+}

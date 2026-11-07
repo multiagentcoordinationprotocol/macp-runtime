@@ -14,8 +14,12 @@
     "schema_version": 2,
     "description": "Majority vote, initiator-only commitment; permits a vote-gated negative (decline) outcome.",
     "rules": {
-      "voting": { "algorithm": "majority" },
-      "commitment": { "authority": "initiator_only" }
+      "voting": {
+        "algorithm": "majority"
+      },
+      "commitment": {
+        "authority": "initiator_only"
+      }
     }
   },
   "policy_version": "policy.decision.majority-decline",
@@ -115,5 +119,6 @@
         }
       }
     }
-  }
+  },
+  "verify_replay_equivalence": true
 }

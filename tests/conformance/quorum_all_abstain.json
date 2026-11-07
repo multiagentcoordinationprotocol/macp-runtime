@@ -1,0 +1,103 @@
+{
+  "_comment": "Pins RFC-MACP-0011 Section 5 rules 4a and 4b at the boundary: required_approvals is 1 over 3 participants. After two Abstain ballots, 1 remaining eligible + 0 approvals is not < 1, so the threshold is still reachable and a negative Commitment is rejected. After the third Abstain, 0 + 0 < 1 and every participant has abstained, so the negative Commitment is accepted.",
+  "description": "Quorum Mode: abstentions shrink the approver pool; an all-abstain session becomes eligible for a negative Commitment only after the last abstention.",
+  "mode": "macp.mode.quorum.v1",
+  "initiator": "agent://coordinator",
+  "participants": [
+    "agent://alice",
+    "agent://bob",
+    "agent://carol"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://coordinator",
+      "message_type": "ApprovalRequest",
+      "payload_type": "macp.modes.quorum.v1.ApprovalRequestPayload",
+      "payload": {
+        "request_id": "r1",
+        "action": "deploy",
+        "summary": "Deploy v2",
+        "details": [],
+        "required_approvals": 1
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://alice",
+      "message_type": "Abstain",
+      "payload_type": "macp.modes.quorum.v1.AbstainPayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "ballot"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://bob",
+      "message_type": "Abstain",
+      "payload_type": "macp.modes.quorum.v1.AbstainPayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "ballot"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Rule 4a: remaining_eligible_participants (1, carol) + current_approvals (0) = 1, which is not < required_approvals (1).",
+      "sender": "agent://coordinator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "quorum.rejected",
+        "authority_scope": "test",
+        "reason": "threshold not met",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "sender": "agent://carol",
+      "message_type": "Abstain",
+      "payload_type": "macp.modes.quorum.v1.AbstainPayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "ballot"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Rule 4b: all eligible participants have abstained; 0 + 0 < 1.",
+      "sender": "agent://coordinator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "quorum.rejected",
+        "authority_scope": "test",
+        "reason": "threshold not met",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "quorum.rejected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": false
+  }
+}

@@ -1,0 +1,86 @@
+{
+  "_comment": "Pins RFC-MACP-0012 Section 4.1 commitment.authority any_participant with Section 6.4: a declared participant other than the initiator may commit, and a sender outside the declared participants may not (FORBIDDEN). algorithm none isolates the authority rule from the vote.",
+  "description": "Decision Mode, authority any_participant: an outsider's Commitment is FORBIDDEN, a non-initiator participant's is accepted.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.any-participant",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "No voting constraint; any declared participant may commit.",
+    "rules": {
+      "voting": {
+        "algorithm": "none"
+      },
+      "commitment": {
+        "authority": "any_participant"
+      }
+    }
+  },
+  "policy_version": "policy.decision.any-participant",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "agent://mallory is not a declared participant.",
+      "sender": "agent://mallory",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "commitment c1",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.any-participant",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "agent://a is a declared participant but not the initiator.",
+      "sender": "agent://a",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "commitment c2",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.any-participant",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}

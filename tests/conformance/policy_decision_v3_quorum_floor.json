@@ -1,0 +1,114 @@
+{
+  "_comment": "Pins RFC-MACP-0012 Section 4.1 (voting.quorum applied through commitment.require_vote_quorum) at schema_version 3, where the companion decision_legacy_require_vote_quorum.json covers schema_version 2. Majority passes on one approval (1/1 >= 0.5) but the count floor of 2 is unmet, so the two gates are separated.",
+  "description": "Decision Mode, schema_version 3: a count quorum of 2 with require_vote_quorum true denies a passing vote until a second ballot is cast.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.v3-count-floor",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Majority with a count floor of 2, bound by require_vote_quorum.",
+    "rules": {
+      "voting": {
+        "algorithm": "majority",
+        "threshold": 0.5,
+        "quorum": {
+          "type": "count",
+          "value": 2
+        }
+      },
+      "commitment": {
+        "authority": "initiator_only",
+        "require_vote_quorum": true
+      }
+    }
+  },
+  "policy_version": "policy.decision.v3-count-floor",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "approve"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "One ballot: the algorithm passes (1/1) but the participation floor of 2 does not.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "commitment c1",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.v3-count-floor",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    },
+    {
+      "sender": "agent://b",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "approve"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Two ballots meet the floor; 2/2 >= 0.5.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c2",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "commitment c2",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.v3-count-floor",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}

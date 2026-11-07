@@ -1,0 +1,101 @@
+{
+  "_comment": "Pins RFC-MACP-0012 Section 4.1 evaluation.minimum_confidence (schema: 'Minimum confidence level for evaluations to be considered valid'), below the floor. It is paired with required_before_voting true because the RFC does not say what minimum_confidence gates on its own (see the spec question). The only evaluation is at 0.5 < 0.8, so it does not count and the passing vote cannot commit. RFC-MACP-0007 Section 5 rule 6 closes deliberation at the first accepted Vote, so every Evaluation precedes every ballot and each fixture can pin only one evaluation state.",
+  "description": "Decision Mode: with required_before_voting and minimum_confidence 0.8, an evaluation at 0.5 does not qualify.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.minimum-confidence",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Majority with a required evaluation at confidence 0.8 or higher.",
+    "rules": {
+      "voting": {
+        "algorithm": "majority",
+        "threshold": 0.5
+      },
+      "evaluation": {
+        "required_before_voting": true,
+        "minimum_confidence": 0.8
+      },
+      "commitment": {
+        "authority": "initiator_only"
+      }
+    }
+  },
+  "policy_version": "policy.decision.minimum-confidence",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Evaluation",
+      "payload_type": "macp.modes.decision.v1.EvaluationPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "recommendation": "APPROVE",
+        "confidence": 0.5,
+        "reason": "assessed"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "approve"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://b",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "approve"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "The only evaluation has confidence 0.5 < 0.8.",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "commitment c1",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.minimum-confidence",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "reject",
+      "expected_error_code": "POLICY_DENIED"
+    }
+  ],
+  "expected_final_state": "Open"
+}

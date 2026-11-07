@@ -1,0 +1,96 @@
+{
+  "_comment": "Pins RFC-MACP-0012 Section 4: keys matching ^[_$] in a rules object are annotations and MUST be ignored, so prefixing a real rule group with '_' disables it. The rules carry _voting set to unanimous next to voting set to majority. Under majority a 1-1 split is 0.5 >= 0.5 and passes; if _voting were read, unanimous would fail.",
+  "description": "Decision Mode: a _voting annotation beside voting is ignored; a 1-1 split passes majority.",
+  "mode": "macp.mode.decision.v1",
+  "initiator": "agent://orchestrator",
+  "participants": [
+    "agent://orchestrator",
+    "agent://a",
+    "agent://b"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.decision.annotation-ignored",
+    "mode": "macp.mode.decision.v1",
+    "schema_version": 3,
+    "description": "Majority, with annotation keys that a runtime must ignore.",
+    "rules": {
+      "_note": "annotation; ignored",
+      "_voting": {
+        "algorithm": "unanimous"
+      },
+      "voting": {
+        "algorithm": "majority",
+        "threshold": 0.5
+      },
+      "commitment": {
+        "authority": "initiator_only",
+        "$comment": "annotation; ignored"
+      }
+    }
+  },
+  "policy_version": "policy.decision.annotation-ignored",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://orchestrator",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.decision.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "option": "deploy",
+        "rationale": "ready",
+        "supporting_data": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://a",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "APPROVE",
+        "reason": "approve"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://b",
+      "message_type": "Vote",
+      "payload_type": "macp.modes.decision.v1.VotePayload",
+      "payload": {
+        "proposal_id": "p1",
+        "vote": "REJECT",
+        "reason": "reject"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Even split under majority 0.5 passes (inclusive).",
+      "sender": "agent://orchestrator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "decision.selected",
+        "authority_scope": "test",
+        "reason": "commitment c1",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.decision.annotation-ignored",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "decision.selected",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}

@@ -1,0 +1,123 @@
+{
+  "_comment": "Pins RFC-MACP-0012 Section 4.3 counter_proposal.max_rounds 0 = unlimited: three successive counter-proposals are all accepted and the final one commits. The boundary for a non-zero limit is not pinned, because the RFC does not define what a round counts (see the spec question).",
+  "description": "Proposal Mode: max_rounds 0 allows any number of counter-proposals.",
+  "mode": "macp.mode.proposal.v1",
+  "initiator": "agent://buyer",
+  "participants": [
+    "agent://buyer",
+    "agent://seller"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy": {
+    "policy_id": "policy.proposal.unlimited-rounds",
+    "mode": "macp.mode.proposal.v1",
+    "schema_version": 3,
+    "description": "No limit on counter-proposals.",
+    "rules": {
+      "counter_proposal": {
+        "max_rounds": 0
+      }
+    }
+  },
+  "policy_version": "policy.proposal.unlimited-rounds",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "sender": "agent://seller",
+      "message_type": "Proposal",
+      "payload_type": "macp.modes.proposal.v1.ProposalPayload",
+      "payload": {
+        "proposal_id": "p1",
+        "title": "offer",
+        "summary": "terms",
+        "details": [],
+        "tags": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://buyer",
+      "message_type": "CounterProposal",
+      "payload_type": "macp.modes.proposal.v1.CounterProposalPayload",
+      "payload": {
+        "proposal_id": "p2",
+        "supersedes_proposal_id": "p1",
+        "title": "counter",
+        "summary": "lower",
+        "details": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://seller",
+      "message_type": "CounterProposal",
+      "payload_type": "macp.modes.proposal.v1.CounterProposalPayload",
+      "payload": {
+        "proposal_id": "p3",
+        "supersedes_proposal_id": "p2",
+        "title": "counter",
+        "summary": "middle",
+        "details": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://buyer",
+      "message_type": "CounterProposal",
+      "payload_type": "macp.modes.proposal.v1.CounterProposalPayload",
+      "payload": {
+        "proposal_id": "p4",
+        "supersedes_proposal_id": "p3",
+        "title": "counter",
+        "summary": "final",
+        "details": []
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://seller",
+      "message_type": "Accept",
+      "payload_type": "macp.modes.proposal.v1.AcceptPayload",
+      "payload": {
+        "proposal_id": "p4",
+        "reason": ""
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://buyer",
+      "message_type": "Accept",
+      "payload_type": "macp.modes.proposal.v1.AcceptPayload",
+      "payload": {
+        "proposal_id": "p4",
+        "reason": ""
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://buyer",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "outcome_positive": true,
+        "action": "proposal.accepted",
+        "authority_scope": "test",
+        "reason": "commitment c1",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.proposal.unlimited-rounds",
+        "configuration_version": "cfg-1"
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "proposal.accepted",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}

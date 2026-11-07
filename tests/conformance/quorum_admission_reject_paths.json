@@ -1,0 +1,206 @@
+{
+  "_comment": "Pins RFC-MACP-0011 Section 2.1 (authority matrix, coordinator outside the voter pool), Section 5 rules 1, 2, 3, 4a and 5, one constraint per rejected step. The coordinator is not in participants, so it may pose the request and commit but not ballot.",
+  "description": "Quorum Mode: request admission, voter eligibility, request_id references, early negative commitment, and Commitment authority.",
+  "mode": "macp.mode.quorum.v1",
+  "initiator": "agent://coordinator",
+  "participants": [
+    "agent://alice",
+    "agent://bob",
+    "agent://carol"
+  ],
+  "mode_version": "1.0.0",
+  "configuration_version": "cfg-1",
+  "policy_version": "",
+  "ttl_ms": 60000,
+  "messages": [
+    {
+      "_comment": "Section 2.1: only the session initiator (coordinator) may send ApprovalRequest.",
+      "sender": "agent://alice",
+      "message_type": "ApprovalRequest",
+      "payload_type": "macp.modes.quorum.v1.ApprovalRequestPayload",
+      "payload": {
+        "request_id": "r1",
+        "action": "deploy",
+        "summary": "Deploy v2",
+        "details": [],
+        "required_approvals": 2
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "Section 5 rule 2: required_approvals MUST be greater than zero.",
+      "sender": "agent://coordinator",
+      "message_type": "ApprovalRequest",
+      "payload_type": "macp.modes.quorum.v1.ApprovalRequestPayload",
+      "payload": {
+        "request_id": "r1",
+        "action": "deploy",
+        "summary": "Deploy v2",
+        "details": [],
+        "required_approvals": 0
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "Section 5 rule 2: required_approvals MUST NOT exceed the count of eligible participants (3).",
+      "sender": "agent://coordinator",
+      "message_type": "ApprovalRequest",
+      "payload_type": "macp.modes.quorum.v1.ApprovalRequestPayload",
+      "payload": {
+        "request_id": "r1",
+        "action": "deploy",
+        "summary": "Deploy v2",
+        "details": [],
+        "required_approvals": 4
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "sender": "agent://coordinator",
+      "message_type": "ApprovalRequest",
+      "payload_type": "macp.modes.quorum.v1.ApprovalRequestPayload",
+      "payload": {
+        "request_id": "r1",
+        "action": "deploy",
+        "summary": "Deploy v2",
+        "details": [],
+        "required_approvals": 2
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Section 5 rule 1: a Session accepts at most one ApprovalRequest in base v1. r2 is otherwise valid.",
+      "sender": "agent://coordinator",
+      "message_type": "ApprovalRequest",
+      "payload_type": "macp.modes.quorum.v1.ApprovalRequestPayload",
+      "payload": {
+        "request_id": "r2",
+        "action": "deploy",
+        "summary": "Deploy v2",
+        "details": [],
+        "required_approvals": 2
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "Section 5 rules 4 and 4a: with no ballots, 3 remaining eligible + 0 approvals >= 2 required, so the threshold is still reachable and a negative Commitment is not yet eligible.",
+      "sender": "agent://coordinator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "quorum.rejected",
+        "authority_scope": "test",
+        "reason": "threshold not met",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": false
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "_comment": "Section 2.1: the coordinator is NOT an eligible ballot caster unless listed in participants.",
+      "sender": "agent://coordinator",
+      "message_type": "Approve",
+      "payload_type": "macp.modes.quorum.v1.ApprovePayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "ballot"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "Section 2.1 and Section 8: a ballot from a sender outside participants MUST be rejected.",
+      "sender": "agent://mallory",
+      "message_type": "Approve",
+      "payload_type": "macp.modes.quorum.v1.ApprovePayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "ballot"
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "_comment": "Section 5 rule 3: a ballot MUST reference the Session's accepted request_id.",
+      "sender": "agent://alice",
+      "message_type": "Approve",
+      "payload_type": "macp.modes.quorum.v1.ApprovePayload",
+      "payload": {
+        "request_id": "r2",
+        "reason": "ballot"
+      },
+      "expect": "reject",
+      "expected_error_code": "INVALID_ENVELOPE"
+    },
+    {
+      "sender": "agent://alice",
+      "message_type": "Approve",
+      "payload_type": "macp.modes.quorum.v1.ApprovePayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "ballot"
+      },
+      "expect": "accept"
+    },
+    {
+      "sender": "agent://bob",
+      "message_type": "Approve",
+      "payload_type": "macp.modes.quorum.v1.ApprovePayload",
+      "payload": {
+        "request_id": "r1",
+        "reason": "ballot"
+      },
+      "expect": "accept"
+    },
+    {
+      "_comment": "Section 5 rule 5 and Section 2.1: only an authorized coordinator may emit the Commitment. The threshold is met, so authority is the only fault.",
+      "sender": "agent://alice",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "quorum.approved",
+        "authority_scope": "test",
+        "reason": "threshold met",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "reject",
+      "expected_error_code": "FORBIDDEN"
+    },
+    {
+      "sender": "agent://coordinator",
+      "message_type": "Commitment",
+      "payload_type": "macp.v1.CommitmentPayload",
+      "payload": {
+        "commitment_id": "c1",
+        "action": "quorum.approved",
+        "authority_scope": "test",
+        "reason": "threshold met",
+        "mode_version": "1.0.0",
+        "policy_version": "policy.default",
+        "configuration_version": "cfg-1",
+        "outcome_positive": true
+      },
+      "expect": "accept"
+    }
+  ],
+  "expected_final_state": "Resolved",
+  "expect_resolution_present": true,
+  "expected_resolution": {
+    "action": "quorum.approved",
+    "mode_version": "1.0.0",
+    "configuration_version": "cfg-1",
+    "outcome_positive": true
+  }
+}
