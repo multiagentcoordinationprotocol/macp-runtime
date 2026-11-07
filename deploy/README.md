@@ -2,7 +2,7 @@
 
 One command runs the whole stack on your machine: the runtime, the control
 plane and its Postgres, the console, the playground, and auth-service. It needs
-no GitHub token, no API key and no LLM key.
+no GitHub token and no LLM key; the API keys it uses are local placeholders.
 
 ```bash
 git clone https://github.com/multiagentcoordinationprotocol/macp-runtime
@@ -72,6 +72,8 @@ To change them, copy `.env.example` to `.env` and edit it.
 | Credential | Default | Used by |
 |---|---|---|
 | `MACP_CP_API_KEY` | `macp-dev-key` | Every caller of the control plane API: the console, the playground and you. Send it as `Authorization: Bearer <key>`. |
+| `MACP_PLAYGROUND_API_KEY` | `macp-dev-playground-key` | The playground's `AUTH_API_KEYS` and the console's key for it, sent as `x-api-key`. Playground images after 0.2.1 refuse to start in production without it. |
+| `MACP_TOKEN_ISSUER_KEY` | `macp-dev-token-issuer-key` | auth-service's `TOKEN_ISSUER_KEYS` and the playground's `MACP_AUTH_SERVICE_API_KEY`: the shared key `POST /tokens` requires as `Authorization: Bearer <key>`. auth-service images after 1.0.0 refuse to start without it. |
 | `MACP_CP_RUNTIME_TOKEN` | `macp-dev-cp-observer` | The control plane's static bearer to the runtime. The runtime maps it to sender `macp-control-plane` with observer rights. |
 | `POSTGRES_PASSWORD` | `macp` | The control plane's database login. |
 | `MACP_RECEIPT_SIGNING_KEY` | empty (unsigned) | The runtime's decision-receipt signing key, with `MACP_RECEIPT_SIGNING_KID` and `MACP_RUNTIME_ID`. See [Decision receipts](../docs/deployment.md#decision-receipts). |
@@ -80,8 +82,9 @@ auth-service starts with an ephemeral signing key, so agent JWTs stop
 validating after it restarts until the runtime refreshes its JWKS cache (60 s).
 
 **This stack is for one machine.** Every port binds to `127.0.0.1`, and
-auth-service is not published at all. auth-service mints a token for any sender
-it is asked for, so do not expose this stack to a network as configured. For a
+auth-service is not published at all. The default keys are placeholders anyone
+can read in this directory, and a holder of the token-issuer key can mint a
+token for any sender, so do not expose this stack to a network as configured. For a
 real deployment, see the runtime's [Deployment Guide](../docs/deployment.md).
 
 ## Using it
@@ -89,6 +92,7 @@ real deployment, see the runtime's [Deployment Guide](../docs/deployment.md).
 ```bash
 # Launch the showcase run without the console, then check it:
 curl -s -X POST localhost:3100/examples/run -H 'content-type: application/json' \
+  -H 'x-api-key: macp-dev-playground-key' \
   -d '{"scenarioRef":"fraud/high-value-new-device@1.0.0","templateId":"showcase","mode":"live","inputs":{},"bootstrapAgents":true}' \
   | jq -r .controlPlaneRun.runId
 curl -s localhost:3001/runs/<runId>/verification -H 'authorization: Bearer macp-dev-key' | jq .status
