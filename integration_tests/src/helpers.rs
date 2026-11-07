@@ -322,6 +322,46 @@ pub fn task_complete_payload(task_id: &str, assignee: &str, summary: &str) -> Ve
     .encode_to_vec()
 }
 
+pub fn task_reject_payload(task_id: &str, assignee: &str, reason: &str) -> Vec<u8> {
+    macp_runtime::task_pb::TaskRejectPayload {
+        task_id: task_id.into(),
+        assignee: assignee.into(),
+        reason: reason.into(),
+    }
+    .encode_to_vec()
+}
+
+// ── Runtime-emitted annotation payloads (RFC-MACP-0001 §7.6 item 9) ──────
+//
+// These exist only so a test can submit an annotation via `Send` and assert
+// that the runtime refuses it: SessionCancel / SessionSuspend / SessionResume
+// are appended by the runtime itself, from the matching RPC.
+
+pub fn session_cancel_payload(reason: &str, cancelled_by: &str) -> Vec<u8> {
+    macp_runtime::pb::SessionCancelPayload {
+        reason: reason.into(),
+        cancelled_by: cancelled_by.into(),
+    }
+    .encode_to_vec()
+}
+
+pub fn session_suspend_payload(reason: &str, suspended_by: &str) -> Vec<u8> {
+    macp_runtime::pb::SessionSuspendPayload {
+        reason: reason.into(),
+        suspended_by: suspended_by.into(),
+    }
+    .encode_to_vec()
+}
+
+pub fn session_resume_payload(reason: &str, resumed_by: &str) -> Vec<u8> {
+    macp_runtime::pb::SessionResumePayload {
+        reason: reason.into(),
+        resumed_by: resumed_by.into(),
+        banked_ms: 0,
+    }
+    .encode_to_vec()
+}
+
 // ── Handoff mode payload helpers ────────────────────────────────────────
 
 pub fn handoff_offer_payload(handoff_id: &str, target: &str, scope: &str, reason: &str) -> Vec<u8> {
@@ -349,6 +389,15 @@ pub fn handoff_accept_payload(handoff_id: &str, accepted_by: &str, reason: &str)
         accepted_by: accepted_by.into(),
         reason: reason.into(),
         implicit: false,
+    }
+    .encode_to_vec()
+}
+
+pub fn handoff_decline_payload(handoff_id: &str, declined_by: &str, reason: &str) -> Vec<u8> {
+    macp_runtime::handoff_pb::HandoffDeclinePayload {
+        handoff_id: handoff_id.into(),
+        declined_by: declined_by.into(),
+        reason: reason.into(),
     }
     .encode_to_vec()
 }
