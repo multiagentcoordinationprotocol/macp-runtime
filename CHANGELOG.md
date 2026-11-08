@@ -6,6 +6,22 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.14.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.14.0...macp-runtime-v0.14.1) - 2026-11-08
+
+### Fixed
+
+- *(server)* read evicted sessions from storage in WhatIfReplay and GetSession ([#311](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/311))
+- *(deploy)* set the playground and token-issuer keys in the self-host compose ([#306](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/306))
+
+### Other
+
+- *(deploy)* pin auth-service 2.0.0 and playground 0.3.0 ([#310](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/310))
+- *(deploy)* pin control-plane 0.8.0 and ui-console 0.3.0 ([#309](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/309))
+- read secrets from Doppler ([#307](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/307))
+- *(integration)* cover 0.14.0 Handoff readiness, FORBIDDEN annotations, 0.13.2 task reassignment code; bump stale 0.10.0 image pins ([#304](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/304))
+- *(deploy)* Doppler as the source of truth for secrets and config ([#305](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/305))
+- pin macp-conform GHCR image to 0.14.0 ([#303](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/303))
+
 ## [0.14.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.13.2...macp-runtime-v0.14.0) - 2026-11-07
 
 ### Fixed
