@@ -895,7 +895,7 @@ jobs:
     name: macp-conform CLI (GHCR image, gRPC)
     runs-on: ubuntu-latest
     env:
-      MACP_CONFORM_IMAGE: ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.14.0
+      MACP_CONFORM_IMAGE: ghcr.io/multiagentcoordinationprotocol/macp-runtime:0.14.1
 
     steps:
       - name: Checkout repository
