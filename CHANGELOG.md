@@ -6,6 +6,12 @@ workspace version in the root `Cargo.toml`.
 
 ## [Unreleased]
 
+## [0.14.2](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.14.1...macp-runtime-v0.14.2) - 2026-11-08
+
+### Fixed
+
+- *(deploy)* stop on failed Railway reads; keep the token out of argv ([#313](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/313))
+
 ## [0.14.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-runtime-v0.14.0...macp-runtime-v0.14.1) - 2026-11-08
 
 ### Fixed
