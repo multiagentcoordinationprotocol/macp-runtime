@@ -1111,3 +1111,14 @@ jobs:
           echo "  - tier-1 + tier-2 integration suites"
           echo "  - docker image build (+ HTTP listener off/on smoke)"
           echo "  - macp-conform CLI against the published image (+ HTTP curl examples)"
+
+  doppler-sync:
+    name: Doppler sync script (offline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: shellcheck and offline tests
+        run: |
+          shellcheck deploy/doppler-sync.sh
+          python3 deploy/test_doppler_sync.py

@@ -55,32 +55,54 @@ keys="$(sed -e 's/#.*//' -e 's/[[:space:]]//g' "$keys_file" | grep -v '^$' || tr
 [ -n "$keys" ] || die "no keys in $keys_file"
 if grep -q '^RAILWAY_' <<<"$keys"; then die "RAILWAY_* keys are Railway-managed; remove them from $keys_file"; fi
 
+# Resolved once, in this shell, so a missing token stops the run here.
+railway_token="${RAILWAY_API_TOKEN:-}"
+if [ -z "$railway_token" ] && [ -f "$HOME/.railway/config.json" ]; then
+  railway_token="$(jq -r '.user.accessToken // .user.token // empty' "$HOME/.railway/config.json")" || railway_token=""
+fi
+[ -n "$railway_token" ] || die "no Railway token (set RAILWAY_API_TOKEN or run railway login)"
+# Prints the response's .data. The token reaches curl as a header file
+# (printf is a builtin, so it is on no process's argv and never in ps); the
+# request body goes on stdin. Fails on a non-2xx, a network error, an
+# unparsable body, or a GraphQL error (Railway reports those with HTTP 200
+# and null data, which would otherwise read as "no variables").
 railway_api() {
-  local token="${RAILWAY_API_TOKEN:-$(jq -r '.user.accessToken // .user.token // empty' ~/.railway/config.json)}"
-  curl -fsS https://backboard.railway.com/graphql/v2 \
-    -H "Authorization: Bearer $token" -H 'content-type: application/json' \
-    -d "$(jq -n --arg q "$1" --argjson v "${2:-null}" '{query: $q, variables: ($v // {})}')"
+  jq -nc --arg q "$1" --argjson v "${2:-null}" '{query: $q, variables: ($v // {})}' |
+    curl -fsS https://backboard.railway.com/graphql/v2 \
+      -H @<(printf 'Authorization: Bearer %s\n' "$railway_token") -H 'content-type: application/json' \
+      --data-binary @- |
+    jq -ce 'if (.errors // []) | length > 0 then error("Railway GraphQL returned errors") else .data end'
 }
 
 ids="$(railway_api 'query($p: String!){project(id: $p){environments{edges{node{id name}}} services{edges{node{id name}}}}}' \
   "$(jq -nc --arg p "$RAILWAY_PROJECT_ID" '{p: $p}')" |
-  jq -c --arg e "$RAILWAY_ENVIRONMENT" --arg s "$RAILWAY_SERVICE" '.data.project |
+  jq -c --arg e "$RAILWAY_ENVIRONMENT" --arg s "$RAILWAY_SERVICE" '.project |
     {e: (.environments.edges[].node | select(.name == $e) | .id),
-     s: (.services.edges[].node | select(.name == $s) | .id)}')"
+     s: (.services.edges[].node | select(.name == $s) | .id)}')" ||
+  die "reading Railway project $RAILWAY_PROJECT_ID failed; nothing changed"
 [ -n "$ids" ] || die "no service $RAILWAY_SERVICE in environment $RAILWAY_ENVIRONMENT"
 
 # Railway's variables as stored (unrendered), so a reference reads as ${{...}}.
+# Fails unless the read succeeds and yields an object.
 railway_vars() {
   railway_api 'query($p: String!, $e: String!, $s: String!){variables(projectId: $p, environmentId: $e, serviceId: $s, unrendered: true)}' \
-    "$(jq -c --arg p "$RAILWAY_PROJECT_ID" '{p: $p, e: .e, s: .s}' <<<"$ids")" | jq -c '.data.variables'
+    "$(jq -c --arg p "$RAILWAY_PROJECT_ID" '{p: $p, e: .e, s: .s}' <<<"$ids")" |
+    jq -ce '.variables | if type == "object" then . else error("no variables object") end'
 }
 doppler_vars() {
   doppler secrets download --no-file --format json --project "$DOPPLER_PROJECT" --config "$DOPPLER_CONFIG"
 }
 
-# One line per key: "<KEY> <state>". Values stay inside jq.
+# One line per key: "<KEY> <state>". Both sides are read into shell variables
+# first, each with its own check, so a failed read stops the run instead of
+# looking like "no entry" (set -e does not see a failure inside a process
+# substitution). Values reach jq only through printf pipes, never argv or disk.
 plan() {
-  jq -nr --slurpfile d <(doppler_vars) --slurpfile r <(railway_vars) --arg keys "$keys" '
+  local d r
+  d="$(doppler_vars)" || die "reading Doppler $DOPPLER_PROJECT/$DOPPLER_CONFIG failed; nothing changed"
+  r="$(railway_vars)" || die "reading Railway variables failed; nothing changed"
+  printf '%s' "$d" | jq -e 'type == "object"' >/dev/null 2>&1 || die "unexpected Doppler response; nothing changed"
+  jq -nr --slurpfile d <(printf '%s' "$d") --slurpfile r <(printf '%s' "$r") --arg keys "$keys" '
     $d[0] as $d | $r[0] as $r |
     $keys | split("\n")[] | . as $k |
     if ($d | has($k) | not) then "\($k) missing-in-doppler"
