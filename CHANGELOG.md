@@ -10,7 +10,11 @@ workspace version in the root `Cargo.toml`.
 
 ### Fixed
 
-- *(server)* read evicted sessions from storage in WhatIfReplay and GetSession ([#311](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/311))
+- *(server)* read evicted sessions from storage in WhatIfReplay and GetSession ([#311](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/311)).
+  Since 0.10.0, `WhatIfReplay` and `GetSession` answered `SESSION_NOT_FOUND` for a
+  finished session once it had been evicted from memory (older than
+  `MACP_SESSION_RETENTION_SECS`), although its log was still on disk. Both RPCs now
+  load an evicted session back from storage. No wire or proto change.
 - *(deploy)* set the playground and token-issuer keys in the self-host compose ([#306](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/306))
 
 ### Other
