@@ -134,6 +134,89 @@ async fn what_if_replays_a_resolved_session_kept_across_a_restart() {
     assert_eq!(meta.state, 2);
 }
 
+/// A restart re-inserts every stored session, and the first cleanup sweep
+/// then evicts each terminal one older than `MACP_SESSION_RETENTION_SECS`
+/// (default 3600) from memory. The evicted session is still on disk, so
+/// `WhatIfReplay` and `GetSession` read it from there, as
+/// `GetDecisionReceipt` always has, rather than answering `SESSION_NOT_FOUND`.
+#[tokio::test]
+async fn what_if_replays_an_evicted_session_after_a_restart() {
+    let binary = test_binary();
+    let data_dir = tempfile::tempdir().expect("tempdir");
+    let data_dir_str = data_dir.path().to_string_lossy().to_string();
+    let env = [
+        ("MACP_MEMORY_ONLY", "0"),
+        ("MACP_DATA_DIR", data_dir_str.as_str()),
+        ("MACP_COMPACT_TERMINAL_LOGS", "0"),
+        ("MACP_SESSION_RETENTION_SECS", "1"),
+        ("MACP_CLEANUP_INTERVAL_SECS", "1"),
+    ];
+
+    let sid = {
+        let mut manager = ServerManager::start_with_env(&binary, &env)
+            .await
+            .expect("first server must start");
+        let mut client = MacpRuntimeServiceClient::connect(manager.endpoint.clone())
+            .await
+            .expect("connect");
+        let sid = resolved_proposal_session(&mut client).await;
+        manager.stop();
+        sid
+    };
+
+    let manager = ServerManager::start_with_env(&binary, &env)
+        .await
+        .expect("second server must start");
+    let mut client = MacpRuntimeServiceClient::connect(manager.endpoint.clone())
+        .await
+        .expect("connect");
+    // Past the retention window and at least two sweeps: evicted from memory.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    let resp = what_if(&mut client, &sid)
+        .await
+        .expect("what-if on an evicted session");
+    assert_eq!(resp.first_divergence, Some(4));
+    assert_eq!(resp.recorded.unwrap().state, 2, "recorded: RESOLVED");
+    assert_eq!(resp.candidate.unwrap().state, 1, "candidate: still OPEN");
+    let indices: Vec<_> = resp.entries.iter().map(|e| e.history_index).collect();
+    assert_eq!(indices, vec![0, 1, 2, 3, 4]);
+
+    let meta = get_session_as(&mut client, BUYER, &sid)
+        .await
+        .expect("GetSession on an evicted session")
+        .metadata
+        .unwrap();
+    assert_eq!(meta.state, 2);
+
+    // Still authorized as GetSession, and an unknown id is still not found.
+    let err = client
+        .what_if_replay(with_sender(
+            "agent://outsider",
+            WhatIfReplayRequest {
+                session_id: sid.clone(),
+                candidate: Some(PolicyDescriptor {
+                    mode: MODE_PROPOSAL.into(),
+                    rules: "{}".into(),
+                    schema_version: 1,
+                    ..Default::default()
+                }),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code(),
+        tonic::Code::PermissionDenied,
+        "{}",
+        err.message()
+    );
+    let err = get_session_as(&mut client, BUYER, &new_session_id())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::NotFound, "{}", err.message());
+}
+
 #[tokio::test]
 async fn what_if_refuses_a_compacted_session() {
     let binary = test_binary();

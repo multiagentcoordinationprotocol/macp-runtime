@@ -241,7 +241,7 @@ pub fn recorded_policy(
 /// Why [`what_if_over_log`] produced no report.
 #[derive(Debug)]
 pub enum WhatIfError {
-    /// No such session (or it was evicted from memory).
+    /// No such session, in memory or in storage.
     UnknownSession,
     /// The candidate failed admission (`INVALID_POLICY_DEFINITION`).
     InvalidCandidate(String),
@@ -1650,10 +1650,16 @@ impl Runtime {
         session_id: &str,
         candidate: &PolicyDefinition,
     ) -> Result<WhatIfRun, WhatIfError> {
+        // A terminal session evicted from memory (`evict_stale_sessions`)
+        // is replayed from storage, as `GetSession` and its decision receipt
+        // read it: eviction bounds memory, not what is replayable.
         let session = self
-            .get_session_checked(session_id)
+            .session_for_read(session_id)
             .await
-            .ok_or(WhatIfError::UnknownSession)?;
+            .map_err(|e| match e {
+                MacpError::UnknownSession => WhatIfError::UnknownSession,
+                e => WhatIfError::Integrity(format!("cannot read the session: {e}")),
+            })?;
         let log =
             match self.log_store.get_log(session_id).await {
                 Some(log) => log,
