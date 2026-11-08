@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-cli-v0.14.0...macp-cli-v0.14.1) - 2026-11-08
+
+### Fixed
+
+- *(deploy)* set the playground and token-issuer keys in the self-host compose ([#306](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/306))
+
+### Other
+
+- *(deploy)* pin auth-service 2.0.0 and playground 0.3.0 ([#310](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/310))
+- *(deploy)* pin control-plane 0.8.0 and ui-console 0.3.0 ([#309](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/309))
+- *(integration)* cover 0.14.0 Handoff readiness, FORBIDDEN annotations, 0.13.2 task reassignment code; bump stale 0.10.0 image pins ([#304](https://github.com/multiagentcoordinationprotocol/macp-runtime/pull/304))
+
 ## [0.14.0](https://github.com/multiagentcoordinationprotocol/macp-runtime/compare/macp-cli-v0.13.2...macp-cli-v0.14.0) - 2026-11-07
 
 ### Other
