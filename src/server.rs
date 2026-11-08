@@ -477,11 +477,16 @@ impl MacpServer {
         }
     }
 
+    /// Authenticate a read of `session_id` and authorize it as `GetSession`,
+    /// returning the identity and the session read. A session evicted from
+    /// memory is read from storage ([`Runtime::session_for_read`]), so a
+    /// terminal session stays readable after `MACP_SESSION_RETENTION_SECS`
+    /// and after a restart, as its decision receipt does.
     async fn authenticate_session_access<T>(
         &self,
         request: &Request<T>,
         session_id: &str,
-    ) -> Result<AuthIdentity, Status> {
+    ) -> Result<(AuthIdentity, crate::session::Session), Status> {
         let identity = self
             .security
             .authenticate_metadata(request.metadata())
@@ -489,16 +494,22 @@ impl MacpServer {
             .map_err(Self::status_from_error)?;
         let session = self
             .runtime
-            .get_session_checked(session_id)
+            .session_for_read(session_id)
             .await
-            .ok_or_else(|| {
-                Self::coded_status(
-                    MacpError::UnknownSession,
-                    format!("Session '{}' not found", session_id),
-                )
-            })?;
+            .map_err(|e| Self::session_read_status(e, session_id))?;
         self.authorize_session_read(&identity, &session).await?;
-        Ok(identity)
+        Ok((identity, session))
+    }
+
+    /// The status for a failed [`Runtime::session_for_read`].
+    fn session_read_status(e: MacpError, session_id: &str) -> Status {
+        match e {
+            MacpError::UnknownSession => Self::coded_status(
+                MacpError::UnknownSession,
+                format!("Session '{}' not found", session_id),
+            ),
+            e => Self::status_from_error(e),
+        }
     }
 
     /// May `identity` read `session`: the initiator, a declared participant
@@ -1744,19 +1755,9 @@ impl MacpRuntimeService for MacpServer {
         request: Request<GetSessionRequest>,
     ) -> Result<Response<GetSessionResponse>, Status> {
         let session_id = request.get_ref().session_id.clone();
-        let _identity = self
+        let (_identity, session) = self
             .authenticate_session_access(&request, &session_id)
             .await?;
-        let session = self
-            .runtime
-            .get_session_checked(&session_id)
-            .await
-            .ok_or_else(|| {
-                Self::coded_status(
-                    MacpError::UnknownSession,
-                    format!("Session '{}' not found", session_id),
-                )
-            })?;
 
         Ok(Response::new(GetSessionResponse {
             metadata: Some(Self::session_to_metadata(&session)),
@@ -2008,13 +2009,7 @@ impl MacpRuntimeService for MacpServer {
             .runtime
             .session_for_read(&session_id)
             .await
-            .map_err(|e| match e {
-                MacpError::UnknownSession => Self::coded_status(
-                    MacpError::UnknownSession,
-                    format!("Session '{}' not found", session_id),
-                ),
-                e => Self::status_from_error(e),
-            })?;
+            .map_err(|e| Self::session_read_status(e, &session_id))?;
         self.authorize_session_read(&identity, &session).await?;
         self.security
             .enforce_rate_limit(&identity.sender, false)
@@ -2593,7 +2588,7 @@ impl MacpRuntimeService for MacpServer {
         request: Request<WhatIfReplayRequest>,
     ) -> Result<Response<WhatIfReplayResponse>, Status> {
         let session_id = request.get_ref().session_id.clone();
-        let identity = self
+        let (identity, _session) = self
             .authenticate_session_access(&request, &session_id)
             .await?;
         self.security
