@@ -6,6 +6,7 @@
 //! serves the stored bytes. Nothing here runs on the message path, in replay
 //! or in recovery, so issuance can never fail, delay or alter a Commitment.
 
+use crate::env;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -90,22 +91,22 @@ impl ReceiptConfig {
     /// `MACP_RUNTIME_ID`. An error names the variable and never echoes key
     /// material.
     pub fn from_env() -> Result<Self, String> {
-        let kid = var("MACP_RECEIPT_SIGNING_KID");
+        let kid = var(env::MACP_RECEIPT_SIGNING_KID);
         let text = match (
-            var("MACP_RECEIPT_SIGNING_KEY_PATH"),
-            var("MACP_RECEIPT_SIGNING_KEY"),
+            var(env::MACP_RECEIPT_SIGNING_KEY_PATH),
+            var(env::MACP_RECEIPT_SIGNING_KEY),
         ) {
             (Some(_), Some(_)) => return Err(
                 "MACP_RECEIPT_SIGNING_KEY_PATH and MACP_RECEIPT_SIGNING_KEY are both set; set one"
                     .into(),
             ),
             (Some(path), None) => Some((
-                "MACP_RECEIPT_SIGNING_KEY_PATH",
+                env::MACP_RECEIPT_SIGNING_KEY_PATH,
                 std::fs::read_to_string(&path).map_err(|e| {
                     format!("MACP_RECEIPT_SIGNING_KEY_PATH: cannot read {path}: {e}")
                 })?,
             )),
-            (None, Some(inline)) => Some(("MACP_RECEIPT_SIGNING_KEY", inline)),
+            (None, Some(inline)) => Some((env::MACP_RECEIPT_SIGNING_KEY, inline)),
             (None, None) => None,
         };
         let signer = match text {
@@ -120,7 +121,7 @@ impl ReceiptConfig {
             }
             None => None,
         };
-        let retired = match var("MACP_RECEIPT_PUBLIC_KEYS_PATH") {
+        let retired = match var(env::MACP_RECEIPT_PUBLIC_KEYS_PATH) {
             Some(path) => {
                 let text = std::fs::read_to_string(&path).map_err(|e| {
                     format!("MACP_RECEIPT_PUBLIC_KEYS_PATH: cannot read {path}: {e}")
@@ -132,7 +133,7 @@ impl ReceiptConfig {
             }
             None => KeySet::new(),
         };
-        let runtime_id = var("MACP_RUNTIME_ID");
+        let runtime_id = var(env::MACP_RUNTIME_ID);
         if signer.is_some() && runtime_id.is_none() {
             return Err(
                 "MACP_RUNTIME_ID must be set when receipts are signed: it is the issuer \

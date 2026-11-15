@@ -1,3 +1,4 @@
+use crate::env;
 use macp_core::error::MacpError;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -240,7 +241,7 @@ impl SecurityLayer {
     /// log field.
     fn page_size_default_source(default_from_env: bool) -> &'static str {
         if default_from_env {
-            "MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE"
+            env::MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE
         } else {
             "built-in"
         }
@@ -266,7 +267,7 @@ impl SecurityLayer {
     }
 
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
-        let max_payload_bytes = std::env::var("MACP_MAX_PAYLOAD_BYTES")
+        let max_payload_bytes = std::env::var(env::MACP_MAX_PAYLOAD_BYTES)
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(1_048_576);
@@ -282,28 +283,28 @@ impl SecurityLayer {
         // and assert the row counts each one produces).
         let (list_sessions_default_page_size, list_sessions_max_page_size) =
             Self::resolve_list_sessions_page_sizes(RawPageSizeEnv {
-                default_raw: std::env::var("MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE").ok(),
-                max_raw: std::env::var("MACP_LIST_SESSIONS_MAX_PAGE_SIZE").ok(),
+                default_raw: std::env::var(env::MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE).ok(),
+                max_raw: std::env::var(env::MACP_LIST_SESSIONS_MAX_PAGE_SIZE).ok(),
             });
 
         let session_start_rate = RateLimitConfig {
-            limit: std::env::var("MACP_SESSION_START_LIMIT_PER_MINUTE")
+            limit: std::env::var(env::MACP_SESSION_START_LIMIT_PER_MINUTE)
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(60),
             window: Duration::from_secs(60),
         };
         let message_rate = RateLimitConfig {
-            limit: std::env::var("MACP_MESSAGE_LIMIT_PER_MINUTE")
+            limit: std::env::var(env::MACP_MESSAGE_LIMIT_PER_MINUTE)
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(600),
             window: Duration::from_secs(60),
         };
 
-        let raw = if let Ok(json) = std::env::var("MACP_AUTH_TOKENS_JSON") {
+        let raw = if let Ok(json) = std::env::var(env::MACP_AUTH_TOKENS_JSON) {
             Some(json)
-        } else if let Ok(path) = std::env::var("MACP_AUTH_TOKENS_FILE") {
+        } else if let Ok(path) = std::env::var(env::MACP_AUTH_TOKENS_FILE) {
             Some(fs::read_to_string(PathBuf::from(path))?)
         } else {
             None
@@ -319,10 +320,10 @@ impl SecurityLayer {
         let mut resolvers: Vec<Box<dyn crate::auth::AuthResolver>> = Vec::new();
 
         // JWT resolver (if configured)
-        if let Ok(issuer) = std::env::var("MACP_AUTH_ISSUER") {
+        if let Ok(issuer) = std::env::var(env::MACP_AUTH_ISSUER) {
             let audience =
-                std::env::var("MACP_AUTH_AUDIENCE").unwrap_or_else(|_| "macp-runtime".into());
-            let cache_ttl = std::env::var("MACP_AUTH_JWKS_TTL_SECS")
+                std::env::var(env::MACP_AUTH_AUDIENCE).unwrap_or_else(|_| "macp-runtime".into());
+            let cache_ttl = std::env::var(env::MACP_AUTH_JWKS_TTL_SECS)
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300u64);
@@ -330,7 +331,7 @@ impl SecurityLayer {
             // allowlist is a latent confusion risk: if the JWKS ever contains
             // an `oct` key, symmetric tokens become verifiable. Operators who
             // genuinely use shared-secret JWTs must opt in explicitly.
-            let algorithms = std::env::var("MACP_AUTH_JWT_ALGS")
+            let algorithms = std::env::var(env::MACP_AUTH_JWT_ALGS)
                 .ok()
                 .map(|raw| {
                     raw.split(',')
@@ -357,7 +358,7 @@ impl SecurityLayer {
                 audience,
                 algorithms,
             };
-            if let Ok(jwks_json) = std::env::var("MACP_AUTH_JWKS_JSON") {
+            if let Ok(jwks_json) = std::env::var(env::MACP_AUTH_JWKS_JSON) {
                 match crate::auth::resolvers::JwtBearerResolver::from_inline_json(
                     config, &jwks_json,
                 ) {
@@ -366,7 +367,7 @@ impl SecurityLayer {
                         tracing::error!("failed to create JWT resolver from inline JWKS: {e}")
                     }
                 }
-            } else if let Ok(jwks_url) = std::env::var("MACP_AUTH_JWKS_URL") {
+            } else if let Ok(jwks_url) = std::env::var(env::MACP_AUTH_JWKS_URL) {
                 resolvers.push(Box::new(
                     crate::auth::resolvers::JwtBearerResolver::from_url(
                         config, jwks_url, cache_ttl,
