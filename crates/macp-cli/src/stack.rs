@@ -16,6 +16,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use macp_runtime::env;
+
 /// `deploy/docker-compose.yml`, as of this release.
 pub const COMPOSE_FILE: &str = include_str!("../deploy/docker-compose.yml");
 /// `deploy/.env.example`, as of this release.
@@ -65,7 +67,7 @@ impl std::fmt::Display for StackError {
 /// Where this release's stack files live: `$MACP_HOME/deploy/<version>`, or
 /// `~/.macp/deploy/<version>`.
 pub fn stack_dir() -> Result<PathBuf, StackError> {
-    let base = match std::env::var_os("MACP_HOME") {
+    let base = match std::env::var_os(env::MACP_HOME) {
         Some(h) => PathBuf::from(h),
         None => std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"))
@@ -122,19 +124,22 @@ pub fn urls() -> Vec<(&'static str, String)> {
     vec![
         (
             "console",
-            format!("http://localhost:{}", port("MACP_CONSOLE_PORT", "3000")),
+            format!("http://localhost:{}", port(env::MACP_CONSOLE_PORT, "3000")),
         ),
         (
             "control plane",
-            format!("http://localhost:{}", port("MACP_CP_PORT", "3001")),
+            format!("http://localhost:{}", port(env::MACP_CP_PORT, "3001")),
         ),
         (
             "playground",
-            format!("http://localhost:{}", port("MACP_PLAYGROUND_PORT", "3100")),
+            format!(
+                "http://localhost:{}",
+                port(env::MACP_PLAYGROUND_PORT, "3100")
+            ),
         ),
         (
             "runtime (gRPC)",
-            format!("grpc://127.0.0.1:{}", port("MACP_RUNTIME_PORT", "50051")),
+            format!("grpc://127.0.0.1:{}", port(env::MACP_RUNTIME_PORT, "50051")),
         ),
     ]
 }

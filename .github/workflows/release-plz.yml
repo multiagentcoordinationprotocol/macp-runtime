@@ -176,6 +176,27 @@ jobs:
     with:
       version: ${{ fromJSON(needs.release-plz.outputs.releases)[0].version }}
 
+  # docs/kb-facts.json (the facts manifest macp-docs consumes; generated and
+  # checked by tests/kb_facts.rs) attached to the GitHub Release. Same gate and
+  # version guard as `docker`; a failure here cannot gate `publish`.
+  kb-facts:
+    name: kb-facts release asset
+    needs: [release-plz, docker-version-guard]
+    if: ${{ needs.release-plz.outputs.releases_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: macp-runtime-v${{ fromJSON(needs.release-plz.outputs.releases)[0].version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - name: Upload kb-facts.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" docs/kb-facts.json --clobber --repo "$GITHUB_REPOSITORY"
+
   # `integration_tests/` is a separate cargo workspace (root Cargo.toml:
   # `exclude = ["integration_tests"]`). It depends on the runtime by path only,
   # but its Cargo.lock still records the resolved versions of all seven macp-*

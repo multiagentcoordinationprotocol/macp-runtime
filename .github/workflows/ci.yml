@@ -243,6 +243,17 @@ jobs:
         env:
           MACP_MEMORY_ONLY: "1"
 
+      # `tests/kb_facts.rs` (run just above) fails unless docs/kb-facts.json
+      # equals what the code generates, so the committed file is the verified
+      # manifest. Published for macp-docs; release-plz.yml also attaches it to
+      # each GitHub Release.
+      - name: Upload kb-facts manifest
+        uses: actions/upload-artifact@v7
+        with:
+          name: kb-facts
+          path: docs/kb-facts.json
+          if-no-files-found: error
+
       - name: Run conformance tests
         run: cargo test --workspace conformance
         env:

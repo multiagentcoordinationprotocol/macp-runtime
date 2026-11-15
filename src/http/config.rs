@@ -20,6 +20,7 @@
 //! and `MACP_MAX_CONCURRENT_STREAMS` (the HTTP/2 stream bound).
 //! `MACP_SHUTDOWN_DRAIN_SECS` is applied by `main`, to both listeners at once.
 
+use crate::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -66,15 +67,15 @@ impl HttpConfig {
     /// lookup). `Ok(None)` when `MACP_HTTP_BIND_ADDR` is unset or empty; every
     /// problem found is reported, each prefixed with its variable name.
     pub fn from_env(get: &dyn Fn(&str) -> Option<String>) -> Result<Option<Self>, Vec<String>> {
-        let Some(bind_raw) = get("MACP_HTTP_BIND_ADDR").filter(|v| !v.is_empty()) else {
+        let Some(bind_raw) = get(env::MACP_HTTP_BIND_ADDR).filter(|v| !v.is_empty()) else {
             return Ok(None);
         };
         let mut errors = Vec::new();
-        let allow_insecure = get("MACP_ALLOW_INSECURE").as_deref() == Some("1");
+        let allow_insecure = get(env::MACP_ALLOW_INSECURE).as_deref() == Some("1");
 
         let bind_addr = match bind_raw.parse::<SocketAddr>() {
             Ok(addr) => {
-                let grpc = get("MACP_BIND_ADDR")
+                let grpc = get(env::MACP_BIND_ADDR)
                     .unwrap_or_else(|| DEFAULT_GRPC_BIND_ADDR.into())
                     .parse::<SocketAddr>()
                     .ok();
@@ -95,7 +96,7 @@ impl HttpConfig {
             }
         };
 
-        let (public_url, prefix) = match get("MACP_HTTP_PUBLIC_URL") {
+        let (public_url, prefix) = match get(env::MACP_HTTP_PUBLIC_URL) {
             None => (None, String::new()),
             Some(raw) => match parse_public_url(&raw, allow_insecure) {
                 Ok(prefix) => (Some(raw), prefix),
@@ -106,7 +107,7 @@ impl HttpConfig {
             },
         };
 
-        let cors_origins = match get("MACP_HTTP_CORS_ORIGINS") {
+        let cors_origins = match get(env::MACP_HTTP_CORS_ORIGINS) {
             None => Vec::new(),
             Some(raw) => match parse_cors_origins(&raw) {
                 Ok(list) => list,
@@ -117,7 +118,7 @@ impl HttpConfig {
             },
         };
 
-        let max_payload = get("MACP_MAX_PAYLOAD_BYTES")
+        let max_payload = get(env::MACP_MAX_PAYLOAD_BYTES)
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(DEFAULT_MAX_PAYLOAD_BYTES);
         let max_body_bytes = match body_floor(max_payload) {
@@ -128,7 +129,7 @@ impl HttpConfig {
                 ));
                 0
             }
-            Some(floor) => match get("MACP_HTTP_MAX_BODY_BYTES") {
+            Some(floor) => match get(env::MACP_HTTP_MAX_BODY_BYTES) {
                 None => floor,
                 Some(raw) => match raw.parse::<u64>() {
                     Ok(v) if v >= floor => v,
@@ -152,7 +153,7 @@ impl HttpConfig {
         };
         let max_body_bytes = usize::try_from(max_body_bytes).unwrap_or(usize::MAX);
 
-        let max_connections = match get("MACP_HTTP_MAX_CONNECTIONS") {
+        let max_connections = match get(env::MACP_HTTP_MAX_CONNECTIONS) {
             None => DEFAULT_MAX_CONNECTIONS,
             Some(raw) => match raw.parse::<usize>() {
                 Ok(v) if (1..=tokio::sync::Semaphore::MAX_PERMITS).contains(&v) => v,
@@ -167,7 +168,7 @@ impl HttpConfig {
 
         // Same rule as the gRPC listener: both PEM paths give TLS; otherwise
         // plaintext only under MACP_ALLOW_INSECURE=1.
-        let tls = match (get("MACP_TLS_CERT_PATH"), get("MACP_TLS_KEY_PATH")) {
+        let tls = match (get(env::MACP_TLS_CERT_PATH), get(env::MACP_TLS_KEY_PATH)) {
             (Some(cert), Some(key)) => Some(TlsPaths {
                 cert: cert.into(),
                 key: key.into(),
@@ -186,11 +187,11 @@ impl HttpConfig {
         };
 
         let request_timeout = Duration::from_secs(
-            get("MACP_REQUEST_TIMEOUT_SECS")
+            get(env::MACP_REQUEST_TIMEOUT_SECS)
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS),
         );
-        let max_concurrent_streams = get("MACP_MAX_CONCURRENT_STREAMS")
+        let max_concurrent_streams = get(env::MACP_MAX_CONCURRENT_STREAMS)
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_MAX_CONCURRENT_STREAMS);
 

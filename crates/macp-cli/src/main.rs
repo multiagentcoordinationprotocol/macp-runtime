@@ -7,6 +7,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use macp_runtime::env;
+
 use clap::{Parser, Subcommand, ValueEnum};
 use macp_cli::receipt::{self, TrustedKeys, Verdict};
 use macp_cli::replay::{self, ReplayError, Source};
@@ -56,7 +58,7 @@ enum Cmd {
         /// With --keys-from: a bearer token for the runtime.
         #[arg(
             long,
-            env = "MACP_TOKEN",
+            env = env::MACP_TOKEN,
             default_value = "macp-dev-cp-observer",
             hide_env_values = true
         )]
@@ -93,12 +95,12 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         policy: Option<PathBuf>,
         /// With --session: the runtime's gRPC endpoint.
-        #[arg(long, env = "MACP_TARGET", default_value = "grpc://127.0.0.1:50051")]
+        #[arg(long, env = env::MACP_TARGET, default_value = "grpc://127.0.0.1:50051")]
         target: String,
         /// With --session: a bearer token that can read the session.
         #[arg(
             long,
-            env = "MACP_TOKEN",
+            env = env::MACP_TOKEN,
             default_value = "macp-dev-cp-observer",
             hide_env_values = true
         )]
@@ -124,13 +126,13 @@ enum SessionCmd {
         /// The session id.
         session_id: String,
         /// The runtime's gRPC endpoint: grpc://, grpcs://, http:// or https://.
-        #[arg(long, env = "MACP_TARGET", default_value = "grpc://127.0.0.1:50051")]
+        #[arg(long, env = env::MACP_TARGET, default_value = "grpc://127.0.0.1:50051")]
         target: String,
         /// Bearer token: an observer, the initiator or a participant. The
         /// default is the self-host stack's observer token.
         #[arg(
             long,
-            env = "MACP_TOKEN",
+            env = env::MACP_TOKEN,
             default_value = "macp-dev-cp-observer",
             hide_env_values = true
         )]

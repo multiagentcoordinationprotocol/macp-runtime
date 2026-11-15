@@ -1,6 +1,7 @@
 use macp_core::clock::{Clock, SystemClock};
 use std::sync::Arc;
 
+use crate::env;
 use crate::error::MacpError;
 use crate::extensions::ExtensionProviderRegistry;
 use crate::log_store::{EntryKind, LogEntry, LogStore};
@@ -70,9 +71,9 @@ impl AuditConfig {
     /// `MACP_AUDIT_INFO_MODES`.
     pub fn from_env() -> Self {
         Self::from_values(
-            std::env::var("MACP_AUDIT_LEVEL").ok().as_deref(),
-            std::env::var("MACP_AUDIT_INFO_POLICIES").ok().as_deref(),
-            std::env::var("MACP_AUDIT_INFO_MODES").ok().as_deref(),
+            std::env::var(env::MACP_AUDIT_LEVEL).ok().as_deref(),
+            std::env::var(env::MACP_AUDIT_INFO_POLICIES).ok().as_deref(),
+            std::env::var(env::MACP_AUDIT_INFO_MODES).ok().as_deref(),
         )
     }
 
@@ -290,12 +291,12 @@ impl Runtime {
         mode_registry: Arc<ModeRegistry>,
         policy_registry: Arc<PolicyRegistry>,
     ) -> Self {
-        let checkpoint_interval = std::env::var("MACP_CHECKPOINT_INTERVAL")
+        let checkpoint_interval = std::env::var(env::MACP_CHECKPOINT_INTERVAL)
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0); // 0 = disabled by default
         let compact_terminal_logs = !matches!(
-            std::env::var("MACP_COMPACT_TERMINAL_LOGS").as_deref(),
+            std::env::var(env::MACP_COMPACT_TERMINAL_LOGS).as_deref(),
             Ok("0") | Ok("false")
         );
         let (signal_tx, _) = tokio::sync::broadcast::channel(256);

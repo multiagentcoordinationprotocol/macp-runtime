@@ -68,4 +68,4 @@ mod watch_sync;
 // Authentication and the request security layer now live in `macp-auth`.
 // Re-exported so `crate::{auth, security}` and downstream
 // `macp_runtime::{auth, security}` paths resolve unchanged.
-pub use macp_auth::{auth, security};
+pub use macp_auth::{auth, env, security};

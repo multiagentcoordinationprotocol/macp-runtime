@@ -121,6 +121,14 @@ contributors can ignore this.
 - **Construct `Session` via `Session::builder`** — core public types are
   `#[non_exhaustive]`.
 - Policy decisions are fail-closed: only an explicit `Allow` proceeds.
+- **Every `MACP_*` environment variable is registered** in
+  `crates/macp-auth/src/env.rs` (re-exported as `macp_runtime::env`), with its
+  default, component, the files that read it and a one-line summary. Non-test
+  code reads it through its constant (`std::env::var(env::MACP_FOO)`), never a
+  `"MACP_FOO"` literal; `tests/env_registry.rs` fails on an unregistered name
+  or a stale `read_in`. Then regenerate the facts manifest that macp-docs
+  consumes: `MACP_REGEN_GOLDEN=1 cargo test -p macp-runtime --test kb_facts`
+  (writes `docs/kb-facts.json`; CI fails while it is stale).
 - Update `CHANGELOG.md` for anything user-visible, and keep `README.md`,
   `docs/`, and the example clients in `src/bin` in step when you change
   SDK-facing behavior.

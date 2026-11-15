@@ -1,0 +1,912 @@
+{
+  "schema_version": 1,
+  "generated_by": "macp-runtime tests/kb_facts.rs",
+  "session": {
+    "current_semantics_rev": 5,
+    "max_suspension_cycles": 1024,
+    "states": [
+      {
+        "name": "Open",
+        "terminal": false
+      },
+      {
+        "name": "Suspended",
+        "terminal": false
+      },
+      {
+        "name": "Resolved",
+        "terminal": true
+      },
+      {
+        "name": "Expired",
+        "terminal": true
+      },
+      {
+        "name": "Cancelled",
+        "terminal": true
+      }
+    ]
+  },
+  "rpcs": [
+    {
+      "name": "Initialize",
+      "kind": "unary",
+      "request": "macp.v1.InitializeRequest",
+      "response": "macp.v1.InitializeResponse"
+    },
+    {
+      "name": "Send",
+      "kind": "unary",
+      "request": "macp.v1.SendRequest",
+      "response": "macp.v1.SendResponse"
+    },
+    {
+      "name": "StreamSession",
+      "kind": "bidi_stream",
+      "request": "macp.v1.StreamSessionRequest",
+      "response": "macp.v1.StreamSessionResponse"
+    },
+    {
+      "name": "GetSession",
+      "kind": "unary",
+      "request": "macp.v1.GetSessionRequest",
+      "response": "macp.v1.GetSessionResponse"
+    },
+    {
+      "name": "CancelSession",
+      "kind": "unary",
+      "request": "macp.v1.CancelSessionRequest",
+      "response": "macp.v1.CancelSessionResponse"
+    },
+    {
+      "name": "SuspendSession",
+      "kind": "unary",
+      "request": "macp.v1.SuspendSessionRequest",
+      "response": "macp.v1.SuspendSessionResponse"
+    },
+    {
+      "name": "ResumeSession",
+      "kind": "unary",
+      "request": "macp.v1.ResumeSessionRequest",
+      "response": "macp.v1.ResumeSessionResponse"
+    },
+    {
+      "name": "GetManifest",
+      "kind": "unary",
+      "request": "macp.v1.GetManifestRequest",
+      "response": "macp.v1.GetManifestResponse"
+    },
+    {
+      "name": "ListModes",
+      "kind": "unary",
+      "request": "macp.v1.ListModesRequest",
+      "response": "macp.v1.ListModesResponse"
+    },
+    {
+      "name": "WatchModeRegistry",
+      "kind": "server_stream",
+      "request": "macp.v1.WatchModeRegistryRequest",
+      "response": "macp.v1.WatchModeRegistryResponse"
+    },
+    {
+      "name": "ListRoots",
+      "kind": "unary",
+      "request": "macp.v1.ListRootsRequest",
+      "response": "macp.v1.ListRootsResponse"
+    },
+    {
+      "name": "WatchRoots",
+      "kind": "server_stream",
+      "request": "macp.v1.WatchRootsRequest",
+      "response": "macp.v1.WatchRootsResponse"
+    },
+    {
+      "name": "ListExtModes",
+      "kind": "unary",
+      "request": "macp.v1.ListExtModesRequest",
+      "response": "macp.v1.ListExtModesResponse"
+    },
+    {
+      "name": "RegisterExtMode",
+      "kind": "unary",
+      "request": "macp.v1.RegisterExtModeRequest",
+      "response": "macp.v1.RegisterExtModeResponse"
+    },
+    {
+      "name": "UnregisterExtMode",
+      "kind": "unary",
+      "request": "macp.v1.UnregisterExtModeRequest",
+      "response": "macp.v1.UnregisterExtModeResponse"
+    },
+    {
+      "name": "PromoteMode",
+      "kind": "unary",
+      "request": "macp.v1.PromoteModeRequest",
+      "response": "macp.v1.PromoteModeResponse"
+    },
+    {
+      "name": "WatchSignals",
+      "kind": "server_stream",
+      "request": "macp.v1.WatchSignalsRequest",
+      "response": "macp.v1.WatchSignalsResponse"
+    },
+    {
+      "name": "ListSessions",
+      "kind": "unary",
+      "request": "macp.v1.ListSessionsRequest",
+      "response": "macp.v1.ListSessionsResponse"
+    },
+    {
+      "name": "WatchSessions",
+      "kind": "server_stream",
+      "request": "macp.v1.WatchSessionsRequest",
+      "response": "macp.v1.WatchSessionsResponse"
+    },
+    {
+      "name": "RegisterPolicy",
+      "kind": "unary",
+      "request": "macp.v1.RegisterPolicyRequest",
+      "response": "macp.v1.RegisterPolicyResponse"
+    },
+    {
+      "name": "UnregisterPolicy",
+      "kind": "unary",
+      "request": "macp.v1.UnregisterPolicyRequest",
+      "response": "macp.v1.UnregisterPolicyResponse"
+    },
+    {
+      "name": "GetPolicy",
+      "kind": "unary",
+      "request": "macp.v1.GetPolicyRequest",
+      "response": "macp.v1.GetPolicyResponse"
+    },
+    {
+      "name": "ListPolicies",
+      "kind": "unary",
+      "request": "macp.v1.ListPoliciesRequest",
+      "response": "macp.v1.ListPoliciesResponse"
+    },
+    {
+      "name": "WatchPolicies",
+      "kind": "server_stream",
+      "request": "macp.v1.WatchPoliciesRequest",
+      "response": "macp.v1.WatchPoliciesResponse"
+    },
+    {
+      "name": "WhatIfReplay",
+      "kind": "unary",
+      "request": "macp.v1.WhatIfReplayRequest",
+      "response": "macp.v1.WhatIfReplayResponse"
+    },
+    {
+      "name": "GetDecisionReceipt",
+      "kind": "unary",
+      "request": "macp.v1.GetDecisionReceiptRequest",
+      "response": "macp.v1.GetDecisionReceiptResponse"
+    },
+    {
+      "name": "GetReceiptKeys",
+      "kind": "unary",
+      "request": "macp.v1.GetReceiptKeysRequest",
+      "response": "macp.v1.GetReceiptKeysResponse"
+    }
+  ],
+  "env_counts": {
+    "non_test": 55,
+    "runtime": 48,
+    "cli": 7,
+    "test": 13
+  },
+  "env": [
+    {
+      "name": "MACP_ALLOW_INSECURE",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/http/config.rs",
+        "src/main.rs"
+      ],
+      "summary": "`1` allows plaintext listeners without TLS (development only)."
+    },
+    {
+      "name": "MACP_AUDIT_INFO_MODES",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/runtime.rs"
+      ],
+      "summary": "Comma-separated mode names whose sessions are audited at `info`."
+    },
+    {
+      "name": "MACP_AUDIT_INFO_POLICIES",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/runtime.rs"
+      ],
+      "summary": "Comma-separated `policy_id`s whose sessions are audited at `info`."
+    },
+    {
+      "name": "MACP_AUDIT_LEVEL",
+      "default": "debug",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/runtime.rs"
+      ],
+      "summary": "`info` logs every accepted message at `info` level."
+    },
+    {
+      "name": "MACP_AUTH_AUDIENCE",
+      "default": "macp-runtime",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "crates/macp-auth/src/security.rs"
+      ],
+      "summary": "Expected JWT `aud` claim."
+    },
+    {
+      "name": "MACP_AUTH_ISSUER",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "crates/macp-auth/src/security.rs"
+      ],
+      "summary": "Expected JWT `iss` claim; setting it enables JWT bearer auth."
+    },
+    {
+      "name": "MACP_AUTH_JWKS_JSON",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "crates/macp-auth/src/security.rs"
+      ],
+      "summary": "Inline JWKS document used to validate JWTs."
+    },
+    {
+      "name": "MACP_AUTH_JWKS_TTL_SECS",
+      "default": "300",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "crates/macp-auth/src/security.rs"
+      ],
+      "summary": "Cache TTL, in seconds, for a JWKS fetched from `MACP_AUTH_JWKS_URL`."
+    },
+    {
+      "name": "MACP_AUTH_JWKS_URL",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "crates/macp-auth/src/security.rs"
+      ],
+      "summary": "JWKS endpoint URL, fetched and cached."
+    },
+    {
+      "name": "MACP_AUTH_JWT_ALGS",
+      "default": "RS256,ES256",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "crates/macp-auth/src/security.rs"
+      ],
+      "summary": "Comma-separated JWT algorithm allowlist; HS256 needs explicit opt-in."
+    },
+    {
+      "name": "MACP_AUTH_TOKENS_FILE",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "crates/macp-auth/src/security.rs"
+      ],
+      "summary": "Path to a static bearer-token configuration file."
+    },
+    {
+      "name": "MACP_AUTH_TOKENS_JSON",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "crates/macp-auth/src/security.rs"
+      ],
+      "summary": "Inline static bearer-token configuration (wins over the file)."
+    },
+    {
+      "name": "MACP_BIND_ADDR",
+      "default": "127.0.0.1:50051",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/http/config.rs",
+        "src/main.rs"
+      ],
+      "summary": "gRPC listen address."
+    },
+    {
+      "name": "MACP_CHECKPOINT_INTERVAL",
+      "default": "0",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/main.rs",
+        "src/runtime.rs"
+      ],
+      "summary": "Mid-session checkpoint interval in log entries; `0` disables it."
+    },
+    {
+      "name": "MACP_CLEANUP_INTERVAL_SECS",
+      "default": "60",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/main.rs"
+      ],
+      "summary": "Background maintenance interval: TTL expiry, eviction, disk GC, due synthetic accepts."
+    },
+    {
+      "name": "MACP_COMPACT_TERMINAL_LOGS",
+      "default": "1",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/runtime.rs"
+      ],
+      "summary": "`0`/`false` keeps an ended session's full log so `WhatIfReplay` can replay it."
+    },
+    {
+      "name": "MACP_CONCURRENCY_LIMIT_PER_CONNECTION",
+      "default": "64",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/main.rs"
+      ],
+      "summary": "gRPC per-connection concurrency limit."
+    },
+    {
+      "name": "MACP_CONFORMANCE_FIXTURES_DIR",
+      "default": null,
+      "test_only": true,
+      "component": "test",
+      "read_in": [
+        "tests/conformance_loader.rs"
+      ],
+      "summary": "Points the conformance tests at a fixture directory instead of the vendored `tests/conformance/`."
+    },
+    {
+      "name": "MACP_CONSOLE_PORT",
+      "default": "3000",
+      "test_only": false,
+      "component": "cli",
+      "read_in": [
+        "crates/macp-cli/src/stack.rs"
+      ],
+      "summary": "Console port `macp up` prints."
+    },
+    {
+      "name": "MACP_CP_PORT",
+      "default": "3001",
+      "test_only": false,
+      "component": "cli",
+      "read_in": [
+        "crates/macp-cli/src/stack.rs"
+      ],
+      "summary": "Control-plane port `macp up` prints."
+    },
+    {
+      "name": "MACP_DATA_DIR",
+      "default": ".macp-data",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/main.rs"
+      ],
+      "summary": "Persistence directory for the file backend."
+    },
+    {
+      "name": "MACP_ERROR_REGISTRY_PATH",
+      "default": null,
+      "test_only": true,
+      "component": "test",
+      "read_in": [
+        "crates/macp-core/src/error.rs"
+      ],
+      "summary": "The spec's `registries/error-codes.md`, for the error-registry parity test."
+    },
+    {
+      "name": "MACP_HOME",
+      "default": "~/.macp",
+      "test_only": false,
+      "component": "cli",
+      "read_in": [
+        "crates/macp-cli/src/stack.rs"
+      ],
+      "summary": "Base directory for the stack files `macp up` writes."
+    },
+    {
+      "name": "MACP_HTTP_BIND_ADDR",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/http/config.rs",
+        "src/main.rs"
+      ],
+      "summary": "HTTP/JSON listener address (`http-listener` feature); unset = no listener."
+    },
+    {
+      "name": "MACP_HTTP_CORS_ORIGINS",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/http/config.rs"
+      ],
+      "summary": "Comma-separated CORS origins for the HTTP listener; unset = closed."
+    },
+    {
+      "name": "MACP_HTTP_MAX_BODY_BYTES",
+      "default": "ceil(4/3 * MACP_MAX_PAYLOAD_BYTES) + 65536",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/http/config.rs"
+      ],
+      "summary": "HTTP request body cap; a value below the default is refused."
+    },
+    {
+      "name": "MACP_HTTP_MAX_CONNECTIONS",
+      "default": "1024",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/http/config.rs"
+      ],
+      "summary": "Concurrent HTTP connections admitted."
+    },
+    {
+      "name": "MACP_HTTP_PUBLIC_URL",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/http/config.rs"
+      ],
+      "summary": "Public HTTP base URL; its path is the route prefix, advertised in the manifest."
+    },
+    {
+      "name": "MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE",
+      "default": "100",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "crates/macp-auth/src/security.rs",
+        "src/main.rs"
+      ],
+      "summary": "`ListSessions` page size when the request sends `page_size = 0`."
+    },
+    {
+      "name": "MACP_LIST_SESSIONS_MAX_PAGE_SIZE",
+      "default": "1000",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "crates/macp-auth/src/security.rs",
+        "src/main.rs"
+      ],
+      "summary": "Hard cap a requested `ListSessions` `page_size` is clamped to."
+    },
+    {
+      "name": "MACP_MAX_CONCURRENT_STREAMS",
+      "default": "128",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/http/config.rs",
+        "src/main.rs"
+      ],
+      "summary": "HTTP/2 max concurrent streams."
+    },
+    {
+      "name": "MACP_MAX_PAYLOAD_BYTES",
+      "default": "1048576",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "crates/macp-auth/src/security.rs",
+        "src/http/config.rs",
+        "src/main.rs"
+      ],
+      "summary": "Maximum envelope payload size in bytes."
+    },
+    {
+      "name": "MACP_MEMORY_ONLY",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/main.rs"
+      ],
+      "summary": "`1` skips persistence (in-memory backend)."
+    },
+    {
+      "name": "MACP_MESSAGE_LIMIT_PER_MINUTE",
+      "default": "600",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "crates/macp-auth/src/security.rs",
+        "src/main.rs"
+      ],
+      "summary": "Per-sender message rate limit."
+    },
+    {
+      "name": "MACP_METRICS_ADDR",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/main.rs"
+      ],
+      "summary": "Prometheus text endpoint bind address; unset = no endpoint."
+    },
+    {
+      "name": "MACP_PARITY_CONTRACT",
+      "default": null,
+      "test_only": true,
+      "component": "test",
+      "read_in": [
+        "tests/parity_contract.rs"
+      ],
+      "summary": "Points the parity test at a canonical `contract.json` instead of the vendored copy."
+    },
+    {
+      "name": "MACP_PLAYGROUND_PORT",
+      "default": "3100",
+      "test_only": false,
+      "component": "cli",
+      "read_in": [
+        "crates/macp-cli/src/stack.rs"
+      ],
+      "summary": "Playground port `macp up` prints."
+    },
+    {
+      "name": "MACP_POLICIES_DIR",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/main.rs"
+      ],
+      "summary": "Directory of policy JSON files preloaded at startup (makes the wire registry read-only)."
+    },
+    {
+      "name": "MACP_POLICIES_DRY_RUN",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/main.rs"
+      ],
+      "summary": "`1` validates `MACP_POLICIES_DIR` and exits without starting the server."
+    },
+    {
+      "name": "MACP_POLICY_SCHEMAS_DIR",
+      "default": null,
+      "test_only": true,
+      "component": "test",
+      "read_in": [
+        "crates/macp-policy/src/registry.rs"
+      ],
+      "summary": "Canonical policy JSON schemas, for the enum-parity test."
+    },
+    {
+      "name": "MACP_RECEIPT_PUBLIC_KEYS_PATH",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/receipts.rs"
+      ],
+      "summary": "JWKS of retired public keys still published by `GetReceiptKeys`."
+    },
+    {
+      "name": "MACP_RECEIPT_SIGNING_KEY",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/receipts.rs"
+      ],
+      "summary": "Inline Ed25519 decision-receipt signing key (exclusive with the path)."
+    },
+    {
+      "name": "MACP_RECEIPT_SIGNING_KEY_PATH",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/receipts.rs"
+      ],
+      "summary": "Ed25519 decision-receipt signing key file; unset = unsigned receipts."
+    },
+    {
+      "name": "MACP_RECEIPT_SIGNING_KID",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/receipts.rs"
+      ],
+      "summary": "Signing key `kid` (required for a PEM key)."
+    },
+    {
+      "name": "MACP_REDIS_URL",
+      "default": "redis://127.0.0.1:6379",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/main.rs"
+      ],
+      "summary": "Redis connection URL (`redis-backend` feature)."
+    },
+    {
+      "name": "MACP_REGEN_GOLDEN",
+      "default": null,
+      "test_only": true,
+      "component": "test",
+      "read_in": [
+        "tests/grpc_refusal_snapshot.rs",
+        "tests/http_json.rs",
+        "tests/kb_facts.rs"
+      ],
+      "summary": "`1` rewrites golden snapshot files instead of comparing against them."
+    },
+    {
+      "name": "MACP_REQUEST_TIMEOUT_SECS",
+      "default": "30",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/http/config.rs",
+        "src/main.rs"
+      ],
+      "summary": "Per-request timeout in seconds."
+    },
+    {
+      "name": "MACP_ROCKSDB_PATH",
+      "default": "<MACP_DATA_DIR>/rocksdb",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/main.rs"
+      ],
+      "summary": "RocksDB database path (`rocksdb-backend` feature)."
+    },
+    {
+      "name": "MACP_RUNTIME_ID",
+      "default": "macp-runtime",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/receipts.rs"
+      ],
+      "summary": "Receipt issuer id (`runtime:<id>`); required when receipts are signed."
+    },
+    {
+      "name": "MACP_RUNTIME_IMAGE",
+      "default": null,
+      "test_only": true,
+      "component": "test",
+      "read_in": [
+        "crates/macp-cli/tests/stack.rs"
+      ],
+      "summary": "Runtime image the CLI stack test runs against."
+    },
+    {
+      "name": "MACP_RUNTIME_PORT",
+      "default": "50051",
+      "test_only": false,
+      "component": "cli",
+      "read_in": [
+        "crates/macp-cli/src/stack.rs"
+      ],
+      "summary": "Runtime gRPC port `macp up` prints."
+    },
+    {
+      "name": "MACP_SESSION_DISK_RETENTION_SECS",
+      "default": "0",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/main.rs"
+      ],
+      "summary": "Delete terminal sessions' durable data after this age; `0` keeps it forever."
+    },
+    {
+      "name": "MACP_SESSION_RETENTION_SECS",
+      "default": "3600",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/main.rs"
+      ],
+      "summary": "Evict terminal sessions from memory at this age (durable data is kept)."
+    },
+    {
+      "name": "MACP_SESSION_START_LIMIT_PER_MINUTE",
+      "default": "60",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "crates/macp-auth/src/security.rs",
+        "src/main.rs"
+      ],
+      "summary": "Per-sender session-start rate limit."
+    },
+    {
+      "name": "MACP_SHUTDOWN_DRAIN_SECS",
+      "default": "10",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/main.rs"
+      ],
+      "summary": "Graceful-shutdown drain deadline in seconds."
+    },
+    {
+      "name": "MACP_STORAGE_BACKEND",
+      "default": "file",
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/main.rs"
+      ],
+      "summary": "Storage backend: `file`, `rocksdb` or `redis`."
+    },
+    {
+      "name": "MACP_STRICT_RECOVERY",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/main.rs"
+      ],
+      "summary": "`1` fails startup on any recovery error."
+    },
+    {
+      "name": "MACP_TARGET",
+      "default": "grpc://127.0.0.1:50051",
+      "test_only": false,
+      "component": "cli",
+      "read_in": [
+        "crates/macp-cli/src/main.rs"
+      ],
+      "summary": "Runtime endpoint the CLI connects to."
+    },
+    {
+      "name": "MACP_TEST_AUTH_TOKEN",
+      "default": null,
+      "test_only": true,
+      "component": "test",
+      "read_in": [
+        "integration_tests/src/config.rs"
+      ],
+      "summary": "Bearer token for hosted integration-test runs."
+    },
+    {
+      "name": "MACP_TEST_BACKEND",
+      "default": null,
+      "test_only": true,
+      "component": "test",
+      "read_in": [
+        "integration_tests/tests/tier1_protocol/test_backends.rs"
+      ],
+      "summary": "Storage backend the integration tests start the runtime with."
+    },
+    {
+      "name": "MACP_TEST_BINARY",
+      "default": null,
+      "test_only": true,
+      "component": "test",
+      "read_in": [
+        "integration_tests/src/config.rs",
+        "integration_tests/tests/tier1_jwt.rs",
+        "integration_tests/tests/tier1_protocol/test_backends.rs",
+        "integration_tests/tests/tier1_protocol/test_decision_receipts.rs",
+        "integration_tests/tests/tier1_protocol/test_handoff_implicit_accept.rs",
+        "integration_tests/tests/tier1_protocol/test_limits.rs",
+        "integration_tests/tests/tier1_protocol/test_list_sessions_pagination.rs",
+        "integration_tests/tests/tier1_protocol/test_passive_subscribe.rs",
+        "integration_tests/tests/tier1_protocol/test_persistence_replay.rs",
+        "integration_tests/tests/tier1_protocol/test_promote_mode.rs",
+        "integration_tests/tests/tier1_protocol/test_session_lifecycle.rs",
+        "integration_tests/tests/tier1_protocol/test_startup_gate.rs",
+        "integration_tests/tests/tier1_protocol/test_tls.rs",
+        "integration_tests/tests/tier1_protocol/test_what_if_replay.rs"
+      ],
+      "summary": "Runtime binary the integration tests launch."
+    },
+    {
+      "name": "MACP_TEST_CLI",
+      "default": null,
+      "test_only": true,
+      "component": "test",
+      "read_in": [
+        "integration_tests/tests/tier1_protocol/test_decision_receipts.rs"
+      ],
+      "summary": "CLI binary the integration tests launch."
+    },
+    {
+      "name": "MACP_TEST_ENDPOINT",
+      "default": null,
+      "test_only": true,
+      "component": "test",
+      "read_in": [
+        "integration_tests/src/config.rs"
+      ],
+      "summary": "Hosted runtime endpoint the integration tests target instead of a local server."
+    },
+    {
+      "name": "MACP_TEST_REDIS_URL",
+      "default": null,
+      "test_only": true,
+      "component": "test",
+      "read_in": [
+        "crates/macp-storage/src/storage/redis_backend.rs",
+        "integration_tests/tests/tier1_protocol/test_backends.rs"
+      ],
+      "summary": "Redis URL for the Redis backend tests."
+    },
+    {
+      "name": "MACP_TEST_TLS",
+      "default": null,
+      "test_only": true,
+      "component": "test",
+      "read_in": [
+        "integration_tests/src/config.rs"
+      ],
+      "summary": "Run the integration tests over TLS."
+    },
+    {
+      "name": "MACP_TLS_CERT_PATH",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/http/config.rs",
+        "src/main.rs"
+      ],
+      "summary": "TLS certificate path (PEM)."
+    },
+    {
+      "name": "MACP_TLS_KEY_PATH",
+      "default": null,
+      "test_only": false,
+      "component": "runtime",
+      "read_in": [
+        "src/http/config.rs",
+        "src/main.rs"
+      ],
+      "summary": "TLS private key path (PEM)."
+    },
+    {
+      "name": "MACP_TOKEN",
+      "default": null,
+      "test_only": false,
+      "component": "cli",
+      "read_in": [
+        "crates/macp-cli/src/main.rs"
+      ],
+      "summary": "Bearer token the CLI authenticates with."
+    }
+  ]
+}

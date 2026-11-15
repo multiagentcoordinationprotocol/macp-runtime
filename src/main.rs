@@ -1,3 +1,4 @@
+use macp_runtime::env;
 use macp_runtime::log_store::LogStore;
 use macp_runtime::mode_registry::ModeRegistry;
 use macp_runtime::pb;
@@ -23,7 +24,7 @@ fn validate_env_config() -> Vec<String> {
     let mut errors = Vec::new();
 
     // Validate MACP_BIND_ADDR is a valid socket address
-    if let Ok(val) = std::env::var("MACP_BIND_ADDR") {
+    if let Ok(val) = std::env::var(env::MACP_BIND_ADDR) {
         if val.parse::<SocketAddr>().is_err() {
             errors.push(format!(
                 "MACP_BIND_ADDR: '{val}' is not a valid socket address (expected host:port, e.g. 127.0.0.1:50051)"
@@ -32,14 +33,14 @@ fn validate_env_config() -> Vec<String> {
     }
 
     // Validate TLS cert/key paths exist if specified
-    if let Ok(cert_path) = std::env::var("MACP_TLS_CERT_PATH") {
+    if let Ok(cert_path) = std::env::var(env::MACP_TLS_CERT_PATH) {
         if !std::path::Path::new(&cert_path).exists() {
             errors.push(format!(
                 "MACP_TLS_CERT_PATH: file does not exist: {cert_path}"
             ));
         }
     }
-    if let Ok(key_path) = std::env::var("MACP_TLS_KEY_PATH") {
+    if let Ok(key_path) = std::env::var(env::MACP_TLS_KEY_PATH) {
         if !std::path::Path::new(&key_path).exists() {
             errors.push(format!(
                 "MACP_TLS_KEY_PATH: file does not exist: {key_path}"
@@ -49,11 +50,11 @@ fn validate_env_config() -> Vec<String> {
 
     // Validate positive integer environment variables
     for var_name in [
-        "MACP_MAX_PAYLOAD_BYTES",
-        "MACP_SESSION_START_LIMIT_PER_MINUTE",
-        "MACP_MESSAGE_LIMIT_PER_MINUTE",
-        "MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE",
-        "MACP_LIST_SESSIONS_MAX_PAGE_SIZE",
+        env::MACP_MAX_PAYLOAD_BYTES,
+        env::MACP_SESSION_START_LIMIT_PER_MINUTE,
+        env::MACP_MESSAGE_LIMIT_PER_MINUTE,
+        env::MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE,
+        env::MACP_LIST_SESSIONS_MAX_PAGE_SIZE,
     ] {
         if let Ok(val) = std::env::var(var_name) {
             match val.parse::<u64>() {
@@ -82,9 +83,9 @@ fn validate_env_config() -> Vec<String> {
     // `tracing::warn!` that vanishes under `RUST_LOG=off`. The error message
     // says which of the two the max came from, so `1000` appearing in it is
     // never mistaken for a value the operator set.
-    if let Ok(default_raw) = std::env::var("MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE") {
+    if let Ok(default_raw) = std::env::var(env::MACP_LIST_SESSIONS_DEFAULT_PAGE_SIZE) {
         if let Ok(default_size) = default_raw.parse::<u64>() {
-            let max_raw = std::env::var("MACP_LIST_SESSIONS_MAX_PAGE_SIZE").ok();
+            let max_raw = std::env::var(env::MACP_LIST_SESSIONS_MAX_PAGE_SIZE).ok();
             // "Unset" and "set but unparseable" both fall back to the built-in
             // cap, but they are not the same operator mistake — and the
             // unparseable one already gets its own error from the loop above,
@@ -132,7 +133,7 @@ fn validate_env_config() -> Vec<String> {
     // Never a silent no-op: a binary without the listener refuses a
     // configuration that asks for one.
     #[cfg(not(feature = "http-listener"))]
-    if std::env::var_os("MACP_HTTP_BIND_ADDR").is_some_and(|v| !v.is_empty()) {
+    if std::env::var_os(env::MACP_HTTP_BIND_ADDR).is_some_and(|v| !v.is_empty()) {
         errors.push(
             "MACP_HTTP_BIND_ADDR is set, but this macp-runtime binary was built without the \
              `http-listener` Cargo feature; rebuild with `--features http-listener` (or use an \
@@ -142,7 +143,7 @@ fn validate_env_config() -> Vec<String> {
     }
 
     // Validate non-negative integer environment variable
-    if let Ok(val) = std::env::var("MACP_CHECKPOINT_INTERVAL") {
+    if let Ok(val) = std::env::var(env::MACP_CHECKPOINT_INTERVAL) {
         if val.parse::<u64>().is_err() {
             errors.push(format!(
                 "MACP_CHECKPOINT_INTERVAL: '{val}' is not a valid non-negative integer"
@@ -254,28 +255,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // MACP_POLICIES_DRY_RUN=1: validate the policies directory and exit
     // without binding a port, opening storage, or replaying sessions.
-    if std::env::var("MACP_POLICIES_DRY_RUN").ok().as_deref() == Some("1") {
-        std::process::exit(policies_dry_run(std::env::var("MACP_POLICIES_DIR").ok()));
+    if std::env::var(env::MACP_POLICIES_DRY_RUN).ok().as_deref() == Some("1") {
+        std::process::exit(policies_dry_run(std::env::var(env::MACP_POLICIES_DIR).ok()));
     }
 
-    let addr = std::env::var("MACP_BIND_ADDR")
+    let addr = std::env::var(env::MACP_BIND_ADDR)
         .unwrap_or_else(|_| "127.0.0.1:50051".into())
         .parse()?;
 
-    let memory_only = std::env::var("MACP_MEMORY_ONLY").ok().as_deref() == Some("1");
+    let memory_only = std::env::var(env::MACP_MEMORY_ONLY).ok().as_deref() == Some("1");
     let data_dir =
-        PathBuf::from(std::env::var("MACP_DATA_DIR").unwrap_or_else(|_| ".macp-data".into()));
-    let strict_recovery = std::env::var("MACP_STRICT_RECOVERY").ok().as_deref() == Some("1");
+        PathBuf::from(std::env::var(env::MACP_DATA_DIR).unwrap_or_else(|_| ".macp-data".into()));
+    let strict_recovery = std::env::var(env::MACP_STRICT_RECOVERY).ok().as_deref() == Some("1");
 
     // Opt-in durable-data retention: 0 (default) keeps history forever.
     // Read before the backend is built: Redis expires trace-anchor keys
     // only when sessions are garbage-collected.
-    let disk_retention_secs: u64 = std::env::var("MACP_SESSION_DISK_RETENTION_SECS")
+    let disk_retention_secs: u64 = std::env::var(env::MACP_SESSION_DISK_RETENTION_SECS)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    let backend_name = std::env::var("MACP_STORAGE_BACKEND").unwrap_or_else(|_| "file".into());
+    let backend_name = std::env::var(env::MACP_STORAGE_BACKEND).unwrap_or_else(|_| "file".into());
     let storage: Arc<dyn StorageBackend> = if memory_only {
         Arc::new(MemoryBackend)
     } else {
@@ -288,13 +289,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             #[cfg(feature = "rocksdb-backend")]
             "rocksdb" => {
-                let path = std::env::var("MACP_ROCKSDB_PATH")
+                let path = std::env::var(env::MACP_ROCKSDB_PATH)
                     .unwrap_or_else(|_| data_dir.join("rocksdb").to_string_lossy().to_string());
                 Arc::new(macp_runtime::storage::RocksDbBackend::open(&path)?)
             }
             #[cfg(feature = "redis-backend")]
             "redis" => {
-                let url = std::env::var("MACP_REDIS_URL")
+                let url = std::env::var(env::MACP_REDIS_URL)
                     .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
                 Arc::new(
                     macp_runtime::storage::RedisBackend::connect(&url, "macp")
@@ -323,7 +324,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the live registry, so a session governed by a file-loaded policy must
     // find it. A configured-but-broken policies dir is fatal: a runtime told
     // to preload governance must not silently start without it.
-    let policies_dir = std::env::var("MACP_POLICIES_DIR").ok();
+    let policies_dir = std::env::var(env::MACP_POLICIES_DIR).ok();
     if let Some(dir) = &policies_dir {
         let count = policy_registry
             .load_from_dir(std::path::Path::new(dir))
@@ -410,7 +411,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let security = SecurityLayer::from_env()?;
 
-    let allow_insecure = std::env::var("MACP_ALLOW_INSECURE").ok().as_deref() == Some("1");
+    let allow_insecure = std::env::var(env::MACP_ALLOW_INSECURE).ok().as_deref() == Some("1");
     // Without configured auth, every bearer token authenticates as a
     // fully-privileged identity (dev fallback). That must be an explicit
     // local-development choice, never a silent default: refuse to start
@@ -437,22 +438,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // (register_policy=false, list_policies=true — RFC-0012 §9).
         svc = svc.with_read_only_policies();
     }
-    let tls_cert = std::env::var("MACP_TLS_CERT_PATH").ok();
-    let tls_key = std::env::var("MACP_TLS_KEY_PATH").ok();
+    let tls_cert = std::env::var(env::MACP_TLS_CERT_PATH).ok();
+    let tls_key = std::env::var(env::MACP_TLS_KEY_PATH).ok();
 
     tracing::info!(%addr, "macp-runtime v{} listening", env!("CARGO_PKG_VERSION"));
 
     // Server resource limits (RFC-MACP-0004 §7 DoS defenses). Combined with
     // per-session locking these bound how much work one client can queue.
-    let concurrency_per_conn: usize = std::env::var("MACP_CONCURRENCY_LIMIT_PER_CONNECTION")
+    let concurrency_per_conn: usize = std::env::var(env::MACP_CONCURRENCY_LIMIT_PER_CONNECTION)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(64);
-    let max_streams: u32 = std::env::var("MACP_MAX_CONCURRENT_STREAMS")
+    let max_streams: u32 = std::env::var(env::MACP_MAX_CONCURRENT_STREAMS)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(128);
-    let request_timeout_secs: u64 = std::env::var("MACP_REQUEST_TIMEOUT_SECS")
+    let request_timeout_secs: u64 = std::env::var(env::MACP_REQUEST_TIMEOUT_SECS)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(30);
@@ -507,7 +508,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // check, so MACP_MAX_PAYLOAD_BYTES above 4 MB was silently ineffective
     // and far-larger frames were decoded before rejection. Envelope overhead
     // (ids, mode, sender, metadata) gets a fixed allowance on top.
-    let max_payload_bytes: usize = std::env::var("MACP_MAX_PAYLOAD_BYTES")
+    let max_payload_bytes: usize = std::env::var(env::MACP_MAX_PAYLOAD_BYTES)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1_048_576);
@@ -518,7 +519,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // forever, so a hard deadline forces exit afterwards. One shared signal
     // feeds every listener (gRPC, drain deadline, metrics); a second signal
     // during the drain exits at once (`src/shutdown.rs`).
-    let drain_secs: u64 = std::env::var("MACP_SHUTDOWN_DRAIN_SECS")
+    let drain_secs: u64 = std::env::var(env::MACP_SHUTDOWN_DRAIN_SECS)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
@@ -577,11 +578,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Background maintenance task: expire TTL-exceeded sessions, emit synthetic
     // envelopes whose deadline has passed, and evict stale ones.
-    let cleanup_interval_secs: u64 = std::env::var("MACP_CLEANUP_INTERVAL_SECS")
+    let cleanup_interval_secs: u64 = std::env::var(env::MACP_CLEANUP_INTERVAL_SECS)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(60);
-    let session_retention_secs: u64 = std::env::var("MACP_SESSION_RETENTION_SECS")
+    let session_retention_secs: u64 = std::env::var(env::MACP_SESSION_RETENTION_SECS)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3600);
@@ -614,7 +615,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // "127.0.0.1:9464"). Deliberately dependency-free: a minimal HTTP/1.1
     // text-format responder — every counter the runtime collects was
     // previously write-only with no export surface at all.
-    if let Ok(metrics_addr) = std::env::var("MACP_METRICS_ADDR") {
+    if let Ok(metrics_addr) = std::env::var(env::MACP_METRICS_ADDR) {
         let metrics_runtime = runtime.clone();
         let metrics_shutdown = shutdown_signal.clone();
         tokio::spawn(async move {
